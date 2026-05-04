@@ -1,0 +1,4 @@
+node_modules/
+client/dist/
+.env
+server/data/tmp_audio.webm
