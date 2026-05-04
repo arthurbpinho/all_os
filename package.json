@@ -1,0 +1,19 @@
+{
+  "name": "allos-platform",
+  "version": "1.0.0",
+  "description": "Plataforma de Simulação Gamificada Allos",
+  "scripts": {
+    "server": "node server/index.js",
+    "client": "cd client && npx vite --host",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "build": "cd client && npx vite build"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.1",
+    "express": "^4.18.2",
+    "openai": "^4.52.0",
+    "uuid": "^9.0.0"
+  }
+}
