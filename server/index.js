@@ -42,6 +42,22 @@ const JWT_SECRET = process.env.JWT_SECRET || (() => {
 const TOKEN_TTL = '7d';
 const BCRYPT_ROUNDS = 10;
 
+// Diagnóstico de env no startup — sem expor secrets, só presença + length.
+function envDiag(name) {
+  const v = process.env[name];
+  if (v === undefined) return 'NOT SET';
+  if (v === '') return 'EMPTY STRING';
+  return `set (${v.length} chars)`;
+}
+console.log('[startup] JWT_SECRET    =', envDiag('JWT_SECRET'));
+console.log('[startup] OPENAI_API_KEY =', envDiag('OPENAI_API_KEY'));
+console.log('[startup] DATA_DIR       =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
+console.log('[startup] PORT           =', envDiag('PORT'));
+console.log('[startup] env keys count =', Object.keys(process.env).length);
+// Lista nomes de envs que CONTÊM "JWT" ou "SECRET" — pega typos como "jwt_secret" / "JWTSECRET"
+const jwtish = Object.keys(process.env).filter((k) => /jwt|secret/i.test(k));
+console.log('[startup] env keys com JWT/SECRET no nome:', jwtish.length ? jwtish.join(', ') : '(nenhum)');
+
 function readJSON(file, fallback = []) {
   const p = path.join(DATA_DIR, file);
   if (!fs.existsSync(p)) return fallback;
