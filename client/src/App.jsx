@@ -227,9 +227,13 @@ export default function App() {
               <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
                 {ICONS.freeplay}<span>Simulação</span>
               </Link>
-              <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
-                {ICONS.neuro}<span>Neuroavaliação</span>
-              </Link>
+              {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
+                  Será reaberta pra alunos/professores quando estiver pronta. */}
+              {isAdmin && (
+                <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
+                  {ICONS.neuro}<span>Neuroavaliação</span>
+                </Link>
+              )}
               {!isVisitor && (
                 <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
                   {ICONS.flame}<span>Objetivos</span>
