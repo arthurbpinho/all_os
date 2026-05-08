@@ -61,6 +61,19 @@ export default function Login({ onLogin }) {
     }
   }
 
+  async function handleVisitor() {
+    setError('');
+    setLoading(true);
+    try {
+      const user = await api.loginVisitor();
+      onLogin(user);
+    } catch (err) {
+      setError(err.message || 'Não foi possível iniciar como visitante.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleInstall() {
     if (installEvent) {
       // Android / Chrome / Edge — prompt nativo
@@ -122,9 +135,22 @@ export default function Login({ onLogin }) {
           </button>
         </form>
 
+        <div className="login-or">
+          <span>ou</span>
+        </div>
+
+        <button
+          type="button"
+          className="btn btn-outline btn-visitor"
+          onClick={handleVisitor}
+          disabled={loading}
+        >
+          Entrar como visitante
+        </button>
+
         <div className="credentials">
           <div className="label">Acesso restrito</div>
-          <p>Plataforma interna da associação. Solicite seu login ao administrador.</p>
+          <p>Plataforma interna da associação. Solicite seu login ao administrador, ou entre como visitante para experimentar (sem persistência).</p>
         </div>
 
         {canShowInstall && (

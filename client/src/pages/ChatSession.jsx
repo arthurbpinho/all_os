@@ -64,8 +64,8 @@ export default function ChatSession({ user }) {
         // Patient persona — sem rubrica de avaliação embutida
         setSystemPrompt(buildFreeplayPrompt(found.specificInstruction));
 
-        // Tenta restaurar sessão pendente (F5 / sair e voltar)
-        if (!restoredRef.current && user?.id) {
+        // Tenta restaurar sessão pendente (F5 / sair e voltar). Visitantes nunca persistem.
+        if (!restoredRef.current && user?.id && user.role !== 'visitor') {
           restoredRef.current = true;
           const saved = await loadActiveSession(user.id, 'exercise', id);
           if (cancelled) return;
@@ -87,9 +87,11 @@ export default function ChatSession({ user }) {
   }, [id, user?.id]);
 
   // Autosave: localStorage síncrono em cada mudança + servidor com debounce 1.5s.
+  // Visitantes não persistem.
   useEffect(() => {
     if (!sessionStarted || phase !== PHASE_SIMULATION || !item || !user?.id) return;
     if (finishedRef.current) return;
+    if (user.role === 'visitor') return;
 
     const data = { messages, elapsedSeconds: elapsed, itemTitle: item.title };
     sessionDataRef.current = data;
@@ -102,9 +104,10 @@ export default function ChatSession({ user }) {
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
   }, [messages, elapsed, sessionStarted, phase, item, user?.id, id]);
 
-  // Flush em visibility/pagehide/unmount
+  // Flush em visibility/pagehide/unmount. Visitantes não persistem.
   useEffect(() => {
     if (!sessionStarted || phase !== PHASE_SIMULATION || !user?.id) return;
+    if (user.role === 'visitor') return;
 
     function flush() {
       if (finishedRef.current) return;
