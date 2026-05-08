@@ -30,6 +30,7 @@ export default function EchoSession({ user, sessionType }) {
   const [elapsed, setElapsed] = useState(0); // segundos
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState('');
   const [highlightTarget, setHighlightTarget] = useState(null); // { msgIndex }
   const [highlightDraft, setHighlightDraft] = useState('');
@@ -88,16 +89,32 @@ export default function EchoSession({ user, sessionType }) {
   async function handleStartSession() {
     if (!item) return;
     setError('');
+    let localThreadId = null;
     try {
       // Cria thread só se houver assistantId
       if (item.assistantId) {
         const res = await api.createThread();
+        localThreadId = res.threadId;
         setThreadId(res.threadId);
       }
       setSessionStarted(true);
-      textareaRef.current?.focus();
+
+      // Disparo: o paciente fala primeiro. Mandamos "Iniciar" oculto pra IA
+      // gerar a abertura do atendimento (que costuma ser a abertura fixa do prompt).
+      const kickoffMsg = { role: 'user', content: 'Iniciar', isSystem: true, highlighted: false, comment: '' };
+      setMessages([kickoffMsg]);
+      setIsTyping(true);
+      try {
+        const reply = await sendToAI('Iniciar', [], localThreadId);
+        setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      } catch (err) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+      } finally {
+        setIsTyping(false);
+        textareaRef.current?.focus();
+      }
     } catch (err) {
-      setError('Erro ao iniciar sessão: ' + err.message);
+      setError('Erro ao iniciar atendimento: ' + err.message);
     }
   }
 
@@ -110,11 +127,12 @@ export default function EchoSession({ user, sessionType }) {
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 
-  async function sendToAI(text, currentMessages) {
+  async function sendToAI(text, currentMessages, threadIdOverride) {
+    const tid = threadIdOverride || threadId;
     // Se já degradou para chat completion (assistant_id ruim), continua nele
-    if (item.assistantId && threadId && !assistantBroken) {
+    if (item.assistantId && tid && !assistantBroken) {
       try {
-        const data = await api.assistantMessage(threadId, item.assistantId, text);
+        const data = await api.assistantMessage(tid, item.assistantId, text);
         return data.content;
       } catch (err) {
         // Se o erro é claramente de configuração do assistant_id, faz fallback
@@ -164,6 +182,7 @@ export default function EchoSession({ user, sessionType }) {
 
   function buildTranscript() {
     return messages
+      .filter((m) => !m.isSystem)
       .map((m) => {
         const author = m.role === 'user' ? user.name : item.name;
         const star = m.highlighted ? ' ★' : '';
@@ -175,7 +194,8 @@ export default function EchoSession({ user, sessionType }) {
 
   async function handleFinalize() {
     if (!sessionStarted || sessionEnded) return;
-    if (messages.length === 0) {
+    const visibleCount = messages.filter((m) => !m.isSystem).length;
+    if (visibleCount === 0) {
       if (!window.confirm('A sessão está vazia. Deseja finalizar mesmo assim (sem avaliação)?')) return;
       if (timerRef.current) clearInterval(timerRef.current);
       setSessionEnded(true);
@@ -230,7 +250,7 @@ export default function EchoSession({ user, sessionType }) {
         type: sessionType,
         itemId: id,
         itemTitle: item.name,
-        messages: messages.map((m) => ({
+        messages: messages.filter((m) => !m.isSystem).map((m) => ({
           role: m.role,
           content: m.content,
           highlighted: m.highlighted || false,
@@ -271,7 +291,7 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   async function toggleRecording() {
-    if (!sessionStarted || sessionEnded) return;
+    if (!sessionStarted || sessionEnded || isTranscribing) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -285,6 +305,7 @@ export default function EchoSession({ user, sessionType }) {
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         setIsRecording(false);
+        setIsTranscribing(true);
         const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -296,6 +317,8 @@ export default function EchoSession({ user, sessionType }) {
             textareaRef.current?.focus();
           } catch (err) {
             setError('Erro ao transcrever: ' + err.message);
+          } finally {
+            setIsTranscribing(false);
           }
         };
         reader.readAsDataURL(blob);
@@ -503,18 +526,14 @@ export default function EchoSession({ user, sessionType }) {
       )}
 
       <div className={`chat-messages ${!sessionStarted ? 'locked' : ''}`}>
-        {messages.length === 0 && sessionStarted && !isTyping && (
-          <div className="empty-chat">
-            Sessão iniciada com {item?.name}. Cumprimente o paciente para começar.
-          </div>
-        )}
-        {messages.length === 0 && !sessionStarted && (
+        {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
           <div className="empty-chat" style={{ marginTop: 100 }}>
             Esta é uma simulação livre — sem nota ao final, foco na escuta e manejo.
           </div>
         )}
 
         {messages.map((msg, i) => {
+          if (msg.isSystem) return null;
           const isUser = msg.role === 'user';
           const author = isUser ? user.name : `${item?.name || 'Paciente'}`;
           return (
@@ -561,11 +580,18 @@ export default function EchoSession({ user, sessionType }) {
       {!sessionStarted ? (
         <div className="start-session-area">
           <div className="start-session-card">
-            <h4>Pronto para iniciar?</h4>
-            <p>O cronômetro começará e você poderá conversar com {item?.name}. Use o botão de destaque (★) para marcar suas próprias intervenções para revisão posterior.</p>
+            <h4>Pronto para começar?</h4>
+            <p>Ao iniciar, {item?.name} abrirá a conversa. Use o botão de destaque (★) para marcar suas próprias intervenções para revisão posterior.</p>
             <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
-              Iniciar Sessão
+              Iniciar atendimento
             </button>
+          </div>
+        </div>
+      ) : isTranscribing ? (
+        <div className="chat-input-area transcribing">
+          <div className="transcribing-indicator">
+            <span className="spinner" />
+            <span>Transcrevendo áudio…</span>
           </div>
         </div>
       ) : (

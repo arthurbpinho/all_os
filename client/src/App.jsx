@@ -98,6 +98,10 @@ export default function App() {
   const navigate = useNavigate();
 
   const [streak, setStreak] = useState(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Fecha drawer mobile sempre que a rota mudar
+  useEffect(() => { setMobileNavOpen(false); }, [location.pathname]);
 
   // Revalida token no boot (e busca user atualizado do servidor).
   useEffect(() => {
@@ -168,7 +172,35 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <aside className="sidebar">
+      <header className="mobile-topbar">
+        <button
+          className="hamburger-btn"
+          onClick={() => setMobileNavOpen((v) => !v)}
+          aria-label="Abrir menu"
+          aria-expanded={mobileNavOpen}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <line x1="3" y1="6" x2="21" y2="6" />
+            <line x1="3" y1="12" x2="21" y2="12" />
+            <line x1="3" y1="18" x2="21" y2="18" />
+          </svg>
+        </button>
+        <div className="mobile-topbar-logo">all<span className="accent">_OS</span></div>
+        <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
+          {user.profilePhoto
+            ? <img src={user.profilePhoto} alt={user.name} />
+            : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+          }
+        </Link>
+      </header>
+
+      <div
+        className={`mobile-nav-backdrop ${mobileNavOpen ? 'open' : ''}`}
+        onClick={() => setMobileNavOpen(false)}
+        aria-hidden="true"
+      />
+
+      <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`}>
         <div className="sidebar-logo">
           <h1>all<span className="accent">_OS</span></h1>
           <p>Simulação Clínica</p>

@@ -594,6 +594,10 @@ select option { background: var(--cream); color: var(--ink); }
   max-width: 920px;
   margin: 0 auto;
 }
+.chat-container.entrevistador-chat {
+  height: calc(100vh - 220px);
+  max-width: 960px;
+}
 
 .chat-header {
   padding: 16px 0 18px;
@@ -697,6 +701,24 @@ select option { background: var(--cream); color: var(--ink); }
   padding: 12px 16px;
   resize: none;
   background: var(--cream);
+}
+.chat-input-area.transcribing {
+  align-items: center;
+  min-height: 78px;
+  padding: 16px 0;
+}
+.transcribing-indicator {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--cream);
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--ink-soft);
+  font-style: italic;
+  font-size: 14px;
 }
 
 .icon-btn {
@@ -2306,16 +2328,253 @@ select option { background: var(--cream); color: var(--ink); }
 /* ────────────────────────────────────────
    RESPONSIVE
    ──────────────────────────────────────── */
-@media (max-width: 900px) {
+/* ============================================================
+   RESPONSIVO
+   ============================================================ */
+
+/* Top bar e backdrop só aparecem em mobile (≤768px) */
+.mobile-topbar { display: none; }
+.mobile-nav-backdrop { display: none; }
+
+/* TABLET (769–1024px): sidebar colapsada em coluna de ícones */
+@media (max-width: 1024px) and (min-width: 769px) {
   .sidebar { width: 64px; padding: 16px 0; }
   .sidebar-logo { padding: 0 12px 16px; text-align: center; }
   .sidebar-logo h1 { font-size: 18px; letter-spacing: 0; }
-  .sidebar-logo p, .sidebar-nav span, .sidebar-nav .nav-section, .sidebar-user .user-name { display: none; }
+  .sidebar-logo p, .sidebar-nav span, .sidebar-nav .nav-section, .sidebar-user .profile-mini-info { display: none; }
   .sidebar-nav a { justify-content: center; padding: 12px; }
   .sidebar-user { padding: 12px; flex-direction: column; }
   .main-content { margin-left: 64px; padding: 24px 18px 40px; }
-  .login-container::before, .login-container::after { display: none; }
-  .card-grid { grid-template-columns: 1fr; }
+  .card-grid { grid-template-columns: 1fr 1fr; }
   .page-header.with-action { flex-direction: column; align-items: flex-start; }
   .modal { padding: 22px; }
+}
+
+/* PHONE (≤768px): top bar + drawer off-canvas, layout em coluna */
+@media (max-width: 768px) {
+  /* Top bar fixo */
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--cream-2);
+    border-bottom: 1px solid var(--sand);
+    position: sticky;
+    top: 0;
+    z-index: 80;
+    height: 56px;
+  }
+  .mobile-topbar-logo {
+    font-family: var(--serif);
+    font-size: 22px;
+    color: var(--marrs-deep);
+    letter-spacing: 0.02em;
+  }
+  .mobile-topbar-logo .accent { color: var(--terra); }
+  .hamburger-btn {
+    width: 40px; height: 40px;
+    border: 1px solid var(--sand);
+    border-radius: var(--radius);
+    background: var(--cream);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--marrs-deep);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .hamburger-btn:hover { background: var(--sand-2); }
+  .mobile-topbar-avatar {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--sand);
+    background: var(--cream);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--marrs-deep);
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .mobile-topbar-avatar img { width: 100%; height: 100%; object-fit: cover; }
+
+  /* Backdrop sob o drawer */
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(20, 86, 78, 0.45);
+    z-index: 90;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.22s ease;
+  }
+  .mobile-nav-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Sidebar vira drawer */
+  .sidebar {
+    width: 280px;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: var(--shadow-lg);
+    z-index: 95;
+  }
+  .sidebar.open { transform: translateX(0); }
+  /* Restaura o conteúdo (sobrescreve regra do tablet caso herde) */
+  .sidebar-logo h1 { font-size: 30px; letter-spacing: 0.02em; }
+  .sidebar-logo p,
+  .sidebar-nav span,
+  .sidebar-nav .nav-section,
+  .sidebar-user .profile-mini-info,
+  .sidebar-user .user-name { display: revert; }
+  .sidebar-nav a { justify-content: flex-start; padding: 11px 14px; }
+  .sidebar-user { flex-direction: row; padding: 18px 24px; }
+
+  /* Layout principal */
+  .app-layout { flex-direction: column; }
+  .main-content {
+    margin-left: 0;
+    padding: 18px 14px 40px;
+  }
+
+  /* Cabeçalhos de página */
+  .page-header { margin-bottom: 22px; }
+  .page-header h2 { font-size: 26px; }
+  .page-header p { font-size: 14px; }
+  .page-header.with-action {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .page-header.with-action > div:last-child {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  /* Cards */
+  .card { padding: 18px 16px; }
+  .card.tight { padding: 14px 14px; }
+  .card-grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* Botões */
+  .btn { padding: 9px 16px; font-size: 13.5px; }
+  .btn-lg { padding: 13px 24px; font-size: 14px; }
+  .btn-sm { padding: 6px 12px; font-size: 12.5px; }
+
+  /* Login */
+  .login-container { padding: 24px 16px; min-height: 100vh; }
+  .login-container::before, .login-container::after { display: none; }
+  .login-card { padding: 28px 22px; max-width: 100%; width: 100%; }
+  .login-card h1 { font-size: 36px; }
+  .login-card .subtitle { font-size: 13px; }
+
+  /* CHAT genérico */
+  .chat-container {
+    height: calc(100vh - 56px - 40px);
+    max-width: 100%;
+  }
+  .chat-container.entrevistador-chat {
+    height: calc(100vh - 56px - 240px);
+    min-height: 360px;
+    max-width: 100%;
+  }
+  .chat-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .chat-header .chat-title {
+    flex-basis: 100%;
+    text-align: left;
+    order: -1;
+  }
+  .chat-header h3 { font-size: 18px; }
+  .chat-header > div:last-child { flex-wrap: wrap; gap: 6px; }
+
+  .chat-message-row { max-width: 92%; }
+  .chat-message { font-size: 14px; padding: 11px 14px; }
+  .chat-input-area { padding: 10px 0; gap: 6px; }
+  .chat-input-area textarea { font-size: 16px; /* evita zoom iOS */ }
+  .icon-btn { width: 42px; height: 42px; }
+
+  /* Start session card */
+  .start-session-area { padding: 12px 0; }
+  .start-session-card { padding: 22px 18px; }
+  .start-session-card h4 { font-size: 19px; }
+  .start-session-card p { font-size: 13.5px; }
+
+  /* Modais ocupam quase toda a tela */
+  .modal-overlay { padding: 14px; align-items: flex-start; overflow-y: auto; }
+  .modal {
+    width: 100%;
+    max-width: 100%;
+    padding: 22px 18px;
+    margin: 24px 0;
+    max-height: none;
+  }
+  .modal-actions { flex-wrap: wrap; gap: 8px; }
+  .modal-actions .btn { flex: 1; min-width: 120px; }
+
+  /* Tabelas: rolagem horizontal sem deformar */
+  .admin-table { font-size: 13px; min-width: 560px; }
+  .card.tight:has(.admin-table),
+  .admin-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* Forms — anti-zoom iOS + colunas viram linhas */
+  .admin-form input,
+  .admin-form textarea,
+  .admin-form select,
+  .profile-form input,
+  .profile-form textarea,
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="number"],
+  input[type="search"],
+  textarea,
+  select {
+    font-size: 16px;
+  }
+  .profile-row { flex-direction: column; gap: 12px; }
+  .profile-actions { flex-direction: column; align-items: stretch; }
+  .profile-actions .btn { width: 100%; }
+  .admin-form > div[style*="display: flex"] { flex-direction: column !important; gap: 12px !important; }
+
+  /* Filter chips de Contas */
+  .page-header + div[style*="display: flex"] { flex-wrap: wrap; }
+
+  /* Logs cards */
+  .log-meta { flex-wrap: wrap; gap: 8px; }
+
+  /* Profile photo grid */
+  .profile-photo-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+
+  /* Alert / banner */
+  .alert { font-size: 13.5px; padding: 12px 14px; }
+
+  /* Esconder elementos que ocupam espaço sem trazer valor em mobile */
+  .ornament, .login-ornament { transform: scale(0.85); }
+}
+
+/* PHONE pequeno (≤480px) */
+@media (max-width: 480px) {
+  .main-content { padding: 14px 12px 32px; }
+  .page-header h2 { font-size: 22px; }
+  .login-card h1 { font-size: 32px; }
+  .chat-header h3 { font-size: 16px; }
+  .chat-message-row { max-width: 96%; }
+  .chat-message { font-size: 13.5px; padding: 10px 12px; }
+  .icon-btn { width: 40px; height: 40px; }
+  .session-chip { font-size: 11px; padding: 4px 10px; }
+  .timer-chip { font-size: 11px; padding: 4px 8px; }
+  .btn-sm { padding: 5px 10px; font-size: 12px; }
+
+  /* Em telas muito apertadas, esconde texto do timer/session-chip e mostra só o ponto/ícone */
+  .session-chip span:not(.dot) {
+    max-width: 80px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }

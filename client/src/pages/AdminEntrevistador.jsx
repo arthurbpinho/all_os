@@ -7,6 +7,8 @@ export default function AdminEntrevistador({ user }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState('');
   const [loadingPrompt, setLoadingPrompt] = useState(true);
   const [showCharModal, setShowCharModal] = useState(false);
@@ -16,6 +18,8 @@ export default function AdminEntrevistador({ user }) {
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
 
   useEffect(() => {
     api.getEntrevistadorPrompt()
@@ -54,6 +58,46 @@ export default function AdminEntrevistador({ user }) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage(input);
+    }
+  }
+
+  async function toggleRecording() {
+    if (!systemPrompt || isTranscribing) return;
+    if (isRecording) {
+      mediaRecorderRef.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setIsRecording(false);
+        setIsTranscribing(true);
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64 = reader.result.split(',')[1];
+          try {
+            const data = await api.transcribe(base64);
+            const text = data.text || data.transcription || '';
+            setInput((prev) => (prev ? prev + ' ' + text : text));
+            textareaRef.current?.focus();
+          } catch (err) {
+            setError('Erro ao transcrever: ' + err.message);
+          } finally {
+            setIsTranscribing(false);
+          }
+        };
+        reader.readAsDataURL(blob);
+      };
+      recorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      setError('Não foi possível acessar o microfone: ' + err.message);
     }
   }
 
@@ -199,7 +243,7 @@ export default function AdminEntrevistador({ user }) {
           <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando prompt do entrevistador…</span>
         </div>
       ) : (
-        <div className="chat-container" style={{ height: 'calc(100vh - 220px)', maxWidth: 960 }}>
+        <div className="chat-container entrevistador-chat">
           <div className="chat-messages">
             {messages.length === 0 && !isTyping && (
               <div className="empty-chat" style={{ marginTop: 80 }}>
@@ -228,29 +272,52 @@ export default function AdminEntrevistador({ user }) {
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="chat-input-area">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Sua resposta…  ·  Enter envia · Shift+Enter quebra linha"
-              rows={1}
-              disabled={isTyping || !systemPrompt}
-            />
-            <button
-              type="button"
-              className="icon-btn primary"
-              onClick={() => sendMessage(input)}
-              disabled={!input.trim() || isTyping}
-              title="Enviar"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9 22 2" />
-              </svg>
-            </button>
-          </div>
+          {isTranscribing ? (
+            <div className="chat-input-area transcribing">
+              <div className="transcribing-indicator">
+                <span className="spinner" />
+                <span>Transcrevendo áudio…</span>
+              </div>
+            </div>
+          ) : (
+            <div className="chat-input-area">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Sua resposta…  ·  Enter envia · Shift+Enter quebra linha"
+                rows={1}
+                disabled={isTyping || !systemPrompt}
+              />
+              <button
+                type="button"
+                className={`icon-btn ${isRecording ? 'recording' : ''}`}
+                onClick={toggleRecording}
+                title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
+                disabled={isTyping || !systemPrompt}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">
+                  <rect x="9" y="2" width="6" height="12" rx="3" />
+                  <path d="M5 10a7 7 0 0 0 14 0" />
+                  <line x1="12" y1="19" x2="12" y2="22" />
+                  <line x1="8" y1="22" x2="16" y2="22" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="icon-btn primary"
+                onClick={() => sendMessage(input)}
+                disabled={!input.trim() || isTyping}
+                title="Enviar"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
       )}
 
