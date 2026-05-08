@@ -29,8 +29,10 @@ export default function ChatSession({ user }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [phase, setPhase] = useState(PHASE_SIMULATION);
+  const [sessionStarted, setSessionStarted] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState('');
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
@@ -64,18 +66,18 @@ export default function ChatSession({ user }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  // Cronômetro: começa quando o item carrega (entrada na sessão), para ao finalizar
+  // Cronômetro: começa quando o usuário clica em Iniciar atendimento, para ao finalizar
   useEffect(() => {
-    if (item && phase === PHASE_SIMULATION && !startedAtRef.current) {
+    if (sessionStarted && phase === PHASE_SIMULATION && !startedAtRef.current) {
       startedAtRef.current = Date.now();
     }
-    if (phase === PHASE_SIMULATION && startedAtRef.current) {
+    if (sessionStarted && phase === PHASE_SIMULATION && startedAtRef.current) {
       timerRef.current = setInterval(() => {
         setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
       }, 1000);
       return () => clearInterval(timerRef.current);
     }
-  }, [item, phase]);
+  }, [sessionStarted, phase]);
 
   function formatTime(secs) {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
@@ -89,9 +91,29 @@ export default function ChatSession({ user }) {
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 
+  async function handleStartSession() {
+    if (!item || sessionStarted) return;
+    setError('');
+    setSessionStarted(true);
+
+    // O paciente fala primeiro: enviamos "Iniciar" oculto à IA pra disparar a abertura.
+    const kickoffMsg = { role: 'user', content: 'Iniciar', isSystem: true };
+    setMessages([kickoffMsg]);
+    setIsTyping(true);
+    try {
+      const reply = await sendToAI([kickoffMsg]);
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+    } catch (err) {
+      setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+    } finally {
+      setIsTyping(false);
+      textareaRef.current?.focus();
+    }
+  }
+
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || phase !== PHASE_SIMULATION) return;
+    if (!trimmed || isTyping || phase !== PHASE_SIMULATION || !sessionStarted) return;
 
     const userMsg = { role: 'user', content: trimmed };
     const updated = [...messages, userMsg];
@@ -118,13 +140,15 @@ export default function ChatSession({ user }) {
 
   function buildTranscript() {
     return messages
+      .filter((m) => !m.isSystem)
       .map((m) => `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`)
       .join('\n\n---\n\n');
   }
 
   async function handleFinalize() {
     if (phase !== PHASE_SIMULATION || isTyping) return;
-    if (messages.length === 0) {
+    const visibleCount = messages.filter((m) => !m.isSystem).length;
+    if (visibleCount === 0) {
       if (!window.confirm('A sessão está vazia. Finalizar mesmo assim (sem avaliação)?')) return;
       if (timerRef.current) clearInterval(timerRef.current);
       setPhase(PHASE_CONCLUDED);
@@ -198,7 +222,7 @@ export default function ChatSession({ user }) {
         itemTitle: item.title,
         skillId: item.skillId,
         difficulty: item.difficulty || null,
-        messages,
+        messages: messages.filter((m) => !m.isSystem),
         durationSeconds: elapsed,
         score: totalScore,
         criteriaScores: parsedCriteria,
@@ -234,7 +258,7 @@ export default function ChatSession({ user }) {
   }
 
   async function toggleRecording() {
-    if (phase !== PHASE_SIMULATION) return;
+    if (phase !== PHASE_SIMULATION || !sessionStarted || isTranscribing) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -248,6 +272,7 @@ export default function ChatSession({ user }) {
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
         setIsRecording(false);
+        setIsTranscribing(true);
         const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const reader = new FileReader();
         reader.onloadend = async () => {
@@ -259,6 +284,8 @@ export default function ChatSession({ user }) {
             textareaRef.current?.focus();
           } catch (err) {
             setError('Erro ao transcrever: ' + err.message);
+          } finally {
+            setIsTranscribing(false);
           }
         };
         reader.readAsDataURL(blob);
@@ -271,9 +298,11 @@ export default function ChatSession({ user }) {
   }
 
   function downloadLog() {
-    const lines = messages.map((m) =>
-      `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`
-    );
+    const lines = messages
+      .filter((m) => !m.isSystem)
+      .map((m) =>
+        `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`
+      );
     const skillName = SKILL_NAMES[item.skillId] || '';
     const header = `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
     const evalSection = evaluationText
@@ -406,13 +435,15 @@ export default function ChatSession({ user }) {
               Log
             </button>
           )}
-          <button
-            onClick={handleFinalize}
-            disabled={isTyping || !item}
-            className="btn btn-secondary btn-sm"
-          >
-            Finalizar Sessão
-          </button>
+          {sessionStarted && (
+            <button
+              onClick={handleFinalize}
+              disabled={isTyping || !item}
+              className="btn btn-secondary btn-sm"
+            >
+              Finalizar Sessão
+            </button>
+          )}
         </div>
       </div>
 
@@ -423,21 +454,24 @@ export default function ChatSession({ user }) {
         </div>
       )}
 
-      <div className="chat-messages">
-        {messages.length === 0 && !isTyping && (
-          <div className="empty-chat">
-            Sessão iniciada. Cumprimente o paciente para começar.
+      <div className={`chat-messages ${!sessionStarted ? 'locked' : ''}`}>
+        {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
+          <div className="empty-chat" style={{ marginTop: 100 }}>
+            {item ? `Exercício: ${item.title}` : 'Carregando exercício…'}
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <div key={i} className={`chat-message-row ${msg.role}`}>
-            <div className="chat-message-author">
-              {msg.role === 'user' ? user.name : item?.title || 'Paciente'}
+        {messages.map((msg, i) => {
+          if (msg.isSystem) return null;
+          return (
+            <div key={i} className={`chat-message-row ${msg.role}`}>
+              <div className="chat-message-author">
+                {msg.role === 'user' ? user.name : item?.title || 'Paciente'}
+              </div>
+              <div className={`chat-message ${msg.role}`}>{msg.content}</div>
             </div>
-            <div className={`chat-message ${msg.role}`}>{msg.content}</div>
-          </div>
-        ))}
+          );
+        })}
 
         {isTyping && (
           <div className="chat-message-row assistant">
@@ -451,43 +485,62 @@ export default function ChatSession({ user }) {
         <div ref={messagesEndRef} />
       </div>
 
-      <div className="chat-input-area">
-        <textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Sua intervenção…  ·  Enter envia · Shift+Enter quebra linha"
-          rows={1}
-          disabled={isTyping}
-        />
-        <button
-          type="button"
-          className={`icon-btn ${isRecording ? 'recording' : ''}`}
-          onClick={toggleRecording}
-          title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
-          disabled={isTyping}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">
-            <rect x="9" y="2" width="6" height="12" rx="3" />
-            <path d="M5 10a7 7 0 0 0 14 0" />
-            <line x1="12" y1="19" x2="12" y2="22" />
-            <line x1="8" y1="22" x2="16" y2="22" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className="icon-btn primary"
-          onClick={() => sendMessage(input)}
-          disabled={!input.trim() || isTyping}
-          title="Enviar"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="22" y1="2" x2="11" y2="13" />
-            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
-        </button>
-      </div>
+      {!sessionStarted ? (
+        <div className="start-session-area">
+          <div className="start-session-card">
+            <h4>Pronto para começar?</h4>
+            <p>Ao iniciar, o paciente abrirá a conversa. Você responde a partir da fala dele.</p>
+            <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
+              Iniciar atendimento
+            </button>
+          </div>
+        </div>
+      ) : isTranscribing ? (
+        <div className="chat-input-area transcribing">
+          <div className="transcribing-indicator">
+            <span className="spinner" />
+            <span>Transcrevendo áudio…</span>
+          </div>
+        </div>
+      ) : (
+        <div className="chat-input-area">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Sua intervenção…  ·  Enter envia · Shift+Enter quebra linha"
+            rows={1}
+            disabled={isTyping}
+          />
+          <button
+            type="button"
+            className={`icon-btn ${isRecording ? 'recording' : ''}`}
+            onClick={toggleRecording}
+            title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
+            disabled={isTyping}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">
+              <rect x="9" y="2" width="6" height="12" rx="3" />
+              <path d="M5 10a7 7 0 0 0 14 0" />
+              <line x1="12" y1="19" x2="12" y2="22" />
+              <line x1="8" y1="22" x2="16" y2="22" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="icon-btn primary"
+            onClick={() => sendMessage(input)}
+            disabled={!input.trim() || isTyping}
+            title="Enviar"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }
