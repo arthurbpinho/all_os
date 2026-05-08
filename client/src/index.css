@@ -1206,6 +1206,16 @@ select option { background: var(--cream); color: var(--ink); }
   color: var(--marrs-deep);
 }
 
+.login-card .install-prompt {
+  margin-top: 16px;
+  display: flex;
+  justify-content: center;
+}
+.login-card .install-prompt .btn {
+  font-size: 12.5px;
+  padding: 8px 16px;
+}
+
 /* ────────────────────────────────────────
    ADMIN
    ──────────────────────────────────────── */
@@ -2362,12 +2372,16 @@ select option { background: var(--cream); color: var(--ink); }
     justify-content: space-between;
     gap: 12px;
     padding: 10px 14px;
+    /* Respeita o notch do iPhone em modo PWA standalone */
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    padding-left: calc(14px + env(safe-area-inset-left, 0px));
+    padding-right: calc(14px + env(safe-area-inset-right, 0px));
     background: var(--cream-2);
     border-bottom: 1px solid var(--sand);
     position: sticky;
     top: 0;
     z-index: 80;
-    height: 56px;
+    min-height: 56px;
   }
   .mobile-topbar-logo {
     font-family: var(--serif);
@@ -2466,7 +2480,12 @@ select option { background: var(--cream); color: var(--ink); }
   .btn-sm { padding: 6px 12px; font-size: 12.5px; }
 
   /* Login */
-  .login-container { padding: 24px 16px; min-height: 100vh; }
+  .login-container {
+    padding: 24px 16px;
+    padding-top: calc(24px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    min-height: 100vh;
+  }
   .login-container::before, .login-container::after { display: none; }
   .login-card { padding: 28px 22px; max-width: 100%; width: 100%; }
   .login-card h1 { font-size: 36px; }
