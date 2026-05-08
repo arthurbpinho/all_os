@@ -9,6 +9,7 @@ import {
   SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import { loadActiveSession, saveActiveSession, clearActiveSession } from '../sessionStore';
 
 const PHASE_SIMULATION = 'simulation';
 const PHASE_EVALUATING = 'evaluating';
@@ -33,6 +34,7 @@ export default function ChatSession({ user }) {
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [confirmingFinalize, setConfirmingFinalize] = useState(false);
   const [error, setError] = useState('');
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
@@ -45,22 +47,56 @@ export default function ChatSession({ user }) {
   const textareaRef = useRef(null);
   const timerRef = useRef(null);
   const startedAtRef = useRef(null);
+  const autosaveTimerRef = useRef(null);
+  const restoredRef = useRef(false);
 
   useEffect(() => {
+    let cancelled = false;
     async function loadItem() {
       try {
         const items = await api.getExercises();
         const found = items.find((i) => String(i.id) === String(id));
+        if (cancelled) return;
         if (!found) { setError('Exercício não encontrado.'); return; }
         setItem(found);
         // Patient persona — sem rubrica de avaliação embutida
         setSystemPrompt(buildFreeplayPrompt(found.specificInstruction));
+
+        // Tenta restaurar sessão pendente (F5 / sair e voltar)
+        if (!restoredRef.current && user?.id) {
+          restoredRef.current = true;
+          const saved = await loadActiveSession(user.id, 'exercise', id);
+          if (cancelled) return;
+          if (saved && Array.isArray(saved.messages) && saved.messages.length > 0) {
+            const savedElapsed = saved.elapsedSeconds || 0;
+            setMessages(saved.messages);
+            setElapsed(savedElapsed);
+            // Ajusta startedAtRef pra que o cronômetro continue do ponto onde parou
+            startedAtRef.current = Date.now() - savedElapsed * 1000;
+            setSessionStarted(true);
+          }
+        }
       } catch (err) {
-        setError(err.message || 'Erro ao carregar exercício.');
+        if (!cancelled) setError(err.message || 'Erro ao carregar exercício.');
       }
     }
     loadItem();
-  }, [id]);
+    return () => { cancelled = true; };
+  }, [id, user?.id]);
+
+  // Autosave da sessão ativa (debounce 3s) sempre que messages ou elapsed muda
+  useEffect(() => {
+    if (!sessionStarted || phase !== PHASE_SIMULATION || !item) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      saveActiveSession(user.id, 'exercise', id, {
+        messages,
+        elapsedSeconds: elapsed,
+        itemTitle: item.title,
+      });
+    }, 3000);
+    return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
+  }, [messages, elapsed, sessionStarted, phase, item, user?.id, id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -145,16 +181,21 @@ export default function ChatSession({ user }) {
       .join('\n\n---\n\n');
   }
 
-  async function handleFinalize() {
+  function handleFinalize() {
+    if (phase !== PHASE_SIMULATION || isTyping) return;
+    setConfirmingFinalize(true);
+  }
+
+  async function doFinalize() {
+    setConfirmingFinalize(false);
     if (phase !== PHASE_SIMULATION || isTyping) return;
     const visibleCount = messages.filter((m) => !m.isSystem).length;
     if (visibleCount === 0) {
-      if (!window.confirm('A sessão está vazia. Finalizar mesmo assim (sem avaliação)?')) return;
       if (timerRef.current) clearInterval(timerRef.current);
       setPhase(PHASE_CONCLUDED);
+      clearActiveSession(user.id, 'exercise', id);
       return;
     }
-    if (!window.confirm('Finalizar a sessão e iniciar a avaliação?')) return;
 
     if (timerRef.current) clearInterval(timerRef.current);
     setPhase(PHASE_EVALUATING);
@@ -255,6 +296,9 @@ export default function ChatSession({ user }) {
         console.warn('Erro ao salvar progresso:', err);
       }
     }
+
+    // Sessão finalizada — limpa o autosave ativo
+    clearActiveSession(user.id, 'exercise', id);
   }
 
   async function toggleRecording() {
@@ -541,6 +585,30 @@ export default function ChatSession({ user }) {
           </button>
         </div>
       )}
+
+      {/* Modal de confirmação de finalização */}
+      {confirmingFinalize && (() => {
+        const visibleCount = messages.filter((m) => !m.isSystem).length;
+        const empty = visibleCount === 0;
+        return (
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingFinalize(false); }}>
+            <div className="modal" style={{ maxWidth: 460 }}>
+              <h3>{empty ? 'Sessão vazia' : 'Finalizar atendimento'}</h3>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18 }}>
+                {empty
+                  ? 'A sessão não tem mensagens ainda. Deseja finalizar mesmo assim, sem avaliação?'
+                  : 'Você quer finalizar a sessão agora e iniciar a avaliação automática?'}
+              </p>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-outline" onClick={() => setConfirmingFinalize(false)}>Cancelar</button>
+                <button type="button" className="btn btn-primary" onClick={doFinalize}>
+                  {empty ? 'Finalizar mesmo assim' : 'Finalizar e avaliar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

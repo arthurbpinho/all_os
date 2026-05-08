@@ -44,7 +44,9 @@ export default function AdminEntrevistador({ user }) {
 
     try {
       const apiMessages = updated.map((m) => ({ role: m.role, content: m.content }));
-      const reply = await api.chat(apiMessages, systemPrompt, 'gpt-5.4-2026-03-05');
+      // maxTokens alto: o entrevistador precisa gerar o prompt completo do paciente
+      // (vários milhares de tokens) sem ser cortado pelo limite default.
+      const reply = await api.chat(apiMessages, systemPrompt, 'gpt-5.4-2026-03-05', 16000);
       const content = typeof reply === 'string' ? reply : reply.content || reply.message || '';
       setMessages((prev) => [...prev, { role: 'assistant', content }]);
     } catch (err) {
@@ -106,34 +108,69 @@ export default function AdminEntrevistador({ user }) {
     return messages.filter((m) => m.role === 'assistant').map((m) => m.content).join('\n\n');
   }
 
-  // BLOCO 2 começa em "BLOCO 2 — PROMPT PARA O SIMULADOR" e vai até o "Pronto. Bloco 1..." final
+  // Extrai o prompt do paciente (saída final do entrevistador).
+  // Reconhece dois formatos:
+  //  - Novo: começa em "## [I. CONTENÇÃO]" e vai até "## [V. ABERTURA E CONTINUIDADE]"
+  //          (ou frase de encerramento "Pronto. É só colar isso no simulador").
+  //  - Antigo: "BLOCO 2 — PROMPT PARA O SIMULADOR" até "Pronto. Bloco 1...".
   function extractBloco2(text) {
-    const startIdx = text.search(/BLOCO\s*2\b[^\n]*PROMPT/i);
-    if (startIdx === -1) return null;
-    let body = text.slice(startIdx);
-    const endMatch = body.match(/\n\s*"?Pronto\.?\s*Bloco\s*1/i);
-    if (endMatch) body = body.slice(0, endMatch.index);
-    return body.trim();
+    // Formato novo
+    const newStart = text.search(/##\s*\[\s*I\.\s*CONTENÇÃO\s*\]/i);
+    if (newStart !== -1) {
+      let body = text.slice(newStart);
+      // Possíveis encerramentos no final do prompt
+      const endPatterns = [
+        /\n\s*-{3,}\s*\n\s*Pronto\.?\s*É só colar/i,
+        /\n\s*Pronto\.?\s*É só colar/i,
+        /\n\s*Pronto\.?\s*Obrigado pela construção/i,
+      ];
+      for (const re of endPatterns) {
+        const m = body.match(re);
+        if (m) { body = body.slice(0, m.index); break; }
+      }
+      return body.trim();
+    }
+
+    // Formato antigo
+    const oldStart = text.search(/BLOCO\s*2\b[^\n]*PROMPT/i);
+    if (oldStart !== -1) {
+      let body = text.slice(oldStart);
+      const endMatch = body.match(/\n\s*"?Pronto\.?\s*Bloco\s*1/i);
+      if (endMatch) body = body.slice(0, endMatch.index);
+      return body.trim();
+    }
+
+    return null;
   }
 
-  // Tenta extrair nome/idade/descrição do BLOCO 1 ou da síntese
+  // Extrai nome / idade / descrição da saída do entrevistador.
   function extractMetaFromBloco1(text) {
     const meta = { name: '', age: '', description: '' };
+
+    // Nome — funciona em ambos os formatos: "Você representa NOME, ..."
+    const nomeMatch = text.match(/Você\s+representa\s+([^,.\n]+)/i);
+    if (nomeMatch) meta.name = nomeMatch[1].trim();
+
+    // Descrição — formato novo: "### Quem ela é\n[parágrafo]"
+    const newQuemMatch = text.match(/###\s*Quem\s+(?:ela|ele)\s+é\s*\n+([\s\S]+?)(?=\n\s*###|\n\s*##|\n\s*\*\*Camada)/i);
+    if (newQuemMatch) {
+      const para = newQuemMatch[1].trim().split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+      meta.description = para.slice(0, 240);
+      const ageMatch = para.match(/\b(\d{1,3})\s*anos?\b/i);
+      if (ageMatch) meta.age = ageMatch[1];
+      return meta;
+    }
+
+    // Descrição — formato antigo: "QUEM ESSA PESSOA É\n[parágrafo]"
     const block1Match = text.match(/BLOCO\s*1[^\n]*\n([\s\S]+?)(?=BLOCO\s*2|---)/i);
     const source = block1Match ? block1Match[1] : text;
-
-    // Quem essa pessoa é
-    const quemMatch = source.match(/QUEM ESSA PESSOA É\s*\n([\s\S]+?)(?=\n[A-Z][A-Z\s—-]{4,}\n)/);
-    if (quemMatch) {
-      const para = quemMatch[1].trim().split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
+    const oldQuemMatch = source.match(/QUEM ESSA PESSOA É\s*\n([\s\S]+?)(?=\n[A-Z][A-Z\s—-]{4,}\n)/);
+    if (oldQuemMatch) {
+      const para = oldQuemMatch[1].trim().split('\n').map((l) => l.trim()).filter(Boolean).join(' ');
       meta.description = para.slice(0, 240);
       const ageMatch = para.match(/\b(\d{1,3})\s*anos?\b/i);
       if (ageMatch) meta.age = ageMatch[1];
     }
-
-    // Tenta inferir nome em "## [I. CONTENÇÃO]" do BLOCO 2: "Você representa NOME, descrição"
-    const nomeMatch = text.match(/Você\s+representa\s+([^,.\n]+)/i);
-    if (nomeMatch) meta.name = nomeMatch[1].trim();
 
     return meta;
   }
@@ -142,7 +179,7 @@ export default function AdminEntrevistador({ user }) {
     const text = getAssistantText();
     const bloco2 = extractBloco2(text);
     if (!bloco2) {
-      alert('Ainda não encontrei o BLOCO 2 (prompt do simulador) na conversa. Continue a entrevista até o entrevistador devolver os dois blocos finais.');
+      alert('Ainda não encontrei o prompt final do paciente na conversa. Aguarde o entrevistador concluir a entrevista e devolver o prompt formatado (começando em "## [I. CONTENÇÃO]").');
       return;
     }
     const meta = extractMetaFromBloco1(text);
@@ -194,7 +231,7 @@ export default function AdminEntrevistador({ user }) {
   function downloadBloco2() {
     const bloco2 = extractBloco2(getAssistantText());
     if (!bloco2) {
-      alert('BLOCO 2 ainda não foi gerado pelo entrevistador.');
+      alert('O prompt final do paciente ainda não foi gerado pelo entrevistador.');
       return;
     }
     const blob = new Blob([bloco2], { type: 'text/markdown;charset=utf-8' });
@@ -221,14 +258,14 @@ export default function AdminEntrevistador({ user }) {
           <h2><Typewriter text="Entre" /><span className="accent"><Typewriter text="vistador" delayStart={180} /></span></h2>
           <p>
             Conduza uma entrevista com o agente entrevistador da Allos para co-construir um novo personagem-paciente.
-            Ao final, o entrevistador devolve dois blocos — o segundo é o prompt pronto para criar um personagem na biblioteca de Simulação.
+            Ao final, o entrevistador devolve o prompt do paciente pronto para criar um personagem na biblioteca de Simulação.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {messages.length > 0 && (
             <>
               <button className="btn btn-outline btn-sm" onClick={downloadConversation}>Baixar conversa</button>
-              <button className="btn btn-outline btn-sm" onClick={downloadBloco2}>Baixar BLOCO 2 (.md)</button>
+              <button className="btn btn-outline btn-sm" onClick={downloadBloco2}>Baixar prompt (.md)</button>
               <button className="btn btn-primary btn-sm" onClick={handlePrepareCharacter}>Criar personagem</button>
               <button className="btn btn-ghost btn-sm" onClick={resetConversation}>Nova entrevista</button>
             </>
@@ -375,7 +412,7 @@ export default function AdminEntrevistador({ user }) {
                 </div>
                 <div>
                   <label htmlFor="ent-prompt">
-                    Prompt do simulador <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(BLOCO 2 extraído da entrevista)</em>
+                    Prompt do simulador <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(extraído da entrevista)</em>
                   </label>
                   <textarea
                     id="ent-prompt"
