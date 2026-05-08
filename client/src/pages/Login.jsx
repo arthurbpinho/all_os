@@ -64,10 +64,8 @@ export default function Login({ onLogin }) {
         </form>
 
         <div className="credentials">
-          <div className="label">Credenciais de teste</div>
-          <p><code>aluno</code> / <code>aluno123</code> · Terapeuta</p>
-          <p><code>supervisor</code> / <code>super123</code> · Supervisor</p>
-          <p><code>admin</code> / <code>admin123</code> · Administrador</p>
+          <div className="label">Acesso restrito</div>
+          <p>Plataforma interna da associação. Solicite seu login ao administrador.</p>
         </div>
       </div>
     </div>

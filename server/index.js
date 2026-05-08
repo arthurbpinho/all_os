@@ -3,6 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(cors());
@@ -14,8 +17,30 @@ if (fs.existsSync(PROFILES_DIR)) {
   app.use('/profiles_icon', express.static(PROFILES_DIR, { maxAge: '7d' }));
 }
 
-const DATA_DIR = path.join(__dirname, 'data');
+// DATA_DIR pode ser sobrescrito via env (Railway: aponta para volume persistente).
+// Se não existir, copia o conteúdo seed embutido no repositório (server/data) na primeira execução.
+const SEED_DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : SEED_DATA_DIR;
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
+  for (const f of fs.readdirSync(SEED_DATA_DIR)) {
+    const dst = path.join(DATA_DIR, f);
+    if (!fs.existsSync(dst)) {
+      fs.copyFileSync(path.join(SEED_DATA_DIR, f), dst);
+    }
+  }
+}
+
+// JWT secret — em produção (Railway) deve vir de env.
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  const fallback = 'dev-secret-' + crypto.randomBytes(8).toString('hex');
+  console.warn('[auth] JWT_SECRET não definido — usando fallback dev. Configure em produção!');
+  return fallback;
+})();
+const TOKEN_TTL = '7d';
+const BCRYPT_ROUNDS = 10;
 
 function readJSON(file, fallback = []) {
   const p = path.join(DATA_DIR, file);
@@ -36,13 +61,51 @@ const DEFAULT_PROFILE = {
   updateAllos: false,
 };
 
-if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
-  writeJSON('users.json', [
-    { id: '1', username: 'aluno', password: 'aluno123', name: 'Terapeuta Teste', role: 'therapist', ...DEFAULT_PROFILE },
-    { id: '2', username: 'supervisor', password: 'super123', name: 'Supervisor', role: 'supervisor', ...DEFAULT_PROFILE },
-    { id: '3', username: 'admin', password: 'admin123', name: 'Administrador', role: 'admin', ...DEFAULT_PROFILE }
-  ]);
+const VALID_ROLES = ['therapist', 'supervisor', 'admin'];
+
+function hashPasswordSync(plain) {
+  return bcrypt.hashSync(String(plain), BCRYPT_ROUNDS);
 }
+
+if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
+  // Seed inicial: apenas o admin. Demais contas são criadas pela tela de Contas.
+  // A senha default abaixo deve ser trocada no primeiro login.
+  const adminInitialPassword = process.env.ADMIN_INITIAL_PASSWORD || 'admin123';
+  writeJSON('users.json', [
+    {
+      id: '1',
+      username: 'admin',
+      passwordHash: hashPasswordSync(adminInitialPassword),
+      name: 'Administrador',
+      role: 'admin',
+      teacherId: null,
+      ...DEFAULT_PROFILE,
+      profilePhoto: '/profiles_icon/jung(1).png',
+    },
+  ]);
+  console.log('[auth] Seed users.json criado. Login admin: admin /', adminInitialPassword);
+}
+
+// Migração one-shot: passwords em texto puro -> bcrypt hash
+(function migratePlaintextPasswords() {
+  const users = readJSON('users.json');
+  let dirty = false;
+  for (const u of users) {
+    if (u.password && !u.passwordHash) {
+      u.passwordHash = hashPasswordSync(u.password);
+      delete u.password;
+      dirty = true;
+    }
+    if (!('teacherId' in u)) {
+      u.teacherId = null;
+      dirty = true;
+    }
+  }
+  if (dirty) {
+    writeJSON('users.json', users);
+    console.log('[auth] Senhas em texto puro migradas para bcrypt.');
+  }
+})();
 
 if (!fs.existsSync(path.join(DATA_DIR, 'exercises.json'))) {
   // Inicia sem exercícios — o admin cadastra via interface.
@@ -71,26 +134,123 @@ if (!fs.existsSync(path.join(DATA_DIR, 'logs.json'))) {
   writeJSON('logs.json', []);
 }
 
+// --- Auth helpers ---
+function publicUser(u) {
+  if (!u) return null;
+  const { password, passwordHash, ...safe } = u;
+  return safe;
+}
+
+function signToken(user) {
+  return jwt.sign(
+    { sub: user.id, role: user.role, username: user.username },
+    JWT_SECRET,
+    { expiresIn: TOKEN_TTL }
+  );
+}
+
+function getTokenFromReq(req) {
+  const h = req.headers.authorization || '';
+  if (h.startsWith('Bearer ')) return h.slice(7);
+  return null;
+}
+
+function requireAuth(req, res, next) {
+  const token = getTokenFromReq(req);
+  if (!token) return res.status(401).json({ error: 'Não autenticado' });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const users = readJSON('users.json');
+    const user = users.find(u => u.id === payload.sub);
+    if (!user) return res.status(401).json({ error: 'Sessão inválida' });
+    req.user = user;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Sessão expirada' });
+  }
+}
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: 'Não autenticado' });
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
+    next();
+  };
+}
+
+// Permite que admin acesse qualquer recurso, professor acesse o de seus alunos,
+// aluno acesse só o próprio.
+function canAccessUserResource(actor, targetUserId) {
+  if (!actor) return false;
+  if (actor.role === 'admin') return true;
+  if (actor.id === targetUserId) return true;
+  if (actor.role === 'supervisor') {
+    const users = readJSON('users.json');
+    const target = users.find(u => u.id === targetUserId);
+    return !!(target && target.teacherId === actor.id);
+  }
+  return false;
+}
+
 // --- Auth ---
-app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
+  }
   const users = readJSON('users.json');
-  const user = users.find(u => u.username === username && u.password === password);
-  if (!user) return res.status(401).json({ error: 'Credenciais inválidas' });
-  const { password: _, ...safeUser } = user;
-  res.json(safeUser);
+  const user = users.find(u => u.username === username);
+  // Bcrypt sempre — se não houver hash, falha silenciosa (resposta genérica para evitar enumeration)
+  const ok = user && user.passwordHash
+    ? await bcrypt.compare(String(password), user.passwordHash)
+    : false;
+  if (!ok) return res.status(401).json({ error: 'Credenciais inválidas' });
+  const token = signToken(user);
+  res.json({ token, user: publicUser(user) });
+});
+
+// Re-valida token e devolve user atualizado (usado no boot do client).
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ user: publicUser(req.user) });
+});
+
+// Troca de senha pelo próprio usuário
+app.post('/api/me/password', requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    return res.status(400).json({ error: 'Senha atual e nova são obrigatórias' });
+  }
+  if (String(newPassword).length < 6) {
+    return res.status(400).json({ error: 'Nova senha deve ter ao menos 6 caracteres' });
+  }
+  const ok = await bcrypt.compare(String(currentPassword), req.user.passwordHash || '');
+  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+  const users = readJSON('users.json');
+  const idx = users.findIndex(u => u.id === req.user.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  writeJSON('users.json', users);
+  res.json({ ok: true });
 });
 
 // --- Profile ---
-app.get('/api/users/:id', (req, res) => {
+app.get('/api/users/:id', requireAuth, (req, res) => {
+  if (!canAccessUserResource(req.user, req.params.id)) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
   const users = readJSON('users.json');
   const user = users.find(u => u.id === req.params.id);
   if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
-  const { password: _, ...safeUser } = user;
-  res.json(safeUser);
+  res.json(publicUser(user));
 });
 
-app.put('/api/users/:id', (req, res) => {
+app.put('/api/users/:id', requireAuth, (req, res) => {
+  // Próprio usuário ou admin. Professor não edita perfil de aluno por aqui.
+  if (req.user.id !== req.params.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
   const users = readJSON('users.json');
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -100,12 +260,395 @@ app.put('/api/users/:id', (req, res) => {
   for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
   users[idx] = { ...users[idx], ...patch };
   writeJSON('users.json', users);
-  const { password: _, ...safeUser } = users[idx];
-  res.json(safeUser);
+  res.json(publicUser(users[idx]));
+});
+
+// --- Admin: gestão de contas ---
+const usernameRegex = /^[a-zA-Z0-9._-]{3,32}$/;
+
+function nextUserId(users) {
+  const maxNumeric = users.reduce((max, u) => {
+    const n = Number(u.id);
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+  return String(maxNumeric + 1);
+}
+
+function validateNewUserPayload(body, users, { isUpdate = false, currentUser = null } = {}) {
+  const errors = [];
+  const username = (body.username || '').trim();
+  const role = body.role;
+  const teacherId = body.teacherId || null;
+
+  if (!isUpdate || body.username !== undefined) {
+    if (!usernameRegex.test(username)) {
+      errors.push('Usuário inválido (3-32 caracteres, letras/números/. _ -)');
+    }
+    const dup = users.find(u => u.username === username && (!currentUser || u.id !== currentUser.id));
+    if (dup) errors.push('Usuário já existe');
+  }
+  if (!isUpdate && (!body.password || String(body.password).length < 6)) {
+    errors.push('Senha deve ter ao menos 6 caracteres');
+  }
+  if (body.password !== undefined && body.password !== '' && String(body.password).length < 6) {
+    errors.push('Senha deve ter ao menos 6 caracteres');
+  }
+  if (!isUpdate && !VALID_ROLES.includes(role)) {
+    errors.push('Função inválida');
+  }
+  if (role === 'therapist') {
+    if (!teacherId) {
+      errors.push('Aluno deve estar vinculado a um professor');
+    } else {
+      const t = users.find(u => u.id === teacherId);
+      if (!t || t.role !== 'supervisor') errors.push('Professor inválido');
+    }
+  }
+  if (role && role !== 'therapist' && teacherId) {
+    errors.push('Apenas alunos podem estar vinculados a um professor');
+  }
+  return errors;
+}
+
+app.get('/api/admin/users', requireAuth, requireRole('admin'), (req, res) => {
+  const users = readJSON('users.json');
+  res.json(users.map(publicUser));
+});
+
+app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
+  const users = readJSON('users.json');
+  const errors = validateNewUserPayload(req.body, users);
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+
+  const role = req.body.role;
+  const newUser = {
+    id: nextUserId(users),
+    username: req.body.username.trim(),
+    name: (req.body.name || req.body.username).trim(),
+    role,
+    teacherId: role === 'therapist' ? (req.body.teacherId || null) : null,
+    passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
+    ...DEFAULT_PROFILE,
+    gender: req.body.gender || '',
+    email: req.body.email || '',
+    profilePhoto: req.body.profilePhoto || '',
+  };
+  users.push(newUser);
+  writeJSON('users.json', users);
+  res.json(publicUser(newUser));
+});
+
+app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  const users = readJSON('users.json');
+  const idx = users.findIndex(u => u.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  const current = users[idx];
+
+  // Admin não pode rebaixar/editar o role da própria conta para evitar lockout
+  if (current.id === req.user.id && req.body.role && req.body.role !== current.role) {
+    return res.status(400).json({ error: 'Você não pode alterar a sua própria função.' });
+  }
+
+  const merged = {
+    ...current,
+    ...(req.body.username !== undefined ? { username: String(req.body.username).trim() } : {}),
+    ...(req.body.name !== undefined ? { name: String(req.body.name).trim() } : {}),
+    ...(req.body.role !== undefined ? { role: req.body.role } : {}),
+    ...(req.body.email !== undefined ? { email: req.body.email } : {}),
+    ...(req.body.gender !== undefined ? { gender: req.body.gender } : {}),
+    ...(req.body.profilePhoto !== undefined ? { profilePhoto: req.body.profilePhoto } : {}),
+  };
+
+  // teacherId só faz sentido para alunos
+  if (merged.role === 'therapist') {
+    if (req.body.teacherId !== undefined) merged.teacherId = req.body.teacherId || null;
+  } else {
+    merged.teacherId = null;
+  }
+
+  if (!VALID_ROLES.includes(merged.role)) {
+    return res.status(400).json({ error: 'Função inválida' });
+  }
+  const errors = validateNewUserPayload(merged, users, { isUpdate: true, currentUser: current });
+  if (errors.length) return res.status(400).json({ error: errors.join('; ') });
+
+  if (req.body.password) {
+    if (String(req.body.password).length < 6) {
+      return res.status(400).json({ error: 'Senha deve ter ao menos 6 caracteres' });
+    }
+    merged.passwordHash = await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS);
+  }
+
+  // Se um professor mudou de função, desvincular alunos
+  if (current.role === 'supervisor' && merged.role !== 'supervisor') {
+    for (const u of users) {
+      if (u.teacherId === current.id) u.teacherId = null;
+    }
+  }
+
+  users[idx] = merged;
+  writeJSON('users.json', users);
+  res.json(publicUser(merged));
+});
+
+app.delete('/api/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+  if (req.params.id === req.user.id) {
+    return res.status(400).json({ error: 'Você não pode excluir a própria conta.' });
+  }
+  const users = readJSON('users.json');
+  const idx = users.findIndex(u => u.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  const target = users[idx];
+
+  if (target.role === 'supervisor') {
+    const linked = users.filter(u => u.teacherId === target.id);
+    if (linked.length > 0) {
+      return res.status(400).json({
+        error: `Este professor tem ${linked.length} aluno(s) vinculado(s). Reatribua-os antes de excluir.`,
+      });
+    }
+  }
+
+  users.splice(idx, 1);
+  writeJSON('users.json', users);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'), async (req, res) => {
+  const newPassword = req.body && req.body.newPassword;
+  if (!newPassword || String(newPassword).length < 6) {
+    return res.status(400).json({ error: 'Senha deve ter ao menos 6 caracteres' });
+  }
+  const users = readJSON('users.json');
+  const idx = users.findIndex(u => u.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  writeJSON('users.json', users);
+  res.json({ ok: true });
+});
+
+// Professor: lista de alunos vinculados a ele
+app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const users = readJSON('users.json');
+  const list = req.user.role === 'admin'
+    ? users.filter(u => u.role === 'therapist')
+    : users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id);
+  res.json(list.map(publicUser));
+});
+
+// --- Indicadores: constância, objetivos diários, metas ---
+const ACHIEVEMENT_DEFS = [
+  { id: 'first_session',       icon: '◐', title: 'Primeira sessão',     description: 'Concluiu sua primeira sessão na plataforma.',                                       tier: 'bronze' },
+  { id: 'simulacao_complete',  icon: '◇', title: 'Repertório clínico',  description: 'Concluiu todos os personagens da Simulação.',                                       tier: 'gold' },
+  { id: 'neuro_complete',      icon: '◈', title: 'Avaliação completa', description: 'Concluiu todos os personagens da Neuroavaliação.',                                  tier: 'gold' },
+  { id: 'trilha_skill_1',      icon: '▲', title: 'Hermenêutica plena',  description: 'Concluiu todos os exercícios da competência Hermenêutica.',                         tier: 'silver' },
+  { id: 'trilha_skill_2',      icon: '▲', title: 'Estrutura consolidada', description: 'Concluiu todos os exercícios da competência Estrutura.',                           tier: 'silver' },
+  { id: 'trilha_skill_3',      icon: '▲', title: 'Empatia consolidada',  description: 'Concluiu todos os exercícios da competência Empatia.',                              tier: 'silver' },
+  { id: 'trilha_skill_4',      icon: '▲', title: 'Olho clínico',        description: 'Concluiu todos os exercícios da competência Especificidade do caso.',               tier: 'silver' },
+  { id: 'trilha_skill_5',      icon: '▲', title: 'Autoconhecimento',    description: 'Concluiu todos os exercícios da competência Eu.',                                   tier: 'silver' },
+  { id: 'trilha_master',       icon: '◆', title: 'Programa concluído', description: 'Concluiu todos os exercícios das 5 competências.',                                  tier: 'platinum' },
+  { id: 'high_score',          icon: '★', title: 'Excelência técnica', description: 'Atingiu pontuação ≥ 25 em uma única sessão.',                                       tier: 'gold' },
+  { id: 'speed_demon',         icon: '↗', title: 'Eficiência',          description: 'Concluiu uma sessão em menos de 5 min com pontuação positiva.',                     tier: 'silver' },
+  { id: 'early_bird',          icon: '◔', title: 'Madrugador',          description: 'Realizou uma sessão antes das 7h.',                                                 tier: 'bronze' },
+  { id: 'night_owl',           icon: '◑', title: 'Sessão noturna',      description: 'Realizou uma sessão depois das 23h.',                                               tier: 'bronze' },
+  { id: 'centena',             icon: '∞', title: 'Centena',             description: '100 sessões concluídas.',                                                           tier: 'platinum' },
+  { id: 'polivalente',         icon: '◉', title: 'Versatilidade',       description: 'Concluiu sessão de cada tipo (trilha, simulação, neuro) num mesmo dia.',           tier: 'gold' },
+  { id: 'streak_7_ever',       icon: '●', title: 'Constância',          description: 'Manteve constância de 7 dias ao menos uma vez.',                                    tier: 'silver' },
+  { id: 'streak_30_ever',      icon: '●', title: 'Persistência',        description: 'Manteve constância de 30 dias ao menos uma vez.',                                   tier: 'platinum' },
+  { id: 'highlights_10',       icon: '◎', title: 'Curador',             description: 'Marcou 10 mensagens como destaque em sessões.',                                     tier: 'silver' },
+  { id: 'all_difficulties',    icon: '⊟', title: 'Calibragem',          description: 'Concluiu exercícios das 3 dificuldades (iniciante, intermediário, avançado).',     tier: 'silver' },
+  { id: 'lua_cheia',           icon: '◐', title: 'Amplitude',           description: 'Realizou sessões antes das 7h e depois das 23h em dias diferentes.',               tier: 'gold' },
+];
+
+function dayKey(timestamp) {
+  return new Date(timestamp).toISOString().slice(0, 10);
+}
+
+function computeStreak(userLogs) {
+  if (!userLogs.length) {
+    return { current: 0, longest: 0, isAlive: false, lastActiveDate: null, status: 'none', daysToWeekly: 7, daysToMonthly: 30 };
+  }
+  const days = new Set(userLogs.map((l) => dayKey(l.timestamp || l.createdAt || Date.now())));
+  const today = dayKey(Date.now());
+  const yesterday = dayKey(Date.now() - 86400000);
+
+  let cursor = days.has(today) ? today : (days.has(yesterday) ? yesterday : null);
+  let current = 0;
+  if (cursor) {
+    const d = new Date(cursor + 'T00:00:00Z');
+    while (days.has(d.toISOString().slice(0, 10))) {
+      current++;
+      d.setUTCDate(d.getUTCDate() - 1);
+    }
+  }
+
+  const sorted = [...days].sort();
+  let longest = 0;
+  let run = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (i === 0) { run = 1; continue; }
+    const prev = new Date(sorted[i - 1] + 'T00:00:00Z');
+    const cur = new Date(sorted[i] + 'T00:00:00Z');
+    const diff = Math.round((cur - prev) / 86400000);
+    if (diff === 1) run++;
+    else { longest = Math.max(longest, run); run = 1; }
+  }
+  longest = Math.max(longest, run);
+
+  const isAlive = current > 0;
+  const lastActiveDate = days.has(today) ? today : (days.has(yesterday) ? yesterday : sorted[sorted.length - 1] || null);
+  const status = current >= 30 ? 'monthly' : current >= 7 ? 'weekly' : 'none';
+
+  return {
+    current,
+    longest,
+    isAlive,
+    lastActiveDate,
+    status,
+    daysToWeekly: Math.max(0, 7 - current),
+    daysToMonthly: Math.max(0, 30 - current),
+  };
+}
+
+function computeDailyMissions(userLogs) {
+  const today = dayKey(Date.now());
+  const todayLogs = userLogs.filter((l) => dayKey(l.timestamp) === today);
+  const totalToday = todayLogs.length;
+  const exerciseToday = todayLogs.filter((l) => l.type === 'exercise').length;
+  const fastGood = todayLogs.some((l) => l.type === 'freeplay' && (l.durationSeconds || 9999) <= 600 && (l.score || 0) >= 8);
+  const neuroDone = todayLogs.some((l) => l.type === 'neuro');
+
+  return [
+    { id: 'daily_1exercise', icon: '◯', title: 'Sessão diária',     description: 'Conclua 1 exercício hoje (qualquer tipo)',                       target: 1, progress: Math.min(totalToday, 1), completed: totalToday >= 1 },
+    { id: 'daily_2trilha',   icon: '◎', title: 'Foco na trilha',    description: 'Conclua 2 exercícios da trilha hoje',                            target: 2, progress: Math.min(exerciseToday, 2), completed: exerciseToday >= 2 },
+    { id: 'daily_efficiency',icon: '↗', title: 'Eficiência clínica',description: 'Conclua uma Simulação em até 10 min com pontuação ≥ 8',         target: 1, progress: fastGood ? 1 : 0, completed: fastGood },
+    { id: 'daily_neuro',     icon: '◈', title: 'Discernimento',     description: 'Conclua uma Neuroavaliação hoje',                                target: 1, progress: neuroDone ? 1 : 0, completed: neuroDone },
+  ];
+}
+
+function computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro) {
+  const exerciseIds = new Set(userLogs.filter((l) => l.type === 'exercise' && l.itemId).map((l) => String(l.itemId)));
+  const freeplayIds = new Set(userLogs.filter((l) => l.type === 'freeplay' && l.itemId).map((l) => String(l.itemId)));
+  const neuroIds    = new Set(userLogs.filter((l) => l.type === 'neuro'    && l.itemId).map((l) => String(l.itemId)));
+
+  const earned = new Set();
+
+  if (userLogs.length >= 1) earned.add('first_session');
+
+  if (freeplay.length > 0 && freeplay.every((c) => freeplayIds.has(String(c.id)))) earned.add('simulacao_complete');
+  if (neuro.length > 0    && neuro.every((c)    => neuroIds.has(String(c.id))))    earned.add('neuro_complete');
+
+  for (let s = 1; s <= 5; s++) {
+    const phases = exercises.filter((e) => Number(e.skillId) === s);
+    if (phases.length > 0 && phases.every((p) => exerciseIds.has(String(p.id)))) {
+      earned.add(`trilha_skill_${s}`);
+    }
+  }
+  if ([1, 2, 3, 4, 5].every((s) => earned.has(`trilha_skill_${s}`))) earned.add('trilha_master');
+
+  if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 25)) earned.add('high_score');
+  if (userLogs.some((l) => (l.durationSeconds || 9999) < 300 && Number.isFinite(l.score) && l.score > 0)) earned.add('speed_demon');
+
+  let hasEarly = false;
+  let hasLate = false;
+  for (const l of userLogs) {
+    const h = new Date(l.timestamp).getHours();
+    if (h < 7) { earned.add('early_bird'); hasEarly = true; }
+    if (h >= 23) { earned.add('night_owl'); hasLate = true; }
+  }
+  if (hasEarly && hasLate) earned.add('lua_cheia');
+
+  if (userLogs.length >= 100) earned.add('centena');
+
+  const byDay = {};
+  for (const l of userLogs) {
+    const k = dayKey(l.timestamp);
+    if (!byDay[k]) byDay[k] = new Set();
+    byDay[k].add(l.type);
+  }
+  if (Object.values(byDay).some((s) => s.has('exercise') && s.has('freeplay') && s.has('neuro'))) {
+    earned.add('polivalente');
+  }
+
+  if (streak.longest >= 7)  earned.add('streak_7_ever');
+  if (streak.longest >= 30) earned.add('streak_30_ever');
+
+  let highlights = 0;
+  for (const l of userLogs) {
+    if (Array.isArray(l.messages)) highlights += l.messages.filter((m) => m && m.highlighted).length;
+  }
+  if (highlights >= 10) earned.add('highlights_10');
+
+  const difficultiesDone = new Set(
+    userLogs.filter((l) => l.type === 'exercise' && l.difficulty).map((l) => l.difficulty)
+  );
+  if (['iniciante', 'intermediario', 'avancado'].every((d) => difficultiesDone.has(d))) {
+    earned.add('all_difficulties');
+  }
+
+  return earned;
+}
+
+app.get('/api/gamification/:userId', requireAuth, (req, res) => {
+  if (!canAccessUserResource(req.user, req.params.userId)) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+  const userId = req.params.userId;
+  const allLogs = readJSON('logs.json');
+  const userLogs = allLogs.filter((l) => l.userId === userId);
+  const exercises = readJSON('exercises.json');
+  const freeplay  = readJSON('freeplay-characters.json');
+  const neuro     = readJSON('neuro-characters.json');
+
+  const streak = computeStreak(userLogs);
+  const dailyMissions = computeDailyMissions(userLogs);
+  const earnedSet = computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro);
+
+  const ach = readJSON('achievements.json', {});
+  if (!ach[userId]) ach[userId] = {};
+  let dirty = false;
+  for (const id of earnedSet) {
+    if (!ach[userId][id]) { ach[userId][id] = new Date().toISOString(); dirty = true; }
+  }
+  if (dirty) writeJSON('achievements.json', ach);
+
+  const achievements = ACHIEVEMENT_DEFS.map((def) => ({
+    ...def,
+    earned: earnedSet.has(def.id),
+    earnedAt: ach[userId][def.id] || null,
+  }));
+
+  const validScores = userLogs.map((l) => l.score).filter((s) => Number.isFinite(s));
+  const stats = {
+    totalSessions: userLogs.length,
+    totalExercise: userLogs.filter((l) => l.type === 'exercise').length,
+    totalFreeplay: userLogs.filter((l) => l.type === 'freeplay').length,
+    totalNeuro:    userLogs.filter((l) => l.type === 'neuro').length,
+    averageScore:  validScores.length > 0 ? Math.round(validScores.reduce((a, b) => a + b, 0) / validScores.length) : null,
+    bestScore:     validScores.length > 0 ? Math.max(...validScores) : null,
+  };
+
+  res.json({ streak, dailyMissions, achievements, stats });
+});
+
+// --- Entrevistador (prompt para construção de personagem) ---
+const ENTREVISTADOR_DIR = path.join(__dirname, '..', 'entrevistador');
+
+app.get('/api/entrevistador-prompt', requireAuth, (req, res) => {
+  const promptFile = path.join(ENTREVISTADOR_DIR, 'promptentrevistador.md');
+  if (!fs.existsSync(promptFile)) {
+    return res.status(404).json({ error: 'Prompt do entrevistador não encontrado.' });
+  }
+  try {
+    const content = fs.readFileSync(promptFile, 'utf-8');
+    res.json({ prompt: content });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao ler o prompt: ' + err.message });
+  }
 });
 
 // Lista de fotos de perfil disponíveis (a partir da pasta profiles_icon na raiz do projeto)
-app.get('/api/profile-photos', (req, res) => {
+app.get('/api/profile-photos', requireAuth, (req, res) => {
   const dir = path.join(__dirname, '..', 'profiles_icon');
   if (!fs.existsSync(dir)) return res.json([]);
   try {
@@ -121,9 +664,9 @@ app.get('/api/profile-photos', (req, res) => {
 });
 
 // --- Exercises (System 1) ---
-app.get('/api/exercises', (req, res) => res.json(readJSON('exercises.json')));
+app.get('/api/exercises', requireAuth, (req, res) => res.json(readJSON('exercises.json')));
 
-app.post('/api/exercises', (req, res) => {
+app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const ex = { id: 'ex' + Date.now(), ...req.body };
   exercises.push(ex);
@@ -131,7 +674,7 @@ app.post('/api/exercises', (req, res) => {
   res.json(ex);
 });
 
-app.put('/api/exercises/:id', (req, res) => {
+app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const idx = exercises.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
@@ -140,7 +683,7 @@ app.put('/api/exercises/:id', (req, res) => {
   res.json(exercises[idx]);
 });
 
-app.delete('/api/exercises/:id', (req, res) => {
+app.delete('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   let exercises = readJSON('exercises.json');
   exercises = exercises.filter(e => e.id !== req.params.id);
   writeJSON('exercises.json', exercises);
@@ -154,9 +697,9 @@ function sanitizeCharacterPayload(body) {
   return out;
 }
 
-app.get('/api/freeplay', (req, res) => res.json(readJSON('freeplay-characters.json')));
+app.get('/api/freeplay', requireAuth, (req, res) => res.json(readJSON('freeplay-characters.json')));
 
-app.post('/api/freeplay', (req, res) => {
+app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
   const c = { id: 'fp' + Date.now(), ...sanitizeCharacterPayload(req.body) };
   chars.push(c);
@@ -164,7 +707,7 @@ app.post('/api/freeplay', (req, res) => {
   res.json(c);
 });
 
-app.put('/api/freeplay/:id', (req, res) => {
+app.put('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
   const idx = chars.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
@@ -173,7 +716,7 @@ app.put('/api/freeplay/:id', (req, res) => {
   res.json(chars[idx]);
 });
 
-app.delete('/api/freeplay/:id', (req, res) => {
+app.delete('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
   let chars = readJSON('freeplay-characters.json');
   chars = chars.filter(c => c.id !== req.params.id);
   writeJSON('freeplay-characters.json', chars);
@@ -181,9 +724,9 @@ app.delete('/api/freeplay/:id', (req, res) => {
 });
 
 // --- Neuro Characters (System 3) ---
-app.get('/api/neuro', (req, res) => res.json(readJSON('neuro-characters.json')));
+app.get('/api/neuro', requireAuth, (req, res) => res.json(readJSON('neuro-characters.json')));
 
-app.post('/api/neuro', (req, res) => {
+app.post('/api/neuro', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
   const c = { id: 'nr' + Date.now(), ...sanitizeCharacterPayload(req.body) };
   chars.push(c);
@@ -191,7 +734,7 @@ app.post('/api/neuro', (req, res) => {
   res.json(c);
 });
 
-app.put('/api/neuro/:id', (req, res) => {
+app.put('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
   const idx = chars.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
@@ -200,7 +743,7 @@ app.put('/api/neuro/:id', (req, res) => {
   res.json(chars[idx]);
 });
 
-app.delete('/api/neuro/:id', (req, res) => {
+app.delete('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
   let chars = readJSON('neuro-characters.json');
   chars = chars.filter(c => c.id !== req.params.id);
   writeJSON('neuro-characters.json', chars);
@@ -208,12 +751,19 @@ app.delete('/api/neuro/:id', (req, res) => {
 });
 
 // --- Progress ---
-app.get('/api/progress/:userId', (req, res) => {
+app.get('/api/progress/:userId', requireAuth, (req, res) => {
+  if (!canAccessUserResource(req.user, req.params.userId)) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
   const progress = readJSON('progress.json', {});
   res.json(progress[req.params.userId] || {});
 });
 
-app.post('/api/progress/:userId', (req, res) => {
+app.post('/api/progress/:userId', requireAuth, (req, res) => {
+  // Apenas o próprio aluno (ou admin) salva progresso
+  if (req.user.id !== req.params.userId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
   const progress = readJSON('progress.json', {});
   progress[req.params.userId] = { ...progress[req.params.userId], ...req.body };
   writeJSON('progress.json', progress);
@@ -221,17 +771,45 @@ app.post('/api/progress/:userId', (req, res) => {
 });
 
 // --- Logs ---
-app.get('/api/logs', (req, res) => {
+app.get('/api/logs', requireAuth, (req, res) => {
   const logs = readJSON('logs.json');
+  const users = readJSON('users.json');
+
+  // Aluno: só os próprios.
+  if (req.user.role === 'therapist') {
+    return res.json(logs.filter(l => l.userId === req.user.id));
+  }
+
+  // Filtro por userId específico
   if (req.query.userId) {
+    if (!canAccessUserResource(req.user, req.query.userId)) {
+      return res.status(403).json({ error: 'Acesso negado' });
+    }
     return res.json(logs.filter(l => l.userId === req.query.userId));
   }
+
+  // Professor: apenas logs de seus alunos
+  if (req.user.role === 'supervisor') {
+    const myStudents = new Set(
+      users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id).map(u => u.id)
+    );
+    return res.json(logs.filter(l => myStudents.has(l.userId)));
+  }
+
+  // Admin: tudo
   res.json(logs);
 });
 
-app.post('/api/logs', (req, res) => {
+app.post('/api/logs', requireAuth, (req, res) => {
+  // O log sempre é gravado em nome do usuário autenticado (impede forjar userId)
   const logs = readJSON('logs.json');
-  const log = { id: 'log' + Date.now(), timestamp: new Date().toISOString(), ...req.body };
+  const log = {
+    id: 'log' + Date.now(),
+    timestamp: new Date().toISOString(),
+    ...req.body,
+    userId: req.user.id,
+    userName: req.user.name,
+  };
   logs.push(log);
   writeJSON('logs.json', logs);
   res.json(log);
@@ -247,8 +825,8 @@ function getOpenAI() {
   return new OpenAI({ apiKey });
 }
 
-app.post('/api/chat', async (req, res) => {
-  const { messages, systemPrompt } = req.body;
+app.post('/api/chat', requireAuth, async (req, res) => {
+  const { messages, systemPrompt, model } = req.body;
   const openai = getOpenAI();
 
   if (!openai) {
@@ -260,7 +838,7 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     const completion = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+      model: model || CHAT_MODEL,
       messages: [
         { role: 'system', content: systemPrompt },
         ...messages
@@ -278,7 +856,7 @@ app.post('/api/chat', async (req, res) => {
 // Mantém os mesmos prompts e fluxos do projeto Echos.
 // Cria uma thread por sessão; envia user message; aguarda run completar; retorna resposta.
 
-app.post('/api/assistants/thread', async (req, res) => {
+app.post('/api/assistants/thread', requireAuth, async (req, res) => {
   const openai = getOpenAI();
   if (!openai) {
     return res.json({ threadId: 'demo-thread-' + Date.now(), demo: true });
@@ -304,7 +882,7 @@ function isValidAssistantId(id) {
   return typeof id === 'string' && /^asst_[A-Za-z0-9]+$/.test(id) && id.length <= 64;
 }
 
-app.post('/api/assistants/message', async (req, res) => {
+app.post('/api/assistants/message', requireAuth, async (req, res) => {
   const { threadId, message } = req.body;
   const assistantId = sanitizeAssistantId(req.body.assistantId);
   const openai = getOpenAI();
@@ -400,7 +978,7 @@ Ao final da sua resposta, inclua OBRIGATORIAMENTE estas linhas, exatamente neste
 Onde X é a nota numérica que você atribui ao desempenho do aluno (use a escala que sua avaliação considera apropriada — pode ser positiva ou negativa, com ou sem sinal). Sem essa linha, o sistema não consegue registrar a pontuação.`;
 }
 
-app.post('/api/evaluate', async (req, res) => {
+app.post('/api/evaluate', requireAuth, async (req, res) => {
   const { messages, systemPrompt: overridePrompt } = req.body;
   const apiKey = process.env.OPENAI_API_KEY;
 
@@ -436,7 +1014,7 @@ app.post('/api/evaluate', async (req, res) => {
 });
 
 // --- Speech to Text Proxy ---
-app.post('/api/transcribe', async (req, res) => {
+app.post('/api/transcribe', requireAuth, async (req, res) => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.json({ text: '[Transcrição não disponível sem API Key]' });
