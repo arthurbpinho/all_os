@@ -75,9 +75,9 @@ export default function AdminFreeplay() {
     <div>
       <div className="page-header with-action">
         <div>
-          <div className="eyebrow">Administração · FreePlay</div>
-          <h2><Typewriter text="Personagens da " /><span className="accent"><Typewriter text="Simulação Livre" delayStart={620} /></span></h2>
-          <p>Cadastre os pacientes simulados que aparecerão na biblioteca de FreePlay para os alunos.</p>
+          <div className="eyebrow">Administração · Simulação</div>
+          <h2><Typewriter text="Personagens da " /><span className="accent"><Typewriter text="Simulação" delayStart={620} /></span></h2>
+          <p>Cadastre os pacientes simulados que aparecerão na biblioteca de Simulação para os alunos.</p>
         </div>
         <button className="btn btn-primary" onClick={openCreate}>+ Novo Personagem</button>
       </div>

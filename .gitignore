@@ -1,4 +1,10 @@
 node_modules/
 client/dist/
 .env
+
+# Dados de runtime — NÃO versionar (contém senhas hash, logs, progresso, etc.)
+server/data/users.json
+server/data/progress.json
+server/data/logs.json
+server/data/achievements.json
 server/data/tmp_audio.webm

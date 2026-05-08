@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import Login from './pages/Login';
 import SkillMap from './pages/SkillMap';
@@ -10,8 +10,12 @@ import Logs from './pages/Logs';
 import AdminExercises from './pages/AdminExercises';
 import AdminFreeplay from './pages/AdminFreeplay';
 import AdminNeuro from './pages/AdminNeuro';
+import AdminEntrevistador from './pages/AdminEntrevistador';
 import Avaliacao from './pages/Avaliacao'
 import Profile from './pages/Profile';
+import Missoes from './pages/Missoes';
+import AdminUsers from './pages/AdminUsers';
+import { api, getToken, clearAuth, onSessionExpired } from './api';
 
 const ICONS = {
   skill: (
@@ -73,15 +77,65 @@ const ICONS = {
       <line x1="21" y1="12" x2="9" y2="12" />
     </svg>
   ),
+  flame: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="5" />
+      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  ),
 };
 
 export default function App() {
   const [user, setUser] = useState(() => {
+    // Só restaura sessão se houver token salvo. Senão, ignora cache de user.
+    if (!getToken()) return null;
     const saved = localStorage.getItem('allos_user');
     return saved ? JSON.parse(saved) : null;
   });
+  const [authChecked, setAuthChecked] = useState(!getToken());
   const location = useLocation();
   const navigate = useNavigate();
+
+  const [streak, setStreak] = useState(null);
+
+  // Revalida token no boot (e busca user atualizado do servidor).
+  useEffect(() => {
+    if (!getToken()) { setAuthChecked(true); return; }
+    let cancelled = false;
+    api.me()
+      .then((data) => {
+        if (cancelled) return;
+        if (data && data.user) {
+          setUser(data.user);
+          localStorage.setItem('allos_user', JSON.stringify(data.user));
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        clearAuth();
+        setUser(null);
+      })
+      .finally(() => { if (!cancelled) setAuthChecked(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Logout automático se a API sinalizar 401 em qualquer chamada.
+  useEffect(() => {
+    return onSessionExpired(() => {
+      setUser(null);
+      navigate('/');
+    });
+  }, [navigate]);
+
+  useEffect(() => {
+    if (!user?.id) { setStreak(null); return; }
+    let cancelled = false;
+    api.getGamification(user.id)
+      .then((data) => { if (!cancelled) setStreak(data?.streak || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [user?.id, location.pathname]);
 
   const handleLogin = (u) => {
     setUser(u);
@@ -94,11 +148,14 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    clearAuth();
     setUser(null);
-    localStorage.removeItem('allos_user');
-    navigate('/login');
+    navigate('/');
   };
 
+  if (!authChecked) {
+    return null;
+  }
   if (!user) {
     return <Login onLogin={handleLogin} />;
   }
@@ -122,13 +179,16 @@ export default function App() {
             <>
               <div className="nav-section">Prática</div>
               <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
-                {ICONS.skill}<span>Trilha de Skills</span>
+                {ICONS.skill}<span>Trilha de Competências</span>
               </Link>
               <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
-                {ICONS.freeplay}<span>FreePlay</span>
+                {ICONS.freeplay}<span>Simulação</span>
               </Link>
               <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
                 {ICONS.neuro}<span>Neuroavaliação</span>
+              </Link>
+              <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
+                {ICONS.flame}<span>Objetivos</span>
               </Link>
             </>
           )}
@@ -161,14 +221,20 @@ export default function App() {
           {isAdmin && (
             <>
               <div className="nav-section">Administração</div>
+              <Link to="/admin/users" className={isActive('/admin/users') ? 'active' : ''}>
+                {ICONS.supervisor}<span>Contas</span>
+              </Link>
               <Link to="/admin/exercises" className={isActive('/admin/exercises') ? 'active' : ''}>
-                {ICONS.admin}<span>Fases da Trilha</span>
+                {ICONS.admin}<span>Exercícios da Trilha</span>
               </Link>
               <Link to="/admin/freeplay" className={isActive('/admin/freeplay') ? 'active' : ''}>
-                {ICONS.characters}<span>Personagens FreePlay</span>
+                {ICONS.characters}<span>Personagens da Simulação</span>
               </Link>
               <Link to="/admin/neuro" className={isActive('/admin/neuro') ? 'active' : ''}>
                 {ICONS.characters}<span>Personagens Neuro</span>
+              </Link>
+              <Link to="/admin/entrevistador" className={isActive('/admin/entrevistador') ? 'active' : ''}>
+                {ICONS.supervisor}<span>Entrevistador</span>
               </Link>
               <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
                 {ICONS.log}<span>Todos os Logs</span>
@@ -179,7 +245,7 @@ export default function App() {
 
         <div className="sidebar-user">
           <Link to="/profile" className="profile-mini" title="Editar perfil">
-            <span className="profile-mini-avatar">
+            <span className={`profile-mini-avatar ${streak?.isAlive ? 'with-streak' : ''}`}>
               {user.profilePhoto
                 ? <img src={user.profilePhoto} alt={user.name} />
                 : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
@@ -187,7 +253,11 @@ export default function App() {
             </span>
             <div className="profile-mini-info">
               <div className="profile-mini-name">{user.name}</div>
-              <div className="profile-mini-role">{user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador'}</div>
+              <div className="profile-mini-role">
+                {streak?.isAlive
+                  ? `${streak.current} ${streak.current === 1 ? 'dia consecutivo' : 'dias consecutivos'}`
+                  : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador')}
+              </div>
             </div>
           </Link>
           <button onClick={handleLogout} className="btn btn-ghost btn-sm" title="Sair">
@@ -208,9 +278,12 @@ export default function App() {
           <Route path="/supervisor" element={<Logs user={user} />} />
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
+          <Route path="/missoes" element={<Missoes user={user} />} />
+          <Route path="/admin/users" element={<AdminUsers user={user} />} />
           <Route path="/admin/exercises" element={<AdminExercises />} />
           <Route path="/admin/freeplay" element={<AdminFreeplay />} />
           <Route path="/admin/neuro" element={<AdminNeuro />} />
+          <Route path="/admin/entrevistador" element={<AdminEntrevistador user={user} />} />
           <Route path="*" element={<Navigate to={defaultRoute(user)} />} />
         </Routes>
       </main>
@@ -220,6 +293,6 @@ export default function App() {
 
 function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
-  if (user.role === 'admin') return '/admin/exercises';
+  if (user.role === 'admin') return '/admin/users';
   return '/skills';
 }

@@ -188,7 +188,7 @@ export default function EchoSession({ user, sessionType }) {
     setEvaluating(true);
     setEvalError('');
 
-    const sessionLabel = sessionType === 'freeplay' ? 'FreePlay (simulação livre)' : 'Neuroavaliação';
+    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
     const transcript = buildTranscript();
     const evalMessages = [{
       role: 'user',
@@ -338,7 +338,7 @@ export default function EchoSession({ user, sessionType }) {
       const comment = m.highlighted && m.comment ? `\n   ↳ comentário: ${m.comment}` : '';
       return `[${prefix}${author}]\n${m.content}${comment}`;
     });
-    const header = `Sessão · ${sessionType === 'freeplay' ? 'FreePlay' : 'Neuroavaliação'}\nPersonagem: ${item.name}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
+    const header = `Sessão · ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}\nPersonagem: ${item.name}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
 
     const evalSection = evaluationText
       ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
@@ -461,7 +461,7 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   // -------- TELA DE CHAT --------
-  const sessionLabel = sessionType === 'freeplay' ? 'FreePlay' : 'Neuroavaliação';
+  const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
 
   return (
     <div className="chat-container echo-chat">

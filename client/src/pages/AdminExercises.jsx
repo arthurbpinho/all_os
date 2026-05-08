@@ -37,7 +37,7 @@ export default function AdminExercises() {
     setLoading(true);
     api.getExercises()
       .then(setExercises)
-      .catch((err) => setError(err.message || 'Erro ao carregar fases'))
+      .catch((err) => setError(err.message || 'Erro ao carregar exercícios'))
       .finally(() => setLoading(false));
   }
 
@@ -95,7 +95,7 @@ export default function AdminExercises() {
   }
 
   async function handleDelete(exercise) {
-    if (!window.confirm(`Excluir a fase "${exercise.title}"?`)) return;
+    if (!window.confirm(`Excluir o exercício "${exercise.title}"?`)) return;
     try {
       await api.deleteExercise(exercise.id);
       load();
@@ -109,10 +109,10 @@ export default function AdminExercises() {
       <div className="page-header with-action">
         <div>
           <div className="eyebrow">Administração</div>
-          <h2><Typewriter text="Fases da " /><span className="accent"><Typewriter text="Trilha" delayStart={420} /></span></h2>
-          <p>Cadastre as fases da trilha de prática deliberada. Cada fase tem dois prompts: o do paciente (personagem da simulação) e o do avaliador (que dá a nota ao final).</p>
+          <h2><Typewriter text="Exercícios da " /><span className="accent"><Typewriter text="Trilha" delayStart={420} /></span></h2>
+          <p>Cadastre os exercícios da trilha de prática deliberada. Cada exercício tem dois prompts: o do paciente (personagem da simulação) e o do avaliador (que dá a nota ao final).</p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ Nova Fase</button>
+        <button className="btn btn-primary" onClick={openCreate}>+ Novo Exercício</button>
       </div>
 
       {error && <div className="alert error">{error}</div>}
@@ -123,18 +123,18 @@ export default function AdminExercises() {
         </div>
       ) : exercises.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
-          Nenhuma fase cadastrada ainda. Clique em "Nova Fase" para começar.
+          Nenhum exercício cadastrado ainda. Clique em "Novo Exercício" para começar.
         </div>
       ) : (
         <div className="card tight" style={{ padding: 0, overflow: 'hidden' }}>
           <table className="admin-table">
             <thead>
-              <tr><th>Skill</th><th>Título</th><th>Dificuldade</th><th>Avaliador</th><th>Ações</th></tr>
+              <tr><th>Competência</th><th>Título</th><th>Dificuldade</th><th>Avaliador</th><th>Ações</th></tr>
             </thead>
             <tbody>
               {exercises.map((ex) => (
                 <tr key={ex.id}>
-                  <td><span className="tag-pill">{SKILL_NAMES[ex.skillId] || `Skill ${ex.skillId}`}</span></td>
+                  <td><span className="tag-pill">{SKILL_NAMES[ex.skillId] || `Competência ${ex.skillId}`}</span></td>
                   <td style={{ fontWeight: 500, color: 'var(--marrs-deep)' }}>{ex.title}</td>
                   <td>
                     <span className={`difficulty-pill difficulty-${ex.difficulty || 'iniciante'}`}>
@@ -164,11 +164,11 @@ export default function AdminExercises() {
       {showModal && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeModal(); }}>
           <div className="modal" style={{ maxWidth: 760 }}>
-            <h3>{editingId ? 'Editar Fase' : 'Nova Fase'}</h3>
+            <h3>{editingId ? 'Editar Exercício' : 'Novo Exercício'}</h3>
             <form className="admin-form" onSubmit={handleSubmit}>
               <div style={{ display: 'flex', gap: 14 }}>
                 <div style={{ flex: 2 }}>
-                  <label htmlFor="skillId">Competência (Skill)</label>
+                  <label htmlFor="skillId">Competência</label>
                   <select id="skillId" name="skillId" value={form.skillId} onChange={handleChange} required>
                     {Object.entries(SKILL_NAMES).map(([sid, name]) => (
                       <option key={sid} value={sid}>{sid}. {name}</option>
@@ -200,7 +200,7 @@ export default function AdminExercises() {
                 <label htmlFor="evaluatorPrompt">
                   Prompt do avaliador <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em>
                 </label>
-                <textarea id="evaluatorPrompt" name="evaluatorPrompt" value={form.evaluatorPrompt} onChange={handleChange} placeholder="Como a IA deve avaliar o desempenho nesta fase específica? Defina critérios, escala de notas, o que olhar e o que ignorar. O sistema acrescenta automaticamente a exigência de [NOTA:X] no final." style={{ minHeight: 200 }} />
+                <textarea id="evaluatorPrompt" name="evaluatorPrompt" value={form.evaluatorPrompt} onChange={handleChange} placeholder="Como a IA deve avaliar o desempenho neste exercício específico? Defina critérios, escala de notas, o que olhar e o que ignorar. O sistema acrescenta automaticamente a exigência de [NOTA:X] no final." style={{ minHeight: 200 }} />
                 <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>
                   Se vazio, usa o avaliador global Allos (10 critérios da prática deliberada). A nota numérica é parseada automaticamente do formato <code style={{ color: 'var(--marrs-deep)' }}>[NOTA:X]</code> que o avaliador deve emitir.
                 </small>
@@ -209,7 +209,7 @@ export default function AdminExercises() {
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={closeModal} disabled={saving}>Cancelar</button>
                 <button type="submit" className="btn btn-primary" disabled={saving}>
-                  {saving ? 'Salvando…' : editingId ? 'Salvar Alterações' : 'Criar Fase'}
+                  {saving ? 'Salvando…' : editingId ? 'Salvar Alterações' : 'Criar Exercício'}
                 </button>
               </div>
             </form>
