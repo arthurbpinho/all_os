@@ -70,8 +70,8 @@ export default function EchoSession({ user, sessionType }) {
           : buildNeuroPrompt(found.specificInstruction);
         setSystemPrompt(prompt);
 
-        // Restaura sessão pendente (se houver)
-        if (!restoredRef.current && user?.id) {
+        // Restaura sessão pendente (se houver). Visitantes nunca persistem.
+        if (!restoredRef.current && user?.id && user.role !== 'visitor') {
           restoredRef.current = true;
           const saved = await loadActiveSession(user.id, sessionType, id);
           if (cancelled) return;
@@ -93,9 +93,11 @@ export default function EchoSession({ user, sessionType }) {
   // Autosave: localStorage síncrono em cada mudança + servidor com debounce 1.5s.
   // Por que síncrono no localStorage: se o usuário sair em < 3s (caso comum logo
   // após Iniciar), o debounce do servidor é cancelado mas o localStorage já tem.
+  // Visitantes não persistem nada.
   useEffect(() => {
     if (!sessionStarted || sessionEnded || !item || !user?.id) return;
     if (finishedRef.current) return;
+    if (user.role === 'visitor') return;
 
     const data = { messages, elapsedSeconds: elapsed, threadId, itemTitle: item.name };
     sessionDataRef.current = data;
@@ -109,9 +111,10 @@ export default function EchoSession({ user, sessionType }) {
   }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, user?.id, id, sessionType]);
 
   // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
-  // localStorage sempre, servidor best-effort.
+  // localStorage sempre, servidor best-effort. Visitantes não persistem.
   useEffect(() => {
     if (!sessionStarted || sessionEnded || !user?.id) return;
+    if (user.role === 'visitor') return;
 
     function flush() {
       if (finishedRef.current) return;

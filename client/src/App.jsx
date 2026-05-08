@@ -169,6 +169,7 @@ export default function App() {
   const isTherapist = user.role === 'therapist';
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
+  const isVisitor = user.role === 'visitor';
 
   return (
     <div className="app-layout">
@@ -186,12 +187,18 @@ export default function App() {
           </svg>
         </button>
         <div className="mobile-topbar-logo">all<span className="accent">_OS</span></div>
-        <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
-          {user.profilePhoto
-            ? <img src={user.profilePhoto} alt={user.name} />
-            : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
-          }
-        </Link>
+        {isVisitor ? (
+          <span className="mobile-topbar-avatar" aria-label="Visitante">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+          </span>
+        ) : (
+          <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
+            {user.profilePhoto
+              ? <img src={user.profilePhoto} alt={user.name} />
+              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+            }
+          </Link>
+        )}
       </header>
 
       <div
@@ -207,7 +214,7 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {(isTherapist || isAdmin) && (
+          {(isTherapist || isAdmin || isVisitor) && (
             <>
               <div className="nav-section">Prática</div>
               {/* Trilha de Competências oculta por enquanto — só admin acessa via menu.
@@ -223,16 +230,18 @@ export default function App() {
               <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
                 {ICONS.neuro}<span>Neuroavaliação</span>
               </Link>
-              <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
-                {ICONS.flame}<span>Objetivos</span>
-              </Link>
+              {!isVisitor && (
+                <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
+                  {ICONS.flame}<span>Objetivos</span>
+                </Link>
+              )}
             </>
           )}
 
-          {(isTherapist || isSupervisor) && (
+          {(isTherapist || isSupervisor || isVisitor) && (
             <>
               <div className="nav-section">Histórico</div>
-              {isTherapist && (
+              {(isTherapist || isVisitor) && (
                 <Link to="/logs" className={isActive('/logs') ? 'active' : ''}>
                   {ICONS.log}<span>Meus Logs</span>
                 </Link>
@@ -280,22 +289,34 @@ export default function App() {
         </nav>
 
         <div className="sidebar-user">
-          <Link to="/profile" className="profile-mini" title="Editar perfil">
-            <span className={`profile-mini-avatar ${streak?.isAlive ? 'with-streak' : ''}`}>
-              {user.profilePhoto
-                ? <img src={user.profilePhoto} alt={user.name} />
-                : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
-              }
-            </span>
-            <div className="profile-mini-info">
-              <div className="profile-mini-name">{user.name}</div>
-              <div className="profile-mini-role">
-                {streak?.isAlive
-                  ? `${streak.current} ${streak.current === 1 ? 'dia consecutivo' : 'dias consecutivos'}`
-                  : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador')}
+          {isVisitor ? (
+            <div className="profile-mini" style={{ cursor: 'default' }}>
+              <span className="profile-mini-avatar">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+              </span>
+              <div className="profile-mini-info">
+                <div className="profile-mini-name">Visitante</div>
+                <div className="profile-mini-role">sessão temporária</div>
               </div>
             </div>
-          </Link>
+          ) : (
+            <Link to="/profile" className="profile-mini" title="Editar perfil">
+              <span className={`profile-mini-avatar ${streak?.isAlive ? 'with-streak' : ''}`}>
+                {user.profilePhoto
+                  ? <img src={user.profilePhoto} alt={user.name} />
+                  : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+                }
+              </span>
+              <div className="profile-mini-info">
+                <div className="profile-mini-name">{user.name}</div>
+                <div className="profile-mini-role">
+                  {streak?.isAlive
+                    ? `${streak.current} ${streak.current === 1 ? 'dia consecutivo' : 'dias consecutivos'}`
+                    : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador')}
+                </div>
+              </div>
+            </Link>
+          )}
           <button onClick={handleLogout} className="btn btn-ghost btn-sm" title="Sair">
             {ICONS.exit}
           </button>
@@ -330,6 +351,6 @@ export default function App() {
 function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
-  // Aluno: Trilha está oculta nesta versão; cai direto na Simulação.
+  // Aluno e visitante: caem direto na Simulação (Trilha está oculta nesta versão).
   return '/freeplay';
 }

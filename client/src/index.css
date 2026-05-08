@@ -1216,6 +1216,30 @@ select option { background: var(--cream); color: var(--ink); }
   padding: 8px 16px;
 }
 
+.login-card .login-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 18px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.login-card .login-or::before,
+.login-card .login-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--sand);
+}
+.login-card .btn-visitor {
+  width: 100%;
+  padding: 12px;
+  font-size: 14px;
+}
+
 /* ────────────────────────────────────────
    ADMIN
    ──────────────────────────────────────── */

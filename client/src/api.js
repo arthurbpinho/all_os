@@ -63,6 +63,11 @@ export const api = {
     if (data && data.token) setToken(data.token);
     return data && data.user ? data.user : data;
   },
+  loginVisitor: async () => {
+    const data = await request('/login/visitor', { method: 'POST', body: {} });
+    if (data && data.token) setToken(data.token);
+    return data && data.user ? data.user : data;
+  },
   logout: () => { clearAuth(); },
   me: () => request('/me'),
   changeMyPassword: (currentPassword, newPassword) =>

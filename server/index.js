@@ -160,6 +160,18 @@ function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Não autenticado' });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
+    // Visitante: reconstrói usuário virtual a partir do JWT (não persistido em users.json)
+    if (payload.role === 'visitor') {
+      req.user = {
+        id: payload.sub,
+        username: payload.username || payload.sub,
+        name: payload.name || 'Visitante',
+        role: 'visitor',
+        teacherId: null,
+        isVisitor: true,
+      };
+      return next();
+    }
     const users = readJSON('users.json');
     const user = users.find(u => u.id === payload.sub);
     if (!user) return res.status(401).json({ error: 'Sessão inválida' });
@@ -211,6 +223,24 @@ app.post('/api/login', async (req, res) => {
   res.json({ token, user: publicUser(user) });
 });
 
+// Login como visitante: gera um JWT com role=visitor e id efêmero (não cria
+// registro em users.json). Logs gerados pelo visitante são naturalmente
+// vistos pelo admin (que vê todos) mas não por nenhum professor (visitor
+// não tem teacherId).
+app.post('/api/login/visitor', (req, res) => {
+  const id = 'visitor-' + crypto.randomBytes(6).toString('hex');
+  const visitorUser = {
+    id,
+    username: id,
+    name: 'Visitante',
+    role: 'visitor',
+    teacherId: null,
+    isVisitor: true,
+  };
+  const token = signToken(visitorUser);
+  res.json({ token, user: visitorUser });
+});
+
 // Re-valida token e devolve user atualizado (usado no boot do client).
 app.get('/api/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
@@ -239,6 +269,10 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
 app.get('/api/users/:id', requireAuth, (req, res) => {
   if (!canAccessUserResource(req.user, req.params.id)) {
     return res.status(403).json({ error: 'Acesso negado' });
+  }
+  // Visitante consultando o próprio "perfil": devolve o usuário virtual do JWT
+  if (req.user.role === 'visitor' && req.params.id === req.user.id) {
+    return res.json(publicUser(req.user));
   }
   const users = readJSON('users.json');
   const user = users.find(u => u.id === req.params.id);
@@ -775,8 +809,8 @@ app.get('/api/logs', requireAuth, (req, res) => {
   const logs = readJSON('logs.json');
   const users = readJSON('users.json');
 
-  // Aluno: só os próprios.
-  if (req.user.role === 'therapist') {
+  // Aluno e visitante: só os próprios.
+  if (req.user.role === 'therapist' || req.user.role === 'visitor') {
     return res.json(logs.filter(l => l.userId === req.user.id));
   }
 
