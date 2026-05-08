@@ -210,9 +210,13 @@ export default function App() {
           {(isTherapist || isAdmin) && (
             <>
               <div className="nav-section">Prática</div>
-              <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
-                {ICONS.skill}<span>Trilha de Competências</span>
-              </Link>
+              {/* Trilha de Competências oculta por enquanto — só admin acessa via menu.
+                  Será reaberta pra alunos/professores em iteração futura. */}
+              {isAdmin && (
+                <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
+                  {ICONS.skill}<span>Trilha de Competências</span>
+                </Link>
+              )}
               <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
                 {ICONS.freeplay}<span>Simulação</span>
               </Link>
@@ -326,5 +330,6 @@ export default function App() {
 function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
-  return '/skills';
+  // Aluno: Trilha está oculta nesta versão; cai direto na Simulação.
+  return '/freeplay';
 }
