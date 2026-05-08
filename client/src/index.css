@@ -114,6 +114,9 @@ button {
   font-size: 14px;
   border: 1px solid transparent;
   white-space: nowrap;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
 }
 
 .btn-primary {

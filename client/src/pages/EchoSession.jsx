@@ -9,6 +9,7 @@ import {
   calculateScores,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import { loadActiveSession, saveActiveSession, clearActiveSession } from '../sessionStore';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -35,6 +36,7 @@ export default function EchoSession({ user, sessionType }) {
   const [highlightTarget, setHighlightTarget] = useState(null); // { msgIndex }
   const [highlightDraft, setHighlightDraft] = useState('');
   const [assistantBroken, setAssistantBroken] = useState(false);
+  const [confirmingFinalize, setConfirmingFinalize] = useState(false);
 
   // Avaliação automática pós-sessão
   const [evaluating, setEvaluating] = useState(false);
@@ -48,25 +50,58 @@ export default function EchoSession({ user, sessionType }) {
   const audioChunksRef = useRef([]);
   const textareaRef = useRef(null);
   const timerRef = useRef(null);
+  const autosaveTimerRef = useRef(null);
+  const restoredRef = useRef(false); // já tentou restaurar
 
-  // Carrega item
+  // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
+    let cancelled = false;
     async function load() {
       try {
         const list = sessionType === 'freeplay' ? await api.getFreeplay() : await api.getNeuro();
         const found = list.find((i) => String(i.id) === String(id));
+        if (cancelled) return;
         if (!found) { setError('Personagem não encontrado.'); return; }
         setItem(found);
         const prompt = sessionType === 'freeplay'
           ? buildFreeplayPrompt(found.specificInstruction)
           : buildNeuroPrompt(found.specificInstruction);
         setSystemPrompt(prompt);
+
+        // Restaura sessão pendente (se houver)
+        if (!restoredRef.current && user?.id) {
+          restoredRef.current = true;
+          const saved = await loadActiveSession(user.id, sessionType, id);
+          if (cancelled) return;
+          if (saved && Array.isArray(saved.messages) && saved.messages.length > 0) {
+            setMessages(saved.messages);
+            setElapsed(saved.elapsedSeconds || 0);
+            if (saved.threadId) setThreadId(saved.threadId);
+            setSessionStarted(true);
+          }
+        }
       } catch (err) {
-        setError(err.message || 'Erro ao carregar personagem.');
+        if (!cancelled) setError(err.message || 'Erro ao carregar personagem.');
       }
     }
     load();
-  }, [id, sessionType]);
+    return () => { cancelled = true; };
+  }, [id, sessionType, user?.id]);
+
+  // Autosave da sessão ativa (debounce 3s) sempre que messages ou elapsed muda
+  useEffect(() => {
+    if (!sessionStarted || sessionEnded || !item) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      saveActiveSession(user.id, sessionType, id, {
+        messages,
+        elapsedSeconds: elapsed,
+        threadId,
+        itemTitle: item.name,
+      });
+    }, 3000);
+    return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
+  }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, user?.id, id, sessionType]);
 
   // Cronômetro
   useEffect(() => {
@@ -192,16 +227,21 @@ export default function EchoSession({ user, sessionType }) {
       .join('\n\n---\n\n');
   }
 
-  async function handleFinalize() {
+  function handleFinalize() {
+    if (!sessionStarted || sessionEnded) return;
+    setConfirmingFinalize(true);
+  }
+
+  async function doFinalize() {
+    setConfirmingFinalize(false);
     if (!sessionStarted || sessionEnded) return;
     const visibleCount = messages.filter((m) => !m.isSystem).length;
     if (visibleCount === 0) {
-      if (!window.confirm('A sessão está vazia. Deseja finalizar mesmo assim (sem avaliação)?')) return;
       if (timerRef.current) clearInterval(timerRef.current);
       setSessionEnded(true);
+      clearActiveSession(user.id, sessionType, id);
       return;
     }
-    if (!window.confirm('Finalizar a sessão e iniciar a avaliação?')) return;
 
     if (timerRef.current) clearInterval(timerRef.current);
     setSessionEnded(true);
@@ -288,6 +328,9 @@ export default function EchoSession({ user, sessionType }) {
         console.warn('Erro ao atualizar progresso:', err);
       }
     }
+
+    // Sessão finalizada — limpa o autosave ativo
+    clearActiveSession(user.id, sessionType, id);
   }
 
   async function toggleRecording() {
@@ -633,6 +676,30 @@ export default function EchoSession({ user, sessionType }) {
           </button>
         </div>
       )}
+
+      {/* Modal de confirmação de finalização */}
+      {confirmingFinalize && (() => {
+        const visibleCount = messages.filter((m) => !m.isSystem).length;
+        const empty = visibleCount === 0;
+        return (
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingFinalize(false); }}>
+            <div className="modal" style={{ maxWidth: 460 }}>
+              <h3>{empty ? 'Sessão vazia' : 'Finalizar atendimento'}</h3>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18 }}>
+                {empty
+                  ? 'A sessão não tem mensagens ainda. Deseja finalizar mesmo assim, sem avaliação?'
+                  : 'Você quer finalizar a sessão agora e iniciar a avaliação automática?'}
+              </p>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-outline" onClick={() => setConfirmingFinalize(false)}>Cancelar</button>
+                <button type="button" className="btn btn-primary" onClick={doFinalize}>
+                  {empty ? 'Finalizar mesmo assim' : 'Finalizar e avaliar'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Modal de destaque/comentário */}
       {highlightTarget && (
