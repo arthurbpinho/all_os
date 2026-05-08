@@ -35,23 +35,26 @@ export default function ChatSession({ user }) {
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
   const [score, setScore] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const textareaRef = useRef(null);
+  const timerRef = useRef(null);
+  const startedAtRef = useRef(null);
 
   useEffect(() => {
     async function loadItem() {
       try {
         const items = await api.getExercises();
         const found = items.find((i) => String(i.id) === String(id));
-        if (!found) { setError('Fase não encontrada.'); return; }
+        if (!found) { setError('Exercício não encontrado.'); return; }
         setItem(found);
         // Patient persona — sem rubrica de avaliação embutida
         setSystemPrompt(buildFreeplayPrompt(found.specificInstruction));
       } catch (err) {
-        setError(err.message || 'Erro ao carregar fase.');
+        setError(err.message || 'Erro ao carregar exercício.');
       }
     }
     loadItem();
@@ -60,6 +63,25 @@ export default function ChatSession({ user }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
+
+  // Cronômetro: começa quando o item carrega (entrada na sessão), para ao finalizar
+  useEffect(() => {
+    if (item && phase === PHASE_SIMULATION && !startedAtRef.current) {
+      startedAtRef.current = Date.now();
+    }
+    if (phase === PHASE_SIMULATION && startedAtRef.current) {
+      timerRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
+      }, 1000);
+      return () => clearInterval(timerRef.current);
+    }
+  }, [item, phase]);
+
+  function formatTime(secs) {
+    const m = Math.floor(secs / 60).toString().padStart(2, '0');
+    const s = Math.floor(secs % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  }
 
   async function sendToAI(allMessages) {
     const apiMessages = allMessages.map((m) => ({ role: m.role, content: m.content }));
@@ -104,11 +126,13 @@ export default function ChatSession({ user }) {
     if (phase !== PHASE_SIMULATION || isTyping) return;
     if (messages.length === 0) {
       if (!window.confirm('A sessão está vazia. Finalizar mesmo assim (sem avaliação)?')) return;
+      if (timerRef.current) clearInterval(timerRef.current);
       setPhase(PHASE_CONCLUDED);
       return;
     }
     if (!window.confirm('Finalizar a sessão e iniciar a avaliação?')) return;
 
+    if (timerRef.current) clearInterval(timerRef.current);
     setPhase(PHASE_EVALUATING);
     setEvalError('');
 
@@ -124,7 +148,7 @@ export default function ChatSession({ user }) {
       overrideSystemPrompt = item.evaluatorPrompt;
       evalMessages = [{
         role: 'user',
-        content: `Sessão: ${sessionLabel}\nFase: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
+        content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
       }];
     } else {
       // Fallback: avaliador global Allos (single-shot)
@@ -175,6 +199,7 @@ export default function ChatSession({ user }) {
         skillId: item.skillId,
         difficulty: item.difficulty || null,
         messages,
+        durationSeconds: elapsed,
         score: totalScore,
         criteriaScores: parsedCriteria,
         evaluation: evalContent,
@@ -250,7 +275,7 @@ export default function ChatSession({ user }) {
       `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`
     );
     const skillName = SKILL_NAMES[item.skillId] || '';
-    const header = `Trilha · ${skillName}\nFase: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
+    const header = `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
     const evalSection = evaluationText
       ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
       : '';
@@ -269,8 +294,8 @@ export default function ChatSession({ user }) {
       <div className="post-session">
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
-          <h2>Avaliando sua <span className="accent">fase</span></h2>
-          <p>A IA está analisando a transcrição com o avaliador desta fase. Pode levar alguns segundos.</p>
+          <h2>Avaliando seu <span className="accent">exercício</span></h2>
+          <p>A IA está analisando a transcrição com o avaliador deste exercício. Pode levar alguns segundos.</p>
           <div className="ornament" />
         </div>
 
@@ -283,7 +308,7 @@ export default function ChatSession({ user }) {
           </div>
           <div className="evaluating-status">
             <div className="evaluating-line"><span className="dot active" /> Construindo transcrição da sessão</div>
-            <div className="evaluating-line"><span className="dot active" /> Aplicando os critérios da fase</div>
+            <div className="evaluating-line"><span className="dot active" /> Aplicando os critérios do exercício</div>
             <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>
             <div className="evaluating-line"><span className="dot" /> Calculando a nota final</div>
           </div>
@@ -298,7 +323,7 @@ export default function ChatSession({ user }) {
       <div className="post-session">
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
-          <h2>Avaliação da <span className="accent">fase</span></h2>
+          <h2>Avaliação do <span className="accent">exercício</span></h2>
           <p>{item?.title} · {SKILL_NAMES[item?.skillId] || ''}</p>
           <div className="ornament" />
         </div>
@@ -307,6 +332,10 @@ export default function ChatSession({ user }) {
 
         <div className="card">
           <div className="post-session-stats">
+            <div>
+              <span className="post-stat-label">Duração</span>
+              <span className="post-stat-value">{formatTime(elapsed)}</span>
+            </div>
             <div>
               <span className="post-stat-label">Mensagens</span>
               <span className="post-stat-value">{messages.length}</span>
@@ -366,7 +395,11 @@ export default function ChatSession({ user }) {
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div className="timer-chip" title="Duração da sessão">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+            <span>{formatTime(elapsed)}</span>
+          </div>
           {messages.length > 0 && (
             <button onClick={downloadLog} className="btn btn-outline btn-sm" title="Baixar log">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>

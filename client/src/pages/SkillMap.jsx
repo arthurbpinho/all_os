@@ -274,13 +274,13 @@ export default function SkillMap({ user }) {
       {!isFullscreen && (
         <div className="page-header with-action">
           <div>
-            <div className="eyebrow">Sistema 1 · Trilha Gamificada</div>
+            <div className="eyebrow">Sistema 1 · Programa Estruturado</div>
             <h2>
               <Typewriter text="Mapa de " />
-              <span className="accent"><Typewriter text="Habilidades" delayStart={520} /></span>
+              <span className="accent"><Typewriter text="Competências" delayStart={520} /></span>
             </h2>
             <p>
-              Cinco competências clínicas. Clique em uma para abrir suas fases — a partir delas, inicie a
+              Cinco competências clínicas. Clique em uma para abrir seus exercícios — a partir deles, inicie a
               prática deliberada com avaliação ao final.
             </p>
           </div>
@@ -310,7 +310,7 @@ export default function SkillMap({ user }) {
 
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: '60px 24px' }}>
-          <span className="spinner" /> <span style={{ marginLeft: 12, color: 'var(--ink-soft)' }}>Carregando trilha…</span>
+          <span className="spinner" /> <span style={{ marginLeft: 12, color: 'var(--ink-soft)' }}>Carregando programa…</span>
         </div>
       ) : (
         <div ref={shellRef} className={`skill-map-shell ${isFullscreen ? 'fullscreen' : ''}`}>
@@ -476,7 +476,7 @@ export default function SkillMap({ user }) {
                       const score = done ? prog.score : null;
                       const isHoveredEx = hoveredNode === `ex-${ex.id}`;
                       const isPulsing = pulsingExercise === ex.id;
-                      const nameLines = wrapText(truncate(ex.title || ex.name || 'Fase', 40), 16);
+                      const nameLines = wrapText(truncate(ex.title || ex.name || 'Exercício', 40), 16);
                       return (
                         <g
                           key={`ex-${ex.id}`}
@@ -617,7 +617,7 @@ export default function SkillMap({ user }) {
                         fontFamily="DM Sans, sans-serif"
                         letterSpacing="1.5"
                       >
-                        {completedCount}/{exList.length} fases
+                        {completedCount}/{exList.length} exercícios
                       </text>
                     </g>
                   </g>
@@ -639,13 +639,13 @@ export default function SkillMap({ user }) {
               <div className="skill-map-active-info">
                 <span className="swatch lg" style={{ background: SKILL_COLORS[zoomedSkill] }} />
                 <div>
-                  <div className="active-eyebrow">Skill {zoomedSkill}</div>
+                  <div className="active-eyebrow">Competência {zoomedSkill}</div>
                   <div className="active-name">{SKILL_NAMES[zoomedSkill]}</div>
                 </div>
                 <div className="active-meta">
                   {bySkill[zoomedSkill].length === 0
-                    ? 'Nenhuma fase cadastrada para esta skill ainda.'
-                    : `${bySkill[zoomedSkill].length} ${bySkill[zoomedSkill].length === 1 ? 'fase disponível' : 'fases disponíveis'} · clique numa fase para iniciar`}
+                    ? 'Nenhum exercício cadastrado para esta competência ainda.'
+                    : `${bySkill[zoomedSkill].length} ${bySkill[zoomedSkill].length === 1 ? 'exercício disponível' : 'exercícios disponíveis'} · clique num exercício para iniciar`}
                 </div>
               </div>
             ) : (
@@ -655,7 +655,7 @@ export default function SkillMap({ user }) {
                     key={sid}
                     className="legend-item legend-button"
                     onClick={() => setZoomedSkill(sid)}
-                    title="Abrir esta skill"
+                    title="Abrir esta competência"
                   >
                     <span className="swatch" style={{ background: SKILL_COLORS[sid] }} />
                     <span><strong style={{ color: 'var(--marrs-deep)' }}>{sid}.</strong> {SKILL_NAMES[sid]}</span>

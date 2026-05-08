@@ -1,11 +1,54 @@
 const BASE = '/api';
+const TOKEN_KEY = 'allos_token';
+
+export function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+export function setToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+export function clearAuth() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem('allos_user');
+  } catch {}
+}
+
+// Listeners notificados quando o token é considerado inválido (401).
+const sessionListeners = new Set();
+export function onSessionExpired(fn) {
+  sessionListeners.add(fn);
+  return () => sessionListeners.delete(fn);
+}
+function notifySessionExpired() {
+  for (const fn of sessionListeners) {
+    try { fn(); } catch {}
+  }
+}
 
 async function request(path, options = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined,
   });
+
+  if (res.status === 401) {
+    clearAuth();
+    notifySessionExpired();
+    const err = await res.json().catch(() => ({ error: 'Sessão expirada' }));
+    throw new Error(err.error || 'Sessão expirada');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
     throw new Error(err.error || 'Erro na requisição');
@@ -14,7 +57,16 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  login: (username, password) => request('/login', { method: 'POST', body: { username, password } }),
+  // Auth
+  login: async (username, password) => {
+    const data = await request('/login', { method: 'POST', body: { username, password } });
+    if (data && data.token) setToken(data.token);
+    return data && data.user ? data.user : data;
+  },
+  logout: () => { clearAuth(); },
+  me: () => request('/me'),
+  changeMyPassword: (currentPassword, newPassword) =>
+    request('/me/password', { method: 'POST', body: { currentPassword, newPassword } }),
 
   // Exercises
   getExercises: () => request('/exercises'),
@@ -43,7 +95,7 @@ export const api = {
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
 
   // Chat (chat completions)
-  chat: (messages, systemPrompt) => request('/chat', { method: 'POST', body: { messages, systemPrompt } }),
+  chat: (messages, systemPrompt, model) => request('/chat', { method: 'POST', body: { messages, systemPrompt, model } }),
 
   // Assistants API (FreePlay/Neuro com assistant_id)
   createThread: () => request('/assistants/thread', { method: 'POST', body: {} }),
@@ -65,4 +117,21 @@ export const api = {
   getUser: (id) => request(`/users/${id}`),
   updateUser: (id, data) => request(`/users/${id}`, { method: 'PUT', body: data }),
   getProfilePhotos: () => request('/profile-photos'),
+
+  // Entrevistador
+  getEntrevistadorPrompt: () => request('/entrevistador-prompt'),
+
+  // Indicadores (constância, objetivos diários, metas)
+  getGamification: (userId) => request(`/gamification/${userId}`),
+
+  // Admin: gestão de contas
+  adminListUsers: () => request('/admin/users'),
+  adminCreateUser: (data) => request('/admin/users', { method: 'POST', body: data }),
+  adminUpdateUser: (id, data) => request(`/admin/users/${id}`, { method: 'PUT', body: data }),
+  adminDeleteUser: (id) => request(`/admin/users/${id}`, { method: 'DELETE' }),
+  adminResetPassword: (id, newPassword) =>
+    request(`/admin/users/${id}/reset-password`, { method: 'POST', body: { newPassword } }),
+
+  // Professor: alunos vinculados
+  getMyStudents: () => request('/teacher/students'),
 };

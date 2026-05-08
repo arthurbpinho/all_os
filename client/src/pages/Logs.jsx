@@ -5,7 +5,7 @@ import ScoreBadge from '../components/ScoreBadge';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
-  freeplay: 'FreePlay',
+  freeplay: 'Simulação',
   neuro: 'Neuroavaliação',
 };
 
