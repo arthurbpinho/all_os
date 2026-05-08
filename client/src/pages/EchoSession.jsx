@@ -9,7 +9,7 @@ import {
   calculateScores,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
-import { loadActiveSession, saveActiveSession, clearActiveSession } from '../sessionStore';
+import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -52,6 +52,8 @@ export default function EchoSession({ user, sessionType }) {
   const timerRef = useRef(null);
   const autosaveTimerRef = useRef(null);
   const restoredRef = useRef(false); // já tentou restaurar
+  const finishedRef = useRef(false); // sessão finalizada — não salvar mais
+  const sessionDataRef = useRef(null); // snapshot da sessão pra flush em qualquer momento
 
   // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
@@ -88,20 +90,46 @@ export default function EchoSession({ user, sessionType }) {
     return () => { cancelled = true; };
   }, [id, sessionType, user?.id]);
 
-  // Autosave da sessão ativa (debounce 3s) sempre que messages ou elapsed muda
+  // Autosave: localStorage síncrono em cada mudança + servidor com debounce 1.5s.
+  // Por que síncrono no localStorage: se o usuário sair em < 3s (caso comum logo
+  // após Iniciar), o debounce do servidor é cancelado mas o localStorage já tem.
   useEffect(() => {
-    if (!sessionStarted || sessionEnded || !item) return;
+    if (!sessionStarted || sessionEnded || !item || !user?.id) return;
+    if (finishedRef.current) return;
+
+    const data = { messages, elapsedSeconds: elapsed, threadId, itemTitle: item.name };
+    sessionDataRef.current = data;
+    saveLocal(user.id, sessionType, id, data);
+
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
-      saveActiveSession(user.id, sessionType, id, {
-        messages,
-        elapsedSeconds: elapsed,
-        threadId,
-        itemTitle: item.name,
-      });
-    }, 3000);
+      api.saveActiveSession(sessionType, id, data).catch(() => {});
+    }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
   }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, user?.id, id, sessionType]);
+
+  // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
+  // localStorage sempre, servidor best-effort.
+  useEffect(() => {
+    if (!sessionStarted || sessionEnded || !user?.id) return;
+
+    function flush() {
+      if (finishedRef.current) return;
+      const data = sessionDataRef.current;
+      if (!data) return;
+      saveLocal(user.id, sessionType, id, data);
+      api.saveActiveSession(sessionType, id, data).catch(() => {});
+    }
+    function onVis() { if (document.visibilityState === 'hidden') flush(); }
+
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', flush);
+      flush(); // unmount também é "saída"
+    };
+  }, [sessionStarted, sessionEnded, user?.id, id, sessionType]);
 
   // Cronômetro
   useEffect(() => {
@@ -235,6 +263,7 @@ export default function EchoSession({ user, sessionType }) {
   async function doFinalize() {
     setConfirmingFinalize(false);
     if (!sessionStarted || sessionEnded) return;
+    finishedRef.current = true; // bloqueia autosave/flush a partir daqui
     const visibleCount = messages.filter((m) => !m.isSystem).length;
     if (visibleCount === 0) {
       if (timerRef.current) clearInterval(timerRef.current);

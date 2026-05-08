@@ -9,7 +9,7 @@ import {
   SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
-import { loadActiveSession, saveActiveSession, clearActiveSession } from '../sessionStore';
+import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
 const PHASE_SIMULATION = 'simulation';
 const PHASE_EVALUATING = 'evaluating';
@@ -49,6 +49,8 @@ export default function ChatSession({ user }) {
   const startedAtRef = useRef(null);
   const autosaveTimerRef = useRef(null);
   const restoredRef = useRef(false);
+  const finishedRef = useRef(false);
+  const sessionDataRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,19 +86,43 @@ export default function ChatSession({ user }) {
     return () => { cancelled = true; };
   }, [id, user?.id]);
 
-  // Autosave da sessão ativa (debounce 3s) sempre que messages ou elapsed muda
+  // Autosave: localStorage síncrono em cada mudança + servidor com debounce 1.5s.
   useEffect(() => {
-    if (!sessionStarted || phase !== PHASE_SIMULATION || !item) return;
+    if (!sessionStarted || phase !== PHASE_SIMULATION || !item || !user?.id) return;
+    if (finishedRef.current) return;
+
+    const data = { messages, elapsedSeconds: elapsed, itemTitle: item.title };
+    sessionDataRef.current = data;
+    saveLocal(user.id, 'exercise', id, data);
+
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
-      saveActiveSession(user.id, 'exercise', id, {
-        messages,
-        elapsedSeconds: elapsed,
-        itemTitle: item.title,
-      });
-    }, 3000);
+      api.saveActiveSession('exercise', id, data).catch(() => {});
+    }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
   }, [messages, elapsed, sessionStarted, phase, item, user?.id, id]);
+
+  // Flush em visibility/pagehide/unmount
+  useEffect(() => {
+    if (!sessionStarted || phase !== PHASE_SIMULATION || !user?.id) return;
+
+    function flush() {
+      if (finishedRef.current) return;
+      const data = sessionDataRef.current;
+      if (!data) return;
+      saveLocal(user.id, 'exercise', id, data);
+      api.saveActiveSession('exercise', id, data).catch(() => {});
+    }
+    function onVis() { if (document.visibilityState === 'hidden') flush(); }
+
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('pagehide', flush);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, [sessionStarted, phase, user?.id, id]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -189,6 +215,7 @@ export default function ChatSession({ user }) {
   async function doFinalize() {
     setConfirmingFinalize(false);
     if (phase !== PHASE_SIMULATION || isTyping) return;
+    finishedRef.current = true; // bloqueia autosave/flush
     const visibleCount = messages.filter((m) => !m.isSystem).length;
     if (visibleCount === 0) {
       if (timerRef.current) clearInterval(timerRef.current);
