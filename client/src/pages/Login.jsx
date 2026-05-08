@@ -18,6 +18,11 @@ function isIOS() {
   return /iPhone|iPad|iPod/i.test(ua) || iPadOS;
 }
 
+function isAndroid() {
+  if (typeof window === 'undefined') return false;
+  return /Android/i.test(window.navigator.userAgent || '');
+}
+
 export default function Login({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -27,8 +32,10 @@ export default function Login({ onLogin }) {
   // PWA install
   const [installEvent, setInstallEvent] = useState(null);
   const [showIOSInstructions, setShowIOSInstructions] = useState(false);
+  const [showAndroidInstructions, setShowAndroidInstructions] = useState(false);
   const [installed, setInstalled] = useState(isStandalone());
   const ios = isIOS();
+  const android = isAndroid();
 
   useEffect(() => {
     function onBeforeInstall(e) {
@@ -86,12 +93,15 @@ export default function Login({ onLogin }) {
     } else if (ios) {
       // iOS Safari — não tem API; abrimos instruções
       setShowIOSInstructions(true);
+    } else if (android) {
+      // Android sem prompt disponível — mostra instruções manuais
+      setShowAndroidInstructions(true);
     }
   }
 
-  // Mostra o botão se não está instalado E (a) Android disparou beforeinstallprompt
-  // ou (b) é iOS (que precisa de instrução manual).
-  const canShowInstall = !installed && (installEvent || ios);
+  // Mostra o botão se não está instalado E é mobile (Android ou iOS).
+  // Se o prompt nativo (Android Chrome) não disparou ainda, o botão abre instruções.
+  const canShowInstall = !installed && (installEvent || ios || android);
 
   return (
     <div className="login-container">
@@ -166,6 +176,32 @@ export default function Login({ onLogin }) {
           </div>
         )}
       </div>
+
+      {showAndroidInstructions && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowAndroidInstructions(false); }}>
+          <div className="modal" style={{ maxWidth: 420 }}>
+            <h3>Instalar no Android</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 16 }}>
+              No Chrome, abra o menu e instale o app:
+            </p>
+            <ol style={{ paddingLeft: 20, color: 'var(--ink)', fontSize: 14, lineHeight: 1.7, marginBottom: 16 }}>
+              <li>Toque no menu <strong>⋮</strong> (três pontos no canto superior direito).</li>
+              <li>
+                Escolha <strong>Instalar app</strong> ou <strong>Adicionar à tela inicial</strong>.
+              </li>
+              <li>Confirme — o app abre em tela cheia, sem barra do navegador.</li>
+            </ol>
+            <p style={{ color: 'var(--muted)', fontSize: 12.5, fontStyle: 'italic', marginBottom: 16 }}>
+              Se o Chrome ainda não considera o site instalável, navegue um pouco pelo app primeiro e tente de novo em alguns segundos.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-primary" onClick={() => setShowAndroidInstructions(false)}>
+                Entendi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showIOSInstructions && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowIOSInstructions(false); }}>
