@@ -94,8 +94,10 @@ export const api = {
   getLogs: (userId) => request(`/logs${userId ? `?userId=${userId}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
 
-  // Chat (chat completions)
-  chat: (messages, systemPrompt, model) => request('/chat', { method: 'POST', body: { messages, systemPrompt, model } }),
+  // Chat (chat completions). maxTokens é opcional; o entrevistador usa um valor maior
+  // pra conseguir gerar o prompt do paciente sem cortar.
+  chat: (messages, systemPrompt, model, maxTokens) =>
+    request('/chat', { method: 'POST', body: { messages, systemPrompt, model, maxTokens } }),
 
   // Assistants API (FreePlay/Neuro com assistant_id)
   createThread: () => request('/assistants/thread', { method: 'POST', body: {} }),
@@ -123,6 +125,14 @@ export const api = {
 
   // Indicadores (constância, objetivos diários, metas)
   getGamification: (userId) => request(`/gamification/${userId}`),
+
+  // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
+  listActiveSessions: () => request('/active-sessions'),
+  getActiveSession: (type, itemId) => request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`),
+  saveActiveSession: (type, itemId, data) =>
+    request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`, { method: 'PUT', body: data }),
+  clearActiveSession: (type, itemId) =>
+    request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`, { method: 'DELETE' }),
 
   // Admin: gestão de contas
   adminListUsers: () => request('/admin/users'),

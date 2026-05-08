@@ -7,4 +7,8 @@ server/data/users.json
 server/data/progress.json
 server/data/logs.json
 server/data/achievements.json
+server/data/active-sessions.json
 server/data/tmp_audio.webm
+
+# Backups locais
+entrevistador/promptentrevistadoroldbackup.md

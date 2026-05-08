@@ -815,6 +815,76 @@ app.post('/api/logs', requireAuth, (req, res) => {
   res.json(log);
 });
 
+// --- Active sessions (sessões em andamento, ainda não finalizadas) ---
+// Permite F5 / sair e voltar sem perder a conversa nem o cronômetro.
+// Estrutura em disco: active-sessions.json = { "<userId>__<type>__<itemId>": { ... } }
+
+const VALID_SESSION_TYPES = ['exercise', 'freeplay', 'neuro'];
+
+function activeSessionKey(userId, type, itemId) {
+  return `${userId}__${type}__${itemId}`;
+}
+
+function readActiveSessions() {
+  return readJSON('active-sessions.json', {});
+}
+
+// Lista todas as sessões ativas do usuário autenticado
+app.get('/api/active-sessions', requireAuth, (req, res) => {
+  const all = readActiveSessions();
+  const mine = Object.values(all).filter((s) => s.userId === req.user.id);
+  res.json(mine);
+});
+
+// Busca uma sessão ativa específica
+app.get('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+  const { type, itemId } = req.params;
+  if (!VALID_SESSION_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'Tipo de sessão inválido' });
+  }
+  const all = readActiveSessions();
+  const session = all[activeSessionKey(req.user.id, type, itemId)];
+  res.json(session || null);
+});
+
+// Salva/atualiza (upsert) uma sessão ativa
+app.put('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+  const { type, itemId } = req.params;
+  if (!VALID_SESSION_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'Tipo de sessão inválido' });
+  }
+  const body = req.body || {};
+  const all = readActiveSessions();
+  const key = activeSessionKey(req.user.id, type, itemId);
+  all[key] = {
+    userId: req.user.id,
+    type,
+    itemId,
+    messages: Array.isArray(body.messages) ? body.messages : [],
+    elapsedSeconds: Number.isFinite(body.elapsedSeconds) ? Math.max(0, Math.floor(body.elapsedSeconds)) : 0,
+    threadId: body.threadId || null,
+    itemTitle: body.itemTitle || '',
+    lastSavedAt: new Date().toISOString(),
+  };
+  writeJSON('active-sessions.json', all);
+  res.json(all[key]);
+});
+
+// Descarta uma sessão ativa (chamado ao finalizar)
+app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+  const { type, itemId } = req.params;
+  if (!VALID_SESSION_TYPES.includes(type)) {
+    return res.status(400).json({ error: 'Tipo de sessão inválido' });
+  }
+  const all = readActiveSessions();
+  const key = activeSessionKey(req.user.id, type, itemId);
+  if (key in all) {
+    delete all[key];
+    writeJSON('active-sessions.json', all);
+  }
+  res.json({ ok: true });
+});
+
 // --- OpenAI Chat Proxy (modelo padrão do projeto) ---
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5.4-mini';
 
@@ -826,7 +896,7 @@ function getOpenAI() {
 }
 
 app.post('/api/chat', requireAuth, async (req, res) => {
-  const { messages, systemPrompt, model } = req.body;
+  const { messages, systemPrompt, model, maxTokens } = req.body;
   const openai = getOpenAI();
 
   if (!openai) {
@@ -836,6 +906,12 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     });
   }
 
+  // Default 1500 (Trilha/Simulação/Neuro). Entrevistador passa um valor maior
+  // pois precisa gerar o prompt completo do paciente, que pode ter milhares de tokens.
+  const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
+    ? Math.min(Math.floor(maxTokens), 32000)
+    : 1500;
+
   try {
     const completion = await openai.chat.completions.create({
       model: model || CHAT_MODEL,
@@ -843,7 +919,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
         { role: 'system', content: systemPrompt },
         ...messages
       ],
-      max_completion_tokens: 1500
+      max_completion_tokens: tokenCap
     });
     res.json(completion.choices[0].message);
   } catch (err) {
