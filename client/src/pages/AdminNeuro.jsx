@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 
-const EMPTY_FORM = { name: '', age: '', description: '', diagnosis: '', assistantId: '', specificInstruction: '' };
+const EMPTY_FORM = { name: '', age: '', description: '', diagnosis: '', assistantId: '', specificInstruction: '', evaluationCriteria: '' };
 
 export default function AdminNeuro() {
   const [characters, setCharacters] = useState([]);
@@ -34,6 +34,7 @@ export default function AdminNeuro() {
       diagnosis: c.diagnosis || '',
       assistantId: c.assistantId || '',
       specificInstruction: c.specificInstruction || '',
+      evaluationCriteria: c.evaluationCriteria || '',
     });
     setEditingId(c.id); setFormError(''); setShowModal(true);
   }
@@ -154,6 +155,13 @@ export default function AdminNeuro() {
               <div>
                 <label htmlFor="specificInstruction">Instrução específica (prompt da IA)</label>
                 <textarea id="specificInstruction" name="specificInstruction" value={form.specificInstruction} onChange={handleChange} placeholder="Manifestações clínicas, comportamento, pistas a oferecer e o que esconder… (usado quando não há Assistant ID)" style={{ minHeight: 200 }} />
+              </div>
+              <div>
+                <label htmlFor="evaluationCriteria">Critério de correção <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(gabarito do avaliador)</em></label>
+                <textarea id="evaluationCriteria" name="evaluationCriteria" value={form.evaluationCriteria} onChange={handleChange} placeholder="Diagnóstico correto, sintomas-chave que o aluno deve identificar, hipóteses diferenciais aceitáveis, condutas esperadas, red flags… (não aparece para o aluno; vai apenas para o avaliador junto com o log)" style={{ minHeight: 180 }} />
+                <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>
+                  Texto descritivo (não imperativo). Será enviado ao avaliador como referência para julgar o desempenho do aluno na sessão.
+                </small>
               </div>
               {formError && <div className="alert error">{formError}</div>}
               <div className="modal-actions">

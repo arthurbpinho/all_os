@@ -31,7 +31,7 @@ export default function FreePlay({ user }) {
         <h2><Typewriter text="Simu" /><span className="accent"><Typewriter text="lação" delayStart={180} /></span></h2>
         <p>
           Pacientes simulados sem objetivo de treino estruturado por competência. Praticar escuta, manejo
-          relacional e tempo de sessão. Ao finalizar, a IA da Allos avalia automaticamente sua sessão.
+          relacional e tempo de sessão. Ao finalizar, o log é enviado ao seu professor vinculado para correção.
         </p>
         <div className="ornament" />
       </div>
