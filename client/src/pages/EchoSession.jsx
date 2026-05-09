@@ -4,11 +4,7 @@ import { api } from '../api';
 import {
   buildFreeplayPrompt,
   buildNeuroPrompt,
-  buildDirectEvaluationPrompt,
-  parseCriteriaScores,
-  calculateScores,
 } from '../prompts';
-import ScoreBadge from '../components/ScoreBadge';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
@@ -16,6 +12,12 @@ import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStor
 // 2. Conversa com personagem (Assistants API se houver assistant_id, senão chat completion)
 // 3. Destaque de mensagens do terapeuta (estrela + comentário)
 // 4. Finalizar → tela pós-sessão com duração e download de log
+
+// Mensagem invisível enviada à IA quando o aluno usa o "time skip" entre sessões.
+const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos para a próxima sessão. Você (o paciente), acaba de entrar na sessão novamente, na próxima semana. Descreva o que aconteceu na sua semana, você já está na sala novamente com o terapeuta.';
+// Tempo mínimo da tela de transição entre sessões (ms) — é um efeito visual,
+// independente do tempo real de resposta da IA.
+const SKIP_MIN_DELAY_MS = 2200;
 
 export default function EchoSession({ user, sessionType }) {
   const { id } = useParams();
@@ -38,12 +40,15 @@ export default function EchoSession({ user, sessionType }) {
   const [assistantBroken, setAssistantBroken] = useState(false);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
 
-  // Avaliação automática pós-sessão
-  const [evaluating, setEvaluating] = useState(false);
-  const [evaluationText, setEvaluationText] = useState('');
-  const [score, setScore] = useState(null);
-  const [criteriaScores, setCriteriaScores] = useState(null);
-  const [evalError, setEvalError] = useState('');
+  // "Time skip" entre sessões — efeito visual (não muda o lado da IA além de
+  // uma mensagem invisível de contexto).
+  const [sessionNumber, setSessionNumber] = useState(1);
+  const [confirmingSkip, setConfirmingSkip] = useState(false);
+  const [skipping, setSkipping] = useState(false);
+
+  // Estado de envio do log (avaliador automático foi desativado — em construção).
+  const [savingLog, setSavingLog] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -79,6 +84,9 @@ export default function EchoSession({ user, sessionType }) {
             setMessages(saved.messages);
             setElapsed(saved.elapsedSeconds || 0);
             if (saved.threadId) setThreadId(saved.threadId);
+            if (Number.isFinite(saved.sessionNumber) && saved.sessionNumber >= 1) {
+              setSessionNumber(saved.sessionNumber);
+            }
             setSessionStarted(true);
           }
         }
@@ -99,7 +107,7 @@ export default function EchoSession({ user, sessionType }) {
     if (finishedRef.current) return;
     if (user.role === 'visitor') return;
 
-    const data = { messages, elapsedSeconds: elapsed, threadId, itemTitle: item.name };
+    const data = { messages, elapsedSeconds: elapsed, threadId, itemTitle: item.name, sessionNumber };
     sessionDataRef.current = data;
     saveLocal(user.id, sessionType, id, data);
 
@@ -108,7 +116,7 @@ export default function EchoSession({ user, sessionType }) {
       api.saveActiveSession(sessionType, id, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
-  }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, user?.id, id, sessionType]);
+  }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, sessionNumber, user?.id, id, sessionType]);
 
   // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
   // localStorage sempre, servidor best-effort. Visitantes não persistem.
@@ -185,10 +193,9 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   async function sendViaChat(text, currentMessages) {
-    const apiMessages = [...currentMessages, { role: 'user', content: text }].map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const apiMessages = [...currentMessages, { role: 'user', content: text }]
+      .filter((m) => m && m.role) // markers visuais (separadores de sessão) não têm role
+      .map((m) => ({ role: m.role, content: m.content }));
     const data = await api.chat(apiMessages, systemPrompt);
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
@@ -246,6 +253,52 @@ export default function EchoSession({ user, sessionType }) {
     }
   }
 
+  function handleSkipSession() {
+    if (!sessionStarted || sessionEnded || isTyping || skipping) return;
+    setConfirmingSkip(true);
+  }
+
+  async function doSkipSession() {
+    setConfirmingSkip(false);
+    if (!sessionStarted || sessionEnded || isTyping || skipping) return;
+
+    const newNumber = sessionNumber + 1;
+    setSessionNumber(newNumber);
+    setSkipping(true);
+
+    // Marker visual (sem role) + mensagem oculta para a IA (com role:'user' + isSystem)
+    const breakMarker = { type: 'session-break', sessionNumber: newNumber, stage: 'transitioning' };
+    const hiddenSkip = { role: 'user', content: SKIP_PROMPT, isSystem: true, highlighted: false, comment: '' };
+    const messagesBeforeSend = [...messages, breakMarker, hiddenSkip];
+    setMessages(messagesBeforeSend);
+    setIsTyping(true);
+
+    const minDelay = new Promise((r) => setTimeout(r, SKIP_MIN_DELAY_MS));
+    try {
+      // Envia via mesmo canal das mensagens normais. Para Assistants API, só
+      // 'text' vai pro thread; para chat completion, mandamos o histórico anterior
+      // (sem o marker e sem a hiddenSkip — sendToAI já usa apenas 'messages' anterior).
+      const [reply] = await Promise.all([sendToAI(SKIP_PROMPT, messages), minDelay]);
+      const flipMarker = (m) =>
+        m && m.type === 'session-break' && m.sessionNumber === newNumber
+          ? { ...m, stage: 'arrived' }
+          : m;
+      setMessages((prev) => prev.map(flipMarker).concat({ role: 'assistant', content: reply }));
+    } catch (err) {
+      const flipMarker = (m) =>
+        m && m.type === 'session-break' && m.sessionNumber === newNumber
+          ? { ...m, stage: 'arrived' }
+          : m;
+      setMessages((prev) =>
+        prev.map(flipMarker).concat({ role: 'assistant', content: `Erro ao retomar a sessão: ${err.message}` })
+      );
+    } finally {
+      setIsTyping(false);
+      setSkipping(false);
+      textareaRef.current?.focus();
+    }
+  }
+
   function buildTranscript() {
     return messages
       .filter((m) => !m.isSystem)
@@ -277,44 +330,12 @@ export default function EchoSession({ user, sessionType }) {
 
     if (timerRef.current) clearInterval(timerRef.current);
     setSessionEnded(true);
-    setEvaluating(true);
-    setEvalError('');
+    setSavingLog(true);
+    setSaveError('');
 
-    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
-    const transcript = buildTranscript();
-    const evalMessages = [{
-      role: 'user',
-      content: buildDirectEvaluationPrompt(sessionLabel, item.name, transcript),
-    }];
-
-    let evalContent = '';
-    let totalScore = null;
-    let parsedCriteria = null;
-
-    try {
-      const reply = await api.evaluate(evalMessages);
-      evalContent = typeof reply === 'string' ? reply : reply.content || '';
-
-      parsedCriteria = parseCriteriaScores(evalContent);
-      if (parsedCriteria) {
-        totalScore = calculateScores(parsedCriteria).totalScore;
-      } else {
-        const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
-        if (m) totalScore = Number(m[1].replace(',', '.'));
-      }
-      if (totalScore !== null && !Number.isFinite(totalScore)) totalScore = null;
-      if (totalScore !== null) totalScore = Math.round(totalScore);
-
-      setEvaluationText(evalContent);
-      setScore(totalScore);
-      setCriteriaScores(parsedCriteria);
-    } catch (err) {
-      setEvalError(err.message || 'Erro ao avaliar a sessão.');
-    } finally {
-      setEvaluating(false);
-    }
-
-    // Salvar log com a avaliação anexada
+    // Avaliador automático foi desativado para Simulação/Neuro — um novo está em
+    // construção. Por ora, o log é salvo direto no histórico (e visível ao
+    // professor vinculado) e exibido para o aluno na tela pós-sessão.
     try {
       await api.saveLog({
         userId: user.id,
@@ -329,36 +350,11 @@ export default function EchoSession({ user, sessionType }) {
           comment: m.comment || '',
         })),
         durationSeconds: elapsed,
-        score: totalScore,
-        criteriaScores: parsedCriteria,
-        evaluation: evalContent,
       });
     } catch (err) {
-      setError('Erro ao salvar log: ' + err.message);
-    }
-
-    // Atualizar progresso por personagem (mantém a maior nota, igual aos exercícios)
-    if (totalScore !== null) {
-      try {
-        const current = await api.getProgress(user.id);
-        const existing = current?.[id];
-        const shouldUpdate = !existing
-          || existing.score == null
-          || totalScore > existing.score;
-        if (shouldUpdate) {
-          await api.saveProgress(user.id, {
-            [id]: {
-              score: totalScore,
-              type: sessionType,
-              criteriaScores: parsedCriteria,
-              completedAt: new Date().toISOString(),
-            },
-          });
-        }
-      } catch (err) {
-        // não-fatal, log já foi salvo
-        console.warn('Erro ao atualizar progresso:', err);
-      }
+      setSaveError(err.message || 'Erro ao salvar o log.');
+    } finally {
+      setSavingLog(false);
     }
 
     // Sessão finalizada — limpa o autosave ativo
@@ -436,13 +432,9 @@ export default function EchoSession({ user, sessionType }) {
       const comment = m.highlighted && m.comment ? `\n   ↳ comentário: ${m.comment}` : '';
       return `[${prefix}${author}]\n${m.content}${comment}`;
     });
-    const header = `Sessão · ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}\nPersonagem: ${item.name}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
+    const header = `Sessão · ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}\nPersonagem: ${item.name}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n\n---\n\n`;
 
-    const evalSection = evaluationText
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
-      : '';
-
-    const blob = new Blob([header + lines.join('\n\n---\n\n') + evalSection], { type: 'text/plain;charset=utf-8' });
+    const blob = new Blob([header + lines.join('\n\n---\n\n')], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -454,51 +446,45 @@ export default function EchoSession({ user, sessionType }) {
   // -------- TELA PÓS-SESSÃO --------
   if (sessionEnded) {
     const highlights = messages.filter((m) => m.highlighted);
+    const visibleMessages = messages.filter((m) => !m.isSystem);
 
-    // Tela de carregamento enquanto a IA avalia
-    if (evaluating) {
-      return (
-        <div className="post-session">
-          <div className="page-header">
-            <div className="eyebrow">Sessão concluída</div>
-            <h2>Avaliando sua <span className="accent">sessão</span></h2>
-            <p>A IA está analisando a transcrição. Isso pode levar alguns segundos.</p>
-            <div className="ornament" />
-          </div>
-
-          <div className="card evaluating-card">
-            <div className="evaluating-orb">
-              <div className="orb-pulse" />
-              <div className="orb-pulse delay-1" />
-              <div className="orb-pulse delay-2" />
-              <div className="orb-core" />
-            </div>
-            <div className="evaluating-status">
-              <div className="evaluating-line"><span className="dot active" /> Construindo transcrição da sessão</div>
-              <div className="evaluating-line"><span className="dot active" /> Aplicando os 10 critérios da Allos</div>
-              <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>
-              <div className="evaluating-line"><span className="dot" /> Calculando notas ponderadas</div>
-            </div>
-          </div>
-        </div>
-      );
+    // Mensagem de envio: para alunos com professor vinculado, indica destino;
+    // para outros perfis (admin, professor, visitante), mostra histórico apenas.
+    const teacherName = user?.teacherName;
+    const isVisitor = user?.role === 'visitor';
+    let sentMessage;
+    if (isVisitor) {
+      sentMessage = 'Você está em modo visitante — o log desta sessão não foi salvo.';
+    } else if (teacherName) {
+      sentMessage = `Seu log de sessão foi enviado para o professor ${teacherName}.`;
+    } else {
+      sentMessage = 'Seu log de sessão foi salvo no seu histórico.';
     }
 
-    // Resultado da avaliação
     return (
       <div className="post-session">
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
           <h2>
-            Avaliação da <span className="accent">sessão</span>
+            Sua <span className="accent">sessão</span>
           </h2>
           <p>Sessão com <strong>{item?.name}</strong> · duração {formatTime(elapsed)}</p>
           <div className="ornament" />
         </div>
 
-        {evalError && <div className="alert error">Falha ao avaliar: {evalError}</div>}
+        {saveError && <div className="alert error">Falha ao salvar log: {saveError}</div>}
 
         <div className="card">
+          {savingLog ? (
+            <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--ink-soft)' }}>
+              <span className="spinner" /> <span style={{ marginLeft: 12 }}>Salvando log…</span>
+            </div>
+          ) : (
+            <div className="alert" style={{ marginBottom: 16 }}>
+              {sentMessage}
+            </div>
+          )}
+
           <div className="post-session-stats">
             <div>
               <span className="post-stat-label">Duração</span>
@@ -506,31 +492,28 @@ export default function EchoSession({ user, sessionType }) {
             </div>
             <div>
               <span className="post-stat-label">Mensagens</span>
-              <span className="post-stat-value">{messages.length}</span>
+              <span className="post-stat-value">{visibleMessages.length}</span>
             </div>
             <div>
               <span className="post-stat-label">Destaques</span>
               <span className="post-stat-value">{highlights.length}</span>
             </div>
-            {score !== null && (
-              <div>
-                <span className="post-stat-label">Nota final</span>
-                <ScoreBadge score={score} size="xl" />
-              </div>
-            )}
           </div>
 
-          {evaluationText && (
-            <div className="post-evaluation">
-              <h4>Análise da IA</h4>
-              <div className="post-evaluation-body">
-                {evaluationText
-                  .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
-                  .replace(/\[NOTA:[^\]]+\]\s*/g, '')
-                  .trim()}
-              </div>
+          <div className="post-evaluation">
+            <h4>Log da sessão</h4>
+            <div className="post-evaluation-body" style={{ whiteSpace: 'pre-wrap' }}>
+              {visibleMessages.length === 0
+                ? 'Nenhuma mensagem trocada nesta sessão.'
+                : visibleMessages.map((m, i) => {
+                    const author = m.role === 'user' ? user.name : (item?.name || 'Paciente');
+                    const star = m.highlighted ? ' ★' : '';
+                    const comment = m.highlighted && m.comment ? `\n   ↳ ${m.comment}` : '';
+                    const sep = i < visibleMessages.length - 1 ? '\n\n---\n\n' : '';
+                    return `[${author}${star}]\n${m.content}${comment}${sep}`;
+                  }).join('')}
             </div>
-          )}
+          </div>
 
           {highlights.length > 0 && (
             <div className="post-highlights">
@@ -571,7 +554,10 @@ export default function EchoSession({ user, sessionType }) {
 
         <div className="chat-title">
           <h3>Sessão com {item?.name || '...'}</h3>
-          <div className="chat-status">{sessionLabel}{sessionType === 'neuro' ? ' · diagnóstico oculto' : ''}</div>
+          <div className="chat-status">
+            {sessionLabel}{sessionType === 'neuro' ? ' · diagnóstico oculto' : ''}
+            {sessionStarted && <> · <strong>Sessão #{sessionNumber}</strong></>}
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
@@ -583,12 +569,22 @@ export default function EchoSession({ user, sessionType }) {
           )}
           <div className={`session-chip ${sessionStarted ? 'active' : 'idle'}`}>
             <span className="dot" />
-            {sessionStarted ? 'Em sessão' : 'Aguardando início'}
+            {sessionStarted ? `Sessão #${sessionNumber}` : 'Aguardando início'}
           </div>
           {sessionStarted && (
-            <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
-              Finalizar
-            </button>
+            <>
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={handleSkipSession}
+                disabled={isTyping || skipping}
+                title="Avançar para a próxima sessão (time skip)"
+              >
+                Próxima sessão →
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
+                Finalizar
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -608,6 +604,30 @@ export default function EchoSession({ user, sessionType }) {
         )}
 
         {messages.map((msg, i) => {
+          if (msg && msg.type === 'session-break') {
+            const isTransitioning = msg.stage !== 'arrived';
+            return (
+              <div key={i} className={`session-break ${isTransitioning ? 'transitioning' : 'arrived'}`}>
+                <div className="session-break-line" />
+                <div className="session-break-card">
+                  <div className="session-break-badge">Sessão #{msg.sessionNumber}</div>
+                  {isTransitioning ? (
+                    <>
+                      <div className="session-break-text">A sessão foi encerrada. Passando semana…</div>
+                      <div className="session-break-loader">
+                        <span className="dot" /><span className="dot" /><span className="dot" />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="session-break-text">
+                      Seu paciente chegou para a sessão da próxima semana, pode iniciar o atendimento.
+                    </div>
+                  )}
+                </div>
+                <div className="session-break-line" />
+              </div>
+            );
+          }
           if (msg.isSystem) return null;
           const isUser = msg.role === 'user';
           const author = isUser ? user.name : `${item?.name || 'Paciente'}`;
@@ -719,19 +739,37 @@ export default function EchoSession({ user, sessionType }) {
               <h3>{empty ? 'Sessão vazia' : 'Finalizar atendimento'}</h3>
               <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18 }}>
                 {empty
-                  ? 'A sessão não tem mensagens ainda. Deseja finalizar mesmo assim, sem avaliação?'
-                  : 'Você quer finalizar a sessão agora e iniciar a avaliação automática?'}
+                  ? 'A sessão não tem mensagens ainda. Deseja finalizar mesmo assim?'
+                  : 'Você quer finalizar a sessão agora? O log será salvo no seu histórico e enviado ao seu professor vinculado.'}
               </p>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setConfirmingFinalize(false)}>Cancelar</button>
                 <button type="button" className="btn btn-primary" onClick={doFinalize}>
-                  {empty ? 'Finalizar mesmo assim' : 'Finalizar e avaliar'}
+                  {empty ? 'Finalizar mesmo assim' : 'Finalizar sessão'}
                 </button>
               </div>
             </div>
           </div>
         );
       })()}
+
+      {/* Modal de confirmação de "time skip" entre sessões */}
+      {confirmingSkip && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingSkip(false); }}>
+          <div className="modal" style={{ maxWidth: 480 }}>
+            <h3>Avançar para a próxima sessão</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18 }}>
+              Tem certeza que deseja ir para a próxima sessão? Lembre-se de fazer um encerramento primeiro com seu paciente — essa função é um <em>time skip</em>.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={() => setConfirmingSkip(false)}>Cancelar</button>
+              <button type="button" className="btn btn-primary" onClick={doSkipSession}>
+                Passar para a próxima sessão
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal de destaque/comentário */}
       {highlightTarget && (

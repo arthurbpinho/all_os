@@ -31,7 +31,7 @@ export default function NeuroEval({ user }) {
         <h2><Typewriter text="Neuro" /><span className="accent"><Typewriter text="avaliação" delayStart={260} /></span></h2>
         <p>
           Pacientes com diagnósticos específicos ocultos. O exercício é identificar o quadro durante a
-          escuta. Avaliação automática ao finalizar a sessão.
+          escuta. Ao finalizar, o log é enviado ao seu professor vinculado para correção.
         </p>
         <div className="ornament" />
       </div>

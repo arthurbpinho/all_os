@@ -154,6 +154,13 @@ if (!fs.existsSync(path.join(DATA_DIR, 'logs.json'))) {
 function publicUser(u) {
   if (!u) return null;
   const { password, passwordHash, ...safe } = u;
+  if (safe.role === 'therapist' && safe.teacherId) {
+    try {
+      const users = readJSON('users.json');
+      const teacher = users.find((t) => t.id === safe.teacherId);
+      if (teacher && teacher.name) safe.teacherName = teacher.name;
+    } catch {}
+  }
   return safe;
 }
 
