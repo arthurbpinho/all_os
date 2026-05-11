@@ -1,10 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import {
-  buildFreeplayPrompt,
-  buildNeuroPrompt,
-} from '../prompts';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
@@ -24,7 +20,6 @@ export default function EchoSession({ user, sessionType }) {
   const navigate = useNavigate();
 
   const [item, setItem] = useState(null);
-  const [systemPrompt, setSystemPrompt] = useState('');
   const [threadId, setThreadId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
@@ -70,10 +65,8 @@ export default function EchoSession({ user, sessionType }) {
         if (cancelled) return;
         if (!found) { setError('Personagem não encontrado.'); return; }
         setItem(found);
-        const prompt = sessionType === 'freeplay'
-          ? buildFreeplayPrompt(found.specificInstruction)
-          : buildNeuroPrompt(found.specificInstruction);
-        setSystemPrompt(prompt);
+        // System prompt resolvido no servidor (a partir de context: { type, itemId }).
+        // O cliente nunca recebe specificInstruction.
 
         // Restaura sessão pendente (se houver). Visitantes nunca persistem.
         if (!restoredRef.current && user?.id && user.role !== 'visitor') {
@@ -196,7 +189,7 @@ export default function EchoSession({ user, sessionType }) {
     const apiMessages = [...currentMessages, { role: 'user', content: text }]
       .filter((m) => m && m.role) // markers visuais (separadores de sessão) não têm role
       .map((m) => ({ role: m.role, content: m.content }));
-    const data = await api.chat(apiMessages, systemPrompt);
+    const data = await api.chat(apiMessages, { type: sessionType, itemId: id });
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 

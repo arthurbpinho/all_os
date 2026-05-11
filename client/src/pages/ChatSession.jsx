@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import {
-  buildFreeplayPrompt,
   buildDirectEvaluationPrompt,
   parseCriteriaScores,
   calculateScores,
@@ -26,7 +25,6 @@ export default function ChatSession({ user }) {
   const navigate = useNavigate();
 
   const [item, setItem] = useState(null);
-  const [systemPrompt, setSystemPrompt] = useState('');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [phase, setPhase] = useState(PHASE_SIMULATION);
@@ -61,8 +59,8 @@ export default function ChatSession({ user }) {
         if (cancelled) return;
         if (!found) { setError('Exercício não encontrado.'); return; }
         setItem(found);
-        // Patient persona — sem rubrica de avaliação embutida
-        setSystemPrompt(buildFreeplayPrompt(found.specificInstruction));
+        // O system prompt é resolvido no servidor a partir do context — o
+        // cliente nunca recebe o texto do specificInstruction.
 
         // Tenta restaurar sessão pendente (F5 / sair e voltar). Visitantes nunca persistem.
         if (!restoredRef.current && user?.id && user.role !== 'visitor') {
@@ -152,7 +150,7 @@ export default function ChatSession({ user }) {
 
   async function sendToAI(allMessages) {
     const apiMessages = allMessages.map((m) => ({ role: m.role, content: m.content }));
-    const data = await api.chat(apiMessages, systemPrompt);
+    const data = await api.chat(apiMessages, { type: 'exercise', itemId: id });
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 
@@ -236,17 +234,18 @@ export default function ChatSession({ user }) {
     const transcript = buildTranscript();
 
     let evalMessages;
-    let overrideSystemPrompt;
 
-    if (item.evaluatorPrompt && item.evaluatorPrompt.trim()) {
-      // Avaliador customizado pelo admin
-      overrideSystemPrompt = item.evaluatorPrompt;
+    if (item.hasCustomEvaluator) {
+      // Avaliador customizado: o servidor já injeta o evaluatorPrompt do
+      // exercício como system prompt — mensagem do usuário fica curta.
       evalMessages = [{
         role: 'user',
         content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
       }];
     } else {
-      // Fallback: avaliador global Allos (single-shot)
+      // Fallback: avaliador global Allos (single-shot). As instruções vão na
+      // mensagem do usuário (não são segredo); o system prompt global é
+      // resolvido no servidor.
       evalMessages = [{
         role: 'user',
         content: buildDirectEvaluationPrompt(sessionLabel, item.title, transcript),
@@ -258,7 +257,7 @@ export default function ChatSession({ user }) {
     let parsedCriteria = null;
 
     try {
-      const reply = await api.evaluate(evalMessages, overrideSystemPrompt);
+      const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
       evalContent = typeof reply === 'string' ? reply : reply.content || '';
 
       // Tenta primeiro [CRITERIOS:...] (Allos format), depois [NOTA:X] (genérico)

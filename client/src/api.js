@@ -99,10 +99,16 @@ export const api = {
   getLogs: (userId) => request(`/logs${userId ? `?userId=${userId}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
 
-  // Chat (chat completions). maxTokens é opcional; o entrevistador usa um valor maior
-  // pra conseguir gerar o prompt do paciente sem cortar.
-  chat: (messages, systemPrompt, model, maxTokens) =>
-    request('/chat', { method: 'POST', body: { messages, systemPrompt, model, maxTokens } }),
+  // Chat (chat completions). O servidor resolve o systemPrompt a partir de
+  // context: { type, itemId } — NUNCA mande systemPrompt do cliente
+  // (o backend rejeita com 400). maxTokens só é honrado em mode 'entrevistador'.
+  chat: (messages, context, maxTokens) =>
+    request('/chat', { method: 'POST', body: { messages, context, maxTokens } }),
+
+  // Chat com o entrevistador (admin-only). O servidor usa o prompt do
+  // entrevistador internamente.
+  adminEntrevistadorChat: (messages, maxTokens) =>
+    request('/chat', { method: 'POST', body: { messages, mode: 'entrevistador', maxTokens } }),
 
   // Assistants API (FreePlay/Neuro com assistant_id)
   createThread: () => request('/assistants/thread', { method: 'POST', body: {} }),
@@ -112,12 +118,13 @@ export const api = {
   // Transcribe
   transcribe: (audioBase64) => request('/transcribe', { method: 'POST', body: { audio: audioBase64 } }),
 
-  // Avaliação. Se systemPrompt é fornecido, sobrescreve o avaliador global Allos
-  // (usado pela Trilha, que tem prompt do avaliador customizado por exercício).
-  evaluate: (messages, systemPrompt) =>
+  // Avaliação. O servidor decide entre avaliador customizado (quando o
+  // exercício tem evaluatorPrompt) e o avaliador global a partir de context.
+  // Para a Avaliação Independente (transcrição manual), passe sem context.
+  evaluate: (messages, context) =>
     request('/evaluate', {
       method: 'POST',
-      body: systemPrompt ? { messages, systemPrompt } : { messages },
+      body: context ? { messages, context } : { messages },
     }),
 
   // Profile
