@@ -6,9 +6,31 @@ const fs = require('fs');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
+const {
+  buildExercisePrompt,
+  buildFreeplayPrompt,
+  buildNeuroPrompt,
+  wrapCustomEvaluatorPrompt,
+} = require('./prompts');
 
 const app = express();
-app.use(cors());
+
+// CORS allowlist. Em produção o front é servido pelo mesmo origin (o Express
+// serve o build do React), então só precisa abrir pra dev local.
+const CORS_ALLOWLIST = (process.env.CORS_ALLOWLIST || 'http://localhost:5173')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    // Same-origin (sem header Origin) sempre passa.
+    if (!origin) return cb(null, true);
+    if (CORS_ALLOWLIST.includes(origin)) return cb(null, true);
+    return cb(new Error('Origin não permitida pelo CORS'));
+  },
+}));
+
 app.use(express.json({ limit: '10mb' }));
 
 // Servir fotos de perfil (pasta profiles_icon na raiz do projeto)
@@ -33,14 +55,56 @@ if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
   }
 }
 
-// JWT secret — em produção (Railway) deve vir de env.
-const JWT_SECRET = process.env.JWT_SECRET || (() => {
-  const fallback = 'dev-secret-' + crypto.randomBytes(8).toString('hex');
-  console.warn('[auth] JWT_SECRET não definido — usando fallback dev. Configure em produção!');
-  return fallback;
-})();
+// JWT secret — obrigatório em todos os ambientes. Fail-closed: se ausente ou
+// curto demais, encerramos o processo em vez de continuar com fallback inseguro
+// (que zera todas as sessões a cada restart e é frágil contra deploys novos).
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  console.error('[FATAL] JWT_SECRET ausente ou curto demais (mínimo 32 chars).');
+  console.error('         Gere com: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
+  process.exit(1);
+}
 const TOKEN_TTL = '7d';
 const BCRYPT_ROUNDS = 10;
+
+// --- Rate limiting ---
+// Pre-auth (chave por IP): protege contra brute-force de credenciais e flood
+// de geração de tokens.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+});
+const visitorLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+});
+// Post-auth (chave por user.id, fallback IP): protege a chave OpenAI de abuse
+// e segura escrita massiva em logs.
+function userKey(req) {
+  return (req.user && req.user.id) ? `u:${req.user.id}` : `ip:${req.ip}`;
+}
+const aiLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: userKey,
+  message: { error: 'Limite de uso da IA atingido. Tente novamente em uma hora.' },
+});
+const writeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: userKey,
+  message: { error: 'Limite de operações atingido. Tente novamente mais tarde.' },
+});
 
 // Diagnóstico de env no startup — sem expor secrets, só presença + length.
 function envDiag(name) {
@@ -85,8 +149,14 @@ function hashPasswordSync(plain) {
 
 if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
   // Seed inicial: apenas o admin. Demais contas são criadas pela tela de Contas.
-  // A senha default abaixo deve ser trocada no primeiro login.
-  const adminInitialPassword = process.env.ADMIN_INITIAL_PASSWORD || 'admin123';
+  // Fail-closed: sem ADMIN_INITIAL_PASSWORD setada (e forte), recusa criar o admin —
+  // evita o cenário em que um deploy "fresh" volta a aceitar admin/admin123.
+  const adminInitialPassword = process.env.ADMIN_INITIAL_PASSWORD;
+  if (!adminInitialPassword || adminInitialPassword.length < 12) {
+    console.error('[FATAL] ADMIN_INITIAL_PASSWORD ausente ou curta demais (mínimo 12 chars).');
+    console.error('         Gere com: openssl rand -base64 24');
+    process.exit(1);
+  }
   writeJSON('users.json', [
     {
       id: '1',
@@ -99,7 +169,7 @@ if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
       profilePhoto: '/profiles_icon/jung(1).png',
     },
   ]);
-  console.log('[auth] Seed users.json criado. Login admin: admin /', adminInitialPassword);
+  console.log('[auth] Seed users.json criado. Login admin: admin / <ADMIN_INITIAL_PASSWORD da env>');
 }
 
 // Migração one-shot: passwords em texto puro -> bcrypt hash
@@ -230,7 +300,7 @@ function canAccessUserResource(actor, targetUserId) {
 }
 
 // --- Auth ---
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', loginLimiter, async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
@@ -250,7 +320,7 @@ app.post('/api/login', async (req, res) => {
 // registro em users.json). Logs gerados pelo visitante são naturalmente
 // vistos pelo admin (que vê todos) mas não por nenhum professor (visitor
 // não tem teacherId).
-app.post('/api/login/visitor', (req, res) => {
+app.post('/api/login/visitor', visitorLimiter, (req, res) => {
   const id = 'visitor-' + crypto.randomBytes(6).toString('hex');
   const visitorUser = {
     id,
@@ -689,19 +759,20 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
 });
 
 // --- Entrevistador (prompt para construção de personagem) ---
+// Admin-only: o prompt do entrevistador é IP da Allos. Antes era acessível
+// por qualquer usuário autenticado (incluindo visitante).
 const ENTREVISTADOR_DIR = path.join(__dirname, '..', 'entrevistador');
 
-app.get('/api/entrevistador-prompt', requireAuth, (req, res) => {
+function loadEntrevistadorPrompt() {
   const promptFile = path.join(ENTREVISTADOR_DIR, 'promptentrevistador.md');
-  if (!fs.existsSync(promptFile)) {
-    return res.status(404).json({ error: 'Prompt do entrevistador não encontrado.' });
-  }
-  try {
-    const content = fs.readFileSync(promptFile, 'utf-8');
-    res.json({ prompt: content });
-  } catch (err) {
-    res.status(500).json({ error: 'Erro ao ler o prompt: ' + err.message });
-  }
+  if (!fs.existsSync(promptFile)) return null;
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
+app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, res) => {
+  const content = loadEntrevistadorPrompt();
+  if (!content) return res.status(404).json({ error: 'Prompt do entrevistador não encontrado.' });
+  res.json({ prompt: content });
 });
 
 // Lista de fotos de perfil disponíveis (a partir da pasta profiles_icon na raiz do projeto)
@@ -720,8 +791,36 @@ app.get('/api/profile-photos', requireAuth, (req, res) => {
   }
 });
 
+// --- Helpers de filtragem de campos sensíveis ---
+// Cliente (não-admin) recebe só metadados de exibição; admin recebe o objeto
+// completo para edição. O conteúdo "secreto" (specificInstruction, evaluatorPrompt,
+// diagnosis) é resolvido server-side em /api/chat e /api/evaluate via context.
+function isAdmin(user) {
+  return !!(user && user.role === 'admin');
+}
+
+function publicExercise(e) {
+  const { specificInstruction, evaluatorPrompt, ...safe } = e;
+  // Cliente precisa saber SE existe avaliador customizado para escolher fluxo,
+  // mas não precisa ver o texto.
+  safe.hasCustomEvaluator = !!(evaluatorPrompt && String(evaluatorPrompt).trim());
+  return safe;
+}
+function publicFreeplayChar(c) {
+  const { specificInstruction, ...safe } = c;
+  return safe;
+}
+function publicNeuroChar(c) {
+  // diagnosis é o gabarito do Sistema 3 — NUNCA vai pra cliente não-admin
+  const { specificInstruction, diagnosis, ...safe } = c;
+  return safe;
+}
+
 // --- Exercises (System 1) ---
-app.get('/api/exercises', requireAuth, (req, res) => res.json(readJSON('exercises.json')));
+app.get('/api/exercises', requireAuth, (req, res) => {
+  const list = readJSON('exercises.json');
+  res.json(isAdmin(req.user) ? list : list.map(publicExercise));
+});
 
 app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
@@ -754,7 +853,10 @@ function sanitizeCharacterPayload(body) {
   return out;
 }
 
-app.get('/api/freeplay', requireAuth, (req, res) => res.json(readJSON('freeplay-characters.json')));
+app.get('/api/freeplay', requireAuth, (req, res) => {
+  const list = readJSON('freeplay-characters.json');
+  res.json(isAdmin(req.user) ? list : list.map(publicFreeplayChar));
+});
 
 app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
@@ -781,7 +883,10 @@ app.delete('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) =>
 });
 
 // --- Neuro Characters (System 3) ---
-app.get('/api/neuro', requireAuth, (req, res) => res.json(readJSON('neuro-characters.json')));
+app.get('/api/neuro', requireAuth, (req, res) => {
+  const list = readJSON('neuro-characters.json');
+  res.json(isAdmin(req.user) ? list : list.map(publicNeuroChar));
+});
 
 app.post('/api/neuro', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
@@ -857,19 +962,72 @@ app.get('/api/logs', requireAuth, (req, res) => {
   res.json(logs);
 });
 
-app.post('/api/logs', requireAuth, (req, res) => {
-  // O log sempre é gravado em nome do usuário autenticado (impede forjar userId)
-  const logs = readJSON('logs.json');
+// Cap de tamanho pra prevenir bloat em logs.json e ataques de fillup.
+const LOG_MAX_TITLE = 200;
+const LOG_MAX_MESSAGES = 500;
+const LOG_MAX_MESSAGE_LEN = 20000;
+const LOG_MAX_EVAL_LEN = 50000;
+const LOG_VALID_TYPES = ['exercise', 'freeplay', 'neuro'];
+
+function clampStr(v, max) {
+  if (v == null) return '';
+  return String(v).slice(0, max);
+}
+
+app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
+  // Allowlist explícita de campos: visitor não consegue "plantar bandeira"
+  // com campos arbitrários, e mass-assignment fica bloqueado. userId/userName
+  // são sempre forçados do JWT.
+  const body = req.body || {};
+
+  if (!LOG_VALID_TYPES.includes(body.type)) {
+    return res.status(400).json({ error: 'type inválido (exercise|freeplay|neuro)' });
+  }
+
+  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+  if (rawMessages.length > LOG_MAX_MESSAGES) {
+    return res.status(400).json({ error: `messages excede limite de ${LOG_MAX_MESSAGES}` });
+  }
+  const cleanMessages = rawMessages.map((m) => ({
+    role: m && (m.role === 'user' || m.role === 'assistant') ? m.role : 'user',
+    content: clampStr(m && m.content, LOG_MAX_MESSAGE_LEN),
+    highlighted: !!(m && m.highlighted),
+    comment: clampStr(m && m.comment, 2000),
+  }));
+
   const log = {
     id: 'log' + Date.now(),
     timestamp: new Date().toISOString(),
-    ...req.body,
+    type: body.type,
+    itemId: clampStr(body.itemId, 200),
+    itemTitle: clampStr(body.itemTitle, LOG_MAX_TITLE),
+    skillId: Number.isFinite(body.skillId) ? Number(body.skillId) : null,
+    difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
+    durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
+    score: Number.isFinite(body.score) ? Number(body.score) : null,
+    criteriaScores: body.criteriaScores && typeof body.criteriaScores === 'object' ? body.criteriaScores : null,
+    evaluation: clampStr(body.evaluation, LOG_MAX_EVAL_LEN),
+    messages: cleanMessages,
     userId: req.user.id,
     userName: req.user.name,
   };
+
+  const logs = readJSON('logs.json');
   logs.push(log);
   writeJSON('logs.json', logs);
   res.json(log);
+});
+
+// DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
+// plantadas durante pentest). Antes não havia rota; só dava pra apagar
+// editando o JSON manualmente.
+app.delete('/api/logs/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const logs = readJSON('logs.json');
+  const idx = logs.findIndex((l) => l.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Log não encontrado' });
+  const removed = logs.splice(idx, 1)[0];
+  writeJSON('logs.json', logs);
+  res.json({ ok: true, removed });
 });
 
 // --- Active sessions (sessões em andamento, ainda não finalizadas) ---
@@ -952,9 +1110,72 @@ function getOpenAI() {
   return new OpenAI({ apiKey });
 }
 
-app.post('/api/chat', requireAuth, async (req, res) => {
-  const { messages, systemPrompt, model, maxTokens } = req.body;
+// Resolve o system prompt server-side a partir de context/mode enviados pelo
+// cliente. Nunca confia em systemPrompt vindo do body. Retorna { systemPrompt,
+// status, error } onde status é o HTTP code apropriado em caso de erro.
+function resolveChatSystemPrompt({ context, mode, user }) {
+  // Modo entrevistador é exclusivo de admin.
+  if (mode === 'entrevistador') {
+    if (!isAdmin(user)) return { status: 403, error: 'Acesso negado' };
+    const prompt = loadEntrevistadorPrompt();
+    if (!prompt) return { status: 500, error: 'Prompt do entrevistador não encontrado.' };
+    return { systemPrompt: prompt };
+  }
+
+  // Modo padrão: cliente envia context com type + itemId; resolvemos o prompt
+  // a partir do arquivo correspondente.
+  if (!context || typeof context !== 'object') {
+    return { status: 400, error: 'context é obrigatório (type + itemId)' };
+  }
+  const { type, itemId } = context;
+  if (!['exercise', 'freeplay', 'neuro'].includes(type)) {
+    return { status: 400, error: 'context.type inválido' };
+  }
+  if (!itemId) return { status: 400, error: 'context.itemId é obrigatório' };
+
+  if (type === 'exercise') {
+    const ex = readJSON('exercises.json').find((e) => String(e.id) === String(itemId));
+    if (!ex) return { status: 404, error: 'Exercício não encontrado' };
+    // Para a simulação (paciente), usamos a persona — o avaliador
+    // customizado entra apenas no /api/evaluate.
+    return { systemPrompt: buildFreeplayPrompt(ex.specificInstruction) };
+  }
+  if (type === 'freeplay') {
+    const c = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
+    if (!c) return { status: 404, error: 'Personagem não encontrado' };
+    return { systemPrompt: buildFreeplayPrompt(c.specificInstruction) };
+  }
+  if (type === 'neuro') {
+    // Neuroavaliação não é acessível a visitor (deve revelar o diagnóstico
+    // só na sessão completa, perfil destinado a alunos cadastrados).
+    if (user.role === 'visitor') {
+      return { status: 403, error: 'Neuroavaliação não está disponível em modo visitante.' };
+    }
+    const c = readJSON('neuro-characters.json').find((c) => String(c.id) === String(itemId));
+    if (!c) return { status: 404, error: 'Paciente não encontrado' };
+    return { systemPrompt: buildNeuroPrompt(c.specificInstruction) };
+  }
+  return { status: 400, error: 'Modo de chat inválido' };
+}
+
+app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
+  const { messages, context, mode, maxTokens } = req.body || {};
   const openai = getOpenAI();
+
+  // Bloqueia tentativas de injetar systemPrompt — visível no log do servidor
+  // pra ajudar a debugar clientes antigos que ainda enviam o campo.
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'systemPrompt')) {
+    return res.status(400).json({
+      error: 'systemPrompt não é mais aceito no body. Use context: { type, itemId } ou mode.',
+    });
+  }
+
+  const resolved = resolveChatSystemPrompt({ context, mode, user: req.user });
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages deve ser uma lista' });
+  }
 
   if (!openai) {
     return res.json({
@@ -963,20 +1184,20 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     });
   }
 
-  // Default 1500 (Trilha/Simulação/Neuro). Entrevistador passa um valor maior
-  // pois precisa gerar o prompt completo do paciente, que pode ter milhares de tokens.
+  // Default 1500 (Trilha/Simulação/Neuro). Modo entrevistador permite valor
+  // maior pra gerar o prompt completo do paciente.
   const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
     ? Math.min(Math.floor(maxTokens), 32000)
     : 1500;
 
   try {
     const completion = await openai.chat.completions.create({
-      model: model || CHAT_MODEL,
+      model: CHAT_MODEL,
       messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages
+        { role: 'system', content: resolved.systemPrompt },
+        ...messages,
       ],
-      max_completion_tokens: tokenCap
+      max_completion_tokens: tokenCap,
     });
     res.json(completion.choices[0].message);
   } catch (err) {
@@ -1015,7 +1236,18 @@ function isValidAssistantId(id) {
   return typeof id === 'string' && /^asst_[A-Za-z0-9]+$/.test(id) && id.length <= 64;
 }
 
-app.post('/api/assistants/message', requireAuth, async (req, res) => {
+// Verifica se um assistantId está cadastrado em algum personagem do banco.
+// Impede que um cliente passe um assistantId arbitrário (de outro projeto da
+// OpenAI) e use a nossa chave para conversar com qualquer assistant.
+function assistantIdIsCadastrado(assistantId) {
+  if (!assistantId) return false;
+  const fp = readJSON('freeplay-characters.json').some((c) => sanitizeAssistantId(c.assistantId) === assistantId);
+  if (fp) return true;
+  const nr = readJSON('neuro-characters.json').some((c) => sanitizeAssistantId(c.assistantId) === assistantId);
+  return nr;
+}
+
+app.post('/api/assistants/message', requireAuth, aiLimiter, async (req, res) => {
   const { threadId, message } = req.body;
   const assistantId = sanitizeAssistantId(req.body.assistantId);
   const openai = getOpenAI();
@@ -1036,6 +1268,12 @@ app.post('/api/assistants/message', requireAuth, async (req, res) => {
       error: 'Assistant ID inválido. Deve começar com "asst_" e ter no máximo 64 caracteres. Verifique no painel da OpenAI.',
       code: 'invalid_assistant_id',
     });
+  }
+
+  // Hardening: só aceita assistantIds que estão cadastrados no banco —
+  // bloqueia uso da chave OpenAI da Allos com assistants de terceiros.
+  if (!assistantIdIsCadastrado(assistantId)) {
+    return res.status(403).json({ error: 'Assistant ID não cadastrado.' });
   }
 
   try {
@@ -1111,9 +1349,35 @@ Ao final da sua resposta, inclua OBRIGATORIAMENTE estas linhas, exatamente neste
 Onde X é a nota numérica que você atribui ao desempenho do aluno (use a escala que sua avaliação considera apropriada — pode ser positiva ou negativa, com ou sem sinal). Sem essa linha, o sistema não consegue registrar a pontuação.`;
 }
 
-app.post('/api/evaluate', requireAuth, async (req, res) => {
-  const { messages, systemPrompt: overridePrompt } = req.body;
+// Resolve o system prompt do avaliador server-side. Se context.type ===
+// 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
+// (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
+// avaliador global Allos.
+function resolveEvaluatorSystemPrompt({ context }) {
+  if (context && typeof context === 'object' && context.type === 'exercise' && context.itemId) {
+    const ex = readJSON('exercises.json').find((e) => String(e.id) === String(context.itemId));
+    if (!ex) return { status: 404, error: 'Exercício não encontrado' };
+    if (ex.evaluatorPrompt && String(ex.evaluatorPrompt).trim()) {
+      return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt) };
+    }
+  }
+  // freeplay, neuro, avaliação manual (sem context) → avaliador global
+  return { systemPrompt: loadAvaliacaoPrompt() };
+}
+
+app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
+  const { messages, context } = req.body || {};
   const apiKey = process.env.OPENAI_API_KEY;
+
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, 'systemPrompt')) {
+    return res.status(400).json({
+      error: 'systemPrompt não é mais aceito no body. Use context: { type, itemId } quando aplicável.',
+    });
+  }
+
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages deve ser uma lista' });
+  }
 
   if (!apiKey) {
     return res.json({
@@ -1122,11 +1386,8 @@ app.post('/api/evaluate', requireAuth, async (req, res) => {
     });
   }
 
-  // Se o cliente fornece um systemPrompt (avaliador customizado da Trilha), usa ele.
-  // Caso contrário, usa o avaliador global Allos (FreePlay/Neuro/Avaliar Sessão).
-  const systemPrompt = overridePrompt
-    ? wrapCustomEvaluatorPrompt(overridePrompt)
-    : loadAvaliacaoPrompt();
+  const resolved = resolveEvaluatorSystemPrompt({ context });
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
   try {
     const { default: OpenAI } = require('openai');
@@ -1134,10 +1395,10 @@ app.post('/api/evaluate', requireAuth, async (req, res) => {
     const completion = await openai.chat.completions.create({
       model: 'gpt-5.4-mini',
       messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages
+        { role: 'system', content: resolved.systemPrompt },
+        ...messages,
       ],
-      max_completion_tokens: 5000
+      max_completion_tokens: 5000,
     });
     res.json(completion.choices[0].message);
   } catch (err) {
@@ -1147,7 +1408,7 @@ app.post('/api/evaluate', requireAuth, async (req, res) => {
 });
 
 // --- Speech to Text Proxy ---
-app.post('/api/transcribe', requireAuth, async (req, res) => {
+app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.json({ text: '[Transcrição não disponível sem API Key]' });

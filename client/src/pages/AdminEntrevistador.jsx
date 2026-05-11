@@ -3,14 +3,15 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 
 export default function AdminEntrevistador({ user }) {
-  const [systemPrompt, setSystemPrompt] = useState('');
+  // O prompt do entrevistador é resolvido no servidor (admin-only) — o cliente
+  // não precisa baixá-lo nem armazená-lo. Apenas indica que a UI está pronta.
+  const [ready, setReady] = useState(true);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState('');
-  const [loadingPrompt, setLoadingPrompt] = useState(true);
   const [showCharModal, setShowCharModal] = useState(false);
   const [charForm, setCharForm] = useState({ name: '', age: '', description: '', specificInstruction: '' });
   const [savingChar, setSavingChar] = useState(false);
@@ -22,19 +23,12 @@ export default function AdminEntrevistador({ user }) {
   const audioChunksRef = useRef([]);
 
   useEffect(() => {
-    api.getEntrevistadorPrompt()
-      .then((data) => setSystemPrompt(data.prompt || ''))
-      .catch((err) => setError('Erro ao carregar o prompt do entrevistador: ' + err.message))
-      .finally(() => setLoadingPrompt(false));
-  }, []);
-
-  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || !systemPrompt) return;
+    if (!trimmed || isTyping || !ready) return;
 
     const userMsg = { role: 'user', content: trimmed };
     const updated = [...messages, userMsg];
@@ -46,7 +40,8 @@ export default function AdminEntrevistador({ user }) {
       const apiMessages = updated.map((m) => ({ role: m.role, content: m.content }));
       // maxTokens alto: o entrevistador precisa gerar o prompt completo do paciente
       // (vários milhares de tokens) sem ser cortado pelo limite default.
-      const reply = await api.chat(apiMessages, systemPrompt, 'gpt-5.4-2026-03-05', 16000);
+      // O servidor injeta o prompt do entrevistador como systemPrompt internamente.
+      const reply = await api.adminEntrevistadorChat(apiMessages, 16000);
       const content = typeof reply === 'string' ? reply : reply.content || reply.message || '';
       setMessages((prev) => [...prev, { role: 'assistant', content }]);
     } catch (err) {
@@ -64,7 +59,7 @@ export default function AdminEntrevistador({ user }) {
   }
 
   async function toggleRecording() {
-    if (!systemPrompt || isTranscribing) return;
+    if (!ready || isTranscribing) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -275,9 +270,9 @@ export default function AdminEntrevistador({ user }) {
 
       {error && <div className="alert error">{error}</div>}
 
-      {loadingPrompt ? (
+      {!ready ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>
-          <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando prompt do entrevistador…</span>
+          <span className="spinner" /> <span style={{ marginLeft: 12 }}>Preparando o entrevistador…</span>
         </div>
       ) : (
         <div className="chat-container entrevistador-chat">
@@ -325,14 +320,14 @@ export default function AdminEntrevistador({ user }) {
                 onKeyDown={handleKeyDown}
                 placeholder="Sua resposta…  ·  Enter envia · Shift+Enter quebra linha"
                 rows={1}
-                disabled={isTyping || !systemPrompt}
+                disabled={isTyping || !ready}
               />
               <button
                 type="button"
                 className={`icon-btn ${isRecording ? 'recording' : ''}`}
                 onClick={toggleRecording}
                 title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
-                disabled={isTyping || !systemPrompt}
+                disabled={isTyping || !ready}
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">
                   <rect x="9" y="2" width="6" height="12" rx="3" />
