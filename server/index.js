@@ -16,19 +16,30 @@ const {
 
 const app = express();
 
+// Railway/Cloudflare ficam na frente; sem isso o express-rate-limit aborta com
+// ERR_ERL_UNEXPECTED_X_FORWARDED_FOR e req.ip fica errado.
+app.set('trust proxy', 1);
+
 // CORS allowlist. Em produção o front é servido pelo mesmo origin (o Express
 // serve o build do React), então só precisa abrir pra dev local.
 const CORS_ALLOWLIST = (process.env.CORS_ALLOWLIST || 'http://localhost:5173')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
-app.use(cors({
-  origin: (origin, cb) => {
-    // Same-origin (sem header Origin) sempre passa.
-    if (!origin) return cb(null, true);
-    if (CORS_ALLOWLIST.includes(origin)) return cb(null, true);
-    return cb(new Error('Origin não permitida pelo CORS'));
-  },
+app.use(cors((req, cb) => {
+  const origin = req.headers.origin;
+  // Same-origin (sem header Origin) sempre passa.
+  if (!origin) return cb(null, { origin: true });
+  if (CORS_ALLOWLIST.includes(origin)) return cb(null, { origin: true });
+  // Same-origin com header Origin: browsers modernos mandam Origin mesmo em
+  // fetch mesmo-origem. Compara host do Origin com o Host da request.
+  try {
+    const originHost = new URL(origin).host;
+    if (originHost && originHost === req.headers.host) {
+      return cb(null, { origin: true });
+    }
+  } catch {}
+  return cb(new Error('Origin não permitida pelo CORS'));
 }));
 
 app.use(express.json({ limit: '10mb' }));
