@@ -32,6 +32,28 @@ export default function AdminUsers({ user: currentUser }) {
   const [resetSaving, setResetSaving] = useState(false);
   const [resetError, setResetError] = useState('');
   const [resetSuccess, setResetSuccess] = useState('');
+  const [exporting, setExporting] = useState(false);
+
+  async function handleExport() {
+    if (exporting) return;
+    setExporting(true);
+    setError('');
+    try {
+      const { blob, filename } = await api.adminExportData();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError('Erro ao exportar: ' + err.message);
+    } finally {
+      setExporting(false);
+    }
+  }
 
   function load() {
     setLoading(true);
@@ -186,7 +208,17 @@ export default function AdminUsers({ user: currentUser }) {
           </h2>
           <p>Crie alunos e professores, vincule cada aluno a um professor responsável e gerencie senhas.</p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ Nova Conta</button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn btn-outline"
+            onClick={handleExport}
+            disabled={exporting}
+            title="Baixa um JSON com todos os dados do servidor (users, exercises, freeplay, neuro, logs, progress, achievements, active-sessions). Útil pra backup ou migração."
+          >
+            {exporting ? 'Baixando…' : 'Exportar dados (backup)'}
+          </button>
+          <button className="btn btn-primary" onClick={openCreate}>+ Nova Conta</button>
+        </div>
       </div>
 
       {error && <div className="alert error">{error}</div>}
