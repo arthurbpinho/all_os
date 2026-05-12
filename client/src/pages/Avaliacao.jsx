@@ -23,6 +23,14 @@ export default function Avaliacao({ user }) {
       setError('Apenas arquivos .txt são aceitos.');
       return;
     }
+    // Limite de tamanho — transcrições reais ficam abaixo de 500KB. Acima
+    // disso é provavelmente um arquivo errado e travaria a aba lendo tudo
+    // em memória + o servidor rejeitaria por exceder express.json limit.
+    const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024; // 2 MB
+    if (file.size > MAX_TRANSCRIPT_BYTES) {
+      setError(`Arquivo muito grande (${(file.size / 1024 / 1024).toFixed(1)} MB). Máximo: 2 MB.`);
+      return;
+    }
     setError('');
     const reader = new FileReader();
     reader.onload = (ev) => {

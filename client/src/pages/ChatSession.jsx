@@ -97,6 +97,10 @@ export default function ChatSession({ user }) {
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
+      // Race: o usuário pode ter clicado "Finalizar" entre o agendamento do
+      // timer e o disparo dele. Se finalizou, NÃO grava — senão a sessão
+      // ressurge zumbi (o DELETE de clearActiveSession já rodou).
+      if (finishedRef.current) return;
       api.saveActiveSession('exercise', id, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };

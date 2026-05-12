@@ -96,7 +96,7 @@ export const api = {
   saveProgress: (userId, data) => request(`/progress/${userId}`, { method: 'POST', body: data }),
 
   // Logs
-  getLogs: (userId) => request(`/logs${userId ? `?userId=${userId}` : ''}`),
+  getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
 
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
@@ -145,6 +145,28 @@ export const api = {
     request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`, { method: 'PUT', body: data }),
   clearActiveSession: (type, itemId) =>
     request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`, { method: 'DELETE' }),
+
+  // Admin: export completo (backup / migração pra SQL).
+  // Não usa o helper `request` porque o servidor responde com
+  // Content-Disposition: attachment — queremos preservar o filename e baixar
+  // como blob, não fazer res.json().
+  adminExportData: async () => {
+    const token = getToken();
+    const res = await fetch(BASE + '/admin/export', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let err = 'Erro ao exportar';
+      try { const j = await res.json(); err = j.error || err; } catch {}
+      throw new Error(err);
+    }
+    // Extrai filename do header (fallback pra um nome default)
+    const dispo = res.headers.get('content-disposition') || '';
+    const match = dispo.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `allos-export-${new Date().toISOString().slice(0,10)}.json`;
+    const blob = await res.blob();
+    return { blob, filename };
+  },
 
   // Admin: gestão de contas
   adminListUsers: () => request('/admin/users'),

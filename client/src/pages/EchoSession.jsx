@@ -106,6 +106,10 @@ export default function EchoSession({ user, sessionType }) {
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
+      // Mesmo race do ChatSession: usuário finaliza no meio do debounce, o
+      // DELETE de clearActiveSession roda, e o PUT chega depois ressuscitando
+      // a sessão. Bloqueamos checando finishedRef no momento do disparo.
+      if (finishedRef.current) return;
       api.saveActiveSession(sessionType, id, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
