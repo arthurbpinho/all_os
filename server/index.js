@@ -1334,21 +1334,6 @@ function loadAvaliacaoPrompt() {
   return prompt + '\n\n---\n\n# DOCUMENTO ANEXO — Manual de Calibração (v2)\n\n' + manual;
 }
 
-// Wrapper que garante o formato [NOTA:X] no fim, quando o admin define um prompt customizado
-function wrapCustomEvaluatorPrompt(adminPrompt) {
-  return `${adminPrompt.trim()}
-
----
-
-## FORMATO OBRIGATÓRIO DE SAÍDA
-
-Ao final da sua resposta, inclua OBRIGATORIAMENTE estas linhas, exatamente neste formato (são lidas pelo sistema):
-
-[NOTA:X]
-
-Onde X é a nota numérica que você atribui ao desempenho do aluno (use a escala que sua avaliação considera apropriada — pode ser positiva ou negativa, com ou sem sinal). Sem essa linha, o sistema não consegue registrar a pontuação.`;
-}
-
 // Resolve o system prompt do avaliador server-side. Se context.type ===
 // 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
 // (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
