@@ -26,6 +26,26 @@ const CORS_ALLOWLIST = (process.env.CORS_ALLOWLIST || 'http://localhost:5173')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Aceita o Vite dev server (porta 5173) tanto em localhost/127.0.0.1 quanto
+// em IPs de rede privada (RFC1918) — pra que `vite --host` funcione quando
+// você acessa a URL "Network" mostrada pelo Vite (ex: http://192.168.x.x:5173),
+// inclusive testando o app pelo celular da mesma rede.
+function isLocalViteDevOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    if (u.protocol !== 'http:' || u.port !== '5173') return false;
+    const h = u.hostname;
+    if (h === 'localhost' || h === '127.0.0.1') return true;
+    if (/^10\./.test(h)) return true;
+    if (/^192\.168\./.test(h)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 app.use(cors((req, cb) => {
   const origin = req.headers.origin;
   // Same-origin (sem header Origin) sempre passa.
@@ -39,7 +59,9 @@ app.use(cors((req, cb) => {
       return cb(null, { origin: true });
     }
   } catch {}
-  return cb(new Error('Origin não permitida pelo CORS'));
+  // Vite dev em LAN (192.168.x.x etc.) — necessário pra `vite --host`.
+  if (isLocalViteDevOrigin(origin)) return cb(null, { origin: true });
+  return cb(new Error('Origin não permitida pelo CORS: ' + origin));
 }));
 
 app.use(express.json({ limit: '10mb' }));
