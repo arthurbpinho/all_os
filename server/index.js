@@ -79,16 +79,21 @@ const TOKEN_TTL = '7d';
 const BCRYPT_ROUNDS = 10;
 
 // --- Rate limiting ---
+// Em NODE_ENV=test, todos os limiters viram no-op: a suite roda dezenas de
+// logins/requests em segundos, o que estouraria janelas reais.
+const SKIP_RATE_LIMIT = process.env.NODE_ENV === 'test';
+const noopLimiter = (req, res, next) => next();
+
 // Pre-auth (chave por IP): protege contra brute-force de credenciais e flood
 // de geração de tokens.
-const loginLimiter = rateLimit({
+const loginLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
-const visitorLimiter = rateLimit({
+const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   standardHeaders: true,
@@ -100,15 +105,19 @@ const visitorLimiter = rateLimit({
 function userKey(req) {
   return (req.user && req.user.id) ? `u:${req.user.id}` : `ip:${req.ip}`;
 }
-const aiLimiter = rateLimit({
+// 300 req/hora cobre ~6 sessões clínicas longas. Era 60 antes — apertado
+// demais pra uso real. Como /api/chat e /api/evaluate só aceitam context com
+// itemId válido (resolveChatSystemPrompt / resolveEvaluatorSystemPrompt),
+// o risco de abuse da chave OpenAI caiu — podemos afrouxar com segurança.
+const aiLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 60,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKey,
   message: { error: 'Limite de uso da IA atingido. Tente novamente em uma hora.' },
 });
-const writeLimiter = rateLimit({
+const writeLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 200,
   standardHeaders: true,
@@ -405,9 +414,13 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
 const usernameRegex = /^[a-zA-Z0-9._-]{3,32}$/;
 
 function nextUserId(users) {
+  // Filtra apenas IDs numéricos. Se algum user legacy tiver id não-numérico
+  // (ex: visitor-xxx persistido por erro), o Number() retorna NaN — antes,
+  // isso corrompia o maxNumeric e o próximo user virava "NaN".
   const maxNumeric = users.reduce((max, u) => {
     const n = Number(u.id);
-    return Number.isFinite(n) && n > max ? n : max;
+    if (!Number.isFinite(n)) return max;
+    return n > max ? n : max;
   }, 0);
   return String(maxNumeric + 1);
 }
@@ -563,6 +576,33 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'
   users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
   writeJSON('users.json', users);
   res.json({ ok: true });
+});
+
+// Export completo dos JSON do DATA_DIR — admin-only. Para backup/migração
+// pra SQL. Retorna passwordHash dos users (admin já tem acesso total).
+// Em produção, o admin loga e baixa via interface (AdminUsers.jsx).
+app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    exportedBy: req.user.username,
+    schemaVersion: 1,
+    data: {
+      users: readJSON('users.json'),
+      exercises: readJSON('exercises.json'),
+      freeplayCharacters: readJSON('freeplay-characters.json'),
+      neuroCharacters: readJSON('neuro-characters.json'),
+      progress: readJSON('progress.json', {}),
+      logs: readJSON('logs.json'),
+      achievements: readJSON('achievements.json', {}),
+      activeSessions: readJSON('active-sessions.json', {}),
+    },
+  };
+  // Content-Disposition: força download como arquivo em vez de renderizar JSON
+  // no navegador. Filename inclui data + hora pra evitar sobrescrever backups.
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="allos-export-${stamp}.json"`);
+  res.send(JSON.stringify(payload, null, 2));
 });
 
 // Professor: lista de alunos vinculados a ele
@@ -835,17 +875,27 @@ app.get('/api/exercises', requireAuth, (req, res) => {
 
 app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
-  const ex = { id: 'ex' + Date.now(), ...req.body };
+  const ex = { id: 'ex' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...req.body };
   exercises.push(ex);
   writeJSON('exercises.json', exercises);
   res.json(ex);
 });
 
+const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt'];
+function pickFields(body, fields) {
+  const out = {};
+  for (const f of fields) {
+    if (body && Object.prototype.hasOwnProperty.call(body, f)) out[f] = body[f];
+  }
+  return out;
+}
+
 app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const idx = exercises.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  exercises[idx] = { ...exercises[idx], ...req.body };
+  // Allowlist: evita que campos arbitrários do body poluam o JSON.
+  exercises[idx] = { ...exercises[idx], ...pickFields(req.body, EXERCISE_FIELDS) };
   writeJSON('exercises.json', exercises);
   res.json(exercises[idx]);
 });
@@ -871,17 +921,19 @@ app.get('/api/freeplay', requireAuth, (req, res) => {
 
 app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
-  const c = { id: 'fp' + Date.now(), ...sanitizeCharacterPayload(req.body) };
+  const c = { id: 'fp' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...sanitizeCharacterPayload(req.body) };
   chars.push(c);
   writeJSON('freeplay-characters.json', chars);
   res.json(c);
 });
 
+const FREEPLAY_FIELDS = ['name', 'age', 'description', 'assistantId', 'specificInstruction'];
+
 app.put('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
   const idx = chars.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(req.body) };
+  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(pickFields(req.body, FREEPLAY_FIELDS)) };
   writeJSON('freeplay-characters.json', chars);
   res.json(chars[idx]);
 });
@@ -901,17 +953,19 @@ app.get('/api/neuro', requireAuth, (req, res) => {
 
 app.post('/api/neuro', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
-  const c = { id: 'nr' + Date.now(), ...sanitizeCharacterPayload(req.body) };
+  const c = { id: 'nr' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...sanitizeCharacterPayload(req.body) };
   chars.push(c);
   writeJSON('neuro-characters.json', chars);
   res.json(c);
 });
 
+const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction'];
+
 app.put('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
   const idx = chars.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(req.body) };
+  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS)) };
   writeJSON('neuro-characters.json', chars);
   res.json(chars[idx]);
 });
@@ -1007,7 +1061,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   }));
 
   const log = {
-    id: 'log' + Date.now(),
+    id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
     type: body.type,
     itemId: clampStr(body.itemId, 200),
@@ -1410,12 +1464,16 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
     return res.json({ text: '[Transcrição não disponível sem API Key]' });
   }
 
+  // Filename único por request — antes era 'tmp_audio.webm' fixo, então dois
+  // /api/transcribe concorrentes sobrescreviam o áudio um do outro e o
+  // segundo recebia transcrição do áudio errado.
+  const tmpFile = path.join(DATA_DIR, `tmp_audio_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.webm`);
+
   try {
     const { default: OpenAI } = require('openai');
     const openai = new OpenAI({ apiKey });
     // Audio comes as base64
     const buffer = Buffer.from(req.body.audio, 'base64');
-    const tmpFile = path.join(DATA_DIR, 'tmp_audio.webm');
     fs.writeFileSync(tmpFile, buffer);
 
     const transcription = await openai.audio.transcriptions.create({
@@ -1423,11 +1481,13 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
       model: 'whisper-1',
       language: 'pt'
     });
-    fs.unlinkSync(tmpFile);
     res.json({ text: transcription.text });
   } catch (err) {
     console.error('Transcription error:', err.message);
     res.status(500).json({ error: 'Erro na transcrição' });
+  } finally {
+    // Limpeza sempre, mesmo se a chamada à OpenAI falhar
+    try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
   }
 });
 
@@ -1438,5 +1498,12 @@ if (fs.existsSync(clientDist)) {
   app.get('*', (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 }
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
+// Só faz listen quando executado diretamente (`node server/index.js`).
+// Quando importado por testes (`require('./server/index.js')`), o supertest
+// cria seu próprio server interno em porta aleatória — sem precisar de listen.
+if (require.main === module) {
+  const PORT = process.env.PORT || 3001;
+  app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
+}
+
+module.exports = app;
