@@ -72,38 +72,27 @@ export function calculateScores(criteriaScores) {
   return { totalScore, skillScores, adjustedCriteria: scores };
 }
 
-// Avaliação direta (single-shot) usada após FreePlay/Neuro e na Trilha quando
-// NÃO há avaliador customizado: o aluno gerou a transcrição, e essa função
-// monta a *mensagem* (role: user) com transcrição + pedido formal. Isso NÃO é
-// system prompt — é a mensagem visível do aluno pedindo avaliação. O system
-// prompt do avaliador continua resolvido no servidor.
+// Monta a *mensagem* (role: user) que vai pro avaliador com a transcrição.
+// O system prompt v9 é resolvido no servidor; se o personagem tiver Bloco 1
+// configurado (evaluationCriteria), o servidor prepende o gabarito ANTES
+// dessa string, formando o pacote final:
+//   [BLOCO 1 DO CASO] (critério de correção/gabarito)
+//   {gabarito}
+//
+//   ---
+//
+//   [LOG DO ATENDIMENTO]
+//   Sessão: ...
+//   {transcript}
+//
+// Quando não há Bloco 1 (aba Avaliação manual ou personagem sem gabarito),
+// a mensagem chega ao avaliador só com o LOG — ele opera em modo degradado.
 export function buildDirectEvaluationPrompt(sessionLabel, characterName, transcript) {
-  return `[AVALIAÇÃO DIRETA — SESSÃO FINALIZADA]
-
+  return `[LOG DO ATENDIMENTO]
 Sessão: ${sessionLabel}
 Personagem: ${characterName}
 
-A seguir está a transcrição completa de uma sessão de simulação clínica. Faça uma avaliação completa neste único turno de resposta — sem fluxo conversacional, sem perguntas socráticas em aberto.
-
-## TRANSCRIÇÃO
-
-${transcript}
-
-## INSTRUÇÕES PARA A AVALIAÇÃO
-
-1. Execute internamente a Fase 1 (silenciosa): atribua nota a cada um dos 10 critérios na escala (-9, -3, -1, 0, +1, +3, +9).
-2. Apresente uma análise crítica com este formato:
-   - **Síntese geral** (2-3 linhas).
-   - **Pontos fortes** (2-3 itens, cite TRECHOS literais da transcrição).
-   - **Pontos frágeis** (2-3 itens, cite TRECHOS literais).
-   - **Provocações para a próxima sessão** (2-3 perguntas socráticas que o aluno deveria refletir — perguntas, não respostas prontas).
-3. Use CONCEITOS na análise (não números) e cite TRECHOS exatos da transcrição.
-4. Ao FINAL da resposta, inclua OBRIGATORIAMENTE estas duas linhas (são para o sistema, não para o aluno):
-
-[CRITERIOS:1=X,2=X,3=X,4=X,5=X,6=X,7=X,8=X,9=X,10=X]
-[NOTA:X]
-
-Onde X em CRITERIOS é a nota de cada critério (-9, -3, -1, 0, +1, +3, +9) e X em NOTA é a soma ponderada de (nota × peso) dos 10 critérios. As linhas acima são obrigatórias.`;
+${transcript}`;
 }
 
 // Tenta extrair as notas por critério da resposta da IA

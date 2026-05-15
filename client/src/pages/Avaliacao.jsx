@@ -9,12 +9,35 @@ export default function Avaliacao({ user }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [characters, setCharacters] = useState([]);
+  const [selectedCharacterId, setSelectedCharacterId] = useState('');
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Carrega lista de personagens FreePlay pra dropdown de critério de correção.
+  // O `evaluationCriteria` (Bloco 1) não vem ao cliente — é resolvido server-side
+  // em /api/evaluate a partir do context.itemId. Aqui só precisamos de id+nome.
+  useEffect(() => {
+    let cancelled = false;
+    api.getFreeplay()
+      .then((list) => {
+        if (cancelled) return;
+        const sorted = (Array.isArray(list) ? list : [])
+          .map((c) => ({ id: c.id, name: c.name, age: c.age }))
+          .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
+        setCharacters(sorted);
+      })
+      .catch(() => { /* sem dropdown se falhar; fluxo genérico continua */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const evaluateContext = selectedCharacterId
+    ? { type: 'freeplay', itemId: selectedCharacterId }
+    : undefined;
 
   function handleFileUpload(e) {
     const file = e.target.files[0];
@@ -54,7 +77,7 @@ export default function Avaliacao({ user }) {
     };
 
     try {
-      const reply = await api.evaluate([initialMessage]);
+      const reply = await api.evaluate([initialMessage], evaluateContext);
       setMessages([initialMessage, reply]);
     } catch (err) {
       setError(err.message || 'Erro ao iniciar avaliação');
@@ -74,7 +97,10 @@ export default function Avaliacao({ user }) {
     setError('');
 
     try {
-      const reply = await api.evaluate(updated.map((m) => ({ role: m.role, content: m.content })));
+      const reply = await api.evaluate(
+        updated.map((m) => ({ role: m.role, content: m.content })),
+        evaluateContext,
+      );
       setMessages([...updated, reply]);
     } catch (err) {
       setError(err.message || 'Erro ao comunicar com a IA');
@@ -114,6 +140,7 @@ export default function Avaliacao({ user }) {
     setInput('');
     setError('');
     setLoading(false);
+    setSelectedCharacterId('');
   }
 
   if (!started) {
@@ -123,13 +150,34 @@ export default function Avaliacao({ user }) {
           <div className="eyebrow">Avaliação Independente</div>
           <h2><Typewriter text="Avaliar uma " /><span className="accent"><Typewriter text="Sessão" delayStart={520} /></span></h2>
           <p>
-            Envie a transcrição completa de uma sessão terapêutica e receba uma análise crítica seguindo
-            os 10 critérios da Allos. A avaliação é conversacional — você pode contestar e dialogar com a IA.
+            Envie a transcrição completa de uma sessão terapêutica e receba uma análise densa seguindo
+            os 6 critérios da Allos (avaliador v9). A análise vem em um único turno; você pode contestar
+            e dialogar com a IA depois.
           </p>
           <div className="ornament" />
         </div>
 
         <div className="avaliacao-intro">
+          <div>
+            <label htmlFor="character-select">Critério de correção (personagem FreePlay)</label>
+            <select
+              id="character-select"
+              value={selectedCharacterId}
+              onChange={(e) => setSelectedCharacterId(e.target.value)}
+              style={{ width: '100%' }}
+            >
+              <option value="">Sem critério específico — avaliação genérica</option>
+              {characters.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}{c.age ? `, ${c.age}` : ''}
+                </option>
+              ))}
+            </select>
+            <small style={{ display: 'block', marginTop: 6, color: 'var(--marrs-dark)', fontSize: 12 }}>
+              Quando selecionado, o avaliador recebe o Bloco 1 (gabarito) do caso como referência. O aluno não vê esse conteúdo.
+            </small>
+          </div>
+
           <div>
             <label htmlFor="transcript">Transcrição da sessão</label>
             <textarea
@@ -179,7 +227,14 @@ export default function Avaliacao({ user }) {
       <div className="chat-header">
         <div className="chat-title" style={{ textAlign: 'left' }}>
           <h3>Avaliação de Sessão</h3>
-          <div className="chat-status">conversa com a IA · diálogo socrático</div>
+          <div className="chat-status">
+            {(() => {
+              const sel = characters.find((c) => c.id === selectedCharacterId);
+              return sel
+                ? `conversa com a IA · critério: ${sel.name}`
+                : 'conversa com a IA · diálogo socrático';
+            })()}
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           {messages.length > 0 && (

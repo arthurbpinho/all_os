@@ -973,12 +973,16 @@ select option { background: var(--cream); color: var(--ink); }
 
 .highlight-comment {
   font-size: 12.5px;
-  color: var(--terra);
+  color: #ff8c00;
   font-family: var(--serif-it);
   font-style: italic;
   margin-top: 4px;
   padding-left: 2px;
   max-width: 100%;
+}
+
+.log-comment {
+  color: #ff8c00;
 }
 
 /* ──── Pós-Sessão ──── */
@@ -1033,7 +1037,7 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .post-highlight-comment {
   font-size: 13px;
-  color: var(--terra);
+  color: #ff8c00;
   font-style: italic;
   font-family: var(--serif-it);
   margin-top: 6px;
@@ -1485,10 +1489,12 @@ select option { background: var(--cream); color: var(--ink); }
 .score-badge.neutral  { background: var(--sand); color: var(--ink-soft); border: 1px solid var(--line); }
 
 /* ────────────────────────────────────────
-   SCORE PILL (badge novo, com 3 faixas de cor)
-   < 0       → vermelho
-   0..10     → laranja (terra)
-   > 10      → verde claro
+   SCORE PILL — escala 0-100 (avaliador v9), 5 faixas
+   ≤ 22   → f1  Erro              (vermelho)
+   23-37  → f2  Burocrático       (terra avermelhada)
+   38-57  → f3  Boa condução      (âmbar)
+   58-80  → f4  Atingiu gabarito  (verde claro)
+   ≥ 81   → f5  Excelência        (verde forte)
    ──────────────────────────────────────── */
 .score-pill {
   display: inline-flex;
@@ -1514,20 +1520,30 @@ select option { background: var(--cream); color: var(--ink); }
   line-height: 1.1;
 }
 
-.score-pill.score-negative {
-  background: rgba(184, 58, 58, 0.1);
+.score-pill.score-f1 {
+  background: rgba(184, 58, 58, 0.10);
   color: #B83A3A;
   border-color: #B83A3A;
 }
-.score-pill.score-mid {
+.score-pill.score-f2 {
   background: rgba(184, 90, 64, 0.12);
   color: #B85A40;
   border-color: #B85A40;
 }
-.score-pill.score-positive {
+.score-pill.score-f3 {
+  background: rgba(217, 156, 70, 0.16);
+  color: #A06A1F;
+  border-color: #C68A3A;
+}
+.score-pill.score-f4 {
   background: rgba(132, 204, 145, 0.18);
   color: #2D8F4E;
   border-color: #6BC079;
+}
+.score-pill.score-f5 {
+  background: rgba(0, 143, 143, 0.14);
+  color: #00696A;
+  border-color: #008F8F;
 }
 
 /* ────────────────────────────────────────
