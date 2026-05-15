@@ -215,7 +215,7 @@ que o caso pedia ainda mais, e esse "mais" não foi inteiramente
 alcançado. Cada critério descreve em detalhe o que significa ter
 chegado em faixa 3 e o que faltaria pra faixa 4.
 
-Pontuação correspondente: 5 a 6 na escala 0-10.
+Pontuação correspondente: 5, 6 ou 7 na escala 0-10.
 
 ### Faixa 4 — Atingiu o gabarito
 
@@ -230,7 +230,7 @@ como "fechar o que o caso pedia" naquela dimensão — pode ser avanço
 de camada, articulação clínica sustentada, construção textual fina,
 ou direção certa escolhida. Não basta "fez bonito em alguns momentos".
 
-Pontuação correspondente: 7 a 8 na escala 0-10.
+Pontuação correspondente: 8 na escala 0-10.
 
 ### Faixa 5 — Excelência
 
@@ -280,18 +280,20 @@ previa); ou foi por fora do planejado, e o que foi feito ficou
 
 ### Regra de pontuação fina dentro da faixa
 
-Cada faixa cobre dois valores na escala 0-10 (faixa 1 = 1 ou 2,
-faixa 2 = 3 ou 4, faixa 3 = 5 ou 6, faixa 4 = 7 ou 8, faixa 5 =
-9 ou 10).
+A maioria das faixas cobre dois valores na escala 0-10, e a Faixa 3 cobre três:
 
-Como decidir entre os dois valores da faixa, depois de já ter
-escolhido a faixa:
+- Faixa 1 = 1 ou 2
+- Faixa 2 = 3 ou 4
+- Faixa 3 = 5, 6 ou 7
+- Faixa 4 = 8 (valor único)
+- Faixa 5 = 9 ou 10
 
-- **Faixa consolidada, sem hesitação:** valor mais alto do intervalo
-  (faixa 2 cheia = 4, faixa 3 cheia = 6, etc.).
-- **Faixa decidida em margem fina, com hesitação remanescente:** valor
-  mais baixo do intervalo (faixa 2 por margem = 3, faixa 3 por margem
-  = 5, etc.).
+Como decidir o valor dentro da faixa, depois de já ter escolhido a faixa:
+
+- **Faixa decidida em margem fina, com hesitação remanescente em relação à faixa abaixo:** valor mais baixo do intervalo (Faixa 2 por margem = 3, Faixa 3 por margem = 5, Faixa 5 por margem = 9).
+- **Faixa consolidada, sem hesitação:** valor médio do intervalo, que costuma ser o ponto de equilíbrio (Faixa 2 cheia = 4, Faixa 3 cheia = 6, Faixa 5 cheia = 10).
+- **Faixa 3 alta — boa condução de alto nível que encostou na Faixa 4 sem fechar:** nota 7. Use quando o aluno demonstrou trabalho clínico claramente acima da Faixa 3 média, chegando perto do que o gabarito pedia, mas sem ter cumprido o gabarito por completo. A Faixa 4 é binária (ou cumpriu o gabarito ou não); a nota 7 é o reconhecimento de boa condução que roçou o gabarito sem o realizar.
+- **Faixa 4 — valor único (8).** A Faixa 4 não tem gradação interna porque "atingiu o gabarito" é categoria binária. Se houve algo a mais que tornou o desempenho excepcional, a faixa é 5. Se ficou abaixo do gabarito, mesmo que por margem, a faixa é 3 (com nota 7 se foi encosto fino).
 
 A pontuação fina opera *depois* da escolha de faixa, não antes. A
 ordem é: primeiro decide a faixa (usando as perguntas operacionais);
@@ -314,7 +316,7 @@ critério.
 
 Exemplo 1: Critério 2 tem 4 componentes. Se ficaram em faixa 4, 3,
 2, 4, a média é (4+3+2+4)/4 = 3,25 — arredonda para faixa 3. O
-critério recebe nota da faixa 3 (5 ou 6, conforme a regra de pontuação
+critério recebe nota da faixa 3 (5, 6 ou 7, conforme a regra de pontuação
 fina).
 
 **Componentes opcionais são excluídos da média quando não pesam, não
@@ -1344,9 +1346,9 @@ a saudação curta. A nota aparece seca, sem justificativa nem explicação
 A nota final é computada a partir da soma das notas dos seis critérios.
 Cada critério contribui com o seguinte:
 
-- Critérios 1 a 5: 0 a 10 pontos cada (escala de 5 faixas, com cada
-  faixa correspondendo a um intervalo de 2 pontos — ver [SISTEMA DE
-  PONTUAÇÃO])
+- Critérios 1 a 5: 0 a 10 pontos cada (escala de 5 faixas — ver
+  [SISTEMA DE PONTUAÇÃO] para a regra de pontuação fina dentro de
+  cada faixa)
 - Critério 6: 2 a 10 pontos (soma das duas escalas paralelas; cada
   escala contribui com 1 a 5)
 
