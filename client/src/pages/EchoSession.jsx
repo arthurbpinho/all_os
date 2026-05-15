@@ -17,6 +17,10 @@ const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos pa
 // independente do tempo real de resposta da IA.
 const SKIP_MIN_DELAY_MS = 2200;
 
+// Limite de sessões por atendimento durante o período de teste do app.
+// Aplica-se apenas à Simulação (freeplay); Neuro segue sem cap.
+const MAX_FREEPLAY_SESSIONS = 6;
+
 export default function EchoSession({ user, sessionType }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -42,6 +46,7 @@ export default function EchoSession({ user, sessionType }) {
   const [sessionNumber, setSessionNumber] = useState(1);
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  const [showSessionLimit, setShowSessionLimit] = useState(false);
 
   // Pós-sessão: salvamento do log + avaliação IA (avaliador v9 global).
   const [savingLog, setSavingLog] = useState(false);
@@ -258,6 +263,10 @@ export default function EchoSession({ user, sessionType }) {
 
   function handleSkipSession() {
     if (!sessionStarted || sessionEnded || isTyping || skipping) return;
+    if (sessionType === 'freeplay' && sessionNumber >= MAX_FREEPLAY_SESSIONS) {
+      setShowSessionLimit(true);
+      return;
+    }
     setConfirmingSkip(true);
   }
 
@@ -625,15 +634,16 @@ export default function EchoSession({ user, sessionType }) {
           {sessionStarted && (
             <>
               <button
-                className="btn btn-outline btn-sm"
+                className="btn btn-sm"
                 onClick={handleSkipSession}
                 disabled={isTyping || skipping}
                 title="Avançar para a próxima sessão (time skip)"
+                style={{ background: 'var(--success)', color: '#fff', borderColor: 'var(--success)' }}
               >
                 Próxima sessão →
               </button>
               <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
-                Finalizar
+                Enviar para correção
               </button>
             </>
           )}
@@ -786,17 +796,17 @@ export default function EchoSession({ user, sessionType }) {
         const empty = visibleCount === 0;
         return (
           <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingFinalize(false); }}>
-            <div className="modal" style={{ maxWidth: 460 }}>
-              <h3>{empty ? 'Sessão vazia' : 'Finalizar atendimento'}</h3>
-              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18 }}>
+            <div className="modal" style={{ maxWidth: 500 }}>
+              <h3>{empty ? 'Sessão vazia' : 'Enviar para correção'}</h3>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
                 {empty
-                  ? 'A sessão não tem mensagens ainda. Deseja finalizar mesmo assim?'
-                  : 'Você quer finalizar a sessão agora? O log será salvo no seu histórico e enviado ao seu professor vinculado.'}
+                  ? 'A sessão não tem mensagens ainda. Deseja enviar para correção mesmo assim?'
+                  : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.'}
               </p>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setConfirmingFinalize(false)}>Cancelar</button>
                 <button type="button" className="btn btn-primary" onClick={doFinalize}>
-                  {empty ? 'Finalizar mesmo assim' : 'Finalizar sessão'}
+                  {empty ? 'Enviar mesmo assim' : 'Enviar para correção'}
                 </button>
               </div>
             </div>
@@ -816,6 +826,23 @@ export default function EchoSession({ user, sessionType }) {
               <button type="button" className="btn btn-outline" onClick={() => setConfirmingSkip(false)}>Cancelar</button>
               <button type="button" className="btn btn-primary" onClick={doSkipSession}>
                 Passar para a próxima sessão
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de limite de sessões (período de teste) */}
+      {showSessionLimit && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowSessionLimit(false); }}>
+          <div className="modal" style={{ maxWidth: 480 }}>
+            <h3>Limite de sessões atingido</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
+              No momento, como estamos em período de teste do aplicativo, você só tem direito a fazer 6 sessões. Por favor faça o encerramento em no máximo 3 mensagens e envie o caso para correção.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-primary" onClick={() => setShowSessionLimit(false)}>
+                Entendi
               </button>
             </div>
           </div>

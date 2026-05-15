@@ -248,7 +248,7 @@ export default function App() {
               <div className="nav-section">Histórico</div>
               {(isTherapist || isVisitor) && (
                 <Link to="/logs" className={isActive('/logs') ? 'active' : ''}>
-                  {ICONS.log}<span>Meus Logs</span>
+                  {ICONS.log}<span>Minhas Sessões</span>
                 </Link>
               )}
               {isSupervisor && (

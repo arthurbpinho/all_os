@@ -220,6 +220,278 @@ function TherapistGroup({ therapistName, logs }) {
   );
 }
 
+// Visão do aluno: navegação em 3 níveis — Pacientes → Datas → Log/Avaliação.
+// Antes era lista flat de cards onde a avaliação ficava invisível (LogCard
+// dependia de evaluationStartIdx, que o novo fluxo de salvamento não popula).
+function StudentSessionsView({ logs }) {
+  const [selectedPatientKey, setSelectedPatientKey] = useState(null);
+  const [selectedLogId, setSelectedLogId] = useState(null);
+  const [tab, setTab] = useState('log');
+
+  // Agrupa logs por paciente (itemId é a chave estável; itemTitle é o nome).
+  const patients = useMemo(() => {
+    const map = new Map();
+    for (const log of logs) {
+      const key = log.itemId || log.itemTitle || '__sem-paciente';
+      if (!map.has(key)) {
+        map.set(key, { key, name: log.itemTitle || 'Sem nome', type: log.type, logs: [] });
+      }
+      map.get(key).logs.push(log);
+    }
+    const arr = Array.from(map.values()).map((p) => {
+      const sortedLogs = p.logs.slice().sort(
+        (a, b) => new Date(b.timestamp || b.createdAt || 0) - new Date(a.timestamp || a.createdAt || 0)
+      );
+      const lastTs = new Date(sortedLogs[0]?.timestamp || sortedLogs[0]?.createdAt || 0).getTime();
+      return { ...p, logs: sortedLogs, lastTs };
+    });
+    arr.sort((a, b) => b.lastTs - a.lastTs);
+    return arr;
+  }, [logs]);
+
+  const selectedPatient = patients.find((p) => p.key === selectedPatientKey) || null;
+  const selectedLog = selectedPatient?.logs.find((l) => l.id === selectedLogId) || null;
+
+  // Nível 3: log ou avaliação
+  if (selectedLog) {
+    return (
+      <SessionDetail
+        patient={selectedPatient}
+        log={selectedLog}
+        tab={tab}
+        onTab={setTab}
+        onBack={() => { setSelectedLogId(null); setTab('log'); }}
+      />
+    );
+  }
+
+  // Nível 2: datas do paciente
+  if (selectedPatient) {
+    return (
+      <PatientSessionList
+        patient={selectedPatient}
+        onSelect={(logId) => { setSelectedLogId(logId); setTab('log'); }}
+        onBack={() => setSelectedPatientKey(null)}
+      />
+    );
+  }
+
+  // Nível 1: lista de pacientes
+  if (patients.length === 0) {
+    return (
+      <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
+        Você ainda não atendeu nenhum paciente.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16, letterSpacing: '0.05em' }}>
+        {patients.length} {patients.length === 1 ? 'paciente atendido' : 'pacientes atendidos'}
+      </p>
+      <div className="card-grid">
+        {patients.map((p) => {
+          const sessoes = p.logs.length;
+          return (
+            <div
+              key={p.key}
+              className="character-card"
+              onClick={() => setSelectedPatientKey(p.key)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedPatientKey(p.key); }}
+              style={{ cursor: 'pointer' }}
+            >
+              <div className="character-card-header">
+                <h3>{p.name}</h3>
+                <span className="tag">{TYPE_LABELS[p.type] || p.type || '—'}</span>
+              </div>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 6 }}>
+                {sessoes} {sessoes === 1 ? 'sessão' : 'sessões'}
+                {p.lastTs ? ` · última em ${formatDate(new Date(p.lastTs).toISOString())}` : ''}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BackButton({ children, onClick }) {
+  return (
+    <button
+      type="button"
+      className="btn btn-ghost btn-sm"
+      onClick={onClick}
+      style={{ marginBottom: 14, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polyline points="15 18 9 12 15 6" />
+      </svg>
+      {children}
+    </button>
+  );
+}
+
+function PatientSessionList({ patient, onSelect, onBack }) {
+  return (
+    <div>
+      <BackButton onClick={onBack}>Voltar para pacientes</BackButton>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.15em', textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 4 }}>
+          {TYPE_LABELS[patient.type] || patient.type || 'Sessão'}
+        </div>
+        <h3 style={{ margin: 0, fontSize: 22 }}>{patient.name}</h3>
+        <p style={{ color: 'var(--ink-soft)', fontSize: 13, marginTop: 6 }}>
+          {patient.logs.length} {patient.logs.length === 1 ? 'sessão registrada' : 'sessões registradas'}. Escolha uma data para ver o log ou a avaliação.
+        </p>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {patient.logs.map((log) => {
+          const dur = log.durationSeconds || 0;
+          const mins = Math.floor(dur / 60).toString().padStart(2, '0');
+          const secs = (dur % 60).toString().padStart(2, '0');
+          return (
+            <div
+              key={log.id}
+              className="card tight"
+              onClick={() => onSelect(log.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelect(log.id); }}
+              style={{
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '14px 18px',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>
+                  {formatDate(log.timestamp || log.createdAt)}
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
+                  {dur > 0 ? `Duração ${mins}:${secs}` : 'sem duração registrada'}
+                  {' · '}
+                  {(log.messages || []).filter((m) => !m.isSystem).length} mensagens
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <ScoreBadge score={log.score} />
+                <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+                  abrir →
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SessionDetail({ patient, log, tab, onTab, onBack }) {
+  const messages = Array.isArray(log.messages) ? log.messages.filter((m) => !m.isSystem) : [];
+  const evaluation = (log.evaluation || '').trim();
+
+  return (
+    <div>
+      <BackButton onClick={onBack}>Voltar para sessões de {patient?.name || 'paciente'}</BackButton>
+
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11, letterSpacing: '0.15em', textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 4 }}>
+          {patient?.name || log.itemTitle}
+        </div>
+        <h3 style={{ margin: 0, fontSize: 22 }}>
+          Sessão de {formatDate(log.timestamp || log.createdAt)}
+        </h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>
+          <span>{TYPE_LABELS[log.type] || log.type}</span>
+          <ScoreBadge score={log.score} />
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => downloadLogAsText(log)}
+            title="Baixar log desta sessão como .txt"
+            style={{ marginLeft: 'auto' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+            Baixar
+          </button>
+        </div>
+      </div>
+
+      <div className="card tight" style={{ marginBottom: 16, padding: '10px 14px' }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ color: 'var(--muted)', fontSize: 13, marginRight: 4 }}>Visualizar</span>
+          <button
+            type="button"
+            className={`btn ${tab === 'log' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => onTab('log')}
+            style={{ padding: '6px 14px', fontSize: 13 }}
+          >
+            Log da sessão
+          </button>
+          <button
+            type="button"
+            className={`btn ${tab === 'evaluation' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => onTab('evaluation')}
+            style={{ padding: '6px 14px', fontSize: 13 }}
+            disabled={!evaluation}
+            title={evaluation ? 'Ver a avaliação da IA desta sessão' : 'Esta sessão não tem avaliação registrada'}
+          >
+            Avaliação {evaluation ? '' : '(sem registro)'}
+          </button>
+        </div>
+      </div>
+
+      {tab === 'log' && (
+        <div className="card tight">
+          {messages.length === 0 ? (
+            <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
+              Nenhuma mensagem registrada nesta sessão.
+            </p>
+          ) : (
+            messages.map((msg, i) => {
+              const isUser = msg.role === 'user';
+              return (
+                <div key={i} className={`msg ${isUser ? 'user' : 'assistant'}`}>
+                  <strong>{isUser ? 'Terapeuta' : 'Paciente'}{msg.highlighted ? ' ★' : ''}</strong>
+                  {msg.content}
+                  {msg.highlighted && msg.comment && (
+                    <div className="log-comment" style={{ marginTop: 6, fontStyle: 'italic' }}>
+                      {`{${msg.comment}}`}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {tab === 'evaluation' && (
+        <div className="card tight">
+          {evaluation ? (
+            <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
+              {evaluation}
+            </div>
+          ) : (
+            <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
+              Esta sessão não tem avaliação registrada.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Logs({ user, userId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -260,10 +532,10 @@ export default function Logs({ user, userId }) {
     return groups;
   }, [logs, isSupervisorView]);
 
-  const title = isSupervisorView ? 'Logs de Supervisão' : 'Meus Logs';
+  const title = isSupervisorView ? 'Logs de Supervisão' : 'Minhas Sessões';
   const subtitle = isSupervisorView
     ? 'Histórico das sessões dos seus terapeutas, agrupado por nome. Baixe o log individual ou todos de uma vez.'
-    : 'Histórico das suas sessões de simulação e avaliações.';
+    : 'Pacientes que você atendeu. Clique em um para ver as datas e abrir o log ou a avaliação de cada sessão.';
 
   return (
     <div>
@@ -278,30 +550,25 @@ export default function Logs({ user, userId }) {
 
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>
-          <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando logs…</span>
-        </div>
-      ) : logs.length === 0 ? (
-        <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
-          {isSupervisorView ? 'Nenhuma sessão registrada na plataforma ainda.' : 'Você ainda não realizou nenhuma sessão.'}
+          <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando sessões…</span>
         </div>
       ) : isSupervisorView ? (
-        <div>
-          <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16, letterSpacing: '0.05em' }}>
-            {grouped.length} {grouped.length === 1 ? 'terapeuta' : 'terapeutas'} · {logs.length} {logs.length === 1 ? 'caso' : 'casos'} no total
-          </p>
-          {grouped.map((g, i) => (
-            <TherapistGroup key={i} therapistName={g.name} logs={g.logs} />
-          ))}
-        </div>
+        logs.length === 0 ? (
+          <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
+            Nenhuma sessão registrada na plataforma ainda.
+          </div>
+        ) : (
+          <div>
+            <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16, letterSpacing: '0.05em' }}>
+              {grouped.length} {grouped.length === 1 ? 'terapeuta' : 'terapeutas'} · {logs.length} {logs.length === 1 ? 'caso' : 'casos'} no total
+            </p>
+            {grouped.map((g, i) => (
+              <TherapistGroup key={i} therapistName={g.name} logs={g.logs} />
+            ))}
+          </div>
+        )
       ) : (
-        <div>
-          <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16, letterSpacing: '0.05em' }}>
-            {logs.length} {logs.length === 1 ? 'sessão registrada' : 'sessões registradas'}
-          </p>
-          {logs.slice().reverse().map((log, i) => (
-            <LogCard key={log.id || i} log={log} />
-          ))}
-        </div>
+        <StudentSessionsView logs={logs} />
       )}
     </div>
   );

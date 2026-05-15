@@ -6,19 +6,31 @@ import ScoreBadge from '../components/ScoreBadge';
 
 export default function FreePlay({ user }) {
   const [characters, setCharacters] = useState([]);
-  const [progress, setProgress] = useState({});
+  const [bestScores, setBestScores] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
+    // Logs do próprio usuário pra calcular a melhor nota por personagem.
+    // EchoSession (freeplay) não grava em progress.json — só em logs.json —
+    // então a fonte de verdade pra "melhor nota com esse paciente" é o log.
     Promise.all([
       api.getFreeplay(),
-      user?.id ? api.getProgress(user.id) : Promise.resolve({}),
+      user?.id ? api.getLogs(user.id) : Promise.resolve([]),
     ])
-      .then(([chars, prog]) => {
+      .then(([chars, logs]) => {
         setCharacters(chars || []);
-        setProgress(prog || {});
+        const max = {};
+        for (const l of logs || []) {
+          if (l.type !== 'freeplay') continue;
+          if (!Number.isFinite(l.score)) continue;
+          if (!l.itemId) continue;
+          if (max[l.itemId] === undefined || l.score > max[l.itemId]) {
+            max[l.itemId] = l.score;
+          }
+        }
+        setBestScores(max);
       })
       .catch((err) => setError(err.message || 'Erro ao carregar personagens'))
       .finally(() => setLoading(false));
@@ -49,8 +61,7 @@ export default function FreePlay({ user }) {
       ) : (
         <div className="card-grid">
           {characters.map((char) => {
-            const charProgress = progress[char.id];
-            const charScore = charProgress?.score;
+            const charBest = bestScores[char.id];
             return (
               <div
                 key={char.id}
@@ -59,8 +70,10 @@ export default function FreePlay({ user }) {
               >
                 <div className="character-card-header">
                   <h3>{char.name}</h3>
-                  {charScore !== undefined && charScore !== null && (
-                    <ScoreBadge score={charScore} />
+                  {Number.isFinite(charBest) && (
+                    <span title="Sua maior nota com este paciente">
+                      <ScoreBadge score={charBest} />
+                    </span>
                   )}
                 </div>
                 <div className="age">{char.age} anos</div>
