@@ -138,6 +138,9 @@ export const api = {
   // Indicadores (constância, objetivos diários, metas)
   getGamification: (userId) => request(`/gamification/${userId}`),
 
+  // Ranking global de jogadores (não disponível pra visitante)
+  getRanking: () => request('/ranking'),
+
   // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
   listActiveSessions: () => request('/active-sessions'),
   getActiveSession: (type, itemId) => request(`/active-sessions/${type}/${encodeURIComponent(itemId)}`),

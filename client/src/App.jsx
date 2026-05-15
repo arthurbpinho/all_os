@@ -14,6 +14,7 @@ import AdminEntrevistador from './pages/AdminEntrevistador';
 import Avaliacao from './pages/Avaliacao'
 import Profile from './pages/Profile';
 import Missoes from './pages/Missoes';
+import Ranking from './pages/Ranking';
 import AdminUsers from './pages/AdminUsers';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 
@@ -258,6 +259,15 @@ export default function App() {
             </>
           )}
 
+          {!isVisitor && (
+            <>
+              <div className="nav-section">Comunidade</div>
+              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''}>
+                {ICONS.supervisor}<span>Ranking</span>
+              </Link>
+            </>
+          )}
+
           {(isSupervisor || isAdmin) && (
             <>
               <div className="nav-section">Avaliação</div>
@@ -340,6 +350,7 @@ export default function App() {
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />
+          <Route path="/ranking" element={<Ranking user={user} />} />
           <Route path="/admin/users" element={<AdminUsers user={user} />} />
           <Route path="/admin/exercises" element={<AdminExercises />} />
           <Route path="/admin/freeplay" element={<AdminFreeplay />} />
