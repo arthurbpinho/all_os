@@ -178,7 +178,7 @@ function writeJSON(file, data) {
 const DEFAULT_PROFILE = {
   gender: '',
   email: '',
-  profilePhoto: '',
+  profilePhoto: '/profiles_icon/isaacdeterno.jpeg',
   updateAllOS: false,
   updateAllos: false,
 };
@@ -504,7 +504,7 @@ app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res)
     ...DEFAULT_PROFILE,
     gender: req.body.gender || '',
     email: req.body.email || '',
-    profilePhoto: req.body.profilePhoto || '',
+    profilePhoto: req.body.profilePhoto || DEFAULT_PROFILE.profilePhoto,
   };
   users.push(newUser);
   writeJSON('users.json', users);
@@ -721,8 +721,8 @@ function computeDailyMissions(userLogs) {
   return [
     { id: 'daily_1exercise', icon: '◯', title: 'Sessão diária',     description: 'Conclua 1 exercício hoje (qualquer tipo)',                       target: 1, progress: Math.min(totalToday, 1), completed: totalToday >= 1 },
     { id: 'daily_2trilha',   icon: '◎', title: 'Foco na trilha',    description: 'Conclua 2 exercícios da trilha hoje',                            target: 2, progress: Math.min(exerciseToday, 2), completed: exerciseToday >= 2 },
-    { id: 'daily_efficiency',icon: '↗', title: 'Eficiência clínica',description: 'Conclua uma Simulação em até 10 min com pontuação ≥ 8',         target: 1, progress: fastGood ? 1 : 0, completed: fastGood },
-    { id: 'daily_neuro',     icon: '◈', title: 'Discernimento',     description: 'Conclua uma Neuroavaliação hoje',                                target: 1, progress: neuroDone ? 1 : 0, completed: neuroDone },
+    { id: 'daily_efficiency',icon: '↗', title: 'Aclamação',         description: 'Conclua uma Simulação em até 10 min com pontuação ≥ 8',         target: 1, progress: fastGood ? 1 : 0, completed: fastGood },
+    { id: 'daily_neuro',     icon: '◈', title: 'Construir Sinapses',description: 'Conclua uma Neuroavaliação hoje',                                target: 1, progress: neuroDone ? 1 : 0, completed: neuroDone },
   ];
 }
 
@@ -1105,6 +1105,64 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   logs.push(log);
   writeJSON('logs.json', logs);
   res.json(log);
+});
+
+// --- Ranking global de jogadores ---
+// Fórmula: para cada personagem que o usuário jogou pelo menos uma vez em
+// freeplay (Simulação), pega a MAIOR nota dele com aquele personagem; soma
+// essas maiores notas e divide pelo número de personagens distintos jogados.
+// Resultado: penaliza farming (repetir o mesmo personagem não infla nota),
+// não penaliza variedade (jogou 1 personagem com 10 = global 10).
+//
+// "totalSessions" conta apenas freeplay com score numérico válido — é o que
+// faz sentido pra ordenação "mais sessões realizadas" no contexto do ranking.
+//
+// Visitante não acessa; logs órfãos de visitantes ficam fora porque nunca
+// casam com nenhum usuário em users.json. Usuários sem nenhuma sessão freeplay
+// pontuada também ficam fora — ninguém aparece zerado.
+app.get('/api/ranking', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não tem acesso ao ranking.' });
+  }
+  const users = readJSON('users.json');
+  const logs = readJSON('logs.json');
+
+  const logsByUser = new Map();
+  for (const l of logs) {
+    if (l.type !== 'freeplay') continue;
+    if (!Number.isFinite(l.score)) continue;
+    if (!l.itemId) continue;
+    if (!logsByUser.has(l.userId)) logsByUser.set(l.userId, []);
+    logsByUser.get(l.userId).push(l);
+  }
+
+  const ranking = users
+    .filter((u) => u.role !== 'visitor')
+    .map((u) => {
+      const userLogs = logsByUser.get(u.id) || [];
+      const maxByChar = new Map();
+      for (const l of userLogs) {
+        const prev = maxByChar.get(l.itemId);
+        if (prev === undefined || l.score > prev) maxByChar.set(l.itemId, l.score);
+      }
+      const charactersPlayed = maxByChar.size;
+      const sumOfMax = Array.from(maxByChar.values()).reduce((a, b) => a + b, 0);
+      const globalScore = charactersPlayed > 0
+        ? Math.round((sumOfMax / charactersPlayed) * 10) / 10
+        : null;
+      return {
+        userId: u.id,
+        name: u.name || u.username,
+        profilePhoto: u.profilePhoto || '',
+        role: u.role,
+        globalScore,
+        charactersPlayed,
+        totalSessions: userLogs.length,
+      };
+    })
+    .filter((r) => r.totalSessions > 0);
+
+  res.json(ranking);
 });
 
 // DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
@@ -1515,7 +1573,12 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         { role: 'system', content: resolved.systemPrompt },
         ...finalMessages,
       ],
-      max_completion_tokens: 5000,
+      // Reasoning model (gpt-5.X) — o teto inclui reasoning_tokens ocultos +
+      // texto visível. Avaliador v9 (system ~23k tokens) sobre transcrição
+      // longa pode gastar 4–8k em raciocínio antes de começar a escrever os
+      // 6 critérios. 5000 estourava e voltava content vazio. 32000 dá folga
+      // sem custo perceptível (cobramos só pelos tokens efetivamente usados).
+      max_completion_tokens: 32000,
     });
     res.json(completion.choices[0].message);
   } catch (err) {
