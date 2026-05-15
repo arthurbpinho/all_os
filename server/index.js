@@ -235,6 +235,30 @@ if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
   }
 })();
 
+// Migração one-shot: padroniza profilePhoto em isaacdeterno.jpeg pra TODOS os
+// usuários já cadastrados (inclusive os que tinham outra foto, por decisão do
+// admin em 2026-05-15). Roda uma única vez — marker em migrations.json garante
+// idempotência mesmo após redeploys. Visitantes são efêmeros (não vivem em
+// users.json), então não precisam de tratamento. Após esta migração, qualquer
+// usuário pode trocar a foto normalmente em /profile e a mudança persiste.
+(function migrateDefaultProfilePhoto() {
+  const migrations = readJSON('migrations.json', {});
+  if (migrations.isaac_default_photo) return;
+  const users = readJSON('users.json');
+  const target = '/profiles_icon/isaacdeterno.jpeg';
+  let changed = 0;
+  for (const u of users) {
+    if (u.profilePhoto !== target) {
+      u.profilePhoto = target;
+      changed++;
+    }
+  }
+  if (changed > 0) writeJSON('users.json', users);
+  migrations.isaac_default_photo = new Date().toISOString();
+  writeJSON('migrations.json', migrations);
+  console.log(`[migration] profilePhoto padronizado em ${changed} usuário(s).`);
+})();
+
 if (!fs.existsSync(path.join(DATA_DIR, 'exercises.json'))) {
   // Inicia sem exercícios — o admin cadastra via interface.
   writeJSON('exercises.json', []);
