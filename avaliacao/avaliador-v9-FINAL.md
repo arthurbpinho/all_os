@@ -1341,7 +1341,7 @@ Onde X é um número inteiro de 0 a 100. Após uma linha em branco, segue
 a saudação curta. A nota aparece seca, sem justificativa nem explicação
 — o texto longo abaixo é a justificativa.
 
-#### Cálculo da nota — tabela de conversão direta
+#### Cálculo da nota — fórmula direta
 
 A nota final é computada a partir da soma das notas dos seis critérios.
 Cada critério contribui com o seguinte:
@@ -1352,28 +1352,24 @@ Cada critério contribui com o seguinte:
 - Critério 6: 2 a 10 pontos (soma das duas escalas paralelas; cada
   escala contribui com 1 a 5)
 
-A soma total tem range 7 a 60. A nota final é essa soma convertida
-para escala 0-100. **Use a tabela abaixo, não calcule manualmente.**
+A soma total tem range 7 a 60 e é convertida para escala 0-100 pela
+fórmula:
 
-| Soma | Nota | Soma | Nota | Soma | Nota | Soma | Nota |
-|------|------|------|------|------|------|------|------|
-| 7    | 12   | 21   | 35   | 35   | 58   | 49   | 82   |
-| 8    | 13   | 22   | 37   | 36   | 60   | 50   | 83   |
-| 9    | 15   | 23   | 38   | 37   | 62   | 51   | 85   |
-| 10   | 17   | 24   | 40   | 38   | 63   | 52   | 87   |
-| 11   | 18   | 25   | 42   | 39   | 65   | 53   | 88   |
-| 12   | 20   | 26   | 43   | 40   | 67   | 54   | 90   |
-| 13   | 22   | 27   | 45   | 41   | 68   | 55   | 92   |
-| 14   | 23   | 28   | 47   | 42   | 70   | 56   | 93   |
-| 15   | 25   | 29   | 48   | 43   | 72   | 57   | 95   |
-| 16   | 27   | 30   | 50   | 44   | 73   | 58   | 97   |
-| 17   | 28   | 31   | 52   | 45   | 75   | 59   | 98   |
-| 18   | 30   | 32   | 53   | 46   | 77   | 60   | 100  |
-| 19   | 32   | 33   | 55   | 47   | 78   |      |      |
-| 20   | 33   | 34   | 57   | 48   | 80   |      |      |
+> **nota = arredondar( soma × 100 ÷ 60 )**
 
-Procure a soma na tabela e use o valor correspondente diretamente.
-Não calcule a divisão você mesmo — isso evita erros aritméticos.
+Equivalente a `soma ÷ 60 × 100`, arredondado ao inteiro mais próximo
+(0,5 arredonda pra cima). Faça a conta diretamente — não há tabela
+a consultar.
+
+Exemplos de checagem:
+- soma 7  → 7 × 100 ÷ 60 = 11,67 → **12**
+- soma 30 → 30 × 100 ÷ 60 = 50,00 → **50**
+- soma 45 → 45 × 100 ÷ 60 = 75,00 → **75**
+- soma 60 → 60 × 100 ÷ 60 = 100  → **100**
+
+Confira a aritmética antes de emitir a nota. Se a soma dos seis
+critérios não cair entre 7 e 60, há erro de soma — recomece a conta
+antes de aplicar a fórmula.
 
 ### 2. Saudação curta — texto fixo
 
