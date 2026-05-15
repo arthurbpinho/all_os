@@ -264,13 +264,22 @@ export default function ChatSession({ user }) {
       const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
       evalContent = typeof reply === 'string' ? reply : reply.content || '';
 
-      // Tenta primeiro [CRITERIOS:...] (Allos format), depois [NOTA:X] (genérico)
+      // Ordem de parsing:
+      //  1. [CRITERIOS:...] — formato Allos legado (10 critérios), ainda usado
+      //     se algum exercício antigo tiver evaluatorPrompt customizado pedindo isso.
+      //  2. **Nota: X/100** — formato do avaliador v9 (saída padrão atual).
+      //  3. [NOTA:X] — wrapper genérico para evaluatorPrompt customizado.
       parsedCriteria = parseCriteriaScores(evalContent);
       if (parsedCriteria) {
         totalScore = calculateScores(parsedCriteria).totalScore;
       } else {
-        const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
-        if (m) totalScore = Number(m[1].replace(',', '.'));
+        const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
+        if (v9) {
+          totalScore = Number(v9[1]);
+        } else {
+          const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
+          if (m) totalScore = Number(m[1].replace(',', '.'));
+        }
       }
       if (totalScore !== null && Number.isFinite(totalScore)) {
         totalScore = Math.round(totalScore);
@@ -465,16 +474,13 @@ export default function ChatSession({ user }) {
                 {evaluationText
                   .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
                   .replace(/\[NOTA:[^\]]+\]\s*/g, '')
+                  .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
                   .trim()}
               </div>
             </div>
           )}
 
           <div className="post-session-actions">
-            <button className="btn btn-outline" onClick={downloadLog}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Baixar log
-            </button>
             <button className="btn btn-primary" onClick={() => navigate('/skills')}>
               Voltar ao mapa
             </button>
