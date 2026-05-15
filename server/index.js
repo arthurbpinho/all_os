@@ -1191,10 +1191,11 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 
 // --- OpenAI Chat Proxy (modelo padrão do projeto) ---
 // CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Modelo "mini".
-// HEAVY_MODEL: avaliador (v9) e entrevistador. Tarefas que exigem o modelo
-// completo — análise clínica densa e geração de prompts de pacientes.
+// HEAVY_MODEL: entrevistador (geração de prompts de pacientes).
+// EVAL_MODEL: avaliador (v9). Modelo dedicado pra análise clínica densa.
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5.4-mini';
 const HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
+const EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -1509,7 +1510,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     const { default: OpenAI } = require('openai');
     const openai = new OpenAI({ apiKey });
     const completion = await openai.chat.completions.create({
-      model: HEAVY_MODEL,
+      model: EVAL_MODEL,
       messages: [
         { role: 'system', content: resolved.systemPrompt },
         ...finalMessages,
