@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import { extractBloco1 } from '../utils/bloco1';
 
 const EMPTY_FORM = { name: '', age: '', description: '', diagnosis: '', assistantId: '', specificInstruction: '', evaluationCriteria: '' };
 
@@ -44,6 +45,19 @@ export default function AdminNeuro() {
   function handleChange(e) {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+  }
+
+  function generateBloco1() {
+    const extracted = extractBloco1(form.specificInstruction);
+    if (!extracted) {
+      setFormError('Não encontrei "## [II. IDENTIDADE]" no prompt do personagem. O Bloco 1 só pode ser gerado a partir de um prompt com a estrutura padrão (seções II a V).');
+      return;
+    }
+    if (form.evaluationCriteria.trim() && !window.confirm('O critério de correção atual será substituído pelo Bloco 1 extraído do prompt. Continuar?')) {
+      return;
+    }
+    setFormError('');
+    setForm((prev) => ({ ...prev, evaluationCriteria: extracted }));
   }
 
   async function handleSubmit(e) {
@@ -157,10 +171,23 @@ export default function AdminNeuro() {
                 <textarea id="specificInstruction" name="specificInstruction" value={form.specificInstruction} onChange={handleChange} placeholder="Manifestações clínicas, comportamento, pistas a oferecer e o que esconder… (usado quando não há Assistant ID)" style={{ minHeight: 200 }} />
               </div>
               <div>
-                <label htmlFor="evaluationCriteria">Critério de correção <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(gabarito do avaliador)</em></label>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, marginBottom: 4 }}>
+                  <label htmlFor="evaluationCriteria" style={{ marginBottom: 0 }}>
+                    Critério de correção <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(gabarito do avaliador)</em>
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={generateBloco1}
+                    disabled={!form.specificInstruction.trim()}
+                    title="Copia as seções II a V do prompt do personagem para este campo"
+                  >
+                    Gerar Bloco 1
+                  </button>
+                </div>
                 <textarea id="evaluationCriteria" name="evaluationCriteria" value={form.evaluationCriteria} onChange={handleChange} placeholder="Diagnóstico correto, sintomas-chave que o aluno deve identificar, hipóteses diferenciais aceitáveis, condutas esperadas, red flags… (não aparece para o aluno; vai apenas para o avaliador junto com o log)" style={{ minHeight: 180 }} />
                 <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>
-                  Texto descritivo (não imperativo). Será enviado ao avaliador como referência para julgar o desempenho do aluno na sessão.
+                  Texto descritivo (não imperativo). Enviado ao avaliador como Bloco 1 do caso, junto com o log da sessão. <strong>Gerar Bloco 1</strong> extrai automaticamente as seções II a V do prompt acima.
                 </small>
               </div>
               {formError && <div className="alert error">{formError}</div>}

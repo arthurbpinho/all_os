@@ -880,12 +880,14 @@ function publicExercise(e) {
   return safe;
 }
 function publicFreeplayChar(c) {
-  const { specificInstruction, ...safe } = c;
+  // evaluationCriteria é o Bloco 1 / gabarito — só vai pro avaliador server-side,
+  // jamais pro cliente não-admin (vazaria a "resposta" do caso).
+  const { specificInstruction, evaluationCriteria, ...safe } = c;
   return safe;
 }
 function publicNeuroChar(c) {
-  // diagnosis é o gabarito do Sistema 3 — NUNCA vai pra cliente não-admin
-  const { specificInstruction, diagnosis, ...safe } = c;
+  // diagnosis e evaluationCriteria são gabaritos — NUNCA vão pra cliente não-admin
+  const { specificInstruction, diagnosis, evaluationCriteria, ...safe } = c;
   return safe;
 }
 
@@ -949,7 +951,7 @@ app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
   res.json(c);
 });
 
-const FREEPLAY_FIELDS = ['name', 'age', 'description', 'assistantId', 'specificInstruction'];
+const FREEPLAY_FIELDS = ['name', 'age', 'description', 'assistantId', 'specificInstruction', 'evaluationCriteria'];
 
 app.put('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('freeplay-characters.json');
@@ -981,7 +983,7 @@ app.post('/api/neuro', requireAuth, requireRole('admin'), (req, res) => {
   res.json(c);
 });
 
-const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction'];
+const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction', 'evaluationCriteria'];
 
 app.put('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
@@ -1188,7 +1190,11 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 });
 
 // --- OpenAI Chat Proxy (modelo padrão do projeto) ---
+// CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Modelo "mini".
+// HEAVY_MODEL: avaliador (v9) e entrevistador. Tarefas que exigem o modelo
+// completo — análise clínica densa e geração de prompts de pacientes.
 const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5.4-mini';
+const HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -1278,8 +1284,11 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     : 1500;
 
   try {
+    // Entrevistador roda no modelo pesado (gera prompts longos e nuançados de
+    // pacientes); personas de simulação ficam no modelo padrão (mais barato).
+    const chosenModel = mode === 'entrevistador' ? HEAVY_MODEL : CHAT_MODEL;
     const completion = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+      model: chosenModel,
       messages: [
         { role: 'system', content: resolved.systemPrompt },
         ...messages,
@@ -1414,11 +1423,11 @@ app.post('/api/assistants/message', requireAuth, aiLimiter, async (req, res) => 
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
 
 function loadAvaliacaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'prompt-avaliacao-simulacao-v8-beta.md');
-  const manualFile = path.join(AVALIACAO_DIR, 'manual-calibracao-avaliacao-v2.md');
-  const prompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf-8') : '';
-  const manual = fs.existsSync(manualFile) ? fs.readFileSync(manualFile, 'utf-8') : '';
-  return prompt + '\n\n---\n\n# DOCUMENTO ANEXO — Manual de Calibração (v2)\n\n' + manual;
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v9-FINAL.md');
+  if (!fs.existsSync(promptFile)) {
+    throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
+  }
+  return fs.readFileSync(promptFile, 'utf-8');
 }
 
 // Resolve o system prompt do avaliador server-side. Se context.type ===
@@ -1435,6 +1444,38 @@ function resolveEvaluatorSystemPrompt({ context }) {
   }
   // freeplay, neuro, avaliação manual (sem context) → avaliador global
   return { systemPrompt: loadAvaliacaoPrompt() };
+}
+
+// Resolve o Bloco 1 (gabarito/critério de correção) do personagem, server-side.
+// O texto fica fora do cliente — o aluno não pode ver a "resposta" do caso.
+// Retorna string vazia quando o caso não tem evaluationCriteria configurado.
+function resolveBloco1({ context }) {
+  if (!context || typeof context !== 'object' || !context.itemId) return '';
+  let char = null;
+  if (context.type === 'freeplay') {
+    char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
+  } else if (context.type === 'neuro') {
+    char = readJSON('neuro-characters.json').find((c) => String(c.id) === String(context.itemId));
+  }
+  const criteria = char && char.evaluationCriteria;
+  return criteria && String(criteria).trim() ? String(criteria).trim() : '';
+}
+
+// Quando há Bloco 1 disponível, prepende ao conteúdo da PRIMEIRA mensagem do
+// usuário no array. Em chats multi-turno (aba Avaliacao), a primeira user
+// message continua sendo a transcrição original — então o gabarito fica sempre
+// no topo do contexto, sem poluir as respostas/perguntas seguintes.
+function withBloco1(messages, bloco1) {
+  if (!bloco1) return messages;
+  const idx = messages.findIndex((m) => m && m.role === 'user');
+  if (idx === -1) return messages;
+  const original = messages[idx];
+  const prefix = `[BLOCO 1 DO CASO] (critério de correção/gabarito)\n${bloco1}\n\n---\n\n`;
+  return [
+    ...messages.slice(0, idx),
+    { ...original, content: prefix + (original.content || '') },
+    ...messages.slice(idx + 1),
+  ];
 }
 
 app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
@@ -1461,14 +1502,17 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const resolved = resolveEvaluatorSystemPrompt({ context });
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
+  const bloco1 = resolveBloco1({ context });
+  const finalMessages = withBloco1(messages, bloco1);
+
   try {
     const { default: OpenAI } = require('openai');
     const openai = new OpenAI({ apiKey });
     const completion = await openai.chat.completions.create({
-      model: 'gpt-5.4-mini',
+      model: HEAVY_MODEL,
       messages: [
         { role: 'system', content: resolved.systemPrompt },
-        ...messages,
+        ...finalMessages,
       ],
       max_completion_tokens: 5000,
     });

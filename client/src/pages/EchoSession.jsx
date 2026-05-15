@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
+import { buildDirectEvaluationPrompt } from '../prompts';
+import ScoreBadge from '../components/ScoreBadge';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -41,9 +43,13 @@ export default function EchoSession({ user, sessionType }) {
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [skipping, setSkipping] = useState(false);
 
-  // Estado de envio do log (avaliador automático foi desativado — em construção).
+  // Pós-sessão: salvamento do log + avaliação IA (avaliador v9 global).
   const [savingLog, setSavingLog] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [evaluating, setEvaluating] = useState(false);
+  const [evalError, setEvalError] = useState('');
+  const [evaluationText, setEvaluationText] = useState('');
+  const [evalScore, setEvalScore] = useState(null);
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -302,7 +308,7 @@ export default function EchoSession({ user, sessionType }) {
       .map((m) => {
         const author = m.role === 'user' ? user.name : item.name;
         const star = m.highlighted ? ' ★' : '';
-        const comment = m.highlighted && m.comment ? `\n   [comentário do terapeuta: ${m.comment}]` : '';
+        const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
         return `[${author}${star}]\n${m.content}${comment}`;
       })
       .join('\n\n---\n\n');
@@ -317,8 +323,8 @@ export default function EchoSession({ user, sessionType }) {
     setConfirmingFinalize(false);
     if (!sessionStarted || sessionEnded) return;
     finishedRef.current = true; // bloqueia autosave/flush a partir daqui
-    const visibleCount = messages.filter((m) => !m.isSystem).length;
-    if (visibleCount === 0) {
+    const visibleMessages = messages.filter((m) => !m.isSystem);
+    if (visibleMessages.length === 0) {
       if (timerRef.current) clearInterval(timerRef.current);
       setSessionEnded(true);
       clearActiveSession(user.id, sessionType, id);
@@ -328,11 +334,56 @@ export default function EchoSession({ user, sessionType }) {
     if (timerRef.current) clearInterval(timerRef.current);
     setSessionEnded(true);
     setSavingLog(true);
+    setEvaluating(true);
     setSaveError('');
+    setEvalError('');
 
-    // Avaliador automático foi desativado para Simulação/Neuro — um novo está em
-    // construção. Por ora, o log é salvo direto no histórico (e visível ao
-    // professor vinculado) e exibido para o aluno na tela pós-sessão.
+    // Monta a transcrição que vai pro avaliador (mesma forma do downloadLog,
+    // pra que o avaliador veja exatamente o que o aluno destacou).
+    const transcriptText = visibleMessages.map((m) => {
+      const author = m.role === 'user' ? user.name : (item?.name || 'Paciente');
+      const star = m.highlighted ? ' ★' : '';
+      const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
+      return `[${author}${star}]\n${m.content}${comment}`;
+    }).join('\n\n---\n\n');
+
+    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+
+    // 1. Roda o avaliador global (v9). FreePlay/Neuro nunca têm evaluatorPrompt
+    //    customizado por personagem, então não passamos `context` — o servidor
+    //    usa o avaliador global.
+    let evalContent = '';
+    let totalScore = null;
+    try {
+      const evalMsg = {
+        role: 'user',
+        content: buildDirectEvaluationPrompt(sessionLabel, item?.name || '—', transcriptText),
+      };
+      // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
+      // antes do log, server-side — sem expor o gabarito ao cliente.
+      const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id });
+      evalContent = typeof reply === 'string' ? reply : reply.content || '';
+      const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
+      if (v9) {
+        totalScore = Number(v9[1]);
+      } else {
+        const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
+        if (m) totalScore = Number(m[1].replace(',', '.'));
+      }
+      if (totalScore !== null && Number.isFinite(totalScore)) {
+        totalScore = Math.round(totalScore);
+      } else {
+        totalScore = null;
+      }
+      setEvaluationText(evalContent);
+      setEvalScore(totalScore);
+    } catch (err) {
+      setEvalError(err.message || 'Erro ao avaliar a sessão.');
+    } finally {
+      setEvaluating(false);
+    }
+
+    // 2. Salva o log no histórico já com score + texto da avaliação.
     try {
       await api.saveLog({
         userId: user.id,
@@ -340,13 +391,15 @@ export default function EchoSession({ user, sessionType }) {
         type: sessionType,
         itemId: id,
         itemTitle: item.name,
-        messages: messages.filter((m) => !m.isSystem).map((m) => ({
+        messages: visibleMessages.map((m) => ({
           role: m.role,
           content: m.content,
           highlighted: m.highlighted || false,
           comment: m.comment || '',
         })),
         durationSeconds: elapsed,
+        score: totalScore,
+        evaluation: evalContent,
       });
     } catch (err) {
       setSaveError(err.message || 'Erro ao salvar o log.');
@@ -422,27 +475,42 @@ export default function EchoSession({ user, sessionType }) {
     );
   }
 
-  function downloadLog() {
-    const lines = messages.map((m) => {
-      const author = m.role === 'user' ? user.name : item.name;
-      const prefix = m.highlighted ? '★ ' : '';
-      const comment = m.highlighted && m.comment ? `\n   ↳ comentário: ${m.comment}` : '';
-      return `[${prefix}${author}]\n${m.content}${comment}`;
-    });
-    const header = `Sessão · ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}\nPersonagem: ${item.name}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n\n---\n\n`;
+  // -------- TELA DE LOADING (avaliando) --------
+  // Mostrada enquanto o avaliador roda. O log não fica visível ao terapeuta
+  // durante esse momento — só a animação e o status.
+  if (sessionEnded && evaluating) {
+    return (
+      <div className="post-session">
+        <div className="page-header">
+          <div className="eyebrow">Sessão concluída</div>
+          <h2>Avaliando sua <span className="accent">sessão</span></h2>
+          <p>A IA está analisando o atendimento com {item?.name}. Pode levar alguns segundos.</p>
+          <div className="ornament" />
+        </div>
 
-    const blob = new Blob([header + lines.join('\n\n---\n\n')], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${sessionType}-${item.name.replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+        <div className="card evaluating-card">
+          <div className="evaluating-orb">
+            <div className="orb-pulse" />
+            <div className="orb-pulse delay-1" />
+            <div className="orb-pulse delay-2" />
+            <div className="orb-core" />
+          </div>
+          <div className="evaluating-status">
+            <div className="evaluating-line"><span className="dot active" /> Construindo transcrição da sessão</div>
+            <div className="evaluating-line"><span className="dot active" /> Aplicando os 6 critérios da Allos</div>
+            <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>
+            <div className="evaluating-line"><span className="dot" /> Calculando a nota final</div>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // -------- TELA PÓS-SESSÃO --------
+  // Terapeuta vê apenas a avaliação — o log completo é destinado ao supervisor
+  // (acessível via /supervisor). Mensagens cruas, destaques e download do log
+  // não aparecem aqui.
   if (sessionEnded) {
-    const highlights = messages.filter((m) => m.highlighted);
     const visibleMessages = messages.filter((m) => !m.isSystem);
 
     // Mensagem de envio: para alunos com professor vinculado, indica destino;
@@ -453,9 +521,9 @@ export default function EchoSession({ user, sessionType }) {
     if (isVisitor) {
       sentMessage = 'Você está em modo visitante — o log desta sessão não foi salvo.';
     } else if (teacherName) {
-      sentMessage = `Seu log de sessão foi enviado para o professor ${teacherName}.`;
+      sentMessage = `O log completo desta sessão foi enviado para o professor ${teacherName}.`;
     } else {
-      sentMessage = 'Seu log de sessão foi salvo no seu histórico.';
+      sentMessage = 'O log completo foi salvo no seu histórico de supervisão.';
     }
 
     return (
@@ -463,18 +531,20 @@ export default function EchoSession({ user, sessionType }) {
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
           <h2>
-            Sua <span className="accent">sessão</span>
+            Avaliação da sua <span className="accent">sessão</span>
           </h2>
           <p>Sessão com <strong>{item?.name}</strong> · duração {formatTime(elapsed)}</p>
           <div className="ornament" />
         </div>
 
         {saveError && <div className="alert error">Falha ao salvar log: {saveError}</div>}
+        {evalError && <div className="alert error">Falha na avaliação: {evalError}</div>}
 
         <div className="card">
           {savingLog ? (
             <div style={{ textAlign: 'center', padding: '20px 0', color: 'var(--ink-soft)' }}>
-              <span className="spinner" /> <span style={{ marginLeft: 12 }}>Salvando log…</span>
+              <span className="spinner" />{' '}
+              <span style={{ marginLeft: 12 }}>Salvando log…</span>
             </div>
           ) : (
             <div className="alert" style={{ marginBottom: 16 }}>
@@ -491,44 +561,28 @@ export default function EchoSession({ user, sessionType }) {
               <span className="post-stat-label">Mensagens</span>
               <span className="post-stat-value">{visibleMessages.length}</span>
             </div>
-            <div>
-              <span className="post-stat-label">Destaques</span>
-              <span className="post-stat-value">{highlights.length}</span>
-            </div>
+            {evalScore !== null && (
+              <div>
+                <span className="post-stat-label">Nota final</span>
+                <ScoreBadge score={evalScore} size="xl" />
+              </div>
+            )}
           </div>
 
-          <div className="post-evaluation">
-            <h4>Log da sessão</h4>
-            <div className="post-evaluation-body" style={{ whiteSpace: 'pre-wrap' }}>
-              {visibleMessages.length === 0
-                ? 'Nenhuma mensagem trocada nesta sessão.'
-                : visibleMessages.map((m, i) => {
-                    const author = m.role === 'user' ? user.name : (item?.name || 'Paciente');
-                    const star = m.highlighted ? ' ★' : '';
-                    const comment = m.highlighted && m.comment ? `\n   ↳ ${m.comment}` : '';
-                    const sep = i < visibleMessages.length - 1 ? '\n\n---\n\n' : '';
-                    return `[${author}${star}]\n${m.content}${comment}${sep}`;
-                  }).join('')}
-            </div>
-          </div>
-
-          {highlights.length > 0 && (
-            <div className="post-highlights">
-              <h4>Trechos destacados pelo terapeuta</h4>
-              {highlights.map((m, i) => (
-                <div key={i} className="post-highlight-item">
-                  <div className="post-highlight-text">{m.content}</div>
-                  {m.comment && <div className="post-highlight-comment">{m.comment}</div>}
-                </div>
-              ))}
+          {evaluationText && (
+            <div className="post-evaluation">
+              <h4>Análise da IA</h4>
+              <div className="post-evaluation-body">
+                {evaluationText
+                  .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
+                  .replace(/\[NOTA:[^\]]+\]\s*/g, '')
+                  .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
+                  .trim()}
+              </div>
             </div>
           )}
 
           <div className="post-session-actions">
-            <button className="btn btn-outline" onClick={downloadLog}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Baixar log
-            </button>
             <button className="btn btn-primary" onClick={() => navigate(sessionType === 'freeplay' ? '/freeplay' : '/neuro')}>
               Voltar à biblioteca
             </button>
@@ -650,7 +704,7 @@ export default function EchoSession({ user, sessionType }) {
                   </div>
                 )}
                 {isUser && msg.highlighted && msg.comment && (
-                  <div className="highlight-comment">↳ {msg.comment}</div>
+                  <div className="highlight-comment">{`{${msg.comment}}`}</div>
                 )}
               </div>
             </div>
