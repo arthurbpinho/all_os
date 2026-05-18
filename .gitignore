@@ -3,11 +3,14 @@ client/dist/
 .env
 
 # Dados de runtime — NÃO versionar (contém senhas hash, logs, progresso, etc.)
+# Persistência em produção: via volume mount da Railway (DATA_DIR=/data),
+# não via git. Cada ambiente (local / prod) tem o seu próprio estado.
 server/data/users.json
 server/data/progress.json
 server/data/logs.json
 server/data/achievements.json
 server/data/active-sessions.json
+server/data/migrations.json
 server/data/tmp_audio.webm
 
 # Backups locais
