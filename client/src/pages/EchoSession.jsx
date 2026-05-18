@@ -7,7 +7,7 @@ import ScoreBadge from '../components/ScoreBadge';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
-// 2. Conversa com personagem (Assistants API se houver assistant_id, senão chat completion)
+// 2. Conversa com personagem via /api/chat (Anthropic Sonnet 4.6, stateless)
 // 3. Destaque de mensagens do terapeuta (estrela + comentário)
 // 4. Finalizar → tela pós-sessão com duração e download de log
 
@@ -26,7 +26,6 @@ export default function EchoSession({ user, sessionType }) {
   const navigate = useNavigate();
 
   const [item, setItem] = useState(null);
-  const [threadId, setThreadId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sessionStarted, setSessionStarted] = useState(false);
@@ -38,7 +37,6 @@ export default function EchoSession({ user, sessionType }) {
   const [error, setError] = useState('');
   const [highlightTarget, setHighlightTarget] = useState(null); // { msgIndex }
   const [highlightDraft, setHighlightDraft] = useState('');
-  const [assistantBroken, setAssistantBroken] = useState(false);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
 
   // "Time skip" entre sessões — efeito visual (não muda o lado da IA além de
@@ -87,7 +85,6 @@ export default function EchoSession({ user, sessionType }) {
           if (saved && Array.isArray(saved.messages) && saved.messages.length > 0) {
             setMessages(saved.messages);
             setElapsed(saved.elapsedSeconds || 0);
-            if (saved.threadId) setThreadId(saved.threadId);
             if (Number.isFinite(saved.sessionNumber) && saved.sessionNumber >= 1) {
               setSessionNumber(saved.sessionNumber);
             }
@@ -111,7 +108,7 @@ export default function EchoSession({ user, sessionType }) {
     if (finishedRef.current) return;
     if (user.role === 'visitor') return;
 
-    const data = { messages, elapsedSeconds: elapsed, threadId, itemTitle: item.name, sessionNumber };
+    const data = { messages, elapsedSeconds: elapsed, itemTitle: item.name, sessionNumber };
     sessionDataRef.current = data;
     saveLocal(user.id, sessionType, id, data);
 
@@ -124,7 +121,7 @@ export default function EchoSession({ user, sessionType }) {
       api.saveActiveSession(sessionType, id, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
-  }, [messages, elapsed, sessionStarted, sessionEnded, item, threadId, sessionNumber, user?.id, id, sessionType]);
+  }, [messages, elapsed, sessionStarted, sessionEnded, item, sessionNumber, user?.id, id, sessionType]);
 
   // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
   // localStorage sempre, servidor best-effort. Visitantes não persistem.
@@ -171,14 +168,7 @@ export default function EchoSession({ user, sessionType }) {
   async function handleStartSession() {
     if (!item) return;
     setError('');
-    let localThreadId = null;
     try {
-      // Cria thread só se houver assistantId
-      if (item.assistantId) {
-        const res = await api.createThread();
-        localThreadId = res.threadId;
-        setThreadId(res.threadId);
-      }
       setSessionStarted(true);
 
       // Disparo: o paciente fala primeiro. Mandamos "Iniciar" oculto pra IA
@@ -187,7 +177,7 @@ export default function EchoSession({ user, sessionType }) {
       setMessages([kickoffMsg]);
       setIsTyping(true);
       try {
-        const reply = await sendToAI('Iniciar', [], localThreadId);
+        const reply = await sendToAI('Iniciar', []);
         setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
       } catch (err) {
         setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
@@ -200,38 +190,12 @@ export default function EchoSession({ user, sessionType }) {
     }
   }
 
-  async function sendViaChat(text, currentMessages) {
+  async function sendToAI(text, currentMessages) {
     const apiMessages = [...currentMessages, { role: 'user', content: text }]
       .filter((m) => m && m.role) // markers visuais (separadores de sessão) não têm role
       .map((m) => ({ role: m.role, content: m.content }));
     const data = await api.chat(apiMessages, { type: sessionType, itemId: id });
     return typeof data === 'string' ? data : data.content || data.message || '';
-  }
-
-  async function sendToAI(text, currentMessages, threadIdOverride) {
-    const tid = threadIdOverride || threadId;
-    // Se já degradou para chat completion (assistant_id ruim), continua nele
-    if (item.assistantId && tid && !assistantBroken) {
-      try {
-        const data = await api.assistantMessage(tid, item.assistantId, text);
-        return data.content;
-      } catch (err) {
-        // Se o erro é claramente de configuração do assistant_id, faz fallback
-        const msg = err.message || '';
-        if (
-          /assistant[_ ]id/i.test(msg) ||
-          /string too long/i.test(msg) ||
-          /No assistant found/i.test(msg) ||
-          /Invalid 'assistant_id'/i.test(msg)
-        ) {
-          setAssistantBroken(true);
-          setError('Assistant ID configurado é inválido — usando o prompt de instrução específica como fallback.');
-          return await sendViaChat(text, currentMessages);
-        }
-        throw err;
-      }
-    }
-    return await sendViaChat(text, currentMessages);
   }
 
   async function sendMessage(text) {
@@ -274,8 +238,15 @@ export default function EchoSession({ user, sessionType }) {
     setConfirmingSkip(false);
     if (!sessionStarted || sessionEnded || isTyping || skipping) return;
 
-    const newNumber = sessionNumber + 1;
-    setSessionNumber(newNumber);
+    // Functional update + log de diagnóstico — se você ainda ver o chip stuck
+    // no #1 depois do rebuild, abra o devtools e veja se este log aparece com
+    // o valor correto. Se aparecer mas a UI não atualiza, problema é de render.
+    let newNumber;
+    setSessionNumber((prev) => {
+      newNumber = prev + 1;
+      console.log('[skip] sessionNumber:', prev, '→', newNumber);
+      return newNumber;
+    });
     setSkipping(true);
 
     // Marker visual (sem role) + mensagem oculta para a IA (com role:'user' + isSystem)
@@ -603,6 +574,9 @@ export default function EchoSession({ user, sessionType }) {
 
   // -------- TELA DE CHAT --------
   const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+  // Diagnóstico temporário: deve logar a cada render com o sessionNumber atual.
+  // Depois de clicar "passar sessão", o próximo render aqui deve mostrar #2.
+  if (sessionStarted) console.log('[render] sessionNumber =', sessionNumber);
 
   return (
     <div className="chat-container echo-chat">
