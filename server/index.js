@@ -1506,7 +1506,7 @@ app.post('/api/assistants/message', requireAuth, aiLimiter, async (req, res) => 
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
 
 function loadAvaliacaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v9-FINAL.md');
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v13-1.md');
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
   }
