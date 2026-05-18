@@ -15,8 +15,9 @@ process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'a'.repeat(48);          // 48 chars — passa no fail-closed
 process.env.ADMIN_INITIAL_PASSWORD = 'testpass1234'; // 12+ chars
 process.env.DATA_DIR = DATA_DIR;
-// Força modo demo (sem chamar OpenAI). Setar pra '' em vez de delete —
+// Força modo demo (sem chamar Anthropic/OpenAI). Setar pra '' em vez de delete —
 // se deletar, o dotenv.config() do server/index.js re-injeta do .env real.
+process.env.ANTHROPIC_API_KEY = '';
 process.env.OPENAI_API_KEY = '';
 
 // O require do app DEVE vir depois das envs acima.

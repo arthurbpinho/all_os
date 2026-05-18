@@ -110,11 +110,6 @@ export const api = {
   adminEntrevistadorChat: (messages, maxTokens) =>
     request('/chat', { method: 'POST', body: { messages, mode: 'entrevistador', maxTokens } }),
 
-  // Assistants API (FreePlay/Neuro com assistant_id)
-  createThread: () => request('/assistants/thread', { method: 'POST', body: {} }),
-  assistantMessage: (threadId, assistantId, message) =>
-    request('/assistants/message', { method: 'POST', body: { threadId, assistantId, message } }),
-
   // Transcribe
   transcribe: (audioBase64) => request('/transcribe', { method: 'POST', body: { audio: audioBase64 } }),
 

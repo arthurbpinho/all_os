@@ -122,15 +122,15 @@ const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   legacyHeaders: false,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
-// Post-auth (chave por user.id, fallback IP): protege a chave OpenAI de abuse
-// e segura escrita massiva em logs.
+// Post-auth (chave por user.id, fallback IP): protege a chave Anthropic
+// (e a OpenAI do Whisper) de abuse, e segura escrita massiva em logs.
 function userKey(req) {
   return (req.user && req.user.id) ? `u:${req.user.id}` : `ip:${req.ip}`;
 }
 // 300 req/hora cobre ~6 sessões clínicas longas. Era 60 antes — apertado
 // demais pra uso real. Como /api/chat e /api/evaluate só aceitam context com
 // itemId válido (resolveChatSystemPrompt / resolveEvaluatorSystemPrompt),
-// o risco de abuse da chave OpenAI caiu — podemos afrouxar com segurança.
+// o risco de abuse da chave Anthropic caiu — podemos afrouxar com segurança.
 const aiLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 300,
@@ -155,11 +155,12 @@ function envDiag(name) {
   if (v === '') return 'EMPTY STRING';
   return `set (${v.length} chars)`;
 }
-console.log('[startup] JWT_SECRET    =', envDiag('JWT_SECRET'));
-console.log('[startup] OPENAI_API_KEY =', envDiag('OPENAI_API_KEY'));
-console.log('[startup] DATA_DIR       =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
-console.log('[startup] PORT           =', envDiag('PORT'));
-console.log('[startup] env keys count =', Object.keys(process.env).length);
+console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
+console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
+console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(usada só pelo Whisper)');
+console.log('[startup] DATA_DIR          =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
+console.log('[startup] PORT              =', envDiag('PORT'));
+console.log('[startup] env keys count    =', Object.keys(process.env).length);
 // Lista nomes de envs que CONTÊM "JWT" ou "SECRET" — pega typos como "jwt_secret" / "JWTSECRET"
 const jwtish = Object.keys(process.env).filter((k) => /jwt|secret/i.test(k));
 console.log('[startup] env keys com JWT/SECRET no nome:', jwtish.length ? jwtish.join(', ') : '(nenhum)');
@@ -1271,19 +1272,37 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// --- OpenAI Chat Proxy (modelo padrão do projeto) ---
-// CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Modelo "mini".
-// HEAVY_MODEL: entrevistador (geração de prompts de pacientes).
-// EVAL_MODEL: avaliador (v9). Modelo dedicado pra análise clínica densa.
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || 'gpt-5.4-mini';
-const HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
-const EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
+// --- Anthropic Chat Proxy (modelo padrão do projeto) ---
+// CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Sonnet 4.6.
+// HEAVY_MODEL: entrevistador (geração de prompts de pacientes). Opus 4.7.
+// EVAL_MODEL: avaliador (v13-1). Opus 4.7 com prompt caching no system de ~23k.
+const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL || 'claude-sonnet-4-6';
+const HEAVY_MODEL = process.env.ANTHROPIC_HEAVY_MODEL || 'claude-opus-4-7';
+const EVAL_MODEL = process.env.ANTHROPIC_EVAL_MODEL || 'claude-opus-4-7';
 
-function getOpenAI() {
-  const apiKey = process.env.OPENAI_API_KEY;
+function getAnthropic() {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
-  const { default: OpenAI } = require('openai');
-  return new OpenAI({ apiKey });
+  const Anthropic = require('@anthropic-ai/sdk').default || require('@anthropic-ai/sdk');
+  return new Anthropic({ apiKey });
+}
+
+// Anthropic exige messages alternando user/assistant, sem role 'system' no array
+// (system vai num campo separado). Normaliza: filtra system, garante alternância
+// colapsando turnos consecutivos do mesmo role.
+function normalizeMessagesForAnthropic(messages) {
+  const cleaned = [];
+  for (const m of messages || []) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    const content = typeof m.content === 'string' ? m.content : String(m.content || '');
+    if (!content) continue;
+    if (cleaned.length && cleaned[cleaned.length - 1].role === m.role) {
+      cleaned[cleaned.length - 1].content += '\n\n' + content;
+    } else {
+      cleaned.push({ role: m.role, content });
+    }
+  }
+  return cleaned;
 }
 
 // Resolve o system prompt server-side a partir de context/mode enviados pelo
@@ -1336,7 +1355,7 @@ function resolveChatSystemPrompt({ context, mode, user }) {
 
 app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   const { messages, context, mode, maxTokens } = req.body || {};
-  const openai = getOpenAI();
+  const anthropic = getAnthropic();
 
   // Bloqueia tentativas de injetar systemPrompt — visível no log do servidor
   // pra ajudar a debugar clientes antigos que ainda enviam o campo.
@@ -1353,154 +1372,67 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
-  if (!openai) {
+  if (!anthropic) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?'
     });
   }
 
-  // Default 1500 (Trilha/Simulação/Neuro). Modo entrevistador permite valor
-  // maior pra gerar o prompt completo do paciente.
+  // Default 1500 pra pacientes (Trilha/Simulação/Neuro) — resposta de
+  // paciente raramente passa de 3 parágrafos, e segura snappy. Entrevistador
+  // sobe pra até 64000 (Opus 4.7 com adaptive thinking pode gastar 4-8k em
+  // raciocínio antes do output longo do prompt do paciente).
+  const isEntrevistador = mode === 'entrevistador';
   const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
-    ? Math.min(Math.floor(maxTokens), 32000)
+    ? Math.min(Math.floor(maxTokens), isEntrevistador ? 64000 : 32000)
     : 1500;
 
+  const normalized = normalizeMessagesForAnthropic(messages);
+  if (!normalized.length) {
+    return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+  }
+
   try {
-    // Entrevistador roda no modelo pesado (gera prompts longos e nuançados de
-    // pacientes); personas de simulação ficam no modelo padrão (mais barato).
-    const chosenModel = mode === 'entrevistador' ? HEAVY_MODEL : CHAT_MODEL;
-    const completion = await openai.chat.completions.create({
+    // Entrevistador roda no Opus 4.7 com adaptive thinking + effort high pra
+    // gerar prompts longos e nuançados de pacientes; pacientes ficam no
+    // Sonnet 4.6 sem thinking pra resposta rápida e natural na conversa.
+    const chosenModel = isEntrevistador ? HEAVY_MODEL : CHAT_MODEL;
+    const params = {
       model: chosenModel,
-      messages: [
-        { role: 'system', content: resolved.systemPrompt },
-        ...messages,
-      ],
-      max_completion_tokens: tokenCap,
-    });
-    res.json(completion.choices[0].message);
+      max_tokens: tokenCap,
+      system: resolved.systemPrompt,
+      messages: normalized,
+    };
+    if (isEntrevistador) {
+      params.thinking = { type: 'adaptive' };
+      params.output_config = { effort: 'high' };
+    }
+    // Stream + getFinalMessage pra evitar timeout HTTP em maxTokens altos;
+    // resposta final tem o mesmo shape de uma chamada não-streaming.
+    const stream = anthropic.messages.stream(params);
+    const message = await stream.finalMessage();
+    const text = (message.content || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+    res.json({ role: 'assistant', content: text });
   } catch (err) {
-    console.error('OpenAI error:', err.message);
+    console.error('Anthropic error:', err.message);
     res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
   }
 });
 
-// --- OpenAI Assistants API (FreePlay/Neuro com assistant_id por personagem) ---
-// Mantém os mesmos prompts e fluxos do projeto Echos.
-// Cria uma thread por sessão; envia user message; aguarda run completar; retorna resposta.
-
-app.post('/api/assistants/thread', requireAuth, async (req, res) => {
-  const openai = getOpenAI();
-  if (!openai) {
-    return res.json({ threadId: 'demo-thread-' + Date.now(), demo: true });
-  }
-  try {
-    const thread = await openai.beta.threads.create();
-    res.json({ threadId: thread.id });
-  } catch (err) {
-    console.error('Thread create error:', err.message);
-    res.status(500).json({ error: 'Erro ao criar thread: ' + err.message });
-  }
-});
-
-// Extrai um ID de assistant válido a partir de qualquer string (URL, texto, etc.)
+// Sanitiza o campo assistantId nos cadastros de personagem. Mantido por
+// compatibilidade: dados antigos têm esse campo da era OpenAI Assistants API,
+// e o admin/UI ainda exibe. A simulação inteira agora roda via /api/chat
+// (Anthropic Messages), então o campo é cosmético — não roteia nada.
 function sanitizeAssistantId(input) {
   if (!input) return '';
   const s = String(input).trim();
   const match = s.match(/asst_[A-Za-z0-9]+/);
   return match ? match[0] : s;
 }
-
-function isValidAssistantId(id) {
-  return typeof id === 'string' && /^asst_[A-Za-z0-9]+$/.test(id) && id.length <= 64;
-}
-
-// Verifica se um assistantId está cadastrado em algum personagem do banco.
-// Impede que um cliente passe um assistantId arbitrário (de outro projeto da
-// OpenAI) e use a nossa chave para conversar com qualquer assistant.
-function assistantIdIsCadastrado(assistantId) {
-  if (!assistantId) return false;
-  const fp = readJSON('freeplay-characters.json').some((c) => sanitizeAssistantId(c.assistantId) === assistantId);
-  if (fp) return true;
-  const nr = readJSON('neuro-characters.json').some((c) => sanitizeAssistantId(c.assistantId) === assistantId);
-  return nr;
-}
-
-app.post('/api/assistants/message', requireAuth, aiLimiter, async (req, res) => {
-  const { threadId, message } = req.body;
-  const assistantId = sanitizeAssistantId(req.body.assistantId);
-  const openai = getOpenAI();
-
-  if (!openai) {
-    return res.json({
-      role: 'assistant',
-      content: '[Modo demonstração — API Key não configurada] (resposta simulada do personagem)'
-    });
-  }
-
-  if (!threadId || !assistantId) {
-    return res.status(400).json({ error: 'threadId e assistantId são obrigatórios.' });
-  }
-
-  if (!isValidAssistantId(assistantId)) {
-    return res.status(400).json({
-      error: 'Assistant ID inválido. Deve começar com "asst_" e ter no máximo 64 caracteres. Verifique no painel da OpenAI.',
-      code: 'invalid_assistant_id',
-    });
-  }
-
-  // Hardening: só aceita assistantIds que estão cadastrados no banco —
-  // bloqueia uso da chave OpenAI da Allos com assistants de terceiros.
-  if (!assistantIdIsCadastrado(assistantId)) {
-    return res.status(403).json({ error: 'Assistant ID não cadastrado.' });
-  }
-
-  try {
-    // 1. Adiciona mensagem do usuário
-    await openai.beta.threads.messages.create(threadId, {
-      role: 'user',
-      content: message,
-    });
-
-    // 2. Executa o assistente (modelo é definido no próprio assistant na OpenAI)
-    let run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: assistantId,
-    });
-
-    // 3. Aguarda conclusão (polling)
-    const startedAt = Date.now();
-    const TIMEOUT_MS = 180000;
-    while (run.status === 'queued' || run.status === 'in_progress') {
-      if (Date.now() - startedAt > TIMEOUT_MS) {
-        return res.status(504).json({ error: 'Tempo limite excedido aguardando o assistente.' });
-      }
-      await new Promise((r) => setTimeout(r, 1000));
-      run = await openai.beta.threads.runs.retrieve(threadId, run.id);
-    }
-
-    if (run.status !== 'completed') {
-      const detail = run.last_error ? `${run.last_error.code} — ${run.last_error.message}` : run.status;
-      return res.status(500).json({ error: `Falha na execução do assistente: ${detail}` });
-    }
-
-    // 4. Recupera última mensagem (resposta da IA)
-    const list = await openai.beta.threads.messages.list(threadId, { order: 'desc', limit: 1 });
-    const last = list.data && list.data[0];
-    if (!last || last.role !== 'assistant') {
-      return res.status(500).json({ error: 'Resposta do assistente não encontrada.' });
-    }
-
-    const content = last.content
-      .filter((c) => c.type === 'text')
-      .map((c) => c.text.value)
-      .join('\n\n');
-
-    res.json({ role: 'assistant', content });
-  } catch (err) {
-    console.error('Assistants error:', err.message);
-    res.status(500).json({ error: 'Erro ao comunicar com o assistente: ' + err.message });
-  }
-});
 
 // --- Avaliação de Sessão (Chat com IA) ---
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
@@ -1563,7 +1495,7 @@ function withBloco1(messages, bloco1) {
 
 app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const { messages, context } = req.body || {};
-  const apiKey = process.env.OPENAI_API_KEY;
+  const anthropic = getAnthropic();
 
   if (Object.prototype.hasOwnProperty.call(req.body || {}, 'systemPrompt')) {
     return res.status(400).json({
@@ -1575,7 +1507,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
-  if (!apiKey) {
+  if (!anthropic) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Não é possível realizar a avaliação sem a chave da API.'
@@ -1587,24 +1519,49 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
 
   const bloco1 = resolveBloco1({ context });
   const finalMessages = withBloco1(messages, bloco1);
+  const normalized = normalizeMessagesForAnthropic(finalMessages);
+  if (!normalized.length) {
+    return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+  }
 
   try {
-    const { default: OpenAI } = require('openai');
-    const openai = new OpenAI({ apiKey });
-    const completion = await openai.chat.completions.create({
+    // Prompt caching no system de ~23k tokens (avaliador v13-1) — a primeira
+    // chamada paga cache_creation (~1.25x), as próximas dentro de 5min leem
+    // a 10% do preço. Como o system raramente muda e cada avaliação reusa
+    // exatamente os mesmos bytes de prefix, o hit rate fica alto.
+    //
+    // max_tokens=64000 dá folga pra Opus 4.7 fazer raciocínio extenso
+    // (adaptive thinking pode gastar 8-15k em casos densos) + os 6 critérios
+    // com justificativas + nota final. 32000 era apertado quando a transcrição
+    // era longa. Opus 4.7 suporta até 128K mas streamamos pra evitar timeout.
+    // effort: 'high' é o mínimo recomendado pra trabalho intelectualmente
+    // sensível em Opus 4.7 (avaliação clínica densa).
+    const stream = anthropic.messages.stream({
       model: EVAL_MODEL,
-      messages: [
-        { role: 'system', content: resolved.systemPrompt },
-        ...finalMessages,
+      max_tokens: 64000,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+      system: [
+        {
+          type: 'text',
+          text: resolved.systemPrompt,
+          cache_control: { type: 'ephemeral' },
+        },
       ],
-      // Reasoning model (gpt-5.X) — o teto inclui reasoning_tokens ocultos +
-      // texto visível. Avaliador v9 (system ~23k tokens) sobre transcrição
-      // longa pode gastar 4–8k em raciocínio antes de começar a escrever os
-      // 6 critérios. 5000 estourava e voltava content vazio. 32000 dá folga
-      // sem custo perceptível (cobramos só pelos tokens efetivamente usados).
-      max_completion_tokens: 32000,
+      messages: normalized,
     });
-    res.json(completion.choices[0].message);
+    const message = await stream.finalMessage();
+    const text = (message.content || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('');
+    // Log de cache hits ajuda a confirmar que o caching tá funcionando.
+    if (message.usage) {
+      console.log(
+        `Evaluate cache: read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
+      );
+    }
+    res.json({ role: 'assistant', content: text });
   } catch (err) {
     console.error('Evaluate error:', err.message);
     res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });

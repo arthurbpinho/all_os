@@ -48,7 +48,7 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
       expect(res.status).toBe(403);
     });
 
-    it('chat funciona em modo demo (sem OPENAI_API_KEY)', async () => {
+    it('chat funciona em modo demo (sem ANTHROPIC_API_KEY)', async () => {
       const token = await loginAs('aluno');
       const res = await request(app)
         .post('/api/chat')

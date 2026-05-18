@@ -38,10 +38,11 @@ export default function AdminEntrevistador({ user }) {
 
     try {
       const apiMessages = updated.map((m) => ({ role: m.role, content: m.content }));
-      // maxTokens alto: o entrevistador precisa gerar o prompt completo do paciente
-      // (vários milhares de tokens) sem ser cortado pelo limite default.
-      // O servidor injeta o prompt do entrevistador como systemPrompt internamente.
-      const reply = await api.adminEntrevistadorChat(apiMessages, 16000);
+      // maxTokens alto: o entrevistador (Opus 4.7 com adaptive thinking) pode
+      // gastar 4-8k em raciocínio antes do output longo do prompt do paciente.
+      // 32000 dá folga sem cortar — o servidor cobra só pelos tokens usados
+      // e cap server-side é 64000 pra entrevistador.
+      const reply = await api.adminEntrevistadorChat(apiMessages, 32000);
       const content = typeof reply === 'string' ? reply : reply.content || reply.message || '';
       setMessages((prev) => [...prev, { role: 'assistant', content }]);
     } catch (err) {
