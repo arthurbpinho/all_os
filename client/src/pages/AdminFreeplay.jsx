@@ -111,13 +111,16 @@ export default function AdminFreeplay() {
         <div className="card tight" style={{ padding: 0, overflow: 'hidden' }}>
           <table className="admin-table">
             <thead>
-              <tr><th>Nome</th><th>Idade</th><th>Descrição</th><th>Ações</th></tr>
+              <tr><th>Nome</th><th>Idade</th><th>Dificuldade</th><th>Descrição</th><th>Ações</th></tr>
             </thead>
             <tbody>
               {characters.map((c) => (
                 <tr key={c.id}>
                   <td style={{ fontWeight: 500, color: 'var(--marrs-deep)' }}>{c.name}</td>
                   <td>{c.age != null ? `${c.age} anos` : '—'}</td>
+                  <td title={`Dificuldade do MMR (1–100) · ${c.competitiveMatches || 0} partida(s) competitiva(s)`}>
+                    <strong>{Number.isFinite(c.difficulty) ? c.difficulty : '—'}</strong>
+                  </td>
                   <td style={{ color: 'var(--ink-soft)', maxWidth: 380 }}>
                     <span style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{c.description}</span>
                   </td>
