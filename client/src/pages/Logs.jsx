@@ -9,6 +9,49 @@ const TYPE_LABELS = {
   neuro: 'Neuroavaliação',
 };
 
+// Nomes dos 6 critérios do avaliador v15 (chaves "1".."6"). criteriaScores só
+// chega pra supervisor/admin (o servidor esconde do aluno), então sempre que
+// existir pode ser exibido.
+const V15_CRITERIA = {
+  '1': 'Construção linguística',
+  '2': 'Relação terapêutica',
+  '3': 'Confiança transmitida',
+  '4': 'Priorização',
+  '5': 'Aprofundamento',
+  '6': 'Flexibilidade e Criatividade',
+};
+
+// Tabela de notas por critério (visível só a supervisor/admin). Renderiza
+// qualquer criteriaScores não-vazio, ordenando por chave numérica.
+function CriteriaTable({ criteriaScores }) {
+  if (!criteriaScores || typeof criteriaScores !== 'object') return null;
+  const entries = Object.entries(criteriaScores)
+    .filter(([, v]) => Number.isFinite(Number(v)))
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (entries.length === 0) return null;
+  return (
+    <div className="criteria-table" style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
+        Notas por critério <span style={{ textTransform: 'none', letterSpacing: 0 }}>(visível só ao supervisor/admin)</span>
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5 }}>
+        <tbody>
+          {entries.map(([k, v]) => (
+            <tr key={k} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
+              <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>
+                {V15_CRITERIA[k] || `Critério ${k}`}
+              </td>
+              <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: 'var(--marrs-deep)', whiteSpace: 'nowrap' }}>
+                {Number(v)}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function formatDate(timestamp) {
   if (!timestamp) return '—';
   const d = new Date(timestamp);
@@ -29,6 +72,39 @@ function sanitizeFilename(name) {
     .slice(0, 80);
 }
 
+const LOG_TTL_DAYS_FALLBACK = 30;
+
+// Data de expiração do log: usa expiresAt vindo do servidor; se ausente
+// (logs antigos), deriva do timestamp + 30 dias.
+function logExpiresAt(log) {
+  if (log.expiresAt) return new Date(log.expiresAt);
+  const base = new Date(log.timestamp || log.createdAt || 0);
+  if (isNaN(base)) return null;
+  return new Date(base.getTime() + LOG_TTL_DAYS_FALLBACK * 86400000);
+}
+
+function daysUntilExpiry(log) {
+  const exp = logExpiresAt(log);
+  if (!exp) return null;
+  return Math.ceil((exp.getTime() - Date.now()) / 86400000);
+}
+
+function ExpiryNote({ log, style }) {
+  const exp = logExpiresAt(log);
+  if (!exp) return null;
+  const days = daysUntilExpiry(log);
+  const soon = days != null && days <= 7;
+  return (
+    <span
+      title="Após esta data o log é removido automaticamente"
+      style={{ fontSize: 12, color: soon ? 'var(--terra)' : 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 4, ...style }}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 2" /></svg>
+      expira {exp.toLocaleDateString('pt-BR')}{soon && days >= 0 ? ` · ${days}d` : ''}
+    </span>
+  );
+}
+
 function downloadLogAsText(log) {
   const messages = Array.isArray(log.messages) ? log.messages : [];
   const header = [
@@ -40,6 +116,7 @@ function downloadLogAsText(log) {
       ? `Duração: ${Math.floor(log.durationSeconds / 60).toString().padStart(2, '0')}:${(log.durationSeconds % 60).toString().padStart(2, '0')}`
       : null,
     log.score != null ? `Nota: ${log.score}` : null,
+    (() => { const e = logExpiresAt(log); return e ? `Expira em: ${e.toLocaleDateString('pt-BR')}` : null; })(),
   ].filter(Boolean).join('\n');
 
   const lines = messages
@@ -59,7 +136,20 @@ function downloadLogAsText(log) {
     ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${log.evaluation}`
     : '';
 
-  const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}`;
+  // Notas por critério (só nos downloads de supervisor/admin — o aluno nem
+  // recebe criteriaScores do servidor).
+  let criteriaSection = '';
+  if (log.criteriaScores && typeof log.criteriaScores === 'object') {
+    const rows = Object.entries(log.criteriaScores)
+      .filter(([, v]) => Number.isFinite(Number(v)))
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([k, v]) => `${V15_CRITERIA[k] || `Critério ${k}`}: ${Number(v)}/10`);
+    if (rows.length) {
+      criteriaSection = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
+    }
+  }
+
+  const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}${criteriaSection}`;
   const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -72,7 +162,9 @@ function downloadLogAsText(log) {
 
 function LogCard({ log, showDownload }) {
   const [expanded, setExpanded] = useState(false);
+  const [tab, setTab] = useState('log');
   const messages = Array.isArray(log.messages) ? log.messages : [];
+  const evaluation = (log.evaluation || '').trim();
 
   return (
     <div
@@ -93,6 +185,7 @@ function LogCard({ log, showDownload }) {
         )}
         {log.type && <span style={{ fontWeight: 500 }}>{TYPE_LABELS[log.type] || log.type}</span>}
         <span>{messages.filter((m) => !m.isSystem).length} {messages.filter((m) => !m.isSystem).length === 1 ? 'mensagem' : 'mensagens'}</span>
+        <ExpiryNote log={log} />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -104,10 +197,10 @@ function LogCard({ log, showDownload }) {
               type="button"
               className="btn btn-outline btn-sm"
               onClick={(e) => { e.stopPropagation(); downloadLogAsText(log); }}
-              title="Baixar log desta sessão"
+              title="Baixar a transcrição e a avaliação juntas (.txt)"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Baixar
+              Baixar log + avaliação
             </button>
           )}
           <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
@@ -118,7 +211,46 @@ function LogCard({ log, showDownload }) {
 
       {expanded && (
         <div className="log-detail" onClick={(e) => e.stopPropagation()}>
-          {messages.length === 0 ? (
+          {/* Toggle Log / Avaliação — supervisor e admin precisam ver a avaliação
+              da IA de cada sessão, não só a transcrição. */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+            <span style={{ color: 'var(--muted)', fontSize: 12, marginRight: 2 }}>Visualizar</span>
+            <button
+              type="button"
+              className={`btn ${tab === 'log' ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setTab('log')}
+              style={{ padding: '4px 12px', fontSize: 12.5 }}
+            >
+              Log da sessão
+            </button>
+            <button
+              type="button"
+              className={`btn ${tab === 'evaluation' ? 'btn-primary' : 'btn-ghost'}`}
+              onClick={() => setTab('evaluation')}
+              disabled={!evaluation}
+              title={evaluation ? 'Ver a avaliação da IA desta sessão' : 'Esta sessão não tem avaliação registrada'}
+              style={{ padding: '4px 12px', fontSize: 12.5 }}
+            >
+              Avaliação {evaluation ? '' : '(sem registro)'}
+            </button>
+          </div>
+
+          {tab === 'evaluation' ? (
+            evaluation || log.criteriaScores ? (
+              <div>
+                <CriteriaTable criteriaScores={log.criteriaScores} />
+                {evaluation && (
+                  <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
+                    {evaluation}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
+                Esta sessão não tem avaliação registrada.
+              </p>
+            )
+          ) : messages.length === 0 ? (
             <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>Nenhuma mensagem registrada.</p>
           ) : (
             messages.map((msg, i) => {
@@ -202,7 +334,7 @@ function TherapistGroup({ therapistName, logs }) {
             type="button"
             className="btn btn-outline btn-sm"
             onClick={downloadAll}
-            title="Baixar todos os logs deste terapeuta"
+            title="Baixar todos os logs deste terapeuta (cada arquivo inclui transcrição + avaliação)"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
             Baixar todos
@@ -375,10 +507,13 @@ function PatientSessionList({ patient, onSelect, onBack }) {
                 <div style={{ fontWeight: 600, fontSize: 15 }}>
                   {formatDate(log.timestamp || log.createdAt)}
                 </div>
-                <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
-                  {dur > 0 ? `Duração ${mins}:${secs}` : 'sem duração registrada'}
-                  {' · '}
-                  {(log.messages || []).filter((m) => !m.isSystem).length} mensagens
+                <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <span>
+                    {dur > 0 ? `Duração ${mins}:${secs}` : 'sem duração registrada'}
+                    {' · '}
+                    {(log.messages || []).filter((m) => !m.isSystem).length} mensagens
+                  </span>
+                  <ExpiryNote log={log} />
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -413,15 +548,16 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>
           <span>{TYPE_LABELS[log.type] || log.type}</span>
           <ScoreBadge score={log.score} />
+          <ExpiryNote log={log} />
           <button
             type="button"
             className="btn btn-outline btn-sm"
             onClick={() => downloadLogAsText(log)}
-            title="Baixar log desta sessão como .txt"
+            title="Baixar a transcrição e a avaliação juntas (.txt)"
             style={{ marginLeft: 'auto' }}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-            Baixar
+            Baixar log + avaliação
           </button>
         </div>
       </div>
@@ -477,9 +613,14 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
 
       {tab === 'evaluation' && (
         <div className="card tight">
-          {evaluation ? (
-            <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
-              {evaluation}
+          {evaluation || log.criteriaScores ? (
+            <div>
+              <CriteriaTable criteriaScores={log.criteriaScores} />
+              {evaluation && (
+                <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
+                  {evaluation}
+                </div>
+              )}
             </div>
           ) : (
             <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
@@ -496,6 +637,7 @@ export default function Logs({ user, userId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [ttlDays, setTtlDays] = useState(LOG_TTL_DAYS_FALLBACK);
 
   const isSupervisorView = !userId;
 
@@ -507,6 +649,12 @@ export default function Logs({ user, userId }) {
       .catch((err) => setError(err.message || 'Erro ao carregar logs'))
       .finally(() => setLoading(false));
   }, [userId]);
+
+  useEffect(() => {
+    api.getLogsPolicy()
+      .then((p) => { if (p && p.ttlDays) setTtlDays(p.ttlDays); })
+      .catch(() => {});
+  }, []);
 
   // Agrupamento por terapeuta — só no view de supervisor (admin/professor sem filtro).
   // Dentro de cada grupo, ordena por data desc; entre grupos, ordena por última atividade desc.
@@ -547,6 +695,17 @@ export default function Logs({ user, userId }) {
       </div>
 
       {error && <div className="alert error">{error}</div>}
+
+      <div className="log-expiry-banner">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+          <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+        </svg>
+        <span>
+          Os logs expiram automaticamente após <strong>{ttlDays} dias</strong> e são removidos para manter o desempenho da plataforma.
+          A data de expiração aparece em cada sessão — <strong>baixe os logs que quiser guardar</strong> antes disso.
+        </span>
+      </div>
 
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>

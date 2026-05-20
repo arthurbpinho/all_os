@@ -26,6 +26,26 @@ export default function Profile({ user, onUpdate }) {
   const [pwdError, setPwdError] = useState('');
   const [pwdSuccess, setPwdSuccess] = useState('');
 
+  // Título (subtítulo) desbloqueável exibido sob o nome / no ranking
+  const [activeTitle, setActiveTitle] = useState(user.activeTitle || '');
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [titleError, setTitleError] = useState('');
+
+  async function selectTitle(id) {
+    const next = id === activeTitle ? '' : id; // clicar no ativo limpa
+    setTitleError('');
+    setTitleSaving(true);
+    try {
+      const updated = await api.setMyTitle(next);
+      setActiveTitle(updated.activeTitle || '');
+      onUpdate(updated);
+    } catch (err) {
+      setTitleError(err.message || 'Erro ao definir título.');
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
   async function handleChangePassword(e) {
     e.preventDefault();
     setPwdError(''); setPwdSuccess('');
@@ -95,6 +115,14 @@ export default function Profile({ user, onUpdate }) {
           <Typewriter text="Perfil de " />
           <span className="accent"><Typewriter text={name || user.name} delayStart={500} /></span>
         </h2>
+        {(() => {
+          const activeBadge = earnedBadges.find((a) => a.id === activeTitle);
+          return activeBadge ? (
+            <div className={`player-title tier-${activeBadge.tier} profile-active-title`}>
+              {activeBadge.icon} {activeBadge.title}
+            </div>
+          ) : null;
+        })()}
         <p>Personalize suas preferências, foto e como você quer receber novidades da Allos.</p>
         <div className="ornament" />
       </div>
@@ -135,6 +163,38 @@ export default function Profile({ user, onUpdate }) {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+
+          {earnedBadges.length > 0 && (
+            <div style={{ marginTop: 22 }}>
+              <h4 className="section-title" style={{ fontSize: 15 }}>Título exibido</h4>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>
+                Escolha um título desbloqueado para exibir sob o seu nome no perfil e no ranking. Clique no ativo para remover.
+              </p>
+              {titleError && <div className="alert error" style={{ marginBottom: 10 }}>{titleError}</div>}
+              <div className="title-chips">
+                <button
+                  type="button"
+                  className={`title-chip ${!activeTitle ? 'active' : ''}`}
+                  onClick={() => selectTitle('')}
+                  disabled={titleSaving || !activeTitle}
+                >
+                  Nenhum
+                </button>
+                {earnedBadges.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    className={`title-chip tier-${a.tier} ${activeTitle === a.id ? 'active' : ''}`}
+                    onClick={() => selectTitle(a.id)}
+                    disabled={titleSaving}
+                    title={a.description}
+                  >
+                    {a.icon} {a.title}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </section>

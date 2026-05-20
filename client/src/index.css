@@ -437,6 +437,19 @@ select option { background: var(--cream); color: var(--ink); }
   color: var(--terra);
   border: 1px solid rgba(184, 90, 64, 0.2);
 }
+.character-card .difficulty-tag {
+  display: inline-block;
+  margin-top: 14px;
+  padding: 4px 12px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: var(--cream-2);
+  color: var(--marrs-deep);
+  border: 1px solid rgba(20, 86, 78, 0.18);
+}
+.character-card .difficulty-tag strong { font-size: 13px; letter-spacing: 0; }
 
 /* ────────────────────────────────────────
    SKILL MAP — adaptado ao tema claro
@@ -1016,6 +1029,32 @@ select option { background: var(--cream); color: var(--ink); }
   color: var(--marrs-deep);
   line-height: 1;
 }
+
+.mmr-result-card {
+  text-align: center;
+  background: var(--cream-2);
+  border: 1px solid rgba(20, 86, 78, 0.15);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  margin-bottom: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.mmr-result-value {
+  font-family: var(--serif);
+  font-size: 40px;
+  line-height: 1;
+  color: var(--marrs-deep);
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.mmr-delta { font-size: 15px; font-family: var(--sans, inherit); font-weight: 600; }
+.mmr-delta.up { color: #1c8a5b; }
+.mmr-delta.down { color: var(--terra); }
+.mmr-result-note { font-size: 13px; color: var(--ink-soft); margin: 0; }
 
 .post-highlights h4 {
   font-family: var(--serif);
@@ -2365,6 +2404,69 @@ select option { background: var(--cream); color: var(--ink); }
 .achievement-card.earned.tier-silver   { border-top: 3px solid #8a9097; }
 .achievement-card.earned.tier-gold     { border-top: 3px solid #c8a04e; }
 .achievement-card.earned.tier-platinum { border-top: 3px solid var(--marrs); box-shadow: 0 0 0 1px rgba(0, 143, 143, 0.18); }
+
+/* ──── Títulos desbloqueáveis (subtítulos) ──── */
+/* Pill exibido sob o nome (perfil, sidebar, ranking). Cor segue o tier. */
+.player-title {
+  display: inline-block;
+  margin-top: 3px;
+  padding: 1px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1.5;
+  border: 1px solid;
+  background: var(--cream-2, #f3efe6);
+  color: var(--ink-soft, #6b6257);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+.player-title.tier-bronze   { color: #8f4631; border-color: #B85A40; background: rgba(184, 90, 64, 0.08); }
+.player-title.tier-silver   { color: #5b6068; border-color: #8a9097; background: rgba(138, 144, 151, 0.1); }
+.player-title.tier-gold     { color: #97781f; border-color: #c8a04e; background: rgba(200, 160, 78, 0.12); }
+.player-title.tier-platinum { color: var(--marrs-dark, #066); border-color: var(--marrs, #008f8f); background: var(--marrs-50, #e6f4f4); }
+.profile-active-title { margin: 8px 0 4px; font-size: 12.5px; padding: 3px 12px; }
+
+/* Picker de títulos no perfil */
+.title-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.title-chip {
+  cursor: pointer;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--cream-2, #f3efe6);
+  color: var(--ink-soft, #6b6257);
+  border: 1.5px solid transparent;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.title-chip:hover:not(:disabled) { transform: translateY(-1px); }
+.title-chip:disabled { opacity: 0.55; cursor: default; }
+.title-chip.tier-bronze   { border-color: rgba(184, 90, 64, 0.4); }
+.title-chip.tier-silver   { border-color: rgba(138, 144, 151, 0.45); }
+.title-chip.tier-gold     { border-color: rgba(200, 160, 78, 0.5); }
+.title-chip.tier-platinum { border-color: rgba(0, 143, 143, 0.4); }
+.title-chip.active {
+  background: var(--marrs, #008f8f);
+  color: #fff;
+  border-color: var(--marrs, #008f8f);
+}
+
+/* ──── Aviso de expiração de logs ──── */
+.log-expiry-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 15px;
+  margin-bottom: 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  background: rgba(200, 160, 78, 0.1);
+  border: 1px solid rgba(200, 160, 78, 0.45);
+  color: var(--ink, #3a342c);
+}
+.log-expiry-banner svg { color: #97781f; margin-top: 1px; }
 
 /* ──── Streak badge — temporário no perfil ──── */
 .streak-badge {

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
-import { buildDirectEvaluationPrompt } from '../prompts';
+import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
@@ -24,6 +24,16 @@ const MAX_FREEPLAY_SESSIONS = 6;
 export default function EchoSession({ user, sessionType }) {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  // Modo competitivo: só vale para freeplay (Simulação). Alimenta o MMR ao
+  // finalizar. Treino mantém o comportamento de hoje (sem MMR).
+  const isCompetitive = sessionType === 'freeplay' && searchParams.get('mode') === 'competitive';
+  const logMode = isCompetitive ? 'competitive' : 'training';
+  // Chave de autosave separada por modo: senão uma sessão de treino e uma
+  // competitiva com o MESMO personagem colidiriam (mesmo type+itemId), uma
+  // restaurando a outra. O itemId real (id) continua indo pro chat e pro log.
+  const autoItemId = isCompetitive ? `${id}::comp` : id;
 
   const [item, setItem] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -38,6 +48,7 @@ export default function EchoSession({ user, sessionType }) {
   const [highlightTarget, setHighlightTarget] = useState(null); // { msgIndex }
   const [highlightDraft, setHighlightDraft] = useState('');
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
+  const [confirmingReset, setConfirmingReset] = useState(false);
 
   // "Time skip" entre sessões — efeito visual (não muda o lado da IA além de
   // uma mensagem invisível de contexto).
@@ -53,6 +64,7 @@ export default function EchoSession({ user, sessionType }) {
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
   const [evalScore, setEvalScore] = useState(null);
+  const [mmrResult, setMmrResult] = useState(null); // resultado MMR pós-partida competitiva
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -63,6 +75,10 @@ export default function EchoSession({ user, sessionType }) {
   const restoredRef = useRef(false); // já tentou restaurar
   const finishedRef = useRef(false); // sessão finalizada — não salvar mais
   const sessionDataRef = useRef(null); // snapshot da sessão pra flush em qualquer momento
+  const fileInputRef = useRef(null);
+
+  // Limite de 30 dias para saves de sessão (alinhado à expiração de logs).
+  const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
   // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
@@ -80,7 +96,7 @@ export default function EchoSession({ user, sessionType }) {
         // Restaura sessão pendente (se houver). Visitantes nunca persistem.
         if (!restoredRef.current && user?.id && user.role !== 'visitor') {
           restoredRef.current = true;
-          const saved = await loadActiveSession(user.id, sessionType, id);
+          const saved = await loadActiveSession(user.id, sessionType, autoItemId);
           if (cancelled) return;
           if (saved && Array.isArray(saved.messages) && saved.messages.length > 0) {
             setMessages(saved.messages);
@@ -110,7 +126,7 @@ export default function EchoSession({ user, sessionType }) {
 
     const data = { messages, elapsedSeconds: elapsed, itemTitle: item.name, sessionNumber };
     sessionDataRef.current = data;
-    saveLocal(user.id, sessionType, id, data);
+    saveLocal(user.id, sessionType, autoItemId, data);
 
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(() => {
@@ -118,10 +134,10 @@ export default function EchoSession({ user, sessionType }) {
       // DELETE de clearActiveSession roda, e o PUT chega depois ressuscitando
       // a sessão. Bloqueamos checando finishedRef no momento do disparo.
       if (finishedRef.current) return;
-      api.saveActiveSession(sessionType, id, data).catch(() => {});
+      api.saveActiveSession(sessionType, autoItemId, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
-  }, [messages, elapsed, sessionStarted, sessionEnded, item, sessionNumber, user?.id, id, sessionType]);
+  }, [messages, elapsed, sessionStarted, sessionEnded, item, sessionNumber, user?.id, autoItemId, sessionType]);
 
   // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
   // localStorage sempre, servidor best-effort. Visitantes não persistem.
@@ -133,8 +149,8 @@ export default function EchoSession({ user, sessionType }) {
       if (finishedRef.current) return;
       const data = sessionDataRef.current;
       if (!data) return;
-      saveLocal(user.id, sessionType, id, data);
-      api.saveActiveSession(sessionType, id, data).catch(() => {});
+      saveLocal(user.id, sessionType, autoItemId, data);
+      api.saveActiveSession(sessionType, autoItemId, data).catch(() => {});
     }
     function onVis() { if (document.visibilityState === 'hidden') flush(); }
 
@@ -145,7 +161,7 @@ export default function EchoSession({ user, sessionType }) {
       window.removeEventListener('pagehide', flush);
       flush(); // unmount também é "saída"
     };
-  }, [sessionStarted, sessionEnded, user?.id, id, sessionType]);
+  }, [sessionStarted, sessionEnded, user?.id, autoItemId, sessionType]);
 
   // Cronômetro
   useEffect(() => {
@@ -294,6 +310,119 @@ export default function EchoSession({ user, sessionType }) {
       .join('\n\n---\n\n');
   }
 
+  // Reinicia a simulação do zero: descarta a conversa, zera cronômetro e número
+  // de sessão, e volta à tela de início. Confirmação acontece no modal.
+  function doReset() {
+    setConfirmingReset(false);
+    // Bloqueia autosave/flush durante o reset pra não ressuscitar a sessão zumbi.
+    finishedRef.current = true;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+    sessionDataRef.current = null;
+    clearActiveSession(user.id, sessionType, autoItemId);
+    setMessages([]);
+    setInput('');
+    setElapsed(0);
+    setSessionNumber(1);
+    setSessionStarted(false);
+    setError('');
+    setTimeout(() => { finishedRef.current = false; }, 0);
+  }
+
+  // Baixa um "save" portátil da sessão em andamento (JSON), para retomar depois.
+  function downloadSave() {
+    const save = {
+      allosSave: true,
+      version: 1,
+      type: sessionType,
+      itemId: String(id),
+      itemTitle: item?.name || '',
+      messages,
+      elapsedSeconds: elapsed,
+      sessionNumber,
+      savedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(save, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const label = sessionType === 'freeplay' ? 'simulacao' : 'neuro';
+    a.href = url;
+    a.download = `allos-save-${label}-${(item?.name || 'sessao').replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Carrega um save (.json) e retoma a sessão. Valida formato, vínculo com este
+  // personagem e o limite de 30 dias.
+  function handleLoadSaveFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const save = JSON.parse(reader.result);
+        if (!save || save.allosSave !== true || !Array.isArray(save.messages)) {
+          throw new Error('Arquivo de save inválido.');
+        }
+        if (save.type !== sessionType || String(save.itemId) !== String(id)) {
+          throw new Error('Este save é de outro personagem. Abra o personagem correspondente para carregá-lo.');
+        }
+        const savedAt = new Date(save.savedAt || 0).getTime();
+        if (Number.isFinite(savedAt) && savedAt > 0 && Date.now() - savedAt > SAVE_TTL_MS) {
+          throw new Error('Este save expirou — saves de sessão valem por 30 dias.');
+        }
+        finishedRef.current = false;
+        setMessages(save.messages);
+        setElapsed(Number.isFinite(save.elapsedSeconds) ? save.elapsedSeconds : 0);
+        if (Number.isFinite(save.sessionNumber) && save.sessionNumber >= 1) {
+          setSessionNumber(save.sessionNumber);
+        }
+        setSessionStarted(true);
+        setError('');
+      } catch (err) {
+        setError(err.message || 'Não foi possível carregar o save.');
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // Baixa o log da sessão JUNTO com a avaliação da IA num único .txt.
+  function downloadLogAndEval() {
+    const visibleMessages = messages.filter((m) => !m.isSystem);
+    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+    const header = [
+      `Tipo: ${sessionLabel}`,
+      `Caso: ${item?.name || '—'}`,
+      `Terapeuta: ${user?.name || '—'}`,
+      `Data: ${new Date().toLocaleString('pt-BR')}`,
+      `Duração: ${formatTime(elapsed)}`,
+      evalScore !== null ? `Nota final: ${evalScore}` : null,
+    ].filter(Boolean).join('\n');
+
+    const lines = visibleMessages.map((m) => {
+      const author = m.role === 'user' ? (user?.name || 'Terapeuta') : (item?.name || 'Paciente');
+      const star = m.highlighted ? ' ★' : '';
+      const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
+      return `[${author}${star}]\n${m.content}${comment}`;
+    });
+
+    // Aluno baixa só a avaliação SEM o bloco [notas-supervisor].
+    const evalForDownload = stripSupervisorBlock(evaluationText);
+    const evalSection = evalForDownload
+      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
+      : '\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n(sem avaliação registrada)';
+
+    const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}`;
+    const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `log-${(item?.name || 'sessao').replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function handleFinalize() {
     if (!sessionStarted || sessionEnded) return;
     setConfirmingFinalize(true);
@@ -307,7 +436,7 @@ export default function EchoSession({ user, sessionType }) {
     if (visibleMessages.length === 0) {
       if (timerRef.current) clearInterval(timerRef.current);
       setSessionEnded(true);
-      clearActiveSession(user.id, sessionType, id);
+      clearActiveSession(user.id, sessionType, autoItemId);
       return;
     }
 
@@ -364,11 +493,13 @@ export default function EchoSession({ user, sessionType }) {
     }
 
     // 2. Salva o log no histórico já com score + texto da avaliação.
+    //    Em modo competitivo o servidor atualiza o MMR e devolve o resultado.
     try {
-      await api.saveLog({
+      const saved = await api.saveLog({
         userId: user.id,
         userName: user.name,
         type: sessionType,
+        mode: logMode,
         itemId: id,
         itemTitle: item.name,
         messages: visibleMessages.map((m) => ({
@@ -381,6 +512,7 @@ export default function EchoSession({ user, sessionType }) {
         score: totalScore,
         evaluation: evalContent,
       });
+      if (saved && saved.mmr) setMmrResult(saved.mmr);
     } catch (err) {
       setSaveError(err.message || 'Erro ao salvar o log.');
     } finally {
@@ -388,7 +520,7 @@ export default function EchoSession({ user, sessionType }) {
     }
 
     // Sessão finalizada — limpa o autosave ativo
-    clearActiveSession(user.id, sessionType, id);
+    clearActiveSession(user.id, sessionType, autoItemId);
   }
 
   async function toggleRecording() {
@@ -549,6 +681,41 @@ export default function EchoSession({ user, sessionType }) {
             )}
           </div>
 
+          {isCompetitive && (
+            <div className="mmr-result-card">
+              {mmrResult ? (
+                mmrResult.calibrating ? (
+                  <>
+                    <span className="post-stat-label">MMR · Em calibração</span>
+                    <p className="mmr-result-note">
+                      Partida {mmrResult.n} de 5 da calibração — seu MMR aparece após a 5ª.
+                      {mmrResult.matchesRemaining > 0 && (
+                        <> Faltam <strong>{mmrResult.matchesRemaining}</strong> {mmrResult.matchesRemaining === 1 ? 'partida' : 'partidas'}.</>
+                      )}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <span className="post-stat-label">Seu MMR</span>
+                    <div className="mmr-result-value">
+                      {Math.round(mmrResult.P_after)}
+                      <span className={`mmr-delta ${mmrResult.delta >= 0 ? 'up' : 'down'}`}>
+                        {mmrResult.delta >= 0 ? '▲' : '▼'} {Math.abs(mmrResult.delta).toFixed(1)}
+                      </span>
+                    </div>
+                    <p className="mmr-result-note">
+                      Dificuldade de {item?.name} agora: <strong>{Math.round(mmrResult.D_after)}</strong>
+                    </p>
+                  </>
+                )
+              ) : (
+                <p className="mmr-result-note">
+                  O MMR não foi atualizado — a sessão não recebeu uma nota numérica do avaliador.
+                </p>
+              )}
+            </div>
+          )}
+
           {evaluationText && (
             <div className="post-evaluation">
               <h4>Análise da IA</h4>
@@ -557,15 +724,24 @@ export default function EchoSession({ user, sessionType }) {
                   .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
                   .replace(/\[NOTA:[^\]]+\]\s*/g, '')
                   .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
+                  // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
+                  // some da visão do aluno, mas continua salvo no log.
+                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
                   .trim()}
               </div>
             </div>
           )}
 
           <div className="post-session-actions">
-            <button className="btn btn-primary" onClick={() => navigate(sessionType === 'freeplay' ? '/freeplay' : '/neuro')}>
+            <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/competitivo' : (sessionType === 'freeplay' ? '/freeplay' : '/neuro'))}>
               Voltar à biblioteca
             </button>
+            {visibleMessages.length > 0 && (
+              <button className="btn btn-outline" onClick={downloadLogAndEval} title="Baixar a transcrição e a avaliação juntas (.txt)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6, verticalAlign: '-2px' }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                Baixar log + avaliação
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -573,7 +749,9 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   // -------- TELA DE CHAT --------
-  const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+  const sessionLabel = isCompetitive
+    ? 'Competitivo'
+    : (sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação');
   // Diagnóstico temporário: deve logar a cada render com o sessionNumber atual.
   // Depois de clicar "passar sessão", o próximo render aqui deve mostrar #2.
   if (sessionStarted) console.log('[render] sessionNumber =', sessionNumber);
@@ -607,6 +785,27 @@ export default function EchoSession({ user, sessionType }) {
           </div>
           {sessionStarted && (
             <>
+              {messages.filter((m) => !m.isSystem).length > 0 && (
+                <button
+                  className="btn btn-outline btn-sm"
+                  onClick={downloadSave}
+                  disabled={isTyping || skipping}
+                  title="Baixar save desta sessão (.json) para retomar depois"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
+                  Save
+                </button>
+              )}
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={() => setConfirmingReset(true)}
+                disabled={isTyping || skipping}
+                title="Reiniciar a simulação do zero"
+                style={{ color: 'var(--terra)', borderColor: 'var(--terra)' }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.7 3" /><polyline points="3 3 3 8 8 8" /></svg>
+                Reiniciar
+              </button>
               <button
                 className="btn btn-sm"
                 onClick={handleSkipSession}
@@ -712,9 +911,15 @@ export default function EchoSession({ user, sessionType }) {
           <div className="start-session-card">
             <h4>Pronto para começar?</h4>
             <p>Ao iniciar, {item?.name} abrirá a conversa. Use o botão de destaque (★) para marcar suas próprias intervenções para revisão posterior.</p>
-            <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
-              Iniciar atendimento
-            </button>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
+                Iniciar atendimento
+              </button>
+              <button className="btn btn-outline btn-lg" onClick={() => fileInputRef.current?.click()} disabled={!item} title="Retomar a partir de um arquivo de save (.json)">
+                Carregar save
+              </button>
+            </div>
+            <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
           </div>
         </div>
       ) : isTranscribing ? (
@@ -787,6 +992,24 @@ export default function EchoSession({ user, sessionType }) {
           </div>
         );
       })()}
+
+      {/* Modal de confirmação de reinício */}
+      {confirmingReset && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingReset(false); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <h3>Reiniciar simulação</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
+              Tem certeza que deseja reiniciar? Toda a conversa atual, o tempo decorrido e o número da sessão serão <strong>perdidos</strong> e você voltará à tela de início. Esta ação não pode ser desfeita.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={() => setConfirmingReset(false)}>Cancelar</button>
+              <button type="button" className="btn btn-primary" onClick={doReset} style={{ background: 'var(--terra)', borderColor: 'var(--terra)' }}>
+                Sim, reiniciar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal de confirmação de "time skip" entre sessões */}
       {confirmingSkip && (

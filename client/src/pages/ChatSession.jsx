@@ -5,6 +5,7 @@ import {
   buildDirectEvaluationPrompt,
   parseCriteriaScores,
   calculateScores,
+  stripSupervisorBlock,
   SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
@@ -33,6 +34,7 @@ export default function ChatSession({ user }) {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
+  const [confirmingReset, setConfirmingReset] = useState(false);
   const [error, setError] = useState('');
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
@@ -49,6 +51,10 @@ export default function ChatSession({ user }) {
   const restoredRef = useRef(false);
   const finishedRef = useRef(false);
   const sessionDataRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // Limite de 30 dias para saves de sessão (alinhado à expiração de logs).
+  const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
   useEffect(() => {
     let cancelled = false;
@@ -391,8 +397,9 @@ export default function ChatSession({ user }) {
       );
     const skillName = SKILL_NAMES[item.skillId] || '';
     const header = `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
-    const evalSection = evaluationText
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
+    const evalForDownload = stripSupervisorBlock(evaluationText);
+    const evalSection = evalForDownload
+      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
       : '';
     const blob = new Blob([header + lines.join('\n\n---\n\n') + evalSection], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -401,6 +408,81 @@ export default function ChatSession({ user }) {
     a.download = `trilha-${item.title.replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // Reinicia a simulação do zero: descarta a conversa, zera o cronômetro e
+  // volta à tela de início. A confirmação acontece no modal antes de chamar.
+  function doReset() {
+    setConfirmingReset(false);
+    // Bloqueia autosave/flush durante o reset pra não ressuscitar a sessão zumbi.
+    finishedRef.current = true;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    if (timerRef.current) clearInterval(timerRef.current);
+    sessionDataRef.current = null;
+    clearActiveSession(user.id, 'exercise', id);
+    setMessages([]);
+    setInput('');
+    setElapsed(0);
+    startedAtRef.current = null;
+    setSessionStarted(false);
+    setError('');
+    // Reabilita a persistência para a próxima sessão iniciada.
+    setTimeout(() => { finishedRef.current = false; }, 0);
+  }
+
+  // Baixa um "save" portátil da sessão em andamento (JSON), para retomar depois.
+  function downloadSave() {
+    const save = {
+      allosSave: true,
+      version: 1,
+      type: 'exercise',
+      itemId: String(id),
+      itemTitle: item?.title || '',
+      messages,
+      elapsedSeconds: elapsed,
+      savedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(save, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `allos-save-trilha-${(item?.title || 'sessao').replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Carrega um save (.json) e retoma a sessão. Valida o formato, o vínculo com
+  // este exercício e o limite de 30 dias.
+  function handleLoadSaveFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // permite recarregar o mesmo arquivo depois
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const save = JSON.parse(reader.result);
+        if (!save || save.allosSave !== true || !Array.isArray(save.messages)) {
+          throw new Error('Arquivo de save inválido.');
+        }
+        if (save.type !== 'exercise' || String(save.itemId) !== String(id)) {
+          throw new Error('Este save é de outro exercício. Abra o exercício correspondente para carregá-lo.');
+        }
+        const savedAt = new Date(save.savedAt || 0).getTime();
+        if (Number.isFinite(savedAt) && savedAt > 0 && Date.now() - savedAt > SAVE_TTL_MS) {
+          throw new Error('Este save expirou — saves de sessão valem por 30 dias.');
+        }
+        finishedRef.current = false;
+        setMessages(save.messages);
+        const sec = Number.isFinite(save.elapsedSeconds) ? save.elapsedSeconds : 0;
+        setElapsed(sec);
+        startedAtRef.current = Date.now() - sec * 1000;
+        setSessionStarted(true);
+        setError('');
+      } catch (err) {
+        setError(err.message || 'Não foi possível carregar o save.');
+      }
+    };
+    reader.readAsText(file);
   }
 
   // -------- TELA DE LOADING (avaliando) --------
@@ -475,6 +557,9 @@ export default function ChatSession({ user }) {
                   .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
                   .replace(/\[NOTA:[^\]]+\]\s*/g, '')
                   .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
+                  // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
+                  // some da visão do aluno, mas continua salvo no log.
+                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
                   .trim()}
               </div>
             </div>
@@ -516,6 +601,24 @@ export default function ChatSession({ user }) {
             <button onClick={downloadLog} className="btn btn-outline btn-sm" title="Baixar log">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
               Log
+            </button>
+          )}
+          {sessionStarted && messages.filter((m) => !m.isSystem).length > 0 && (
+            <button onClick={downloadSave} className="btn btn-outline btn-sm" title="Baixar save desta sessão (.json) para retomar depois">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
+              Save
+            </button>
+          )}
+          {sessionStarted && (
+            <button
+              onClick={() => setConfirmingReset(true)}
+              disabled={isTyping}
+              className="btn btn-outline btn-sm"
+              title="Reiniciar a simulação do zero"
+              style={{ color: 'var(--terra)', borderColor: 'var(--terra)' }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.7 3" /><polyline points="3 3 3 8 8 8" /></svg>
+              Reiniciar
             </button>
           )}
           {sessionStarted && (
@@ -573,9 +676,15 @@ export default function ChatSession({ user }) {
           <div className="start-session-card">
             <h4>Pronto para começar?</h4>
             <p>Ao iniciar, o paciente abrirá a conversa. Você responde a partir da fala dele.</p>
-            <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
-              Iniciar atendimento
-            </button>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+              <button className="btn btn-primary btn-lg" onClick={handleStartSession} disabled={!item}>
+                Iniciar atendimento
+              </button>
+              <button className="btn btn-outline btn-lg" onClick={() => fileInputRef.current?.click()} disabled={!item} title="Retomar a partir de um arquivo de save (.json)">
+                Carregar save
+              </button>
+            </div>
+            <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
           </div>
         </div>
       ) : isTranscribing ? (
@@ -648,6 +757,24 @@ export default function ChatSession({ user }) {
           </div>
         );
       })()}
+
+      {/* Modal de confirmação de reinício */}
+      {confirmingReset && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingReset(false); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <h3>Reiniciar simulação</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
+              Tem certeza que deseja reiniciar? Toda a conversa atual e o tempo decorrido serão <strong>perdidos</strong> e você voltará à tela de início. Esta ação não pode ser desfeita.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={() => setConfirmingReset(false)}>Cancelar</button>
+              <button type="button" className="btn btn-primary" onClick={doReset} style={{ background: 'var(--terra)', borderColor: 'var(--terra)' }}>
+                Sim, reiniciar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
