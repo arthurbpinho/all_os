@@ -12,6 +12,8 @@ server/data/achievements.json
 server/data/active-sessions.json
 server/data/migrations.json
 server/data/mmr.json
+server/data/duels.json
+server/data/notifications.json
 server/data/tmp_audio.webm
 
 # Backups locais

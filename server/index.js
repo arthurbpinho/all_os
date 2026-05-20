@@ -14,6 +14,7 @@ const {
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
+const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
 
 const app = express();
 
@@ -293,6 +294,20 @@ if (!fs.existsSync(path.join(DATA_DIR, 'logs.json'))) {
 // ranking (decisão do dono): zerar notas dos logs NÃO zera o MMR.
 if (!fs.existsSync(path.join(DATA_DIR, 'mmr.json'))) {
   writeJSON('mmr.json', { players: {}, characters: {} });
+}
+
+// Duelos (avaliação comparada entre dois alunos atendendo o mesmo personagem).
+// Array de duelos; cada um guarda os dois lados (challenger/opponent), as
+// transcrições e o resultado da avaliação comparativa. Só vale pra treino por
+// enquanto (não toca no MMR).
+if (!fs.existsSync(path.join(DATA_DIR, 'duels.json'))) {
+  writeJSON('duels.json', []);
+}
+
+// Notificações in-app (convite de duelo, resultado de duelo). Mapa
+// { <userId>: [ {id, type, ...} ] }. Visitantes (id efêmero) não recebem.
+if (!fs.existsSync(path.join(DATA_DIR, 'notifications.json'))) {
+  writeJSON('notifications.json', {});
 }
 
 function readMMR() {
@@ -709,6 +724,8 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
       achievements: readJSON('achievements.json', {}),
       activeSessions: readJSON('active-sessions.json', {}),
       mmr: readJSON('mmr.json', { players: {}, characters: {} }),
+      duels: readJSON('duels.json', []),
+      notifications: readJSON('notifications.json', {}),
     },
   };
   // Content-Disposition: força download como arquivo em vez de renderizar JSON
@@ -1292,6 +1309,20 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // prioridade.
   const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(body.evaluation);
 
+  // Nota final: calculada em CÓDIGO a partir das notas por critério do bloco
+  // [notas-supervisor] (avaliadores v15/progressão). A IA não emite mais a nota
+  // 0–100 no texto — `server/scoring.js` faz a conta (soma → base 100). A trilha
+  // (exercise) manda criteriaScores explícito + score já calculado client-side
+  // (escala -9..+9, outra fórmula), então nesse caso respeitamos o body.score.
+  const explicitCriteria = (body.criteriaScores && typeof body.criteriaScores === 'object')
+    ? body.criteriaScores
+    : null;
+  let finalScore = Number.isFinite(body.score) ? Number(body.score) : null;
+  if (supervisorCriteria && !explicitCriteria) {
+    const computed = finalScoreFromCriteria(supervisorCriteria);
+    if (computed !== null) finalScore = computed;
+  }
+
   const log = {
     id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
@@ -1302,10 +1333,8 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     skillId: Number.isFinite(body.skillId) ? Number(body.skillId) : null,
     difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
     durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
-    score: Number.isFinite(body.score) ? Number(body.score) : null,
-    criteriaScores: (body.criteriaScores && typeof body.criteriaScores === 'object')
-      ? body.criteriaScores
-      : (supervisorCriteria || null),
+    score: finalScore,
+    criteriaScores: explicitCriteria || supervisorCriteria || null,
     evaluation: clampStr(cleanEvaluation, LOG_MAX_EVAL_LEN),
     messages: cleanMessages,
     userId: req.user.id,
@@ -1684,6 +1713,16 @@ function loadAvaliacaoPrompt() {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
+// Avaliador comparativo (Duelo): recebe os dois logs do mesmo caso e devolve a
+// análise comparativa + JSON [notas-supervisor] com A1..A6 / B1..B6.
+function loadComparativoPrompt() {
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-comparativo-v1.md');
+  if (!fs.existsSync(promptFile)) {
+    throw new Error(`Prompt do avaliador comparativo não encontrado em ${promptFile}`);
+  }
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
 // Resolve o system prompt do avaliador server-side. Se context.type ===
 // 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
 // (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
@@ -1838,6 +1877,526 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
     // Limpeza sempre, mesmo se a chamada à OpenAI falhar
     try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
   }
+});
+
+// ============================================================================
+// DUELOS — avaliação comparada entre dois alunos atendendo o mesmo personagem
+// ============================================================================
+// Fluxo: o desafiante (challenger) escolhe um personagem e um oponente (um
+// terapeuta do sistema OU um visitante via link). Cada um atende o MESMO
+// personagem na sua própria sessão. Quando os DOIS enviam, o avaliador
+// comparativo roda server-side, gera a análise + JSON [notas-supervisor]
+// (A1..A6 = challenger, B1..B6 = opponent), e o backend calcula as duas notas
+// (server/scoring.js) e o vencedor. Só treino por enquanto — não toca no MMR.
+
+const DUEL_TTL_MS = 30 * 24 * 60 * 60 * 1000; // mesma janela dos logs
+const DUEL_MAX_MESSAGES = 500;
+const DUEL_MAX_MESSAGE_LEN = 20000;
+
+function readDuels() { return readJSON('duels.json', []); }
+function writeDuels(d) { writeJSON('duels.json', d); }
+function readNotifications() { return readJSON('notifications.json', {}); }
+function writeNotifications(n) { writeJSON('notifications.json', n); }
+
+function pruneExpiredDuels() {
+  let duels;
+  try { duels = readDuels(); } catch { return 0; }
+  if (!Array.isArray(duels) || duels.length === 0) return 0;
+  const cutoff = Date.now() - DUEL_TTL_MS;
+  const kept = duels.filter((d) => {
+    const t = new Date(d.createdAt || 0).getTime();
+    if (!Number.isFinite(t) || t === 0) return true;
+    return t >= cutoff;
+  });
+  if (kept.length === duels.length) return 0;
+  writeDuels(kept);
+  return duels.length - kept.length;
+}
+
+// Cria uma notificação para um usuário real (visitantes não recebem).
+function pushNotification(userId, notif) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  const all = readNotifications();
+  if (!all[userId]) all[userId] = [];
+  all[userId].unshift({
+    id: 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    createdAt: new Date().toISOString(),
+    read: false,
+    ...notif,
+  });
+  // Cap de 50 notificações por usuário pra não inchar o arquivo.
+  if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
+  writeNotifications(all);
+}
+
+// Sanitiza mensagens enviadas pelo cliente ao submeter uma sessão de duelo.
+function cleanDuelMessages(rawMessages) {
+  const arr = Array.isArray(rawMessages) ? rawMessages.slice(0, DUEL_MAX_MESSAGES) : [];
+  return arr
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && !m.isSystem)
+    .map((m) => ({
+      role: m.role,
+      content: clampStr(m.content, DUEL_MAX_MESSAGE_LEN),
+      highlighted: !!m.highlighted,
+      comment: clampStr(m.comment, 2000),
+    }));
+}
+
+// Monta a transcrição textual de um lado, no formato que o avaliador espera.
+function transcriptFromMessages(messages, authorName, characterName) {
+  return (messages || [])
+    .map((m) => {
+      const author = m.role === 'user' ? authorName : characterName;
+      const star = m.highlighted ? ' ★' : '';
+      const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
+      return `[${author}${star}]\n${m.content}${comment}`;
+    })
+    .join('\n\n---\n\n');
+}
+
+// Identidade pública de um usuário (pro card do oponente / lado do duelo).
+function duelIdentity(user) {
+  return {
+    userId: user.id,
+    name: user.name || user.username || 'Terapeuta',
+    profilePhoto: user.profilePhoto || '',
+    isVisitor: user.role === 'visitor',
+  };
+}
+
+// Resolve qual lado do duelo é o usuário (challenger | opponent | null).
+function duelSideFor(duel, user) {
+  if (!user) return null;
+  if (duel.challenger && duel.challenger.userId === user.id) return 'challenger';
+  if (duel.opponent && duel.opponent.userId === user.id) return 'opponent';
+  return null;
+}
+
+function isDuelParticipant(duel, user) {
+  return !!duelSideFor(duel, user) || isAdmin(user);
+}
+
+// Versão do duelo segura pro cliente. Transcrições só aparecem quando o duelo
+// está concluído (e só pra participantes/admin). Notas por critério só pra admin.
+function sanitizeDuelForUser(duel, user) {
+  const side = duelSideFor(duel, user);
+  const completed = duel.status === 'completed';
+  const sideView = (s, includeMessages) => ({
+    userId: s.userId || null,
+    name: s.name || null,
+    profilePhoto: s.profilePhoto || '',
+    isVisitor: !!s.isVisitor,
+    kind: s.kind || undefined,
+    state: s.state,
+    accepted: !!s.accepted,
+    submittedAt: s.submittedAt || null,
+    durationSeconds: s.durationSeconds || 0,
+    ...(includeMessages ? { messages: s.messages || [] } : {}),
+  });
+  const wantMessages = completed && (side || isAdmin(user));
+  const out = {
+    id: duel.id,
+    createdAt: duel.createdAt,
+    status: duel.status,
+    mode: duel.mode,
+    inviteMethod: duel.inviteMethod,
+    character: duel.character,
+    challenger: sideView(duel.challenger, wantMessages),
+    opponent: sideView(duel.opponent, wantMessages),
+    youAre: side,
+  };
+  // Token (pro link de WhatsApp) só pro desafiante e pro admin.
+  if (side === 'challenger' || isAdmin(user)) out.token = duel.token;
+  if (duel.result) {
+    out.result = {
+      winner: duel.result.winner,
+      scoreChallenger: duel.result.scoreChallenger,
+      scoreOpponent: duel.result.scoreOpponent,
+      evaluation: duel.result.evaluation, // já vem sem o bloco [notas-supervisor]
+      evaluatedAt: duel.result.evaluatedAt,
+    };
+    if (isAdmin(user)) {
+      out.result.criteriaChallenger = duel.result.criteriaChallenger;
+      out.result.criteriaOpponent = duel.result.criteriaOpponent;
+    }
+  }
+  return out;
+}
+
+// Roda o avaliador comparativo nos dois logs e devolve as notas + texto limpo.
+async function runComparativeEvaluation(duel) {
+  const anthropic = getAnthropic();
+  const challengerName = duel.challenger.name || 'Aluno A';
+  const opponentName = duel.opponent.name || 'Aluno B';
+  const logA = transcriptFromMessages(duel.challenger.messages, challengerName, duel.character.name);
+  const logB = transcriptFromMessages(duel.opponent.messages, opponentName, duel.character.name);
+
+  if (!anthropic) {
+    // Modo demonstração (sem API key): nota neutra pros dois, sem vencedor real.
+    const criteria = { A1: 5, A2: 5, A3: 5, A4: 5, A5: 5, A6: 5, B1: 5, B2: 5, B3: 5, B4: 5, B5: 5, B6: 5 };
+    const comp = comparativeScores(criteria);
+    return {
+      evaluationClean: '[Modo demonstração — API Key não configurada] Avaliação comparativa indisponível.',
+      comp,
+    };
+  }
+
+  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: duel.character.id } });
+  const userContent =
+    (bloco1 ? `[BLOCO 1 DO CASO] (referência interna do avaliador — gabarito)\n${bloco1}\n\n---\n\n` : '') +
+    `[LOG DO ALUNO A — ${challengerName}]\n${logA || '(sem mensagens)'}\n\n---\n\n` +
+    `[LOG DO ALUNO B — ${opponentName}]\n${logB || '(sem mensagens)'}`;
+
+  const stream = anthropic.messages.stream({
+    model: EVAL_MODEL,
+    max_tokens: 16000,
+    system: [
+      { type: 'text', text: loadComparativoPrompt(), cache_control: { type: 'ephemeral' } },
+    ],
+    messages: [{ role: 'user', content: userContent }],
+  });
+  const message = await stream.finalMessage();
+  const text = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  if (message.usage) {
+    console.log(
+      `Duel evaluate cache: read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
+    );
+  }
+  const { clean, criteria } = extractSupervisorNotes(text);
+  const comp = comparativeScores(criteria);
+  return { evaluationClean: clean, comp };
+}
+
+// Lista de oponentes possíveis: terapeutas do sistema (exceto você).
+app.get('/api/duel/opponents', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não pode iniciar duelos.' });
+  }
+  const users = readJSON('users.json');
+  const list = users
+    .filter((u) => u.role === 'therapist' && u.id !== req.user.id)
+    .map((u) => ({ userId: u.id, name: u.name || u.username, profilePhoto: u.profilePhoto || '' }))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
+  res.json(list);
+});
+
+// Cria um duelo. body: { characterId, opponentUserId?, inviteMethod }.
+// - opponentUserId presente → convida um usuário específico.
+//   inviteMethod 'system' dispara notificação in-app; 'whatsapp' gera só o link.
+// - opponentUserId ausente → duelo aberto (link p/ visitante ou qualquer um).
+app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não pode iniciar duelos.' });
+  }
+  const body = req.body || {};
+  const character = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(body.characterId));
+  if (!character) return res.status(404).json({ error: 'Personagem não encontrado.' });
+
+  const inviteMethod = body.inviteMethod === 'system' ? 'system' : 'whatsapp';
+
+  // Convite pelo sistema (in-app) é direcionado a um usuário específico, que
+  // aceita pela notificação. Convite por WhatsApp/link é ABERTO: quem abrir o
+  // link aceita (usuário logado ou visitante) — evita travar o aceite quando o
+  // destinatário entra como visitante.
+  let opponent;
+  let notifyUserId = null;
+  if (inviteMethod === 'system') {
+    const opponentUserId = body.opponentUserId || null;
+    if (!opponentUserId) return res.status(400).json({ error: 'Convite pelo sistema exige um oponente.' });
+    const target = readJSON('users.json').find((u) => u.id === opponentUserId);
+    if (!target || target.role === 'visitor') return res.status(404).json({ error: 'Oponente inválido.' });
+    if (target.id === req.user.id) return res.status(400).json({ error: 'Você não pode duelar consigo mesmo.' });
+    opponent = { ...duelIdentity(target), kind: 'user', state: 'invited', accepted: false, messages: [], durationSeconds: 0, submittedAt: null };
+    notifyUserId = target.id;
+  } else {
+    opponent = { userId: null, name: null, profilePhoto: '', isVisitor: true, kind: 'open', state: 'invited', accepted: false, messages: [], durationSeconds: 0, submittedAt: null };
+  }
+  // Convite via link (whatsapp/aberto): challenger fica 'invited' até confirmar
+  // que enviou o link ("Sim! Enviei"). Convite via sistema também só inicia a
+  // sessão do challenger quando ele clica em iniciar — em ambos os casos o lado
+  // do challenger começa como 'invited' e vira 'in_progress' no start.
+  const duel = {
+    id: 'duel-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+    token: crypto.randomBytes(12).toString('hex'),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    mode: 'training',
+    status: 'pending',
+    inviteMethod,
+    character: { id: character.id, name: character.name },
+    challenger: { ...duelIdentity(req.user), state: 'in_progress', messages: [], durationSeconds: 0, submittedAt: null },
+    opponent,
+    result: null,
+  };
+
+  const duels = readDuels();
+  duels.push(duel);
+  writeDuels(duels);
+
+  // Convite in-app: notifica o oponente.
+  if (notifyUserId) {
+    pushNotification(notifyUserId, {
+      type: 'duel_invite',
+      duelId: duel.id,
+      fromName: duel.challenger.name,
+      fromUserId: req.user.id,
+      characterName: character.name,
+    });
+  }
+
+  res.json(sanitizeDuelForUser(duel, req.user));
+});
+
+// Detalhe de um duelo (participante ou admin).
+app.get('/api/duel/:id', requireAuth, (req, res) => {
+  const duel = readDuels().find((d) => d.id === req.params.id);
+  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
+  res.json(sanitizeDuelForUser(duel, req.user));
+});
+
+// Resumo de um duelo por token (pra tela de aceitar via link, inclusive visitante).
+app.get('/api/duel/by-token/:token', requireAuth, (req, res) => {
+  const duel = readDuels().find((d) => d.token === req.params.token);
+  if (!duel) return res.status(404).json({ error: 'Convite inválido ou expirado.' });
+  res.json({
+    id: duel.id,
+    status: duel.status,
+    character: duel.character,
+    challengerName: duel.challenger.name,
+    opponentKind: duel.opponent.kind,
+    opponentTaken: !!duel.opponent.userId,
+    youAre: duelSideFor(duel, req.user),
+  });
+});
+
+// Aceita um duelo enviado por link (token) — usuário logado OU visitante.
+app.post('/api/duel/by-token/:token/accept', requireAuth, (req, res) => {
+  const duels = readDuels();
+  const duel = duels.find((d) => d.token === req.params.token);
+  if (!duel) return res.status(404).json({ error: 'Convite inválido ou expirado.' });
+  const out = acceptDuel(duel, req.user);
+  if (out.error) return res.status(out.status).json({ error: out.error });
+  writeDuels(duels);
+  res.json(sanitizeDuelForUser(duel, req.user));
+});
+
+// Aceita um duelo recebido por notificação (convite in-app, usuário específico).
+app.post('/api/duel/:id/accept', requireAuth, (req, res) => {
+  const duels = readDuels();
+  const duel = duels.find((d) => d.id === req.params.id);
+  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  const out = acceptDuel(duel, req.user);
+  if (out.error) return res.status(out.status).json({ error: out.error });
+  // Marca a notificação de convite como lida.
+  markDuelInviteRead(req.user.id, duel.id);
+  writeDuels(duels);
+  res.json(sanitizeDuelForUser(duel, req.user));
+});
+
+// Lógica compartilhada de aceite (muta o objeto duel; o caller persiste).
+function acceptDuel(duel, user) {
+  const side = duelSideFor(duel, user);
+  if (side === 'challenger') return { status: 400, error: 'Você é o desafiante deste duelo.' };
+  if (duel.status === 'completed') return { status: 400, error: 'Este duelo já foi concluído.' };
+  // Já aceitou antes (convite in-app pré-atribui opponent.userId, mas só
+  // consideramos "já é o oponente" quando accepted === true) → idempotente.
+  if (side === 'opponent' && duel.opponent.accepted) return {};
+
+  if (duel.opponent.kind === 'user') {
+    // Convite in-app a um usuário específico: só esse usuário aceita.
+    if (duel.opponent.userId && duel.opponent.userId !== user.id) {
+      return { status: 403, error: 'Este convite é de outra pessoa.' };
+    }
+  } else {
+    // Duelo aberto (link/WhatsApp): o primeiro a aceitar trava o lado do oponente.
+    if (duel.opponent.userId && duel.opponent.userId !== user.id) {
+      return { status: 409, error: 'Este duelo já foi aceito por outra pessoa.' };
+    }
+  }
+
+  Object.assign(duel.opponent, duelIdentity(user), {
+    kind: duel.opponent.kind,
+    state: 'in_progress',
+    accepted: true,
+    acceptedAt: new Date().toISOString(),
+    messages: duel.opponent.messages || [],
+    durationSeconds: 0,
+    submittedAt: null,
+  });
+  duel.updatedAt = new Date().toISOString();
+  return {};
+}
+
+function markDuelInviteRead(userId, duelId) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  const all = readNotifications();
+  const list = all[userId];
+  if (!list) return;
+  let dirty = false;
+  for (const n of list) {
+    if (n.type === 'duel_invite' && n.duelId === duelId && !n.read) { n.read = true; dirty = true; }
+  }
+  if (dirty) writeNotifications(all);
+}
+
+// Submete a sessão de um lado. Quando os DOIS submeteram, roda o avaliador
+// comparativo (no request do segundo a submeter) e grava o resultado.
+app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
+  const duels = readDuels();
+  const duel = duels.find((d) => d.id === req.params.id);
+  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  const side = duelSideFor(duel, req.user);
+  if (!side) return res.status(403).json({ error: 'Você não participa deste duelo.' });
+  if (duel.status === 'completed') return res.json(sanitizeDuelForUser(duel, req.user));
+
+  const messages = cleanDuelMessages(req.body && req.body.messages);
+  const duration = Number.isFinite(req.body && req.body.durationSeconds)
+    ? Math.max(0, Math.floor(req.body.durationSeconds)) : 0;
+
+  duel[side].messages = messages;
+  duel[side].durationSeconds = duration;
+  duel[side].state = 'submitted';
+  duel[side].submittedAt = new Date().toISOString();
+  duel.updatedAt = new Date().toISOString();
+
+  const bothSubmitted = duel.challenger.state === 'submitted' && duel.opponent.state === 'submitted';
+  if (!bothSubmitted) {
+    writeDuels(duels);
+    return res.json(sanitizeDuelForUser(duel, req.user));
+  }
+
+  // Os dois enviaram → roda a avaliação comparativa agora.
+  duel.status = 'evaluating';
+  writeDuels(duels);
+
+  try {
+    const { evaluationClean, comp } = await runComparativeEvaluation(duel);
+    // Relê e remapeia (o arquivo pode ter mudado durante a chamada à IA).
+    const fresh = readDuels();
+    const target = fresh.find((d) => d.id === duel.id) || duel;
+    if (comp) {
+      target.result = {
+        winner: comp.winner === 'A' ? 'challenger' : comp.winner === 'B' ? 'opponent' : 'draw',
+        scoreChallenger: comp.scoreA,
+        scoreOpponent: comp.scoreB,
+        criteriaChallenger: comp.criteriaChallenger,
+        criteriaOpponent: comp.criteriaOpponent,
+        evaluation: evaluationClean,
+        evaluatedAt: new Date().toISOString(),
+      };
+      target.status = 'completed';
+    } else {
+      target.result = { winner: null, scoreChallenger: null, scoreOpponent: null, evaluation: evaluationClean, evaluatedAt: new Date().toISOString(), error: 'Não foi possível extrair as notas da avaliação.' };
+      target.status = 'completed';
+    }
+    target.updatedAt = new Date().toISOString();
+    writeDuels(fresh);
+
+    // Notifica os dois lados reais com o resultado (visitantes ficam de fora).
+    notifyDuelResult(target);
+    return res.json(sanitizeDuelForUser(target, req.user));
+  } catch (err) {
+    console.error('Duel evaluation error:', err.message);
+    const fresh = readDuels();
+    const target = fresh.find((d) => d.id === duel.id) || duel;
+    target.status = 'pending'; // volta a pendente pra permitir retry
+    writeDuels(fresh);
+    return res.status(500).json({ error: 'Erro ao avaliar o duelo: ' + err.message });
+  }
+});
+
+function notifyDuelResult(duel) {
+  if (!duel.result) return;
+  const r = duel.result;
+  const sides = [
+    { s: duel.challenger, score: r.scoreChallenger, theirScore: r.scoreOpponent, won: r.winner === 'challenger', theirName: duel.opponent.name },
+    { s: duel.opponent, score: r.scoreOpponent, theirScore: r.scoreChallenger, won: r.winner === 'opponent', theirName: duel.challenger.name },
+  ];
+  for (const side of sides) {
+    if (!side.s.userId || side.s.isVisitor) continue;
+    pushNotification(side.s.userId, {
+      type: 'duel_result',
+      duelId: duel.id,
+      characterName: duel.character.name,
+      opponentName: side.theirName,
+      outcome: r.winner === 'draw' ? 'draw' : (side.won ? 'win' : 'loss'),
+      yourScore: side.score,
+      theirScore: side.theirScore,
+    });
+  }
+}
+
+// Logs sociais: duelos do usuário agrupados por oponente, ordenados por número
+// de partidas (desc) e depois por nome do oponente (asc).
+app.get('/api/duels/social', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json([]);
+  pruneExpiredDuels();
+  const duels = readDuels().filter((d) => isDuelParticipant(d, req.user));
+  const groups = {};
+  for (const d of duels) {
+    const side = duelSideFor(d, req.user);
+    if (!side && !isAdmin(req.user)) continue;
+    const me = side === 'opponent' ? d.opponent : d.challenger;
+    const them = side === 'opponent' ? d.challenger : d.opponent;
+    const key = them.userId || (them.name ? `name:${them.name}` : `duel:${d.id}`);
+    if (!groups[key]) {
+      groups[key] = {
+        opponent: { userId: them.userId || null, name: them.name || 'Visitante', profilePhoto: them.profilePhoto || '', isVisitor: !!them.isVisitor },
+        count: 0, wins: 0, losses: 0, draws: 0, duels: [],
+      };
+    }
+    const g = groups[key];
+    g.count++;
+    let outcome = null;
+    let yourScore = null;
+    let theirScore = null;
+    if (d.result) {
+      yourScore = side === 'opponent' ? d.result.scoreOpponent : d.result.scoreChallenger;
+      theirScore = side === 'opponent' ? d.result.scoreChallenger : d.result.scoreOpponent;
+      if (d.result.winner === 'draw') { outcome = 'draw'; g.draws++; }
+      else if ((d.result.winner === 'challenger' && side === 'challenger') || (d.result.winner === 'opponent' && side === 'opponent')) { outcome = 'win'; g.wins++; }
+      else { outcome = 'loss'; g.losses++; }
+    }
+    g.duels.push({
+      id: d.id,
+      characterName: d.character.name,
+      date: d.result ? d.result.evaluatedAt : d.createdAt,
+      status: d.status,
+      outcome, yourScore, theirScore,
+    });
+  }
+  const list = Object.values(groups)
+    .map((g) => ({ ...g, duels: g.duels.sort((a, b) => new Date(b.date) - new Date(a.date)) }))
+    .sort((a, b) => (b.count - a.count) || (a.opponent.name || '').localeCompare(b.opponent.name || '', 'pt-BR'));
+  res.json(list);
+});
+
+// --- Notificações in-app ---
+app.get('/api/notifications', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json({ items: [], unread: 0 });
+  const all = readNotifications();
+  const items = all[req.user.id] || [];
+  res.json({ items, unread: items.filter((n) => !n.read).length });
+});
+
+app.post('/api/notifications/:id/read', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json({ ok: true });
+  const all = readNotifications();
+  const items = all[req.user.id] || [];
+  const n = items.find((x) => x.id === req.params.id);
+  if (n) { n.read = true; writeNotifications(all); }
+  res.json({ ok: true });
+});
+
+app.post('/api/notifications/read-all', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json({ ok: true });
+  const all = readNotifications();
+  const items = all[req.user.id] || [];
+  let dirty = false;
+  for (const n of items) if (!n.read) { n.read = true; dirty = true; }
+  if (dirty) writeNotifications(all);
+  res.json({ ok: true });
 });
 
 // Serve static files in production

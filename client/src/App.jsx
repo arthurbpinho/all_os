@@ -17,6 +17,11 @@ import Profile from './pages/Profile';
 import Missoes from './pages/Missoes';
 import Ranking from './pages/Ranking';
 import AdminUsers from './pages/AdminUsers';
+import Duelo from './pages/Duelo';
+import DuelSession from './pages/DuelSession';
+import DuelAccept from './pages/DuelAccept';
+import LogsSociais from './pages/LogsSociais';
+import NotificationBell from './components/NotificationBell';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 
 const ICONS = {
@@ -93,6 +98,26 @@ const ICONS = {
       <path d="M6 4h12v5a6 6 0 0 1-12 0z" />
       <line x1="12" y1="15" x2="12" y2="19" />
       <path d="M8 21h8M9 21a3 3 0 0 1 6 0" />
+    </svg>
+  ),
+  duel: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <polyline points="14.5 17.5 3 6 3 3 6 3 17.5 14.5" />
+      <line x1="13" y1="19" x2="19" y2="13" />
+      <line x1="16" y1="16" x2="20" y2="20" />
+      <line x1="19" y1="21" x2="21" y2="19" />
+      <polyline points="14.5 6.5 18 3 21 3 21 6 17.5 9.5" />
+      <line x1="5" y1="14" x2="9" y2="18" />
+      <line x1="7" y1="17" x2="4" y2="20" />
+      <line x1="3" y1="19" x2="5" y2="21" />
+    </svg>
+  ),
+  social: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
     </svg>
   ),
 };
@@ -184,6 +209,7 @@ export default function App() {
 
   return (
     <div className="app-layout">
+      {!isVisitor && <NotificationBell user={user} />}
       <header className="mobile-topbar">
         <button
           className="hamburger-btn"
@@ -245,6 +271,13 @@ export default function App() {
                   {ICONS.trophy}<span>Competitivo</span>
                 </Link>
               )}
+              {/* Duelo: avaliação comparada entre dois alunos (mesmo paciente).
+                  Visitante não inicia duelos (recebe só via link). */}
+              {(isTherapist || isAdmin) && (
+                <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''}>
+                  {ICONS.duel}<span>Duelo</span>
+                </Link>
+              )}
               {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
                   Será reaberta pra alunos/professores quando estiver pronta. */}
               {isAdmin && (
@@ -260,12 +293,17 @@ export default function App() {
             </>
           )}
 
-          {(isTherapist || isSupervisor || isVisitor) && (
+          {(isTherapist || isSupervisor || isVisitor || isAdmin) && (
             <>
               <div className="nav-section">Histórico</div>
               {(isTherapist || isVisitor) && (
                 <Link to="/logs" className={isActive('/logs') ? 'active' : ''}>
                   {ICONS.log}<span>Minhas Sessões</span>
+                </Link>
+              )}
+              {(isTherapist || isAdmin) && (
+                <Link to="/duelo/logs" className={isActive('/duelo/logs') ? 'active' : ''}>
+                  {ICONS.social}<span>Logs Sociais</span>
                 </Link>
               )}
               {isSupervisor && (
@@ -367,6 +405,11 @@ export default function App() {
           <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
           <Route path="/freeplay" element={<FreePlay user={user} />} />
           <Route path="/competitivo" element={<Competitive user={user} />} />
+          <Route path="/duelo" element={<Duelo user={user} />} />
+          <Route path="/duelo/logs" element={<LogsSociais user={user} />} />
+          <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
+          <Route path="/duelo/aceitar/:id" element={<DuelAccept user={user} />} />
+          <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />

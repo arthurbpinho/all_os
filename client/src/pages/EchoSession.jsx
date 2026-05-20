@@ -472,6 +472,10 @@ export default function EchoSession({ user, sessionType }) {
       // antes do log, server-side — sem expor o gabarito ao cliente.
       const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id });
       evalContent = typeof reply === 'string' ? reply : reply.content || '';
+      // A nota final NÃO vem mais do texto da IA — o backend a calcula em código
+      // a partir do bloco [notas-supervisor] (server/scoring.js) e devolve no
+      // save (saved.score). Mantemos um parse de fallback só para avaliadores
+      // antigos que ainda escreviam **Nota: X/100** ou [NOTA:X].
       const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
       if (v9) {
         totalScore = Number(v9[1]);
@@ -512,6 +516,9 @@ export default function EchoSession({ user, sessionType }) {
         score: totalScore,
         evaluation: evalContent,
       });
+      // A nota exibida é a calculada em código no backend (saved.score), não a
+      // parseada do texto. Só faz override se o backend devolveu nota numérica.
+      if (saved && Number.isFinite(saved.score)) setEvalScore(saved.score);
       if (saved && saved.mmr) setMmrResult(saved.mmr);
     } catch (err) {
       setSaveError(err.message || 'Erro ao salvar o log.');
