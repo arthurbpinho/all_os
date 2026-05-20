@@ -2819,8 +2819,14 @@ select option { background: var(--cream); color: var(--ink); }
 /* DUELO + NOTIFICAÇÕES                                          */
 /* ============================================================ */
 
-/* --- Sino de notificações (canto superior direito) --- */
-.notif-bell { position: fixed; top: 16px; right: 22px; z-index: 85; }
+/* --- Ações do topo (canto superior direito): atualizações + notificações --- */
+.topbar-actions {
+  position: fixed; top: 16px; right: 22px; z-index: 85;
+  display: flex; align-items: center; gap: 10px;
+}
+
+/* --- Sino de notificações + painel de atualizações (botões iguais) --- */
+.notif-bell, .sys-updates { position: relative; }
 .notif-bell-btn {
   position: relative;
   width: 42px; height: 42px;
@@ -2996,6 +3002,72 @@ select option { background: var(--cream); color: var(--ink); }
 .duel-outcome-chip.pending { background: var(--sand-2); color: var(--muted); }
 
 @media (max-width: 768px) {
-  .notif-bell { top: calc(9px + env(safe-area-inset-top, 0px)); right: 62px; z-index: 85; }
-  .notif-bell-btn { width: 38px; height: 38px; box-shadow: none; }
+  /* Topbar mobile: hamburger (esq) · logo (centro) · ações + avatar (dir).
+     Posiciona as ações à esquerda do avatar do topbar. */
+  .topbar-actions { top: calc(9px + env(safe-area-inset-top, 0px)); right: 62px; gap: 8px; }
+  .notif-bell-btn, .sys-updates-btn { width: 38px; height: 38px; box-shadow: none; }
+}
+
+/* --- Duelo: modo treino/competitivo + resultado de MMR --- */
+.duel-mode-block { margin-bottom: 18px; }
+.duel-mode-toggle {
+  display: inline-flex; border: 1px solid var(--sand); border-radius: var(--radius-lg);
+  overflow: hidden; background: var(--cream-2);
+}
+.duel-mode-toggle button {
+  border: none; background: none; cursor: pointer; font: inherit;
+  padding: 8px 22px; font-size: 14px; font-weight: 600; color: var(--ink-soft);
+}
+.duel-mode-toggle button.active { background: var(--marrs-deep); color: #fff; }
+.duel-mode-hint { font-size: 12.5px; color: var(--muted); margin: 8px 2px 0; max-width: 560px; line-height: 1.5; }
+
+.duel-mmr-card {
+  text-align: center; padding: 22px 24px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+
+/* --- Atualizações do sistema (bloco de notas com exclamação) --- */
+.sys-updates-btn {
+  position: relative;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--sand);
+  background: var(--cream);
+  color: var(--marrs-deep);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: background 0.15s ease;
+}
+.sys-updates-btn:hover { background: var(--sand-2); }
+.sys-updates-dot {
+  position: absolute; top: -2px; right: -2px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--terra); border: 2px solid var(--cream);
+}
+.sys-updates-panel {
+  position: absolute; top: 50px; right: 0;
+  width: 380px; max-width: calc(100vw - 32px);
+  background: var(--cream);
+  border: 1px solid var(--sand);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.sys-updates-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--sand);
+  font-weight: 600; font-size: 14px; color: var(--ink);
+}
+.sys-updates-list { max-height: min(70vh, 560px); overflow-y: auto; }
+.sys-update-item { padding: 14px 16px; border-bottom: 1px solid var(--sand-2); }
+.sys-update-item:last-child { border-bottom: none; }
+.sys-update-date {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px;
+}
+.sys-update-title { font-weight: 700; color: var(--marrs-deep); font-size: 14.5px; margin-bottom: 6px; }
+.sys-update-body {
+  white-space: pre-wrap;
+  font-size: 13px; line-height: 1.55; color: var(--ink-soft);
 }

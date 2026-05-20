@@ -1,5 +1,11 @@
 // IMPORTANTE: helpers seta as envs antes de importar o app — manter como 1º require.
-const { app, request, resetData, loginAs, loginVisitor, authHeader } = require('./helpers');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
+const fs = require('fs');
+const path = require('path');
+
+function seedMmr(players) {
+  fs.writeFileSync(path.join(DATA_DIR, 'mmr.json'), JSON.stringify({ players, characters: {} }, null, 2));
+}
 
 // Duelos rodam em modo demonstração aqui (ANTHROPIC_API_KEY vazia), então a
 // avaliação comparativa usa o fallback neutro: notas 5 pros dois → 50 × 50 →
@@ -129,6 +135,67 @@ describe('duelos', () => {
     // challenger vê o visitante como oponente
     const soc = await request(app).get('/api/duels/social').set(authHeader(aluno));
     expect(soc.body[0].opponent.isVisitor).toBe(true);
+  });
+
+  it('duelo competitivo com jogadores em calibração NÃO rankeia (reason calibrating)', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+    // sem seed de mmr → ambos n=0 (em calibração)
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system', mode: 'competitive' });
+    const duelId = create.body.id;
+    expect(create.body.mode).toBe('competitive');
+
+    await request(app).post(`/api/duel/${duelId}/accept`).set(authHeader(aluno2));
+    await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno)).send({ messages: msgs, durationSeconds: 60 });
+    const sub2 = await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno2)).send({ messages: msgs, durationSeconds: 60 });
+
+    expect(sub2.body.status).toBe('completed');
+    expect(sub2.body.result.mmr.ranked).toBe(false);
+    expect(sub2.body.result.mmr.reason).toBe('calibrating');
+  });
+
+  it('duelo competitivo rankeado altera o MMR dos dois (jogadores fora da calibração)', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+    // challenger ('3') MMR 50, opponent ('5') MMR 70, ambos fora da calibração
+    seedMmr({ '3': { P: 50, n: 10, W: [] }, '5': { P: 70, n: 10, W: [] } });
+
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system', mode: 'competitive' });
+    const duelId = create.body.id;
+
+    await request(app).post(`/api/duel/${duelId}/accept`).set(authHeader(aluno2));
+    await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno)).send({ messages: msgs, durationSeconds: 60 });
+    const sub2 = await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno2)).send({ messages: msgs, durationSeconds: 60 });
+
+    const m = sub2.body.result.mmr;
+    expect(m.ranked).toBe(true);
+    // demo: 50×50 → quem tem MMR menor (challenger) ganha pool, quem tem maior perde
+    expect(m.challenger.delta).toBeGreaterThan(0);
+    expect(m.opponent.delta).toBeLessThan(0);
+
+    // o mmr.json foi de fato atualizado
+    const mmrFile = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'mmr.json'), 'utf-8'));
+    expect(mmrFile.players['3'].P).not.toBe(50);
+    expect(mmrFile.players['5'].P).not.toBe(70);
+    // n incrementa (partida competitiva conta como PvE no sistema solo)
+    expect(mmrFile.players['3'].n).toBe(11);
+  });
+
+  it('duelo competitivo contra visitante não rankeia (reason visitor)', async () => {
+    const aluno = await loginAs('aluno');
+    seedMmr({ '3': { P: 60, n: 10, W: [] } });
+    // cria competitivo mas via link aberto (oponente será visitante)
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, inviteMethod: 'whatsapp', mode: 'competitive' });
+    const { id: duelId, token } = create.body;
+    const visitor = await loginVisitor();
+    await request(app).post(`/api/duel/by-token/${token}/accept`).set(authHeader(visitor));
+    await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(visitor)).send({ messages: msgs, durationSeconds: 60 });
+    const sub2 = await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno)).send({ messages: msgs, durationSeconds: 60 });
+    expect(sub2.body.result.mmr.ranked).toBe(false);
+    expect(sub2.body.result.mmr.reason).toBe('visitor');
   });
 
   it('não deixa duelar consigo mesmo e nega acesso de não-participante', async () => {

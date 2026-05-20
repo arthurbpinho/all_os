@@ -28,6 +28,7 @@ function avatar(photo, name) {
 
 export default function Duelo({ user }) {
   const [step, setStep] = useState('character'); // character | opponent
+  const [mode, setMode] = useState('training'); // training | competitive
   const [characters, setCharacters] = useState([]);
   const [opponents, setOpponents] = useState([]);
   const [selectedChar, setSelectedChar] = useState(null);
@@ -62,6 +63,7 @@ export default function Duelo({ user }) {
         characterId: selectedChar.id,
         opponentUserId: opponentUserId || undefined,
         inviteMethod: method,
+        mode,
       });
       const link = duel.token ? buildInviteLink(duel.token) : '';
       if (method === 'whatsapp') {
@@ -95,7 +97,7 @@ export default function Duelo({ user }) {
     return (
       <div>
         <div className="page-header">
-          <div className="eyebrow">Duelo · {selectedChar?.name}</div>
+          <div className="eyebrow">Duelo {mode === 'competitive' ? 'competitivo' : 'de treino'} · {selectedChar?.name}</div>
           <h2>Convite <span className="accent">enviado</span></h2>
           <div className="ornament" />
         </div>
@@ -189,9 +191,23 @@ export default function Duelo({ user }) {
             <button className="btn btn-ghost btn-sm" onClick={() => { setStep('character'); setSelectedChar(null); }}>trocar</button>
           </div>
 
+          {/* Modo do duelo */}
+          <div className="duel-mode-block">
+            <div className="duel-mode-toggle">
+              <button className={mode === 'training' ? 'active' : ''} onClick={() => setMode('training')}>Treino</button>
+              <button className={mode === 'competitive' ? 'active' : ''} onClick={() => setMode('competitive')}>Competitivo</button>
+            </div>
+            <p className="duel-mode-hint">
+              {mode === 'competitive'
+                ? 'Vale MMR. Só conta entre jogadores cadastrados e fora da calibração; se a diferença de nível for muito grande (nota muito baixa de um dos lados), não é contabilizado (anti-smurf).'
+                : 'Sem ranking — só treino e feedback comparativo. Pode duelar contra visitante.'}
+            </p>
+          </div>
+
           <h3 className="duel-section-title">Quem você quer desafiar?</h3>
 
-          {/* Visitante / link aberto */}
+          {/* Visitante / link aberto — só no treino (competitivo exige cadastro) */}
+          {mode !== 'competitive' && (
           <div className="card duel-visitor-card">
             <div className="duel-opp-info">
               <span className="duel-avatar">
@@ -208,6 +224,7 @@ export default function Duelo({ user }) {
               </button>
             </div>
           </div>
+          )}
 
           {/* Lista de terapeutas */}
           {opponents.length === 0 ? (

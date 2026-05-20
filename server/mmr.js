@@ -169,6 +169,76 @@ function updateMatch(playerIn, charIn, Sraw) {
   return { player, character, result };
 }
 
+// --- Camada PvP (duelos), conforme mmr_pvp_v1.md ---
+// O MMR é ÚNICO (o mesmo de PvE). Num duelo, os dois jogadores atendem o mesmo
+// personagem e recebem notas independentes (0..100). Uma pool (20% do MMR de
+// cada) é redistribuída pelas notas; cada um roda o pipeline solo normal e o
+// delta PvP é aplicado por cima.
+const PVP_STAKE = 0.20;     // fração do MMR que cada jogador "aposta"
+const PVP_MIN_SCORE = 25;   // anti-smurf/win-trade: nota mínima pra ranquear
+
+// Decide se um duelo é rankeado e, em caso afirmativo, calcula os novos estados.
+// Pré-condições (todas obrigatórias): os dois jogadores PASSARAM da calibração
+// (n >= CALIBRATION_MATCHES) e NENHUM tirou nota < PVP_MIN_SCORE.
+// "n_partidas > 5" do doc = "fora da calibração" na fronteira já documentada
+// deste engine (calibração = 5 primeiras partidas; madura a partir daí).
+//
+// Não-rankeado → feedback acontece mesmo assim (no chamador), mas MMR, janela,
+// n e dificuldade D ficam INALTERADOS. Retorna { ranked:false, reason }.
+// Rankeado → retorna estados novos (não muta a entrada) + breakdown do PvP.
+function processDuel(playerAIn, playerBIn, charIn, S_A_raw, S_B_raw) {
+  const pA = { ...newPlayer(), ...(playerAIn || {}) };
+  const pB = { ...newPlayer(), ...(playerBIn || {}) };
+  const S_A = clamp(Number(S_A_raw), 0, 100);
+  const S_B = clamp(Number(S_B_raw), 0, 100);
+
+  const calibratingA = pA.n < CALIBRATION_MATCHES;
+  const calibratingB = pB.n < CALIBRATION_MATCHES;
+
+  let reason = null;
+  if (calibratingA || calibratingB) reason = 'calibrating';
+  else if (S_A < PVP_MIN_SCORE || S_B < PVP_MIN_SCORE) reason = 'anti_smurf';
+  if (reason) return { ranked: false, reason, S_A, S_B };
+
+  // Passo 1 — pool, a partir do MMR ANTES da atualização solo.
+  const apostaA = PVP_STAKE * pA.P;
+  const apostaB = PVP_STAKE * pB.P;
+  const pool = apostaA + apostaB;
+
+  // Passo 2 — distribuição proporcional às notas (soma mínima real = 24).
+  const soma = S_A + S_B;
+  const fracA = soma > 0 ? S_A / soma : 0.5;
+  const fracB = soma > 0 ? S_B / soma : 0.5;
+  const recebidoA = fracA * pool;
+  const recebidoB = fracB * pool;
+
+  // Passo 3 — deltas PvP.
+  const deltaA = recebidoA - apostaA;
+  const deltaB = recebidoB - apostaB;
+
+  // Passo 4 — atualiza via sistema solo (cada jogador como uma partida PvE
+  // contra o personagem; isso também ajusta D). Threading do personagem: A, depois B.
+  const upA = updateMatch(pA, charIn, S_A);
+  const upB = updateMatch(pB, upA.character, S_B);
+  const playerA = upA.player;
+  const playerB = upB.player;
+  const character = upB.character;
+
+  // Aplica o delta PvP por cima do MMR já atualizado (sem teto).
+  playerA.P += deltaA;
+  playerB.P += deltaB;
+
+  return {
+    ranked: true,
+    reason: null,
+    S_A, S_B,
+    pvp: { pool, apostaA, apostaB, recebidoA, recebidoB, deltaA, deltaB },
+    playerA, playerB, character,
+    resultA: { ...upA.result, P_after: playerA.P, delta: playerA.P - upA.result.P_before, pvpDelta: deltaA },
+    resultB: { ...upB.result, P_after: playerB.P, delta: playerB.P - upB.result.P_before, pvpDelta: deltaB },
+  };
+}
+
 // Visão pública do jogador para ranking/perfil. MMR fica OCULTO (null) durante a
 // calibração (n < 5), exibindo só quantas partidas faltam.
 function playerView(player) {
@@ -191,6 +261,7 @@ function characterDifficulty(character) {
 
 module.exports = {
   P0, D0, D_MIN, D_MAX, WINDOW, CALIBRATION_MATCHES, CHAR_MATURE_AT, REGRESS_REFIT_EVERY,
+  PVP_STAKE, PVP_MIN_SCORE,
   clamp,
   newPlayer,
   newCharacter,
@@ -199,6 +270,7 @@ module.exports = {
   sensitivity,
   fitRegression,
   updateMatch,
+  processDuel,
   playerView,
   characterDifficulty,
 };
