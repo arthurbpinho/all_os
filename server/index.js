@@ -1815,6 +1815,19 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     //
     // max_tokens=16000 é folga real (output típico fica em 3-5k tokens).
     // Antes era 64000 pra acomodar thinking, agora não precisa.
+    // Resposta em STREAM (SSE). O avaliador (Opus, system de ~28k tokens)
+    // demora 30-90s; antes a gente bufferava tudo com finalMessage() e só então
+    // dava res.json() — o cliente/Cloudflare ficavam sem receber NENHUM byte
+    // por mais de 100s e o proxy cortava com 524 ("a avaliação não funciona na
+    // nuvem" / "sem avaliação registrada"). Streamando, o proxy vê o 1º byte na
+    // hora e mantém a conexão aberta enquanto os tokens fluem.
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // desliga buffering de proxies (nginx/railway)
+    if (res.flushHeaders) res.flushHeaders();
+    res.write(': ok\n\n'); // heartbeat inicial — garante TTFB baixo antes do 1º token
+
     const stream = anthropic.messages.stream({
       model: EVAL_MODEL,
       max_tokens: 16000,
@@ -1827,21 +1840,27 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       ],
       messages: normalized,
     });
+    stream.on('text', (delta) => {
+      if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+    });
     const message = await stream.finalMessage();
-    const text = (message.content || [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
     // Log de cache hits ajuda a confirmar que o caching tá funcionando.
     if (message.usage) {
       console.log(
         `Evaluate cache: read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
       );
     }
-    res.json({ role: 'assistant', content: text });
+    res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+    res.end();
   } catch (err) {
     console.error('Evaluate error:', err.message);
-    res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    if (res.headersSent) {
+      // Stream já começou (status 200 enviado) — reporta o erro pelo próprio SSE.
+      try { res.write(`data: ${JSON.stringify({ error: 'Erro ao comunicar com a IA: ' + err.message })}\n\n`); } catch {}
+      res.end();
+    } else {
+      res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    }
   }
 });
 

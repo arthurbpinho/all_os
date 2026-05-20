@@ -9,6 +9,8 @@ import {
   SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import LogActions from '../components/LogActions';
+import { makeLogItems, evalSection as evalSectionTxt, downloadText } from '../logFiles';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
 const PHASE_SIMULATION = 'simulation';
@@ -389,25 +391,24 @@ export default function ChatSession({ user }) {
     }
   }
 
-  function downloadLog() {
-    const lines = messages
-      .filter((m) => !m.isSystem)
-      .map((m) =>
-        `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`
-      );
+  // Builders de texto pro <LogActions> (copiar/baixar log / avaliação / tudo).
+  function chatLogHeader() {
     const skillName = SKILL_NAMES[item.skillId] || '';
-    const header = `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
-    const evalForDownload = stripSupervisorBlock(evaluationText);
-    const evalSection = evalForDownload
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
-      : '';
-    const blob = new Blob([header + lines.join('\n\n---\n\n') + evalSection], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `trilha-${item.title.replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    return `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}${score !== null ? `\nNota final: ${score > 0 ? '+' : ''}${score}` : ''}`;
+  }
+  function chatTranscript() {
+    return messages
+      .filter((m) => !m.isSystem)
+      .map((m) => `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`)
+      .join('\n\n---\n\n');
+  }
+  const logText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}`;
+  const evalText = () => `${chatLogHeader()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`.trimEnd();
+  const bothText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`;
+  const logFileBase = () => (item?.title ? `trilha-${item.title}` : 'trilha');
+  // Download rápido do log no cabeçalho (durante a sessão ainda não há avaliação).
+  function downloadLog() {
+    downloadText(`${logFileBase().replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`, bothText());
   }
 
   // Reinicia a simulação do zero: descarta a conversa, zera o cronômetro e
@@ -564,6 +565,22 @@ export default function ChatSession({ user }) {
               </div>
             </div>
           )}
+
+          {messages.filter((m) => !m.isSystem).length > 0 && (() => {
+            const hasEval = !!stripSupervisorBlock(evaluationText).trim();
+            return (
+              <div style={{ marginTop: 14 }}>
+                <LogActions
+                  items={makeLogItems({
+                    baseName: logFileBase(),
+                    getLog: logText,
+                    getEval: hasEval ? evalText : null,
+                    getBoth: hasEval ? bothText : null,
+                  })}
+                />
+              </div>
+            );
+          })()}
 
           <div className="post-session-actions">
             <button className="btn btn-primary" onClick={() => navigate('/skills')}>

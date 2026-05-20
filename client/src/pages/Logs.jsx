@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
+import LogActions from '../components/LogActions';
+import { makeLogItems, downloadText } from '../logFiles';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
@@ -105,7 +107,10 @@ function ExpiryNote({ log, style }) {
   );
 }
 
-function downloadLogAsText(log) {
+// Monta os textos de um log salvo: logStr (só transcrição), evalStr (avaliação +
+// notas por critério, quando houver) e bothStr (tudo). hasEval indica se há
+// avaliação/critérios pra oferecer os botões de "Avaliação"/"Tudo".
+function buildLogStrings(log) {
   const messages = Array.isArray(log.messages) ? log.messages : [];
   const header = [
     `Tipo: ${TYPE_LABELS[log.type] || log.type || '—'}`,
@@ -119,7 +124,7 @@ function downloadLogAsText(log) {
     (() => { const e = logExpiresAt(log); return e ? `Expira em: ${e.toLocaleDateString('pt-BR')}` : null; })(),
   ].filter(Boolean).join('\n');
 
-  const lines = messages
+  const transcript = messages
     .filter((m) => !m.isSystem)
     .map((m, i) => {
       const isUser = m.role === 'user';
@@ -130,34 +135,49 @@ function downloadLogAsText(log) {
       const star = m.highlighted ? ' ★' : '';
       const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
       return `[${author}${star}]\n${m.content}${comment}`;
-    });
+    })
+    .join('\n\n---\n\n');
 
-  const evalSection = log.evaluation
+  const evalPart = log.evaluation
     ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${log.evaluation}`
     : '';
 
   // Notas por critério (só nos downloads de supervisor/admin — o aluno nem
   // recebe criteriaScores do servidor).
-  let criteriaSection = '';
+  let criteriaPart = '';
   if (log.criteriaScores && typeof log.criteriaScores === 'object') {
     const rows = Object.entries(log.criteriaScores)
       .filter(([, v]) => Number.isFinite(Number(v)))
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([k, v]) => `${V15_CRITERIA[k] || `Critério ${k}`}: ${Number(v)}/10`);
     if (rows.length) {
-      criteriaSection = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
+      criteriaPart = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
     }
   }
 
-  const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}${criteriaSection}`;
-  const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  return {
+    logStr: `${header}\n\n---\n\n${transcript}`,
+    evalStr: `${header}${evalPart}${criteriaPart}`,
+    bothStr: `${header}\n\n---\n\n${transcript}${evalPart}${criteriaPart}`,
+    hasEval: !!evalPart || !!criteriaPart,
+  };
+}
+
+// Itens (copiar/baixar log / avaliação / tudo) pro <LogActions> de um log salvo.
+function logItemsFor(log) {
+  const base = `${sanitizeFilename(log.userName)}-${sanitizeFilename(log.itemTitle)}`;
+  const hasEval = !!(log.evaluation || (log.criteriaScores && Object.keys(log.criteriaScores).length));
+  return makeLogItems({
+    baseName: base,
+    getLog: () => buildLogStrings(log).logStr,
+    getEval: hasEval ? () => buildLogStrings(log).evalStr : null,
+    getBoth: hasEval ? () => buildLogStrings(log).bothStr : null,
+  });
+}
+
+function downloadLogAsText(log) {
   const stamp = (log.timestamp || log.createdAt || new Date().toISOString()).slice(0, 10);
-  a.href = url;
-  a.download = `log-${sanitizeFilename(log.userName)}-${sanitizeFilename(log.itemTitle)}-${stamp}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
+  downloadText(`log-${sanitizeFilename(log.userName)}-${sanitizeFilename(log.itemTitle)}-${stamp}.txt`, buildLogStrings(log).bothStr);
 }
 
 function LogCard({ log, showDownload }) {
@@ -192,17 +212,6 @@ function LogCard({ log, showDownload }) {
         <h4>{log.itemTitle || log.title || 'Sessão sem título'}</h4>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           <ScoreBadge score={log.score} />
-          {showDownload && (
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={(e) => { e.stopPropagation(); downloadLogAsText(log); }}
-              title="Baixar a transcrição e a avaliação juntas (.txt)"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Baixar log + avaliação
-            </button>
-          )}
           <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
             {expanded ? 'ocultar' : 'expandir'}
           </span>
@@ -234,6 +243,12 @@ function LogCard({ log, showDownload }) {
               Avaliação {evaluation ? '' : '(sem registro)'}
             </button>
           </div>
+
+          {showDownload && (
+            <div style={{ marginBottom: 14 }}>
+              <LogActions items={logItemsFor(log)} inline />
+            </div>
+          )}
 
           {tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
@@ -549,16 +564,9 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
           <span>{TYPE_LABELS[log.type] || log.type}</span>
           <ScoreBadge score={log.score} />
           <ExpiryNote log={log} />
-          <button
-            type="button"
-            className="btn btn-outline btn-sm"
-            onClick={() => downloadLogAsText(log)}
-            title="Baixar a transcrição e a avaliação juntas (.txt)"
-            style={{ marginLeft: 'auto' }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-            Baixar log + avaliação
-          </button>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <LogActions items={logItemsFor(log)} inline />
         </div>
       </div>
 

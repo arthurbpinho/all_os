@@ -119,11 +119,69 @@ export const api = {
   // Avaliação. O servidor decide entre avaliador customizado (quando o
   // exercício tem evaluatorPrompt) e o avaliador global a partir de context.
   // Para a Avaliação Independente (transcrição manual), passe sem context.
-  evaluate: (messages, context) =>
-    request('/evaluate', {
+  //
+  // A resposta vem em STREAM (SSE) — o avaliador demora 30-90s e bufferar tudo
+  // estourava o timeout de 100s do Cloudflare em produção. Aqui a gente lê os
+  // deltas e remonta o texto, devolvendo o MESMO formato { role, content } de
+  // antes (os chamadores não mudam). `onToken(delta, full)` é opcional, pra
+  // quem quiser exibir o texto chegando ao vivo.
+  evaluate: async (messages, context, onToken) => {
+    const token = getToken();
+    const res = await fetch(BASE + '/evaluate', {
       method: 'POST',
-      body: context ? { messages, context } : { messages },
-    }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(context ? { messages, context } : { messages }),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      notifySessionExpired();
+      const err = await res.json().catch(() => ({ error: 'Sessão expirada' }));
+      throw new Error(err.error || 'Sessão expirada');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Erro na avaliação' }));
+      throw new Error(err.error || 'Erro na avaliação');
+    }
+    // Modo demonstração (sem API key) e erros pré-stream voltam como JSON.
+    const ctype = res.headers.get('content-type') || '';
+    if (!ctype.includes('text/event-stream') || !res.body) {
+      return res.json();
+    }
+    // Stream SSE: acumula os deltas (eventos `data: {delta|done|error}`).
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let full = '';
+    let streamError = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const event = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch { continue; }
+          if (obj.delta) {
+            full += obj.delta;
+            if (onToken) { try { onToken(obj.delta, full); } catch {} }
+          } else if (obj.error) {
+            streamError = obj.error;
+          }
+        }
+      }
+    }
+    if (streamError) throw new Error(streamError);
+    return { role: 'assistant', content: full };
+  },
 
   // Profile
   getUser: (id) => request(`/users/${id}`),

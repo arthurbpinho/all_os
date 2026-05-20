@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { copyText } from '../logFiles';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 
@@ -43,6 +44,7 @@ export default function LogsSociais({ user }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(null); // duelo em ação (cancelar/baixar)
+  const [copiedId, setCopiedId] = useState(null); // duelo recém-copiado
   const navigate = useNavigate();
 
   const load = useCallback(() => {
@@ -87,6 +89,22 @@ export default function LogsSociais({ user }) {
       URL.revokeObjectURL(url);
     } catch (err) {
       setError(err.message || 'Não foi possível baixar o log.');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleCopy(e, d) {
+    e.stopPropagation();
+    setBusyId(d.id);
+    setError('');
+    try {
+      const { blob } = await api.exportDuelLog(d.id);
+      await copyText(await blob.text());
+      setCopiedId(d.id);
+      setTimeout(() => setCopiedId((id) => (id === d.id ? null : id)), 1500);
+    } catch (err) {
+      setError(err.message || 'Não foi possível copiar o log.');
     } finally {
       setBusyId(null);
     }
@@ -149,6 +167,18 @@ export default function LogsSociais({ user }) {
                     </button>
                     {(d.canExport || d.canCancel) && (
                       <div className="social-duel-actions">
+                        {d.canExport && (
+                          <button
+                            className="social-duel-action"
+                            title="Copiar o log deste duelo"
+                            disabled={busyId === d.id}
+                            onClick={(e) => handleCopy(e, d)}
+                          >
+                            {copiedId === d.id
+                              ? <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2"><polyline points="20 6 9 17 4 12" /></svg>
+                              : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>}
+                          </button>
+                        )}
                         {d.canExport && (
                           <button
                             className="social-duel-action"
