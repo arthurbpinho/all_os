@@ -9,6 +9,49 @@ const TYPE_LABELS = {
   neuro: 'Neuroavaliação',
 };
 
+// Nomes dos 6 critérios do avaliador v15 (chaves "1".."6"). criteriaScores só
+// chega pra supervisor/admin (o servidor esconde do aluno), então sempre que
+// existir pode ser exibido.
+const V15_CRITERIA = {
+  '1': 'Construção linguística',
+  '2': 'Relação terapêutica',
+  '3': 'Confiança transmitida',
+  '4': 'Priorização',
+  '5': 'Aprofundamento',
+  '6': 'Flexibilidade e Criatividade',
+};
+
+// Tabela de notas por critério (visível só a supervisor/admin). Renderiza
+// qualquer criteriaScores não-vazio, ordenando por chave numérica.
+function CriteriaTable({ criteriaScores }) {
+  if (!criteriaScores || typeof criteriaScores !== 'object') return null;
+  const entries = Object.entries(criteriaScores)
+    .filter(([, v]) => Number.isFinite(Number(v)))
+    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  if (entries.length === 0) return null;
+  return (
+    <div className="criteria-table" style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
+        Notas por critério <span style={{ textTransform: 'none', letterSpacing: 0 }}>(visível só ao supervisor/admin)</span>
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5 }}>
+        <tbody>
+          {entries.map(([k, v]) => (
+            <tr key={k} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
+              <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>
+                {V15_CRITERIA[k] || `Critério ${k}`}
+              </td>
+              <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: 'var(--marrs-deep)', whiteSpace: 'nowrap' }}>
+                {Number(v)}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function formatDate(timestamp) {
   if (!timestamp) return '—';
   const d = new Date(timestamp);
@@ -93,7 +136,20 @@ function downloadLogAsText(log) {
     ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${log.evaluation}`
     : '';
 
-  const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}`;
+  // Notas por critério (só nos downloads de supervisor/admin — o aluno nem
+  // recebe criteriaScores do servidor).
+  let criteriaSection = '';
+  if (log.criteriaScores && typeof log.criteriaScores === 'object') {
+    const rows = Object.entries(log.criteriaScores)
+      .filter(([, v]) => Number.isFinite(Number(v)))
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([k, v]) => `${V15_CRITERIA[k] || `Critério ${k}`}: ${Number(v)}/10`);
+    if (rows.length) {
+      criteriaSection = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
+    }
+  }
+
+  const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}${criteriaSection}`;
   const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -180,9 +236,14 @@ function LogCard({ log, showDownload }) {
           </div>
 
           {tab === 'evaluation' ? (
-            evaluation ? (
-              <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
-                {evaluation}
+            evaluation || log.criteriaScores ? (
+              <div>
+                <CriteriaTable criteriaScores={log.criteriaScores} />
+                {evaluation && (
+                  <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
+                    {evaluation}
+                  </div>
+                )}
               </div>
             ) : (
               <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
@@ -552,9 +613,14 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
 
       {tab === 'evaluation' && (
         <div className="card tight">
-          {evaluation ? (
-            <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
-              {evaluation}
+          {evaluation || log.criteriaScores ? (
+            <div>
+              <CriteriaTable criteriaScores={log.criteriaScores} />
+              {evaluation && (
+                <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
+                  {evaluation}
+                </div>
+              )}
             </div>
           ) : (
             <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
