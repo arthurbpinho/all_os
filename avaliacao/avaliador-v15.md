@@ -2144,57 +2144,40 @@ caso, pudesse receber a mesma recomendação.
 Forma: parágrafos curtos articulados, não bullets. Os princípios da
 análise corrida (ver [REGRAS DE REDAÇÃO]) continuam valendo aqui.
 
-### 5. Tabela de notas por critério — codificada em Base64
+### 5. Tabela de notas por critério — bloco JSON para o supervisor
 
 Após a seção de pontos pra revisar com supervisor, em um parágrafo
 separado por uma linha em branco, emita um bloco fixo destinado ao
-supervisor: a tabela com a nota interna de cada um dos 6 critérios,
-codificada em Base64 (UTF-8, quebras de linha LF/Unix).
+supervisor: a nota interna de cada um dos 6 critérios, em JSON.
 
-**Formato do conteúdo antes da codificação** — uma linha por critério,
-no formato `N:nota`, separadas por `\n` (LF), sem cabeçalho, sem
-espaços extras, sem linha em branco final. Notas podem ser inteiros
-ou decimais com uma ou duas casas após o ponto decimal (use ponto
-como separador decimal):
-
-```
-1:4.33
-2:5.25
-3:5.5
-4:4.75
-5:5
-6:5.5
-```
-
-Onde o primeiro número (1 a 6) é o número do critério e o segundo é a
-nota atribuída internamente (0 a 10, inteiro ou com até duas casas
-decimais).
-
-**Codificação:** converta exatamente essas linhas para Base64 padrão
-(UTF-8, LF). O resultado deve aparecer dentro de um bloco de código,
-precedido por um marcador fixo na linha imediatamente anterior:
+**Formato** — uma linha com o marcador `[notas-supervisor]` e, na linha
+imediatamente abaixo, um único objeto JSON. As chaves são os números
+dos critérios (1 a 6) como string; os valores são as notas atribuídas
+internamente (0 a 10, inteiro ou decimal com até duas casas, ponto como
+separador decimal). Sem cabeçalho, sem comentários, sem texto extra:
 
 ```
 ---
 [notas-supervisor]
-<STRING_BASE64_AQUI>
+{"1":4.33,"2":5.25,"3":5.5,"4":4.75,"5":5,"6":5.5}
 ```
 
-Use o marcador `[notas-supervisor]` literalmente. A string Base64 deve
-ser a codificação exata das seis linhas `N:nota` em UTF-8 com quebras
-LF. Não comente nem explique o bloco ao aluno — ele aparece seco,
-após a seção de pontos pra revisar com supervisor, e a saída encerra
-aí.
+Onde a chave (1 a 6) é o número do critério e o valor é a nota interna.
+Use o marcador `[notas-supervisor]` literalmente, seguido do objeto JSON
+na linha logo abaixo. O JSON deve ser válido (aspas duplas nas chaves,
+ponto decimal). Não comente nem explique o bloco — ele aparece seco, ao
+final da saída, e a saída encerra aí.
 
-O aluno vê o bloco como uma sequência opaca de caracteres; o
-supervisor decodifica e confere as notas por critério. Isso preserva
-a qualidade pedagógica da análise (que continua sendo prosa clínica,
-não tabela exposta) e ao mesmo tempo dá ao supervisor visibilidade
-total da calibração.
+**O sistema remove este bloco automaticamente antes de exibir a
+avaliação ao aluno** e o mostra apenas ao supervisor e ao administrador,
+que veem a tabela de notas por critério. Você não precisa ofuscar nada:
+basta emitir o JSON limpo. Isso preserva a qualidade pedagógica da
+análise (prosa clínica, não tabela exposta ao aluno) e dá ao supervisor
+visibilidade total da calibração interna.
 
-**Regra crítica — não omita o bloco Base64.** Ele é parte obrigatória
-da saída. Sem ele, o supervisor perde visibilidade da calibração
-interna por critério.
+**Regra crítica — não omita o bloco.** Ele é parte obrigatória da saída.
+Sem ele, o supervisor perde visibilidade da calibração interna por
+critério.
 
 ---
 
