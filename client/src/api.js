@@ -197,6 +197,26 @@ export const api = {
   acceptDuel: (id) => request(`/duel/${id}/accept`, { method: 'POST', body: {} }),
   // Submete a sessão de um lado. data: { messages, durationSeconds }
   submitDuel: (id, data) => request(`/duel/${id}/submit`, { method: 'POST', body: data }),
+  // Cancela (exclui) um duelo ainda não aceito. Só funciona enquanto pendente.
+  cancelDuel: (id) => request(`/duel/${id}`, { method: 'DELETE' }),
+  // Baixa o log de um duelo (avaliação cruzada + notas + sessões) como arquivo.
+  // Não usa o helper `request` porque o servidor responde com attachment.
+  exportDuelLog: async (id) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/duel/${encodeURIComponent(id)}/export`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let err = 'Erro ao baixar o log';
+      try { const j = await res.json(); err = j.error || err; } catch {}
+      throw new Error(err);
+    }
+    const dispo = res.headers.get('content-disposition') || '';
+    const match = dispo.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `duelo-${id}.txt`;
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   // Logs sociais: duelos agrupados por oponente.
   getSocialLogs: () => request('/duels/social'),
 

@@ -2163,6 +2163,45 @@ app.get('/api/duel/:id', requireAuth, (req, res) => {
   res.json(sanitizeDuelForUser(duel, req.user));
 });
 
+// Cancela (exclui) um duelo que ainda NÃO foi aceito pelo oponente. Só um
+// participante (o desafiante, ou o oponente convidado por convite in-app) ou um
+// admin pode cancelar, e apenas enquanto o duelo está pendente e sem aceite.
+// Duelos em andamento (aceitos) ou concluídos NÃO podem ser excluídos por aqui —
+// ficam disponíveis para download e somem sozinhos 30 dias após a criação.
+app.delete('/api/duel/:id', requireAuth, (req, res) => {
+  const duels = readDuels();
+  const idx = duels.findIndex((d) => d.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  const duel = duels[idx];
+  if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
+  if (duel.opponent.accepted || duel.status !== 'pending') {
+    return res.status(409).json({ error: 'Só é possível cancelar um duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.' });
+  }
+  duels.splice(idx, 1);
+  writeDuels(duels);
+  // Remove a notificação de convite pendente do oponente (o duelo deixou de existir).
+  if (duel.opponent && duel.opponent.userId) removeDuelInviteNotification(duel.opponent.userId, duel.id);
+  res.json({ ok: true });
+});
+
+// Download do log de um duelo (avaliação cruzada + notas + as duas sessões),
+// em texto. Só participantes (ou admin) baixam — cada um só acessa os seus
+// duelos. O conteúdo é apagado automaticamente 30 dias após a criação do duelo.
+app.get('/api/duel/:id/export', requireAuth, (req, res) => {
+  pruneExpiredDuels();
+  const duel = readDuels().find((d) => d.id === req.params.id);
+  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
+  const doc = buildDuelExport(duel, req.user);
+  const stamp = new Date(duel.createdAt || Date.now()).toISOString().slice(0, 10);
+  const slug = String(duel.character && duel.character.name || 'duelo')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'duelo';
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="duelo-${slug}-${stamp}.txt"`);
+  res.send(doc);
+});
+
 // Resumo de um duelo por token (pra tela de aceitar via link, inclusive visitante).
 app.get('/api/duel/by-token/:token', requireAuth, (req, res) => {
   const duel = readDuels().find((d) => d.token === req.params.token);
@@ -2246,6 +2285,91 @@ function markDuelInviteRead(userId, duelId) {
     if (n.type === 'duel_invite' && n.duelId === duelId && !n.read) { n.read = true; dirty = true; }
   }
   if (dirty) writeNotifications(all);
+}
+
+// Remove de vez a(s) notificação(ões) de convite de um duelo (usado no cancelamento).
+function removeDuelInviteNotification(userId, duelId) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  const all = readNotifications();
+  const list = all[userId];
+  if (!list) return;
+  const next = list.filter((n) => !(n.type === 'duel_invite' && n.duelId === duelId));
+  if (next.length !== list.length) { all[userId] = next; writeNotifications(all); }
+}
+
+// Monta o log de um duelo em texto (avaliação cruzada + notas + as duas sessões),
+// destacando qual lado é o usuário que está baixando.
+function buildDuelExport(duel, user) {
+  const side = duelSideFor(duel, user);
+  const fmt = (iso) => {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }); }
+    catch { return String(iso); }
+  };
+  const challengerName = duel.challenger.name || 'Desafiante';
+  const opponentName = duel.opponent.name || 'Visitante';
+  const youTag = (s) => (side === s ? ' (você)' : '');
+  const statusLabel = duel.status === 'completed' ? 'Concluído'
+    : duel.status === 'evaluating' ? 'Em avaliação'
+    : duel.opponent.accepted ? 'Em andamento' : 'Aguardando aceite';
+  const lines = [];
+  const L = (s = '') => lines.push(s);
+  const rule = (c = '=') => L(c.repeat(64));
+
+  L('ALLOS — LOG DE DUELO (AVALIAÇÃO CRUZADA)');
+  rule();
+  L(`Duelo:       ${duel.id}`);
+  L(`Criado em:   ${fmt(duel.createdAt)}`);
+  L(`Personagem:  ${duel.character && duel.character.name || '—'}`);
+  L(`Modo:        ${duel.mode === 'competitive' ? 'Competitivo (MMR)' : 'Treino'}`);
+  L(`Status:      ${statusLabel}`);
+  L(`Desafiante:  ${challengerName}${youTag('challenger')}`);
+  L(`Oponente:    ${opponentName}${youTag('opponent')}`);
+  L('');
+
+  if (duel.result) {
+    L('NOTAS');
+    rule('-');
+    const sc = duel.result.scoreChallenger;
+    const so = duel.result.scoreOpponent;
+    L(`${challengerName}: ${Number.isFinite(sc) ? sc + '/100' : '—'}`);
+    L(`${opponentName}: ${Number.isFinite(so) ? so + '/100' : '—'}`);
+    const w = duel.result.winner;
+    const outcome = w === 'draw' ? 'Empate'
+      : w === 'challenger' ? `Vitória de ${challengerName}`
+      : w === 'opponent' ? `Vitória de ${opponentName}` : '—';
+    L(`Resultado: ${outcome}`);
+    if (duel.result.mmr && duel.result.mmr.ranked) L('Duelo valeu MMR (competitivo).');
+    L('');
+    L('AVALIAÇÃO CRUZADA');
+    rule('-');
+    L(duel.result.evaluation || '(sem texto de avaliação)');
+    L('');
+  } else {
+    L('Este duelo ainda não foi avaliado — sem notas nem avaliação cruzada.');
+    L('');
+  }
+
+  for (const [s, name] of [['challenger', challengerName], ['opponent', opponentName]]) {
+    const sideObj = duel[s];
+    L(`SESSÃO — ${name}${youTag(s)}`);
+    rule('-');
+    if (sideObj.durationSeconds) {
+      const mins = Math.floor(sideObj.durationSeconds / 60);
+      const secs = sideObj.durationSeconds % 60;
+      L(`Duração: ${mins}min ${secs}s${sideObj.submittedAt ? ` · enviada em ${fmt(sideObj.submittedAt)}` : ''}`);
+      L('');
+    }
+    const transcript = transcriptFromMessages(sideObj.messages, name, duel.character && duel.character.name);
+    L(transcript || '(sessão não enviada)');
+    L('');
+  }
+
+  rule();
+  L(`Exportado em ${fmt(new Date().toISOString())}.`);
+  L('Os dados deste duelo são apagados automaticamente 30 dias após a criação.');
+  L('Guarde este arquivo se precisar mantê-lo.');
+  return lines.join('\n');
 }
 
 // Submete a sessão de um lado. Quando os DOIS submeteram, roda o avaliador
@@ -2413,6 +2537,12 @@ app.get('/api/duels/social', requireAuth, (req, res) => {
       characterName: d.character.name,
       date: d.result ? d.result.evaluatedAt : d.createdAt,
       status: d.status,
+      accepted: !!d.opponent.accepted,
+      youAre: side,
+      // Cancelável só enquanto pendente e sem aceite (duelos em andamento/concluídos não).
+      canCancel: d.status === 'pending' && !d.opponent.accepted && !!side,
+      // Download do log liberado quando há avaliação cruzada (duelo concluído).
+      canExport: d.status === 'completed',
       outcome, yourScore, theirScore,
     });
   }
