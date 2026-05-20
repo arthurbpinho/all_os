@@ -1165,9 +1165,18 @@ app.get('/api/logs', requireAuth, (req, res) => {
   const logs = readJSON('logs.json');
   const users = readJSON('users.json');
 
+  // criteriaScores (notas por critério do avaliador) são só pra supervisor/admin.
+  // O aluno (therapist) e o visitante recebem o log SEM esse campo.
+  const isStudent = req.user.role === 'therapist' || req.user.role === 'visitor';
+  const serve = (arr) => {
+    const decorated = decorateLogs(arr);
+    if (!isStudent) return decorated;
+    return decorated.map(({ criteriaScores, ...rest }) => rest);
+  };
+
   // Aluno e visitante: só os próprios.
   if (req.user.role === 'therapist' || req.user.role === 'visitor') {
-    return res.json(decorateLogs(logs.filter(l => l.userId === req.user.id)));
+    return res.json(serve(logs.filter(l => l.userId === req.user.id)));
   }
 
   // Filtro por userId específico
@@ -1175,7 +1184,7 @@ app.get('/api/logs', requireAuth, (req, res) => {
     if (!canAccessUserResource(req.user, req.query.userId)) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
-    return res.json(decorateLogs(logs.filter(l => l.userId === req.query.userId)));
+    return res.json(serve(logs.filter(l => l.userId === req.query.userId)));
   }
 
   // Professor: apenas logs de seus alunos
@@ -1183,11 +1192,11 @@ app.get('/api/logs', requireAuth, (req, res) => {
     const myStudents = new Set(
       users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id).map(u => u.id)
     );
-    return res.json(decorateLogs(logs.filter(l => myStudents.has(l.userId))));
+    return res.json(serve(logs.filter(l => myStudents.has(l.userId))));
   }
 
   // Admin: tudo
-  res.json(decorateLogs(logs));
+  res.json(serve(logs));
 });
 
 // Metadados da política de expiração — o cliente usa pra montar o aviso.
@@ -1205,6 +1214,51 @@ const LOG_VALID_TYPES = ['exercise', 'freeplay', 'neuro'];
 function clampStr(v, max) {
   if (v == null) return '';
   return String(v).slice(0, max);
+}
+
+// --- Bloco [notas-supervisor] do avaliador (v15+) ---
+// O avaliador emite, ao final do texto, um bloco com as notas internas por
+// critério. v15 atual usa JSON; versões anteriores usavam Base64 de linhas
+// "N:nota". Esse bloco é destinado a SUPERVISOR/ADMIN — nunca ao aluno. No save
+// extraímos as notas (vão pro criteriaScores, que o GET esconde do aluno) e
+// gravamos o texto da avaliação SEM o bloco.
+function parseSupervisorPayload(payload) {
+  if (!payload) return null;
+  // 1) JSON direto (v15)
+  try {
+    const obj = JSON.parse(payload);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const n = Number(String(v).replace(',', '.'));
+        if (Number.isFinite(n)) out[String(k)] = n;
+      }
+      if (Object.keys(out).length) return out;
+    }
+  } catch {}
+  // 2) Base64 (v15 original) ou texto puro de linhas "N:nota" (retrocompat)
+  let lines = payload;
+  if (!payload.includes(':') && /^[A-Za-z0-9+/=\s]+$/.test(payload)) {
+    try { lines = Buffer.from(payload, 'base64').toString('utf-8'); } catch {}
+  }
+  const out = {};
+  for (const line of lines.split(/\r?\n/)) {
+    const m = line.match(/^\s*(\d+)\s*:\s*([-+]?\d+(?:[.,]\d+)?)\s*$/);
+    if (m) out[m[1]] = Number(m[2].replace(',', '.'));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function extractSupervisorNotes(evaluation) {
+  const text = typeof evaluation === 'string' ? evaluation : '';
+  // bloco no fim do texto: (--- opcional) + [notas-supervisor] + payload até o fim
+  const m = text.match(/\n*(?:-{3,}[^\S\n]*\r?\n+)?\[notas-supervisor\][^\S\n]*\r?\n?([\s\S]*)$/i);
+  if (!m) return { clean: text, criteria: null };
+  const clean = text.slice(0, m.index).replace(/\s+$/, '');
+  let payload = (m[1] || '').trim();
+  // remove cercas ``` se o modelo envolver o bloco em código
+  payload = payload.replace(/^```[a-z]*[ \t]*\r?\n?/i, '').replace(/\r?\n?```\s*$/i, '').trim();
+  return { clean, criteria: parseSupervisorPayload(payload) };
 }
 
 app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
@@ -1232,6 +1286,12 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // MMR; qualquer outro valor cai em 'training' (comportamento de hoje).
   const mode = body.mode === 'competitive' ? 'competitive' : 'training';
 
+  // Extrai o bloco [notas-supervisor] (notas por critério) do texto do avaliador:
+  // grava a avaliação SEM o bloco e guarda as notas em criteriaScores (que o GET
+  // esconde do aluno). criteriaScores explícito no body (fluxo da trilha) tem
+  // prioridade.
+  const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(body.evaluation);
+
   const log = {
     id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
@@ -1243,8 +1303,10 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
     durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
     score: Number.isFinite(body.score) ? Number(body.score) : null,
-    criteriaScores: body.criteriaScores && typeof body.criteriaScores === 'object' ? body.criteriaScores : null,
-    evaluation: clampStr(body.evaluation, LOG_MAX_EVAL_LEN),
+    criteriaScores: (body.criteriaScores && typeof body.criteriaScores === 'object')
+      ? body.criteriaScores
+      : (supervisorCriteria || null),
+    evaluation: clampStr(cleanEvaluation, LOG_MAX_EVAL_LEN),
     messages: cleanMessages,
     userId: req.user.id,
     userName: req.user.name,

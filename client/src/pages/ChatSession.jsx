@@ -5,6 +5,7 @@ import {
   buildDirectEvaluationPrompt,
   parseCriteriaScores,
   calculateScores,
+  stripSupervisorBlock,
   SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
@@ -396,8 +397,9 @@ export default function ChatSession({ user }) {
       );
     const skillName = SKILL_NAMES[item.skillId] || '';
     const header = `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}\n${score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n` : ''}\n---\n\n`;
-    const evalSection = evaluationText
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
+    const evalForDownload = stripSupervisorBlock(evaluationText);
+    const evalSection = evalForDownload
+      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
       : '';
     const blob = new Blob([header + lines.join('\n\n---\n\n') + evalSection], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);

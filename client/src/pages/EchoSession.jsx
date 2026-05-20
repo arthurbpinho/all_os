@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
-import { buildDirectEvaluationPrompt } from '../prompts';
+import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
@@ -407,8 +407,10 @@ export default function EchoSession({ user, sessionType }) {
       return `[${author}${star}]\n${m.content}${comment}`;
     });
 
-    const evalSection = evaluationText
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evaluationText}`
+    // Aluno baixa só a avaliação SEM o bloco [notas-supervisor].
+    const evalForDownload = stripSupervisorBlock(evaluationText);
+    const evalSection = evalForDownload
+      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
       : '\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n(sem avaliação registrada)';
 
     const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}`;
