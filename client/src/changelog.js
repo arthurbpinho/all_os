@@ -44,6 +44,16 @@ export const CHANGELOG = [
 
     Layout no celular: corrigida a formatação do painel de Atualizações/Notificações e da lista de Logs Sociais (incluindo o botão de baixar), que estavam quebrados no celular.
 
+🔹 Avaliação e Logs (correções):
+
+    Avaliação na nuvem: corrigido o erro que deixava a avaliação "sem resposta" em sessões mais longas — a análise agora chega de forma contínua, sem travar.
+
+    Avaliador correto: a avaliação de sessão voltou a usar o avaliador certo (v15).
+
+    Simulação Livre: passa a ser de prática pura — sem nota nem avaliação ao final, apenas o log da sessão. A avaliação automática fica no Competitivo, na Neuroavaliação e na Trilha (o Duelo segue com sua avaliação cruzada).
+
+    Copiar e baixar logs: em todos os lugares com log, agora dá pra copiar ou baixar separadamente o log, a avaliação, ou os dois juntos.
+
 Aproveitem os novos recursos e continuem enviando os feedbacks com base na prática de vocês!`,
   },
   {

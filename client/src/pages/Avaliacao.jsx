@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import LogActions from '../components/LogActions';
+import { makeLogItems } from '../logFiles';
 
 export default function Avaliacao({ user }) {
   const [transcript, setTranscript] = useState('');
@@ -116,21 +118,15 @@ export default function Avaliacao({ user }) {
     }
   }
 
-  function downloadLog() {
-    const text = messages
+  // Texto da conversa de avaliação (transcrição enviada + diálogo com a IA).
+  function buildEvalDialog() {
+    return messages
       .map((m, i) => {
         const name = m.role === 'user' ? user?.name || 'Usuário' : 'all_OS';
         if (i === 0) return `[${name}]\n[Transcrição enviada · ${transcript.length} caracteres]`;
         return `[${name}]\n${m.content}`;
       })
       .join('\n\n---\n\n');
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `avaliacao-${new Date().toISOString().slice(0, 10)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   function handleReset() {
@@ -236,12 +232,12 @@ export default function Avaliacao({ user }) {
             })()}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           {messages.length > 0 && (
-            <button onClick={downloadLog} className="btn btn-outline btn-sm">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Log
-            </button>
+            <LogActions
+              inline
+              items={makeLogItems({ baseName: 'avaliacao', getLog: buildEvalDialog })}
+            />
           )}
           <button className="btn btn-outline btn-sm" onClick={handleReset}>
             Nova Avaliação

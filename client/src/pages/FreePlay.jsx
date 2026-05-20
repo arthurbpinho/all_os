@@ -43,7 +43,8 @@ export default function FreePlay({ user }) {
         <h2><Typewriter text="Simu" /><span className="accent"><Typewriter text="lação" delayStart={180} /></span></h2>
         <p>
           Pacientes simulados sem objetivo de treino estruturado por competência. Praticar escuta, manejo
-          relacional e tempo de sessão. Ao finalizar, o log é enviado ao seu professor vinculado para correção.
+          relacional e tempo de sessão — sem nota nem avaliação ao final. Ao finalizar, o log é salvo no seu
+          histórico e enviado ao seu professor vinculado.
         </p>
         <div className="ornament" />
       </div>

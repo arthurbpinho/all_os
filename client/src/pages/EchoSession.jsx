@@ -4,6 +4,8 @@ import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import LogActions from '../components/LogActions';
+import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -30,6 +32,10 @@ export default function EchoSession({ user, sessionType }) {
   // finalizar. Treino mantém o comportamento de hoje (sem MMR).
   const isCompetitive = sessionType === 'freeplay' && searchParams.get('mode') === 'competitive';
   const logMode = isCompetitive ? 'competitive' : 'training';
+  // Simulação Livre (freeplay em treino) NÃO roda o avaliador — finaliza salvando
+  // só o log. O avaliador fica restrito ao Competitivo; Neuro e Duelo seguem
+  // avaliando normalmente.
+  const skipEvaluator = sessionType === 'freeplay' && !isCompetitive;
   // Chave de autosave separada por modo: senão uma sessão de treino e uma
   // competitiva com o MESMO personagem colidiriam (mesmo type+itemId), uma
   // restaurando a outra. O itemId real (id) continua indo pro chat e pro log.
@@ -387,41 +393,30 @@ export default function EchoSession({ user, sessionType }) {
     reader.readAsText(file);
   }
 
-  // Baixa o log da sessão JUNTO com a avaliação da IA num único .txt.
-  function downloadLogAndEval() {
-    const visibleMessages = messages.filter((m) => !m.isSystem);
-    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
-    const header = [
-      `Tipo: ${sessionLabel}`,
+  // Builders de texto pro <LogActions> (copiar/baixar log / avaliação / tudo).
+  // O aluno nunca recebe o bloco [notas-supervisor]. Na Simulação Livre não há
+  // avaliação, então só o "Log" fica disponível.
+  function buildLogHeader() {
+    return [
+      `Tipo: ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}`,
       `Caso: ${item?.name || '—'}`,
       `Terapeuta: ${user?.name || '—'}`,
       `Data: ${new Date().toLocaleString('pt-BR')}`,
       `Duração: ${formatTime(elapsed)}`,
       evalScore !== null ? `Nota final: ${evalScore}` : null,
     ].filter(Boolean).join('\n');
-
-    const lines = visibleMessages.map((m) => {
+  }
+  function buildTranscript() {
+    return messages.filter((m) => !m.isSystem).map((m) => {
       const author = m.role === 'user' ? (user?.name || 'Terapeuta') : (item?.name || 'Paciente');
       const star = m.highlighted ? ' ★' : '';
       const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
       return `[${author}${star}]\n${m.content}${comment}`;
-    });
-
-    // Aluno baixa só a avaliação SEM o bloco [notas-supervisor].
-    const evalForDownload = stripSupervisorBlock(evaluationText);
-    const evalSection = evalForDownload
-      ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalForDownload}`
-      : '\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n(sem avaliação registrada)';
-
-    const body = `${header}\n\n---\n\n${lines.join('\n\n---\n\n')}${evalSection}`;
-    const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `log-${(item?.name || 'sessao').replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
+    }).join('\n\n---\n\n');
   }
+  const logText = () => `${buildLogHeader()}\n\n---\n\n${buildTranscript()}`;
+  const evalText = () => `${buildLogHeader()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`.trimEnd();
+  const bothText = () => `${buildLogHeader()}\n\n---\n\n${buildTranscript()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`;
 
   function handleFinalize() {
     if (!sessionStarted || sessionEnded) return;
@@ -443,57 +438,58 @@ export default function EchoSession({ user, sessionType }) {
     if (timerRef.current) clearInterval(timerRef.current);
     setSessionEnded(true);
     setSavingLog(true);
-    setEvaluating(true);
+    if (!skipEvaluator) setEvaluating(true);
     setSaveError('');
     setEvalError('');
 
-    // Monta a transcrição que vai pro avaliador (mesma forma do downloadLog,
-    // pra que o avaliador veja exatamente o que o aluno destacou).
-    const transcriptText = visibleMessages.map((m) => {
-      const author = m.role === 'user' ? user.name : (item?.name || 'Paciente');
-      const star = m.highlighted ? ' ★' : '';
-      const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
-      return `[${author}${star}]\n${m.content}${comment}`;
-    }).join('\n\n---\n\n');
-
-    const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
-
-    // 1. Roda o avaliador global (v9). FreePlay/Neuro nunca têm evaluatorPrompt
-    //    customizado por personagem, então não passamos `context` — o servidor
-    //    usa o avaliador global.
+    // 1. Avaliador. Simulação Livre (freeplay em treino) NÃO avalia — salva só o
+    //    log. O avaliador roda no Competitivo e na Neuroavaliação. FreePlay/Neuro
+    //    nunca têm evaluatorPrompt customizado por personagem, então não passamos
+    //    `context` de exercício — o servidor usa o avaliador global (v15).
     let evalContent = '';
     let totalScore = null;
-    try {
-      const evalMsg = {
-        role: 'user',
-        content: buildDirectEvaluationPrompt(sessionLabel, item?.name || '—', transcriptText),
-      };
-      // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
-      // antes do log, server-side — sem expor o gabarito ao cliente.
-      const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id });
-      evalContent = typeof reply === 'string' ? reply : reply.content || '';
-      // A nota final NÃO vem mais do texto da IA — o backend a calcula em código
-      // a partir do bloco [notas-supervisor] (server/scoring.js) e devolve no
-      // save (saved.score). Mantemos um parse de fallback só para avaliadores
-      // antigos que ainda escreviam **Nota: X/100** ou [NOTA:X].
-      const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
-      if (v9) {
-        totalScore = Number(v9[1]);
-      } else {
-        const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
-        if (m) totalScore = Number(m[1].replace(',', '.'));
+    if (!skipEvaluator) {
+      // Monta a transcrição que vai pro avaliador (mesma forma do downloadLog,
+      // pra que o avaliador veja exatamente o que o aluno destacou).
+      const transcriptText = visibleMessages.map((m) => {
+        const author = m.role === 'user' ? user.name : (item?.name || 'Paciente');
+        const star = m.highlighted ? ' ★' : '';
+        const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
+        return `[${author}${star}]\n${m.content}${comment}`;
+      }).join('\n\n---\n\n');
+      const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+      try {
+        const evalMsg = {
+          role: 'user',
+          content: buildDirectEvaluationPrompt(sessionLabel, item?.name || '—', transcriptText),
+        };
+        // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
+        // antes do log, server-side — sem expor o gabarito ao cliente.
+        const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id });
+        evalContent = typeof reply === 'string' ? reply : reply.content || '';
+        // A nota final NÃO vem mais do texto da IA — o backend a calcula em código
+        // a partir do bloco [notas-supervisor] (server/scoring.js) e devolve no
+        // save (saved.score). Mantemos um parse de fallback só para avaliadores
+        // antigos que ainda escreviam **Nota: X/100** ou [NOTA:X].
+        const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
+        if (v9) {
+          totalScore = Number(v9[1]);
+        } else {
+          const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
+          if (m) totalScore = Number(m[1].replace(',', '.'));
+        }
+        if (totalScore !== null && Number.isFinite(totalScore)) {
+          totalScore = Math.round(totalScore);
+        } else {
+          totalScore = null;
+        }
+        setEvaluationText(evalContent);
+        setEvalScore(totalScore);
+      } catch (err) {
+        setEvalError(err.message || 'Erro ao avaliar a sessão.');
+      } finally {
+        setEvaluating(false);
       }
-      if (totalScore !== null && Number.isFinite(totalScore)) {
-        totalScore = Math.round(totalScore);
-      } else {
-        totalScore = null;
-      }
-      setEvaluationText(evalContent);
-      setEvalScore(totalScore);
-    } catch (err) {
-      setEvalError(err.message || 'Erro ao avaliar a sessão.');
-    } finally {
-      setEvaluating(false);
     }
 
     // 2. Salva o log no histórico já com score + texto da avaliação.
@@ -650,7 +646,9 @@ export default function EchoSession({ user, sessionType }) {
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
           <h2>
-            Avaliação da sua <span className="accent">sessão</span>
+            {skipEvaluator
+              ? <>Sessão <span className="accent">concluída</span></>
+              : <>Avaliação da sua <span className="accent">sessão</span></>}
           </h2>
           <p>Sessão com <strong>{item?.name}</strong> · duração {formatTime(elapsed)}</p>
           <div className="ornament" />
@@ -739,16 +737,26 @@ export default function EchoSession({ user, sessionType }) {
             </div>
           )}
 
+          {visibleMessages.length > 0 && (() => {
+            const hasEval = !skipEvaluator && !!stripSupervisorBlock(evaluationText).trim();
+            return (
+              <div style={{ marginTop: 14 }}>
+                <LogActions
+                  items={makeLogItems({
+                    baseName: item?.name || 'sessao',
+                    getLog: logText,
+                    getEval: hasEval ? evalText : null,
+                    getBoth: hasEval ? bothText : null,
+                  })}
+                />
+              </div>
+            );
+          })()}
+
           <div className="post-session-actions">
             <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/competitivo' : (sessionType === 'freeplay' ? '/freeplay' : '/neuro'))}>
               Voltar à biblioteca
             </button>
-            {visibleMessages.length > 0 && (
-              <button className="btn btn-outline" onClick={downloadLogAndEval} title="Baixar a transcrição e a avaliação juntas (.txt)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 6, verticalAlign: '-2px' }}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-                Baixar log + avaliação
-              </button>
-            )}
           </div>
         </div>
       </div>
@@ -823,7 +831,7 @@ export default function EchoSession({ user, sessionType }) {
                 Próxima sessão →
               </button>
               <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
-                Enviar para correção
+                {skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção'}
               </button>
             </>
           )}
@@ -840,7 +848,11 @@ export default function EchoSession({ user, sessionType }) {
       <div className={`chat-messages ${!sessionStarted ? 'locked' : ''}`}>
         {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
           <div className="empty-chat" style={{ marginTop: 100 }}>
-            Esta é uma simulação livre — sem nota ao final, foco na escuta e manejo.
+            {isCompetitive
+              ? 'Modo competitivo — esta sessão é avaliada e vale ranking (MMR) ao final.'
+              : (sessionType === 'freeplay'
+                ? 'Esta é uma simulação livre — sem nota nem avaliação ao final, foco na escuta e manejo.'
+                : 'Neuroavaliação — avaliação ao final, foco no raciocínio diagnóstico.')}
           </div>
         )}
 
@@ -980,19 +992,26 @@ export default function EchoSession({ user, sessionType }) {
       {confirmingFinalize && (() => {
         const visibleCount = messages.filter((m) => !m.isSystem).length;
         const empty = visibleCount === 0;
+        const title = empty ? 'Sessão vazia' : (skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção');
+        const bodyText = empty
+          ? `A sessão não tem mensagens ainda. Deseja ${skipEvaluator ? 'encerrar' : 'enviar para correção'} mesmo assim?`
+          : (skipEvaluator
+            ? 'Tem certeza que deseja encerrar? Esta é uma simulação livre: não há avaliação nem nota. O log das sessões será salvo no seu histórico e você não poderá continuar este atendimento depois.'
+            : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.');
+        const confirmLabel = empty
+          ? (skipEvaluator ? 'Encerrar mesmo assim' : 'Enviar mesmo assim')
+          : (skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção');
         return (
           <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmingFinalize(false); }}>
             <div className="modal" style={{ maxWidth: 500 }}>
-              <h3>{empty ? 'Sessão vazia' : 'Enviar para correção'}</h3>
+              <h3>{title}</h3>
               <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
-                {empty
-                  ? 'A sessão não tem mensagens ainda. Deseja enviar para correção mesmo assim?'
-                  : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.'}
+                {bodyText}
               </p>
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={() => setConfirmingFinalize(false)}>Cancelar</button>
                 <button type="button" className="btn btn-primary" onClick={doFinalize}>
-                  {empty ? 'Enviar mesmo assim' : 'Enviar para correção'}
+                  {confirmLabel}
                 </button>
               </div>
             </div>
