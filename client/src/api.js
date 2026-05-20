@@ -72,6 +72,8 @@ export const api = {
   me: () => request('/me'),
   changeMyPassword: (currentPassword, newPassword) =>
     request('/me/password', { method: 'POST', body: { currentPassword, newPassword } }),
+  // Título (subtítulo) ativo exibido no perfil/ranking. titleId vazio limpa.
+  setMyTitle: (titleId) => request('/me/title', { method: 'POST', body: { titleId } }),
 
   // Exercises
   getExercises: () => request('/exercises'),
@@ -98,6 +100,7 @@ export const api = {
   // Logs
   getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
+  getLogsPolicy: () => request('/logs/policy'),
 
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
   // context: { type, itemId } — NUNCA mande systemPrompt do cliente
@@ -135,6 +138,10 @@ export const api = {
 
   // Ranking global de jogadores (não disponível pra visitante)
   getRanking: () => request('/ranking'),
+  // MMR competitivo do próprio usuário (perfil / pós-sessão)
+  getMyMmr: () => request('/me/mmr'),
+  // Reset de ranking (admin): zera notas + progresso, preserva logs.
+  adminResetRanking: () => request('/admin/ranking/reset', { method: 'POST' }),
 
   // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
   listActiveSessions: () => request('/active-sessions'),

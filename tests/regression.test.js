@@ -275,4 +275,106 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
       expect(res.status).toBe(200);
     });
   });
+
+  // === Reset de ranking (admin) — zera notas, preserva logs ===
+  describe('POST /api/admin/ranking/reset', () => {
+    async function seedScoredLog(token) {
+      // cria log + força um score editando o JSON (POST não aceita score do aluno? aceita via allowlist)
+      const res = await request(app)
+        .post('/api/logs')
+        .set(authHeader(token))
+        .send({ type: 'freeplay', itemId: 'fp-test-1', itemTitle: 'Sofia', score: 80, messages: [{ role: 'user', content: 'oi' }] });
+      return res.body.id;
+    }
+
+    it('zera score/criteriaScores dos logs mas mantém os logs e mensagens', async () => {
+      const aluno = await loginAs('aluno');
+      const logId = await seedScoredLog(aluno);
+      // confirma que o score foi gravado
+      const before = await request(app).get('/api/logs').set(authHeader(aluno));
+      const logBefore = before.body.find((l) => l.id === logId);
+      expect(logBefore.score).toBe(80);
+
+      const admin = await loginAs('admin');
+      const reset = await request(app).post('/api/admin/ranking/reset').set(authHeader(admin));
+      expect(reset.status).toBe(200);
+      expect(reset.body.ok).toBe(true);
+      expect(reset.body.clearedScores).toBeGreaterThanOrEqual(1);
+
+      const after = await request(app).get('/api/logs').set(authHeader(aluno));
+      const logAfter = after.body.find((l) => l.id === logId);
+      expect(logAfter).toBeTruthy();          // log preservado
+      expect(logAfter.score).toBeNull();      // nota zerada
+      expect(logAfter.messages.length).toBe(1); // conversa preservada
+    });
+
+    it('é admin-only', async () => {
+      const aluno = await loginAs('aluno');
+      const r1 = await request(app).post('/api/admin/ranking/reset').set(authHeader(aluno));
+      expect(r1.status).toBe(403);
+      const prof = await loginAs('prof');
+      const r2 = await request(app).post('/api/admin/ranking/reset').set(authHeader(prof));
+      expect(r2.status).toBe(403);
+    });
+  });
+
+  // === Expiração de logs (30 dias) ===
+  describe('expiração de logs', () => {
+    it('GET /api/logs anexa expiresAt ~30 dias após o timestamp', async () => {
+      const aluno = await loginAs('aluno');
+      await request(app).post('/api/logs').set(authHeader(aluno))
+        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'x' });
+      const res = await request(app).get('/api/logs').set(authHeader(aluno));
+      const log = res.body[0];
+      expect(log.expiresAt).toBeTruthy();
+      const delta = new Date(log.expiresAt) - new Date(log.timestamp);
+      expect(Math.round(delta / 86400000)).toBe(30);
+    });
+
+    it('logs com mais de 30 dias são removidos no GET', async () => {
+      const aluno = await loginAs('aluno');
+      await request(app).post('/api/logs').set(authHeader(aluno))
+        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'velho' });
+      // envelhece o log direto no JSON (40 dias atrás)
+      const file = path.join(DATA_DIR, 'logs.json');
+      const logs = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      logs[0].timestamp = new Date(Date.now() - 40 * 86400000).toISOString();
+      fs.writeFileSync(file, JSON.stringify(logs));
+      const res = await request(app).get('/api/logs').set(authHeader(aluno));
+      expect(res.body.length).toBe(0);
+    });
+
+    it('GET /api/logs/policy expõe ttlDays', async () => {
+      const aluno = await loginAs('aluno');
+      const res = await request(app).get('/api/logs/policy').set(authHeader(aluno));
+      expect(res.status).toBe(200);
+      expect(res.body.ttlDays).toBe(30);
+    });
+  });
+
+  // === Títulos desbloqueáveis ===
+  describe('POST /api/me/title', () => {
+    it('rejeita título não desbloqueado (403) e aceita após desbloquear', async () => {
+      const aluno = await loginAs('aluno');
+      // sem sessões: nenhuma conquista → 403
+      const fail = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'first_session' });
+      expect(fail.status).toBe(403);
+      // cria 1 sessão → desbloqueia 'first_session'
+      await request(app).post('/api/logs').set(authHeader(aluno))
+        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'x' });
+      const ok = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'first_session' });
+      expect(ok.status).toBe(200);
+      expect(ok.body.activeTitle).toBe('first_session');
+      expect(ok.body.titleLabel).toBeTruthy();
+      // título vazio limpa
+      const clear = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: '' });
+      expect(clear.body.activeTitle).toBe('');
+    });
+
+    it('titleId inexistente retorna 400', async () => {
+      const aluno = await loginAs('aluno');
+      const res = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'nao_existe' });
+      expect(res.status).toBe(400);
+    });
+  });
 });

@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-r
 import Login from './pages/Login';
 import SkillMap from './pages/SkillMap';
 import FreePlay from './pages/FreePlay';
+import Competitive from './pages/Competitive';
 import NeuroEval from './pages/NeuroEval';
 import ChatSession from './pages/ChatSession';
 import EchoSession from './pages/EchoSession';
@@ -83,6 +84,15 @@ const ICONS = {
       <circle cx="12" cy="12" r="9" />
       <circle cx="12" cy="12" r="5" />
       <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  ),
+  trophy: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+      <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+      <path d="M6 4h12v5a6 6 0 0 1-12 0z" />
+      <line x1="12" y1="15" x2="12" y2="19" />
+      <path d="M8 21h8M9 21a3 3 0 0 1 6 0" />
     </svg>
   ),
 };
@@ -228,6 +238,13 @@ export default function App() {
               <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
                 {ICONS.freeplay}<span>Simulação</span>
               </Link>
+              {/* Competitivo: mesmos personagens da Simulação, mas ranqueado (MMR).
+                  Visitante não pontua (id efêmero), então não vê a aba. */}
+              {!isVisitor && (
+                <Link to="/competitivo" className={isActive('/competitivo') ? 'active' : ''}>
+                  {ICONS.trophy}<span>Competitivo</span>
+                </Link>
+              )}
               {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
                   Será reaberta pra alunos/professores quando estiver pronta. */}
               {isAdmin && (
@@ -323,6 +340,11 @@ export default function App() {
               </span>
               <div className="profile-mini-info">
                 <div className="profile-mini-name">{user.name}</div>
+                {user.titleLabel && (
+                  <div className={`player-title tier-${user.titleTier || 'bronze'}`} style={{ marginTop: 2 }}>
+                    {user.titleLabel}
+                  </div>
+                )}
                 <div className="profile-mini-role">
                   {streak?.isAlive
                     ? `${streak.current} ${streak.current === 1 ? 'dia consecutivo' : 'dias consecutivos'}`
@@ -344,6 +366,7 @@ export default function App() {
           <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
           <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
           <Route path="/freeplay" element={<FreePlay user={user} />} />
+          <Route path="/competitivo" element={<Competitive user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />

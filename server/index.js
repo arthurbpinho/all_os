@@ -13,6 +13,7 @@ const {
   buildNeuroPrompt,
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
+const mmrEngine = require('./mmr');
 
 const app = express();
 
@@ -287,10 +288,35 @@ if (!fs.existsSync(path.join(DATA_DIR, 'logs.json'))) {
   writeJSON('logs.json', []);
 }
 
+// Estado do MMR competitivo. { players: { <userId>: {P,n,W} },
+// characters: { <charId>: {D,n_D,alpha,beta,history} } }. Sobrevive ao reset de
+// ranking (decisão do dono): zerar notas dos logs NÃO zera o MMR.
+if (!fs.existsSync(path.join(DATA_DIR, 'mmr.json'))) {
+  writeJSON('mmr.json', { players: {}, characters: {} });
+}
+
+function readMMR() {
+  const data = readJSON('mmr.json', { players: {}, characters: {} });
+  if (!data.players) data.players = {};
+  if (!data.characters) data.characters = {};
+  return data;
+}
+function writeMMR(data) {
+  writeJSON('mmr.json', data);
+}
+
 // --- Auth helpers ---
 function publicUser(u) {
   if (!u) return null;
   const { password, passwordHash, ...safe } = u;
+  // Título ativo (subtítulo desbloqueável): resolve o rótulo a partir da conquista.
+  // Disponível em /me, /ranking (via users) e no perfil. ACHIEVEMENT_DEFS é const
+  // de módulo já inicializada no momento em que publicUser roda (request time).
+  if (safe.activeTitle) {
+    const def = ACHIEVEMENT_DEFS.find((d) => d.id === safe.activeTitle);
+    safe.titleLabel = def ? def.title : null;
+    safe.titleTier = def ? def.tier : null;
+  }
   if (safe.role === 'therapist' && safe.teacherId) {
     try {
       const users = readJSON('users.json');
@@ -423,6 +449,46 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
   writeJSON('users.json', users);
   res.json({ ok: true });
+});
+
+// Define o "título" (subtítulo) ativo exibido no perfil e no ranking. Só
+// permite títulos de conquistas que o usuário REALMENTE desbloqueou — a posse
+// é revalidada server-side via computeEarnedAchievements (não confia no client).
+// titleId vazio limpa o título.
+app.post('/api/me/title', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não pode definir título.' });
+  }
+  const titleId = req.body && req.body.titleId;
+  const users = readJSON('users.json');
+  const idx = users.findIndex((u) => u.id === req.user.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+
+  if (!titleId) {
+    users[idx].activeTitle = '';
+    writeJSON('users.json', users);
+    return res.json(publicUser(users[idx]));
+  }
+
+  const def = ACHIEVEMENT_DEFS.find((d) => d.id === titleId);
+  if (!def) return res.status(400).json({ error: 'Título inválido.' });
+
+  const allLogs = readJSON('logs.json');
+  const userLogs = allLogs.filter((l) => l.userId === req.user.id);
+  const streak = computeStreak(userLogs);
+  const earned = computeEarnedAchievements(
+    userLogs,
+    streak,
+    readJSON('exercises.json'),
+    readJSON('freeplay-characters.json'),
+    readJSON('neuro-characters.json'),
+  );
+  if (!earned.has(titleId)) {
+    return res.status(403).json({ error: 'Você ainda não desbloqueou esse título.' });
+  }
+  users[idx].activeTitle = titleId;
+  writeJSON('users.json', users);
+  res.json(publicUser(users[idx]));
 });
 
 // --- Profile ---
@@ -642,6 +708,7 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
       logs: readJSON('logs.json'),
       achievements: readJSON('achievements.json', {}),
       activeSessions: readJSON('active-sessions.json', {}),
+      mmr: readJSON('mmr.json', { players: {}, characters: {} }),
     },
   };
   // Content-Disposition: força download como arquivo em vez de renderizar JSON
@@ -965,7 +1032,17 @@ function sanitizeCharacterPayload(body) {
 
 app.get('/api/freeplay', requireAuth, (req, res) => {
   const list = readJSON('freeplay-characters.json');
-  res.json(isAdmin(req.user) ? list : list.map(publicFreeplayChar));
+  const mmr = readMMR();
+  // Dificuldade do MMR é aberta (alunos + admin) — exibida nos cards do modo
+  // competitivo e no painel admin. Personagem nunca jogado mostra a baseline 50.
+  const withDifficulty = (base, c) => ({
+    ...base,
+    difficulty: mmrEngine.characterDifficulty(mmr.characters[c.id]),
+    competitiveMatches: (mmr.characters[c.id] && mmr.characters[c.id].n_D) || 0,
+  });
+  res.json(
+    list.map((c) => withDifficulty(isAdmin(req.user) ? c : publicFreeplayChar(c), c)),
+  );
 });
 
 app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
@@ -1047,13 +1124,50 @@ app.post('/api/progress/:userId', requireAuth, (req, res) => {
 });
 
 // --- Logs ---
+// Logs expiram automaticamente em 30 dias e são removidos do disco — medida
+// preventiva pra conter o crescimento do logs.json a longo prazo. A data de
+// expiração de cada log é derivada (timestamp + TTL) e exposta no GET pra que
+// o cliente exiba o aviso pros 3 perfis (aluno, professor, admin).
+const LOG_TTL_DAYS = 30;
+const LOG_TTL_MS = LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+function logExpiresAt(log) {
+  const t = new Date(log.timestamp || log.createdAt || 0).getTime();
+  if (!Number.isFinite(t) || t === 0) return null;
+  return new Date(t + LOG_TTL_MS).toISOString();
+}
+
+// Remove logs com mais de LOG_TTL_DAYS. Idempotente; só grava se algo mudou.
+// Logs sem timestamp válido são preservados (não dá pra estimar a idade).
+// Retorna a quantidade removida.
+function pruneExpiredLogs() {
+  let logs;
+  try { logs = readJSON('logs.json'); } catch { return 0; }
+  if (!Array.isArray(logs) || logs.length === 0) return 0;
+  const cutoff = Date.now() - LOG_TTL_MS;
+  const kept = logs.filter((l) => {
+    const t = new Date(l.timestamp || l.createdAt || 0).getTime();
+    if (!Number.isFinite(t) || t === 0) return true;
+    return t >= cutoff;
+  });
+  if (kept.length === logs.length) return 0;
+  writeJSON('logs.json', kept);
+  return logs.length - kept.length;
+}
+
+// Anexa expiresAt (derivado) a cada log devolvido — não é persistido.
+function decorateLogs(arr) {
+  return arr.map((l) => ({ ...l, expiresAt: logExpiresAt(l) }));
+}
+
 app.get('/api/logs', requireAuth, (req, res) => {
+  pruneExpiredLogs();
   const logs = readJSON('logs.json');
   const users = readJSON('users.json');
 
   // Aluno e visitante: só os próprios.
   if (req.user.role === 'therapist' || req.user.role === 'visitor') {
-    return res.json(logs.filter(l => l.userId === req.user.id));
+    return res.json(decorateLogs(logs.filter(l => l.userId === req.user.id)));
   }
 
   // Filtro por userId específico
@@ -1061,7 +1175,7 @@ app.get('/api/logs', requireAuth, (req, res) => {
     if (!canAccessUserResource(req.user, req.query.userId)) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
-    return res.json(logs.filter(l => l.userId === req.query.userId));
+    return res.json(decorateLogs(logs.filter(l => l.userId === req.query.userId)));
   }
 
   // Professor: apenas logs de seus alunos
@@ -1069,11 +1183,16 @@ app.get('/api/logs', requireAuth, (req, res) => {
     const myStudents = new Set(
       users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id).map(u => u.id)
     );
-    return res.json(logs.filter(l => myStudents.has(l.userId)));
+    return res.json(decorateLogs(logs.filter(l => myStudents.has(l.userId))));
   }
 
   // Admin: tudo
-  res.json(logs);
+  res.json(decorateLogs(logs));
+});
+
+// Metadados da política de expiração — o cliente usa pra montar o aviso.
+app.get('/api/logs/policy', requireAuth, (req, res) => {
+  res.json({ ttlDays: LOG_TTL_DAYS });
 });
 
 // Cap de tamanho pra prevenir bloat em logs.json e ataques de fillup.
@@ -1109,10 +1228,15 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     comment: clampStr(m && m.comment, 2000),
   }));
 
+  // mode só é significativo para freeplay (Simulação): 'competitive' alimenta o
+  // MMR; qualquer outro valor cai em 'training' (comportamento de hoje).
+  const mode = body.mode === 'competitive' ? 'competitive' : 'training';
+
   const log = {
     id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
     type: body.type,
+    mode,
     itemId: clampStr(body.itemId, 200),
     itemTitle: clampStr(body.itemTitle, LOG_MAX_TITLE),
     skillId: Number.isFinite(body.skillId) ? Number(body.skillId) : null,
@@ -1129,65 +1253,102 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   const logs = readJSON('logs.json');
   logs.push(log);
   writeJSON('logs.json', logs);
-  res.json(log);
+
+  // MMR competitivo: partida válida = freeplay + mode competitive + nota
+  // numérica + usuário real (visitante tem id efêmero, fica de fora). A nota S
+  // é a nota crua (0..100) do avaliador, parseada no cliente — mesmo modelo de
+  // confiança do ranking de notas que já existia. Atualização atômica do
+  // mmr.json (read-modify-write na mesma request).
+  let mmrResult = null;
+  if (
+    mode === 'competitive' &&
+    log.type === 'freeplay' &&
+    Number.isFinite(log.score) &&
+    log.itemId &&
+    req.user.role !== 'visitor'
+  ) {
+    const mmr = readMMR();
+    const { player, character, result } = mmrEngine.updateMatch(
+      mmr.players[req.user.id],
+      mmr.characters[log.itemId],
+      log.score,
+    );
+    mmr.players[req.user.id] = player;
+    mmr.characters[log.itemId] = character;
+    writeMMR(mmr);
+    mmrResult = result;
+  }
+
+  res.json({ ...log, mmr: mmrResult });
 });
 
-// --- Ranking global de jogadores ---
-// Fórmula: para cada personagem que o usuário jogou pelo menos uma vez em
-// freeplay (Simulação), pega a MAIOR nota dele com aquele personagem; soma
-// essas maiores notas e divide pelo número de personagens distintos jogados.
-// Resultado: penaliza farming (repetir o mesmo personagem não infla nota),
-// não penaliza variedade (jogou 1 personagem com 10 = global 10).
+// --- Ranking global de jogadores (por MMR competitivo) ---
+// O ranking ordena pelo MMR (P) do modo Competitivo. Só entra quem jogou ao
+// menos 1 partida competitiva. Nas 5 primeiras partidas o MMR fica oculto
+// (calibrating=true, mmr=null) — o cliente mostra "faltam X partidas".
 //
-// "totalSessions" conta apenas freeplay com score numérico válido — é o que
-// faz sentido pra ordenação "mais sessões realizadas" no contexto do ranking.
-//
-// Visitante não acessa; logs órfãos de visitantes ficam fora porque nunca
-// casam com nenhum usuário em users.json. Usuários sem nenhuma sessão freeplay
-// pontuada também ficam fora — ninguém aparece zerado.
+// Visitante não acessa nem pontua (id efêmero, sem registro de MMR).
 app.get('/api/ranking', requireAuth, (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não tem acesso ao ranking.' });
   }
   const users = readJSON('users.json');
-  const logs = readJSON('logs.json');
-
-  const logsByUser = new Map();
-  for (const l of logs) {
-    if (l.type !== 'freeplay') continue;
-    if (!Number.isFinite(l.score)) continue;
-    if (!l.itemId) continue;
-    if (!logsByUser.has(l.userId)) logsByUser.set(l.userId, []);
-    logsByUser.get(l.userId).push(l);
-  }
+  const mmr = readMMR();
 
   const ranking = users
     .filter((u) => u.role !== 'visitor')
     .map((u) => {
-      const userLogs = logsByUser.get(u.id) || [];
-      const maxByChar = new Map();
-      for (const l of userLogs) {
-        const prev = maxByChar.get(l.itemId);
-        if (prev === undefined || l.score > prev) maxByChar.set(l.itemId, l.score);
-      }
-      const charactersPlayed = maxByChar.size;
-      const sumOfMax = Array.from(maxByChar.values()).reduce((a, b) => a + b, 0);
-      const globalScore = charactersPlayed > 0
-        ? Math.round((sumOfMax / charactersPlayed) * 10) / 10
-        : null;
+      const state = mmr.players[u.id];
+      if (!state || state.n < 1) return null; // só quem jogou competitivo
+      const view = mmrEngine.playerView(state);
+      const def = u.activeTitle ? ACHIEVEMENT_DEFS.find((d) => d.id === u.activeTitle) : null;
       return {
         userId: u.id,
         name: u.name || u.username,
         profilePhoto: u.profilePhoto || '',
         role: u.role,
-        globalScore,
-        charactersPlayed,
-        totalSessions: userLogs.length,
+        title: def ? def.title : null,
+        titleTier: def ? def.tier : null,
+        mmr: view.mmr,
+        calibrating: view.calibrating,
+        matchesRemaining: view.matchesRemaining,
+        matches: state.n,
       };
     })
-    .filter((r) => r.totalSessions > 0);
+    .filter(Boolean);
 
   res.json(ranking);
+});
+
+// MMR do próprio usuário (perfil / tela pós-sessão). Visitante recebe um estado
+// neutro (nunca pontua).
+app.get('/api/me/mmr', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.json(mmrEngine.playerView(null));
+  }
+  const mmr = readMMR();
+  res.json(mmrEngine.playerView(mmr.players[req.user.id]));
+});
+
+// Reset de ranking (admin-only). Zera as NOTAS de todas as sessões e o
+// progresso da trilha, mas PRESERVA os logs/transcrições e o texto das
+// avaliações — o supervisor continua revisitando as conversas, e os logs
+// seguem a regra de expiração de 30 dias normalmente. Use quando o modelo do
+// avaliador muda e as notas antigas perdem validade comparativa.
+// NÃO toca no mmr.json: por decisão do dono, o MMR competitivo sobrevive ao
+// reset (o ranking por MMR continua intacto).
+app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, res) => {
+  const logs = readJSON('logs.json');
+  let clearedScores = 0;
+  for (const l of logs) {
+    if (l.score !== null && l.score !== undefined) clearedScores++;
+    l.score = null;
+    l.criteriaScores = null;
+  }
+  writeJSON('logs.json', logs);
+  writeJSON('progress.json', {});
+  console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), progresso limpo.`);
+  res.json({ ok: true, clearedScores });
 });
 
 // DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
@@ -1275,7 +1436,7 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 // --- Anthropic Chat Proxy (modelo padrão do projeto) ---
 // CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Sonnet 4.6.
 // HEAVY_MODEL: entrevistador (geração de prompts de pacientes). Opus 4.7.
-// EVAL_MODEL: avaliador (v13-1). Opus 4.7 com prompt caching no system de ~23k.
+// EVAL_MODEL: avaliador (v15). Opus 4.7 com prompt caching no system de ~23k.
 const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL || 'claude-sonnet-4-6';
 const HEAVY_MODEL = process.env.ANTHROPIC_HEAVY_MODEL || 'claude-opus-4-7';
 const EVAL_MODEL = process.env.ANTHROPIC_EVAL_MODEL || 'claude-opus-4-7';
@@ -1381,11 +1542,11 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
 
   // Default 1500 pra pacientes (Trilha/Simulação/Neuro) — resposta de
   // paciente raramente passa de 3 parágrafos, e segura snappy. Entrevistador
-  // sobe pra até 64000 (Opus 4.7 com adaptive thinking pode gastar 4-8k em
-  // raciocínio antes do output longo do prompt do paciente).
+  // sobe pra 16000 (gera prompt de paciente longo, mas sem thinking então
+  // 16k é folga real).
   const isEntrevistador = mode === 'entrevistador';
   const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
-    ? Math.min(Math.floor(maxTokens), isEntrevistador ? 64000 : 32000)
+    ? Math.min(Math.floor(maxTokens), isEntrevistador ? 16000 : 4000)
     : 1500;
 
   const normalized = normalizeMessagesForAnthropic(messages);
@@ -1393,21 +1554,32 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
   }
 
+  // Prompt caching: cache_control no system + último user message.
+  // Em chat de paciente com 50-100 turnos isso reduz o custo de input em ~10x
+  // — system+histórico viram cache_read (10% do preço) a partir do 2º turno.
+  // Cada novo turno paga cache_creation só do delta (último user message).
+  const systemBlocks = [
+    { type: 'text', text: resolved.systemPrompt, cache_control: { type: 'ephemeral' } },
+  ];
+  const cachedMessages = normalized.map((m, i) => {
+    if (i !== normalized.length - 1) return m;
+    return {
+      role: m.role,
+      content: [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }],
+    };
+  });
+
   try {
-    // Entrevistador roda no Opus 4.7 com adaptive thinking + effort high pra
-    // gerar prompts longos e nuançados de pacientes; pacientes ficam no
-    // Sonnet 4.6 sem thinking pra resposta rápida e natural na conversa.
+    // Entrevistador roda no Opus 4.7 (prompt generation pede qualidade alta).
+    // Pacientes ficam no Sonnet 4.6. Ambos SEM thinking — thinking estava
+    // dobrando o custo sem ganho proporcional pra esses use cases.
     const chosenModel = isEntrevistador ? HEAVY_MODEL : CHAT_MODEL;
     const params = {
       model: chosenModel,
       max_tokens: tokenCap,
-      system: resolved.systemPrompt,
-      messages: normalized,
+      system: systemBlocks,
+      messages: cachedMessages,
     };
-    if (isEntrevistador) {
-      params.thinking = { type: 'adaptive' };
-      params.output_config = { effort: 'high' };
-    }
     // Stream + getFinalMessage pra evitar timeout HTTP em maxTokens altos;
     // resposta final tem o mesmo shape de uma chamada não-streaming.
     const stream = anthropic.messages.stream(params);
@@ -1416,6 +1588,11 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       .filter((b) => b.type === 'text')
       .map((b) => b.text)
       .join('');
+    if (message.usage) {
+      console.log(
+        `Chat cache (${chosenModel}): read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
+      );
+    }
     res.json({ role: 'assistant', content: text });
   } catch (err) {
     console.error('Anthropic error:', err.message);
@@ -1438,7 +1615,7 @@ function sanitizeAssistantId(input) {
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
 
 function loadAvaliacaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v13-1.md');
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v15.md');
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
   }
@@ -1525,22 +1702,21 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   }
 
   try {
-    // Prompt caching no system de ~23k tokens (avaliador v13-1) — a primeira
+    // Prompt caching no system de ~32k tokens (avaliador v15) — a primeira
     // chamada paga cache_creation (~1.25x), as próximas dentro de 5min leem
     // a 10% do preço. Como o system raramente muda e cada avaliação reusa
     // exatamente os mesmos bytes de prefix, o hit rate fica alto.
     //
-    // max_tokens=64000 dá folga pra Opus 4.7 fazer raciocínio extenso
-    // (adaptive thinking pode gastar 8-15k em casos densos) + os 6 critérios
-    // com justificativas + nota final. 32000 era apertado quando a transcrição
-    // era longa. Opus 4.7 suporta até 128K mas streamamos pra evitar timeout.
-    // effort: 'high' é o mínimo recomendado pra trabalho intelectualmente
-    // sensível em Opus 4.7 (avaliação clínica densa).
+    // Sem thinking + effort high: o adaptive thinking estava gastando 8-15k
+    // tokens × $75/M = $0.60-$1.10 por avaliação só de raciocínio interno.
+    // Opus 4.7 já produz avaliação clínica densa sem precisar de thinking
+    // extendido — os 6 critérios + nota final cabem em ~3-5k de output.
+    //
+    // max_tokens=16000 é folga real (output típico fica em 3-5k tokens).
+    // Antes era 64000 pra acomodar thinking, agora não precisa.
     const stream = anthropic.messages.stream({
       model: EVAL_MODEL,
-      max_tokens: 64000,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'high' },
+      max_tokens: 16000,
       system: [
         {
           type: 'text',
@@ -1613,6 +1789,15 @@ if (fs.existsSync(clientDist)) {
 // Quando importado por testes (`require('./server/index.js')`), o supertest
 // cria seu próprio server interno em porta aleatória — sem precisar de listen.
 if (require.main === module) {
+  // Limpeza de logs expirados no boot + a cada 6h. unref() pra não segurar o
+  // processo vivo só por causa do timer.
+  const removed = pruneExpiredLogs();
+  if (removed > 0) console.log(`[logs] ${removed} log(s) expirado(s) (>${LOG_TTL_DAYS} dias) removido(s) no boot.`);
+  setInterval(() => {
+    const n = pruneExpiredLogs();
+    if (n > 0) console.log(`[logs] ${n} log(s) expirado(s) removido(s).`);
+  }, 6 * 60 * 60 * 1000).unref();
+
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
 }
