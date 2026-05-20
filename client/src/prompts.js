@@ -95,6 +95,18 @@ Personagem: ${characterName}
 ${transcript}`;
 }
 
+// Remove o bloco [notas-supervisor] (notas por critério, v15+) do texto do
+// avaliador. Esse bloco é destinado só a supervisor/admin — não deve aparecer
+// pro aluno na tela pós-sessão nem nos downloads que o próprio aluno faz. O
+// texto cru (com o bloco) ainda é enviado ao servidor, que extrai as notas e
+// salva a avaliação já limpa.
+export function stripSupervisorBlock(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
+    .trim();
+}
+
 // Tenta extrair as notas por critério da resposta da IA
 export function parseCriteriaScores(text) {
   const scores = {};
