@@ -183,4 +183,25 @@ export const api = {
 
   // Professor: alunos vinculados
   getMyStudents: () => request('/teacher/students'),
+
+  // --- Duelos (avaliação comparada entre dois alunos) ---
+  // Lista de oponentes possíveis (terapeutas do sistema, exceto você).
+  getDuelOpponents: () => request('/duel/opponents'),
+  // Cria um duelo. data: { characterId, opponentUserId?, inviteMethod: 'system'|'whatsapp' }
+  createDuel: (data) => request('/duel', { method: 'POST', body: data }),
+  getDuel: (id) => request(`/duel/${id}`),
+  // Resumo por token (tela de aceitar via link — funciona pra visitante também).
+  getDuelByToken: (token) => request(`/duel/by-token/${encodeURIComponent(token)}`),
+  acceptDuelByToken: (token) => request(`/duel/by-token/${encodeURIComponent(token)}/accept`, { method: 'POST', body: {} }),
+  // Aceitar duelo recebido por notificação (convite in-app).
+  acceptDuel: (id) => request(`/duel/${id}/accept`, { method: 'POST', body: {} }),
+  // Submete a sessão de um lado. data: { messages, durationSeconds }
+  submitDuel: (id, data) => request(`/duel/${id}/submit`, { method: 'POST', body: data }),
+  // Logs sociais: duelos agrupados por oponente.
+  getSocialLogs: () => request('/duels/social'),
+
+  // --- Notificações in-app ---
+  getNotifications: () => request('/notifications'),
+  markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),
+  markAllNotificationsRead: () => request('/notifications/read-all', { method: 'POST', body: {} }),
 };
