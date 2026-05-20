@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
@@ -6,6 +6,9 @@ import ScoreBadge from '../components/ScoreBadge';
 
 // Logs Sociais — resultados dos duelos, agrupados por oponente. A lista vem do
 // servidor já ordenada por número de partidas (desc) e nome do oponente (asc).
+// Aqui dá pra cancelar duelos ainda não aceitos e baixar o log dos concluídos.
+// Duelos em andamento ou concluídos não podem ser excluídos; tudo some sozinho
+// 30 dias após a criação.
 function formatDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -23,27 +26,71 @@ function avatar(photo, name) {
     );
 }
 
-function outcomeChip(d) {
-  if (d.status !== 'completed' || !d.outcome) {
-    return <span className="duel-outcome-chip pending">pendente</span>;
+function statusChip(d) {
+  if (d.status === 'completed') {
+    if (d.outcome === 'win') return <span className="duel-outcome-chip win">vitória</span>;
+    if (d.outcome === 'loss') return <span className="duel-outcome-chip loss">derrota</span>;
+    if (d.outcome === 'draw') return <span className="duel-outcome-chip draw">empate</span>;
+    return <span className="duel-outcome-chip pending">concluído</span>;
   }
-  if (d.outcome === 'win') return <span className="duel-outcome-chip win">vitória</span>;
-  if (d.outcome === 'loss') return <span className="duel-outcome-chip loss">derrota</span>;
-  return <span className="duel-outcome-chip draw">empate</span>;
+  if (d.status === 'evaluating') return <span className="duel-outcome-chip ongoing">avaliando…</span>;
+  if (d.accepted) return <span className="duel-outcome-chip ongoing">em andamento</span>;
+  return <span className="duel-outcome-chip waiting">aguardando aceite</span>;
 }
 
 export default function LogsSociais({ user }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState(null); // duelo em ação (cancelar/baixar)
   const navigate = useNavigate();
 
-  useEffect(() => {
-    api.getSocialLogs()
+  const load = useCallback(() => {
+    return api.getSocialLogs()
       .then((data) => setGroups(data || []))
-      .catch((err) => setError(err.message || 'Erro ao carregar os logs sociais.'))
-      .finally(() => setLoading(false));
-  }, [user]);
+      .catch((err) => setError(err.message || 'Erro ao carregar os logs sociais.'));
+  }, []);
+
+  useEffect(() => {
+    setLoading(true);
+    load().finally(() => setLoading(false));
+  }, [load, user]);
+
+  async function handleCancel(e, d) {
+    e.stopPropagation();
+    if (!window.confirm('Cancelar este convite de duelo? Como ele ainda não foi aceito, será excluído.')) return;
+    setBusyId(d.id);
+    setError('');
+    try {
+      await api.cancelDuel(d.id);
+      await load();
+    } catch (err) {
+      setError(err.message || 'Não foi possível cancelar o duelo.');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDownload(e, d) {
+    e.stopPropagation();
+    setBusyId(d.id);
+    setError('');
+    try {
+      const { blob, filename } = await api.exportDuelLog(d.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err.message || 'Não foi possível baixar o log.');
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   return (
     <div>
@@ -52,6 +99,10 @@ export default function LogsSociais({ user }) {
         <h2>Logs <span className="accent"><Typewriter text="Sociais" /></span></h2>
         <p>Seus duelos agrupados por adversário, do mais frequente ao menos. Toque em um duelo para ver o resultado e a análise comparativa.</p>
         <div className="ornament" />
+      </div>
+
+      <div className="social-retention-note">
+        Convites ainda não aceitos podem ser cancelados. Duelos em andamento ou concluídos não podem ser excluídos — baixe o log (avaliação cruzada, notas e as duas sessões) enquanto quiser: tudo é apagado automaticamente 30 dias após a criação do duelo.
       </div>
 
       {error && <div className="alert error">{error}</div>}
@@ -81,20 +132,50 @@ export default function LogsSociais({ user }) {
               </div>
               <div className="social-duel-list">
                 {g.duels.map((d) => (
-                  <button key={d.id} className="social-duel-row" onClick={() => navigate(`/duelo/sessao/${d.id}`)}>
-                    <div className="social-duel-main">
-                      <span className="social-duel-char">{d.characterName}</span>
-                      <span className="social-duel-date">{formatDate(d.date)}</span>
-                    </div>
-                    <div className="social-duel-right">
-                      {d.status === 'completed' && Number.isFinite(d.yourScore) && Number.isFinite(d.theirScore) && (
-                        <span className="social-duel-scores">
-                          <ScoreBadge score={d.yourScore} /> <span className="vs">×</span> <ScoreBadge score={d.theirScore} />
-                        </span>
-                      )}
-                      {outcomeChip(d)}
-                    </div>
-                  </button>
+                  <div key={d.id} className="social-duel-row">
+                    <button className="social-duel-open" onClick={() => navigate(`/duelo/sessao/${d.id}`)}>
+                      <div className="social-duel-main">
+                        <span className="social-duel-char">{d.characterName}</span>
+                        <span className="social-duel-date">{formatDate(d.date)}</span>
+                      </div>
+                      <div className="social-duel-right">
+                        {d.status === 'completed' && Number.isFinite(d.yourScore) && Number.isFinite(d.theirScore) && (
+                          <span className="social-duel-scores">
+                            <ScoreBadge score={d.yourScore} /> <span className="vs">×</span> <ScoreBadge score={d.theirScore} />
+                          </span>
+                        )}
+                        {statusChip(d)}
+                      </div>
+                    </button>
+                    {(d.canExport || d.canCancel) && (
+                      <div className="social-duel-actions">
+                        {d.canExport && (
+                          <button
+                            className="social-duel-action"
+                            title="Baixar o log deste duelo"
+                            disabled={busyId === d.id}
+                            onClick={(e) => handleDownload(e, d)}
+                          >
+                            {busyId === d.id
+                              ? <span className="spinner spinner-sm" />
+                              : <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg>}
+                          </button>
+                        )}
+                        {d.canCancel && (
+                          <button
+                            className="social-duel-action danger"
+                            title="Cancelar convite (ainda não aceito)"
+                            disabled={busyId === d.id}
+                            onClick={(e) => handleCancel(e, d)}
+                          >
+                            {busyId === d.id
+                              ? <span className="spinner spinner-sm" />
+                              : <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>

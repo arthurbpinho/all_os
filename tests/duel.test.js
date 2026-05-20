@@ -198,6 +198,89 @@ describe('duelos', () => {
     expect(sub2.body.result.mmr.reason).toBe('visitor');
   });
 
+  it('cancela um duelo ainda não aceito (challenger), removendo o convite do oponente', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system' });
+    const duelId = create.body.id;
+
+    // oponente tem o convite pendente, e o duelo aparece como cancelável nos logs
+    const notifBefore = await request(app).get('/api/notifications').set(authHeader(aluno2));
+    expect(notifBefore.body.items.some((n) => n.type === 'duel_invite' && n.duelId === duelId)).toBe(true);
+    const socBefore = await request(app).get('/api/duels/social').set(authHeader(aluno));
+    expect(socBefore.body[0].duels[0].canCancel).toBe(true);
+    expect(socBefore.body[0].duels[0].canExport).toBe(false);
+
+    // challenger cancela
+    const cancel = await request(app).delete(`/api/duel/${duelId}`).set(authHeader(aluno));
+    expect(cancel.status).toBe(200);
+
+    // duelo some pros dois e o convite é removido
+    expect((await request(app).get(`/api/duel/${duelId}`).set(authHeader(aluno))).status).toBe(404);
+    const socAfter = await request(app).get('/api/duels/social').set(authHeader(aluno));
+    expect(socAfter.body).toEqual([]);
+    const notifAfter = await request(app).get('/api/notifications').set(authHeader(aluno2));
+    expect(notifAfter.body.items.some((n) => n.type === 'duel_invite' && n.duelId === duelId)).toBe(false);
+  });
+
+  it('o oponente convidado pode recusar (cancelar) enquanto não aceitou', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system' });
+    const cancel = await request(app).delete(`/api/duel/${create.body.id}`).set(authHeader(aluno2));
+    expect(cancel.status).toBe(200);
+  });
+
+  it('NÃO deixa cancelar duelo já aceito, nem por terceiro', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system' });
+    const duelId = create.body.id;
+
+    // terceiro não-participante não cancela
+    const outro = await loginAs('prof');
+    expect((await request(app).delete(`/api/duel/${duelId}`).set(authHeader(outro))).status).toBe(403);
+
+    // depois de aceito, vira "em andamento" e não pode mais ser excluído
+    await request(app).post(`/api/duel/${duelId}/accept`).set(authHeader(aluno2));
+    const cancel = await request(app).delete(`/api/duel/${duelId}`).set(authHeader(aluno));
+    expect(cancel.status).toBe(409);
+  });
+
+  it('baixa o log de um duelo concluído (avaliação cruzada + notas + as duas sessões); só participantes', async () => {
+    const aluno = await loginAs('aluno');
+    const aluno2 = await loginAs('aluno2');
+    const create = await request(app).post('/api/duel').set(authHeader(aluno))
+      .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system' });
+    const duelId = create.body.id;
+    await request(app).post(`/api/duel/${duelId}/accept`).set(authHeader(aluno2));
+    await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno)).send({ messages: msgs, durationSeconds: 120 });
+    await request(app).post(`/api/duel/${duelId}/submit`).set(authHeader(aluno2)).send({ messages: msgs, durationSeconds: 90 });
+
+    // logs sociais marcam o duelo como exportável e não-cancelável
+    const soc = await request(app).get('/api/duels/social').set(authHeader(aluno));
+    expect(soc.body[0].duels[0].canExport).toBe(true);
+    expect(soc.body[0].duels[0].canCancel).toBe(false);
+
+    const exp = await request(app).get(`/api/duel/${duelId}/export`).set(authHeader(aluno));
+    expect(exp.status).toBe(200);
+    expect(exp.headers['content-disposition']).toMatch(/attachment; filename="duelo-.*\.txt"/);
+    expect(exp.text).toContain('AVALIAÇÃO CRUZADA');
+    expect(exp.text).toContain('NOTAS');
+    expect(exp.text).toContain('Aluno A (você)');   // marca o lado de quem baixa
+    expect(exp.text).toContain('SESSÃO — Aluno A'); // sessão do challenger
+    expect(exp.text).toContain('SESSÃO — Aluno B'); // sessão do oponente
+    expect(exp.text).toContain('30 dias');          // aviso de retenção
+
+    // não-participante não baixa
+    const outro = await loginAs('prof');
+    expect((await request(app).get(`/api/duel/${duelId}/export`).set(authHeader(outro))).status).toBe(403);
+  });
+
   it('não deixa duelar consigo mesmo e nega acesso de não-participante', async () => {
     const aluno = await loginAs('aluno');
     const self = await request(app).post('/api/duel').set(authHeader(aluno))

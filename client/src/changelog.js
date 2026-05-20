@@ -36,6 +36,14 @@ export const CHANGELOG = [
 
     Títulos no Perfil: Implementação inicial da exibição de títulos baseados em conquistas (recurso ainda em desenvolvimento).
 
+🔹 Logs Sociais e Duelos (correções):
+
+    Cancelar convite: agora dá pra cancelar um convite de duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.
+
+    Baixar o log: nos duelos concluídos, dá pra baixar o log completo (avaliação cruzada + notas + as duas sessões). Cada pessoa só acessa os próprios duelos, e tudo é apagado automaticamente 30 dias após a criação.
+
+    Layout no celular: corrigida a formatação do painel de Atualizações/Notificações e da lista de Logs Sociais (incluindo o botão de baixar), que estavam quebrados no celular.
+
 Aproveitem os novos recursos e continuem enviando os feedbacks com base na prática de vocês!`,
   },
   {
