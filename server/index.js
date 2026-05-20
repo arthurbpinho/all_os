@@ -2015,6 +2015,7 @@ function sanitizeDuelForUser(duel, user) {
       evaluation: duel.result.evaluation, // já vem sem o bloco [notas-supervisor]
       evaluatedAt: duel.result.evaluatedAt,
     };
+    if (duel.result.mmr) out.result.mmr = duel.result.mmr;
     if (isAdmin(user)) {
       out.result.criteriaChallenger = duel.result.criteriaChallenger;
       out.result.criteriaOpponent = duel.result.criteriaOpponent;
@@ -2115,12 +2116,19 @@ app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
   // que enviou o link ("Sim! Enviei"). Convite via sistema também só inicia a
   // sessão do challenger quando ele clica em iniciar — em ambos os casos o lado
   // do challenger começa como 'invited' e vira 'in_progress' no start.
+  // Modo: 'competitive' alimenta o MMR (PvP) ao final; qualquer outro = treino.
+  // O duelo só rankeia de fato se os DOIS forem usuários cadastrados, fora da
+  // calibração e sem nota abaixo do mínimo (anti-smurf) — isso é verificado na
+  // hora da avaliação (applyDuelMmr). Aqui só registramos a intenção. Visitante
+  // nunca cria duelo (já barrado acima).
+  const mode = body.mode === 'competitive' ? 'competitive' : 'training';
+
   const duel = {
     id: 'duel-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
     token: crypto.randomBytes(12).toString('hex'),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    mode: 'training',
+    mode,
     status: 'pending',
     inviteMethod,
     character: { id: character.id, name: character.name },
@@ -2286,6 +2294,8 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
         evaluatedAt: new Date().toISOString(),
       };
       target.status = 'completed';
+      // MMR PvP (só duelo competitivo entre dois usuários cadastrados).
+      applyDuelMmr(target, comp);
     } else {
       target.result = { winner: null, scoreChallenger: null, scoreOpponent: null, evaluation: evaluationClean, evaluatedAt: new Date().toISOString(), error: 'Não foi possível extrair as notas da avaliação.' };
       target.status = 'completed';
@@ -2306,12 +2316,51 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
   }
 });
 
+// Aplica o MMR PvP a um duelo competitivo já avaliado (muta duel.result.mmr e
+// persiste mmr.json se rankeado). comp = saída de comparativeScores
+// (scoreA = challenger, scoreB = opponent). Para treino, ou quando algum lado
+// não é usuário cadastrado, marca não-rankeado (sem mexer no MMR).
+function applyDuelMmr(duel, comp) {
+  if (duel.mode !== 'competitive' || !comp) return;
+  const ch = duel.challenger;
+  const op = duel.opponent;
+  const bothReal = ch.userId && !ch.isVisitor && op.userId && !op.isVisitor;
+  if (!bothReal) {
+    duel.result.mmr = { ranked: false, reason: 'visitor' };
+    return;
+  }
+  const mmr = readMMR();
+  const out = mmrEngine.processDuel(
+    mmr.players[ch.userId],
+    mmr.players[op.userId],
+    mmr.characters[duel.character.id],
+    comp.scoreA,
+    comp.scoreB,
+  );
+  if (!out.ranked) {
+    duel.result.mmr = { ranked: false, reason: out.reason };
+    return;
+  }
+  mmr.players[ch.userId] = out.playerA;
+  mmr.players[op.userId] = out.playerB;
+  mmr.characters[duel.character.id] = out.character;
+  writeMMR(mmr);
+  const round1 = (x) => Math.round(x * 10) / 10;
+  duel.result.mmr = {
+    ranked: true,
+    challenger: { before: Math.round(out.resultA.P_before), after: Math.round(out.playerA.P), delta: round1(out.resultA.delta), pvpDelta: round1(out.pvp.deltaA) },
+    opponent: { before: Math.round(out.resultB.P_before), after: Math.round(out.playerB.P), delta: round1(out.resultB.delta), pvpDelta: round1(out.pvp.deltaB) },
+    characterDifficulty: mmrEngine.characterDifficulty(out.character),
+  };
+}
+
 function notifyDuelResult(duel) {
   if (!duel.result) return;
   const r = duel.result;
+  const rankedMmr = r.mmr && r.mmr.ranked ? r.mmr : null;
   const sides = [
-    { s: duel.challenger, score: r.scoreChallenger, theirScore: r.scoreOpponent, won: r.winner === 'challenger', theirName: duel.opponent.name },
-    { s: duel.opponent, score: r.scoreOpponent, theirScore: r.scoreChallenger, won: r.winner === 'opponent', theirName: duel.challenger.name },
+    { s: duel.challenger, key: 'challenger', score: r.scoreChallenger, theirScore: r.scoreOpponent, won: r.winner === 'challenger', theirName: duel.opponent.name },
+    { s: duel.opponent, key: 'opponent', score: r.scoreOpponent, theirScore: r.scoreChallenger, won: r.winner === 'opponent', theirName: duel.challenger.name },
   ];
   for (const side of sides) {
     if (!side.s.userId || side.s.isVisitor) continue;
@@ -2323,6 +2372,7 @@ function notifyDuelResult(duel) {
       outcome: r.winner === 'draw' ? 'draw' : (side.won ? 'win' : 'loss'),
       yourScore: side.score,
       theirScore: side.theirScore,
+      mmrDelta: rankedMmr ? rankedMmr[side.key].delta : null,
     });
   }
 }

@@ -118,6 +118,9 @@ export default function NotificationBell({ user }) {
                         {Number.isFinite(n.yourScore) && Number.isFinite(n.theirScore) && (
                           <> ({n.yourScore} × {n.theirScore})</>
                         )}
+                        {Number.isFinite(n.mmrDelta) && (
+                          <> · MMR {n.mmrDelta >= 0 ? '+' : ''}{n.mmrDelta}</>
+                        )}
                       </>
                     )}
                     <span className="notif-item-time">{timeAgo(n.createdAt)}</span>

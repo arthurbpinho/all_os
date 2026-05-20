@@ -22,6 +22,7 @@ import DuelSession from './pages/DuelSession';
 import DuelAccept from './pages/DuelAccept';
 import LogsSociais from './pages/LogsSociais';
 import NotificationBell from './components/NotificationBell';
+import SystemUpdates from './components/SystemUpdates';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 
 const ICONS = {
@@ -209,7 +210,10 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      {!isVisitor && <NotificationBell user={user} />}
+      <div className="topbar-actions">
+        <SystemUpdates />
+        {!isVisitor && <NotificationBell user={user} />}
+      </div>
       <header className="mobile-topbar">
         <button
           className="hamburger-btn"

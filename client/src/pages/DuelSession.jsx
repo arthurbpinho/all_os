@@ -317,6 +317,40 @@ export default function DuelSession({ user }) {
           </div>
         </div>
 
+        {duel.mode === 'competitive' && (
+          <div className="card duel-mmr-card">
+            {r.mmr && r.mmr.ranked ? (() => {
+              const m = youAre === 'opponent' ? r.mmr.opponent : r.mmr.challenger;
+              const up = m.delta >= 0;
+              return (
+                <>
+                  <span className="post-stat-label">Seu MMR</span>
+                  <div className="mmr-result-value">
+                    {m.after}
+                    <span className={`mmr-delta ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {Math.abs(m.delta).toFixed(1)}</span>
+                  </div>
+                  <p className="mmr-result-note">
+                    Dificuldade de {character?.name} agora: <strong>{r.mmr.characterDifficulty}</strong>
+                  </p>
+                </>
+              );
+            })() : (
+              <>
+                <span className="post-stat-label">Competitivo</span>
+                <p className="mmr-result-note">
+                  {r.mmr?.reason === 'anti_smurf'
+                    ? 'Como a diferença de nível foi muito grande, este duelo não foi contabilizado para o competitivo.'
+                    : r.mmr?.reason === 'calibrating'
+                    ? 'Este duelo não contou para o competitivo — um dos jogadores ainda está em calibração (precisa completar as 5 primeiras partidas).'
+                    : r.mmr?.reason === 'visitor'
+                    ? 'Duelos competitivos valem só entre jogadores cadastrados — este não contou para o MMR.'
+                    : 'Este duelo não foi contabilizado para o competitivo.'}
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
         {r.evaluation && (
           <div className="card">
             <div className="post-evaluation">
@@ -346,7 +380,7 @@ export default function DuelSession({ user }) {
         </button>
         <div className="chat-title">
           <h3>Duelo · {character?.name || '...'}</h3>
-          <div className="chat-status">vs {opponentName}</div>
+          <div className="chat-status">vs {opponentName}{duel?.mode === 'competitive' ? ' · Competitivo (MMR)' : ' · Treino'}</div>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {sessionStarted && (
