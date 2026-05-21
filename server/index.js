@@ -1831,7 +1831,7 @@ function sanitizeAssistantId(input) {
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
 
 function loadAvaliacaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v15.md');
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v16-2.md');
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
   }
@@ -1954,7 +1954,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const streamReasoning = canSeeReasoning && showReasoning === true;
 
   try {
-    // Avaliador v15 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
+    // Avaliador v16-2 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
     // Bloco 1 × log e pontua os 6 critérios no canal de reasoning OCULTO — não
     // sai no output_text, então o gabarito não vaza pro aluno (era o que o Opus
     // sem thinking fazia errado, externalizando a análise). Quando o pedido vem
