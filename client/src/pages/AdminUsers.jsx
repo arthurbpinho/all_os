@@ -33,6 +33,31 @@ export default function AdminUsers({ user: currentUser }) {
   const [resetError, setResetError] = useState('');
   const [resetSuccess, setResetSuccess] = useState('');
   const [exporting, setExporting] = useState(false);
+  // Toggle de avaliação para visitantes (eventos/palestras). Default off.
+  const [visitorEval, setVisitorEval] = useState(false);
+  const [visitorEvalSaving, setVisitorEvalSaving] = useState(false);
+  const [visitorEvalError, setVisitorEvalError] = useState('');
+
+  useEffect(() => {
+    api.getSettings()
+      .then((s) => setVisitorEval(!!s.visitorEvaluationEnabled))
+      .catch(() => { /* mantém off se falhar */ });
+  }, []);
+
+  async function toggleVisitorEval() {
+    if (visitorEvalSaving) return;
+    const next = !visitorEval;
+    setVisitorEvalSaving(true);
+    setVisitorEvalError('');
+    try {
+      const s = await api.adminUpdateSettings({ visitorEvaluationEnabled: next });
+      setVisitorEval(!!s.visitorEvaluationEnabled);
+    } catch (err) {
+      setVisitorEvalError(err.message || 'Erro ao salvar configuração.');
+    } finally {
+      setVisitorEvalSaving(false);
+    }
+  }
 
   async function handleExport() {
     if (exporting) return;
@@ -222,6 +247,34 @@ export default function AdminUsers({ user: currentUser }) {
       </div>
 
       {error && <div className="alert error">{error}</div>}
+
+      <div className="card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ maxWidth: 620 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            Avaliação para visitantes
+            <span style={{
+              marginLeft: 10, fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 999,
+              background: visitorEval ? 'var(--success, #1f8a4c)' : 'var(--sand, #e7e2d8)',
+              color: visitorEval ? '#fff' : 'var(--ink-soft)',
+            }}>
+              {visitorEval ? 'LIGADA' : 'DESLIGADA'}
+            </span>
+          </div>
+          <p style={{ margin: 0, fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+            Quando ligada, visitantes recebem avaliação da IA (gpt-5.4, da Simulação Livre) ao
+            final da sessão — para demonstrações em palestras/eventos. Desligada no dia a dia.
+          </p>
+          {visitorEvalError && <div className="alert error" style={{ marginTop: 8, marginBottom: 0 }}>{visitorEvalError}</div>}
+        </div>
+        <button
+          className={`btn ${visitorEval ? 'btn-outline' : 'btn-primary'}`}
+          onClick={toggleVisitorEval}
+          disabled={visitorEvalSaving}
+          title={visitorEval ? 'Desligar avaliação para visitantes' : 'Ligar avaliação para visitantes'}
+        >
+          {visitorEvalSaving ? 'Salvando…' : (visitorEval ? 'Desligar' : 'Ligar')}
+        </button>
+      </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         {[

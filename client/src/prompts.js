@@ -107,6 +107,30 @@ export function stripSupervisorBlock(text) {
     .trim();
 }
 
+// Extrai as notas por critério do bloco [notas-supervisor] (v15) da resposta do
+// avaliador — espelha o extractSupervisorNotes do servidor. Usado SÓ na aba
+// Avaliar Sessão, onde o texto chega cru (com o bloco) e o gate é por role no
+// cliente. Retorna { "1": n, ... } ou null. NÃO mostre o resultado ao aluno.
+export function parseSupervisorCriteria(text) {
+  if (!text) return null;
+  const m = String(text).match(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][^\S\n]*\n?([\s\S]*)$/i);
+  if (!m) return null;
+  let payload = (m[1] || '').trim();
+  payload = payload.replace(/^```[a-z]*[ \t]*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+  try {
+    const obj = JSON.parse(payload);
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      const out = {};
+      for (const [k, v] of Object.entries(obj)) {
+        const n = Number(String(v).replace(',', '.'));
+        if (Number.isFinite(n)) out[String(k)] = n;
+      }
+      if (Object.keys(out).length) return out;
+    }
+  } catch {}
+  return null;
+}
+
 // Tenta extrair as notas por critério da resposta da IA
 export function parseCriteriaScores(text) {
   const scores = {};

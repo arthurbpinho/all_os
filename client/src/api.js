@@ -125,15 +125,21 @@ export const api = {
   // deltas e remonta o texto, devolvendo o MESMO formato { role, content } de
   // antes (os chamadores não mudam). `onToken(delta, full)` é opcional, pra
   // quem quiser exibir o texto chegando ao vivo.
-  evaluate: async (messages, context, onToken) => {
+  // `onReasoning(delta, full)` é opcional: quando passado, o cliente pede o
+  // resumo do raciocínio (showReasoning) e recebe eventos `data:{reasoning}`. O
+  // servidor só envia esses eventos pra supervisor/admin — pro aluno fica vazio.
+  evaluate: async (messages, context, onToken, onReasoning) => {
     const token = getToken();
+    const wantReasoning = typeof onReasoning === 'function';
+    const body = context ? { messages, context } : { messages };
+    if (wantReasoning) body.showReasoning = true;
     const res = await fetch(BASE + '/evaluate', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
-      body: JSON.stringify(context ? { messages, context } : { messages }),
+      body: JSON.stringify(body),
     });
     if (res.status === 401) {
       clearAuth();
@@ -155,6 +161,7 @@ export const api = {
     const decoder = new TextDecoder();
     let buf = '';
     let full = '';
+    let reasoning = '';
     let streamError = null;
     for (;;) {
       const { value, done } = await reader.read();
@@ -173,6 +180,9 @@ export const api = {
           if (obj.delta) {
             full += obj.delta;
             if (onToken) { try { onToken(obj.delta, full); } catch {} }
+          } else if (obj.reasoning) {
+            reasoning += obj.reasoning;
+            if (onReasoning) { try { onReasoning(obj.reasoning, reasoning); } catch {} }
           } else if (obj.error) {
             streamError = obj.error;
           }
@@ -180,7 +190,7 @@ export const api = {
       }
     }
     if (streamError) throw new Error(streamError);
-    return { role: 'assistant', content: full };
+    return { role: 'assistant', content: full, reasoning };
   },
 
   // Profile
@@ -200,6 +210,12 @@ export const api = {
   getMyMmr: () => request('/me/mmr'),
   // Reset de ranking (admin): zera notas + progresso, preserva logs.
   adminResetRanking: () => request('/admin/ranking/reset', { method: 'POST' }),
+
+  // Configurações da plataforma. getSettings: qualquer usuário (visitante inclui)
+  // — o EchoSession usa pra saber se roda a avaliação do visitante.
+  // adminUpdateSettings: toggle admin-only (ex.: { visitorEvaluationEnabled: true }).
+  getSettings: () => request('/settings'),
+  adminUpdateSettings: (data) => request('/admin/settings', { method: 'PUT', body: data }),
 
   // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
   listActiveSessions: () => request('/active-sessions'),

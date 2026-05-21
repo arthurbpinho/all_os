@@ -32,10 +32,17 @@ export default function EchoSession({ user, sessionType }) {
   // finalizar. Treino mantém o comportamento de hoje (sem MMR).
   const isCompetitive = sessionType === 'freeplay' && searchParams.get('mode') === 'competitive';
   const logMode = isCompetitive ? 'competitive' : 'training';
-  // Simulação Livre (freeplay em treino) NÃO roda o avaliador — finaliza salvando
-  // só o log. O avaliador fica restrito ao Competitivo; Neuro e Duelo seguem
-  // avaliando normalmente.
-  const skipEvaluator = sessionType === 'freeplay' && !isCompetitive;
+  // Simulação Livre = freeplay em treino. Volta a rodar o avaliador (como
+  // Competitivo e Neuro), porém no modelo mais barato (5.4) — o servidor escolhe
+  // pelo context.mode='training' — e com aviso de que a nota é MENOS precisa que
+  // a do Competitivo. Não pula mais o avaliador; isFreeSim só dirige a copy/aviso.
+  const isFreeSim = sessionType === 'freeplay' && !isCompetitive;
+  const isVisitor = user?.role === 'visitor';
+  // Avaliação para VISITANTE é controlada pelo admin (toggle p/ palestras/eventos),
+  // default off. Quando off, o visitante encerra a sessão sem avaliação. Usuário
+  // real (aluno/prof/admin) sempre avalia. Carregado do servidor no mount.
+  const [visitorEvalEnabled, setVisitorEvalEnabled] = useState(false);
+  const skipEvaluator = isVisitor && !visitorEvalEnabled;
   // Chave de autosave separada por modo: senão uma sessão de treino e uma
   // competitiva com o MESMO personagem colidiriam (mesmo type+itemId), uma
   // restaurando a outra. O itemId real (id) continua indo pro chat e pro log.
@@ -85,6 +92,17 @@ export default function EchoSession({ user, sessionType }) {
 
   // Limite de 30 dias para saves de sessão (alinhado à expiração de logs).
   const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+  // Visitante: checa se o admin ligou a avaliação (toggle de evento). Só pra
+  // visitante — usuário real sempre avalia, não precisa do fetch.
+  useEffect(() => {
+    if (!isVisitor) return;
+    let cancelled = false;
+    api.getSettings()
+      .then((s) => { if (!cancelled) setVisitorEvalEnabled(!!s.visitorEvaluationEnabled); })
+      .catch(() => { /* mantém off se falhar */ });
+    return () => { cancelled = true; };
+  }, [isVisitor]);
 
   // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
@@ -394,8 +412,8 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   // Builders de texto pro <LogActions> (copiar/baixar log / avaliação / tudo).
-  // O aluno nunca recebe o bloco [notas-supervisor]. Na Simulação Livre não há
-  // avaliação, então só o "Log" fica disponível.
+  // O aluno nunca recebe o bloco [notas-supervisor]. Todas as sessões (inclusive
+  // a Simulação Livre) têm avaliação, então "Avaliação" fica disponível quando há.
   function buildLogHeader() {
     return [
       `Tipo: ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}`,
@@ -442,10 +460,12 @@ export default function EchoSession({ user, sessionType }) {
     setSaveError('');
     setEvalError('');
 
-    // 1. Avaliador. Simulação Livre (freeplay em treino) NÃO avalia — salva só o
-    //    log. O avaliador roda no Competitivo e na Neuroavaliação. FreePlay/Neuro
-    //    nunca têm evaluatorPrompt customizado por personagem, então não passamos
-    //    `context` de exercício — o servidor usa o avaliador global (v15).
+    // 1. Avaliador roda em quase todas as sessões (Simulação Livre, Competitivo e
+    //    Neuro). ÚNICA exceção: VISITANTE quando o admin não ligou a avaliação
+    //    (skipEvaluator) — encerra salvando só o log. FreePlay/Neuro nunca têm
+    //    evaluatorPrompt customizado, então não passamos `context` de exercício —
+    //    o servidor usa o avaliador global (v15). O `mode` diz ao servidor qual
+    //    modelo usar: 'training' (Simulação Livre) → 5.4 barato; 'competitive' → 5.5.
     let evalContent = '';
     let totalScore = null;
     if (!skipEvaluator) {
@@ -465,7 +485,7 @@ export default function EchoSession({ user, sessionType }) {
         };
         // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
         // antes do log, server-side — sem expor o gabarito ao cliente.
-        const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id });
+        const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id, mode: logMode });
         evalContent = typeof reply === 'string' ? reply : reply.content || '';
         // A nota final NÃO vem mais do texto da IA — o backend a calcula em código
         // a partir do bloco [notas-supervisor] (server/scoring.js) e devolve no
@@ -721,6 +741,15 @@ export default function EchoSession({ user, sessionType }) {
             </div>
           )}
 
+          {isFreeSim && !isVisitor && (
+            <div className="alert" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning, #d99100)' }}>
+              <strong>Avaliação de Simulação Livre — menos precisa.</strong> A análise e a
+              nota da simulação livre são mais imprecisas que as do modo Competitivo.
+              Para uma avaliação melhor dos seus atendimentos clínicos, priorize o{' '}
+              <strong>Competitivo</strong>.
+            </div>
+          )}
+
           {evaluationText && (
             <div className="post-evaluation">
               <h4>Análise da IA</h4>
@@ -738,7 +767,7 @@ export default function EchoSession({ user, sessionType }) {
           )}
 
           {visibleMessages.length > 0 && (() => {
-            const hasEval = !skipEvaluator && !!stripSupervisorBlock(evaluationText).trim();
+            const hasEval = !!stripSupervisorBlock(evaluationText).trim();
             return (
               <div style={{ marginTop: 14 }}>
                 <LogActions
@@ -851,7 +880,11 @@ export default function EchoSession({ user, sessionType }) {
             {isCompetitive
               ? 'Modo competitivo — esta sessão é avaliada e vale ranking (MMR) ao final.'
               : (sessionType === 'freeplay'
-                ? 'Esta é uma simulação livre — sem nota nem avaliação ao final, foco na escuta e manejo.'
+                ? (isVisitor
+                    ? (skipEvaluator
+                        ? 'Simulação livre — sessão de demonstração, sem avaliação ao final.'
+                        : 'Simulação livre — você recebe uma avaliação da IA ao final (demonstração).')
+                    : 'Simulação livre — recebe avaliação e nota ao final, porém menos precisas que o Competitivo. Para avaliar seus atendimentos clínicos, priorize o Competitivo.')
                 : 'Neuroavaliação — avaliação ao final, foco no raciocínio diagnóstico.')}
           </div>
         )}
@@ -996,7 +1029,9 @@ export default function EchoSession({ user, sessionType }) {
         const bodyText = empty
           ? `A sessão não tem mensagens ainda. Deseja ${skipEvaluator ? 'encerrar' : 'enviar para correção'} mesmo assim?`
           : (skipEvaluator
-            ? 'Tem certeza que deseja encerrar? Esta é uma simulação livre: não há avaliação nem nota. O log das sessões será salvo no seu histórico e você não poderá continuar este atendimento depois.'
+            ? 'Tem certeza que deseja encerrar? Esta sessão não terá avaliação nem nota. (A avaliação para visitantes está desligada.)'
+            : isFreeSim
+            ? 'Tem certeza? Esta é uma simulação livre: ela recebe avaliação e nota, porém MENOS precisas que o Competitivo (priorize o Competitivo para avaliar seus atendimentos clínicos). O log será salvo no seu histórico e você não poderá continuar este atendimento depois.'
             : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.');
         const confirmLabel = empty
           ? (skipEvaluator ? 'Encerrar mesmo assim' : 'Enviar mesmo assim')

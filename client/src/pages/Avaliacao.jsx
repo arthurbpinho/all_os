@@ -1,10 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
 import { api } from '../api';
+import { stripSupervisorBlock, parseSupervisorCriteria } from '../prompts';
 import Typewriter from '../components/Typewriter';
 import LogActions from '../components/LogActions';
+import CriteriaTable from '../components/CriteriaTable';
 import { makeLogItems } from '../logFiles';
 
 export default function Avaliacao({ user }) {
+  // As notas por critério (bloco [notas-supervisor]) só aparecem pra
+  // supervisor/admin — aqui o texto chega cru com o bloco, então o gate é por
+  // role no cliente (o servidor não esconde o bloco do stream). Aluno nunca vê.
+  const canSeeCriteria = user?.role === 'supervisor' || user?.role === 'admin';
   const [transcript, setTranscript] = useState('');
   const [started, setStarted] = useState(false);
   const [messages, setMessages] = useState([]);
@@ -13,6 +19,9 @@ export default function Avaliacao({ user }) {
   const [error, setError] = useState('');
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
+  // Resumo do raciocínio do avaliador (GPT-5.4) chegando ao vivo durante a
+  // análise. Só supervisor/admin recebe (gate por role no servidor).
+  const [liveReasoning, setLiveReasoning] = useState('');
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -72,6 +81,7 @@ export default function Avaliacao({ user }) {
     setError('');
     setStarted(true);
     setLoading(true);
+    setLiveReasoning('');
 
     const initialMessage = {
       role: 'user',
@@ -79,7 +89,12 @@ export default function Avaliacao({ user }) {
     };
 
     try {
-      const reply = await api.evaluate([initialMessage], evaluateContext);
+      const reply = await api.evaluate(
+        [initialMessage],
+        evaluateContext,
+        undefined,
+        (_d, full) => setLiveReasoning(full),
+      );
       setMessages([initialMessage, reply]);
     } catch (err) {
       setError(err.message || 'Erro ao iniciar avaliação');
@@ -97,11 +112,14 @@ export default function Avaliacao({ user }) {
     setInput('');
     setLoading(true);
     setError('');
+    setLiveReasoning('');
 
     try {
       const reply = await api.evaluate(
         updated.map((m) => ({ role: m.role, content: m.content })),
         evaluateContext,
+        undefined,
+        (_d, full) => setLiveReasoning(full),
       );
       setMessages([...updated, reply]);
     } catch (err) {
@@ -124,7 +142,8 @@ export default function Avaliacao({ user }) {
       .map((m, i) => {
         const name = m.role === 'user' ? user?.name || 'Usuário' : 'all_OS';
         if (i === 0) return `[${name}]\n[Transcrição enviada · ${transcript.length} caracteres]`;
-        return `[${name}]\n${m.content}`;
+        const body = m.role === 'assistant' ? stripSupervisorBlock(m.content) : m.content;
+        return `[${name}]\n${body}`;
       })
       .join('\n\n---\n\n');
   }
@@ -137,6 +156,7 @@ export default function Avaliacao({ user }) {
     setError('');
     setLoading(false);
     setSelectedCharacterId('');
+    setLiveReasoning('');
   }
 
   if (!started) {
@@ -246,26 +266,53 @@ export default function Avaliacao({ user }) {
       </div>
 
       <div className="chat-messages">
-        {messages.map((msg, i) => (
-          <div key={i} className={`chat-message-row ${msg.role}`}>
-            <div className="chat-message-author">
-              {msg.role === 'user' ? user?.name || 'Usuário' : 'all_OS · Avaliador'}
+        {messages.map((msg, i) => {
+          const isAssistant = msg.role === 'assistant';
+          const body = i === 0
+            ? `Transcrição enviada · ${transcript.length.toLocaleString('pt-BR')} caracteres`
+            : (isAssistant ? stripSupervisorBlock(msg.content) : msg.content);
+          return (
+            <div key={i} className={`chat-message-row ${msg.role}`}>
+              <div className="chat-message-author">
+                {msg.role === 'user' ? user?.name || 'Usuário' : 'all_OS · Avaliador'}
+              </div>
+              {isAssistant && msg.reasoning ? (
+                <details style={{ marginBottom: 8, fontSize: 12, opacity: 0.85 }}>
+                  <summary style={{ cursor: 'pointer', letterSpacing: '0.04em' }}>
+                    🧠 Raciocínio do avaliador (resumo)
+                  </summary>
+                  <div style={{ whiteSpace: 'pre-wrap', marginTop: 6, paddingLeft: 10, borderLeft: '2px solid var(--marrs-gold, #c9a227)' }}>
+                    {msg.reasoning}
+                  </div>
+                </details>
+              ) : null}
+              <div
+                className={`chat-message ${msg.role}`}
+                style={i === 0 ? { fontStyle: 'italic', opacity: 0.85 } : undefined}
+              >
+                {body}
+              </div>
+              {isAssistant && i > 0 && canSeeCriteria && (
+                <div style={{ marginTop: 8 }}>
+                  <CriteriaTable criteriaScores={parseSupervisorCriteria(msg.content)} />
+                </div>
+              )}
             </div>
-            <div
-              className={`chat-message ${msg.role}`}
-              style={i === 0 ? { fontStyle: 'italic', opacity: 0.85 } : undefined}
-            >
-              {i === 0
-                ? `Transcrição enviada · ${transcript.length.toLocaleString('pt-BR')} caracteres`
-                : msg.content}
-            </div>
-          </div>
-        ))}
+          );
+        })}
         {loading && (
           <div className="chat-message-row assistant">
             <div className="chat-message-author">all_OS</div>
+            {liveReasoning ? (
+              <div style={{ marginBottom: 8, fontSize: 12, opacity: 0.78, whiteSpace: 'pre-wrap', paddingLeft: 10, borderLeft: '2px solid var(--marrs-gold, #c9a227)' }}>
+                <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4, opacity: 0.7 }}>
+                  🧠 Pensando…
+                </div>
+                {liveReasoning}
+              </div>
+            ) : null}
             <div className="chat-message assistant" style={{ fontStyle: 'italic', opacity: 0.7 }}>
-              <span className="loading-dots">Analisando</span>
+              <span className="loading-dots">{liveReasoning ? 'Escrevendo avaliação' : 'Analisando'}</span>
             </div>
           </div>
         )}

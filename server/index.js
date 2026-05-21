@@ -159,7 +159,7 @@ function envDiag(name) {
 }
 console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
 console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
-console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(usada só pelo Whisper)');
+console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
 console.log('[startup] DATA_DIR          =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
 console.log('[startup] PORT              =', envDiag('PORT'));
 console.log('[startup] env keys count    =', Object.keys(process.env).length);
@@ -1442,6 +1442,37 @@ app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, re
   res.json({ ok: true, clearedScores });
 });
 
+// --- Configurações globais da plataforma (settings.json) ---
+// Flags controladas pelo admin. Hoje: visitorEvaluationEnabled — liga a avaliação
+// (gpt-5.4, via Simulação Livre, o único modo que o visitante acessa) para
+// VISITANTES. Default FALSE: no dia a dia o visitante joga sem avaliação (não
+// queima tokens nem expõe a IA). O dono liga durante palestras/eventos pra deixar
+// as pessoas testarem e verem a avaliação funcionando, e desliga depois.
+function readSettings() {
+  return readJSON('settings.json', {});
+}
+function visitorEvaluationEnabled() {
+  return readSettings().visitorEvaluationEnabled === true;
+}
+
+// Configurações visíveis ao cliente — QUALQUER usuário autenticado (inclusive
+// visitante: o EchoSession precisa saber se deve rodar a avaliação do visitante).
+app.get('/api/settings', requireAuth, (req, res) => {
+  res.json({ visitorEvaluationEnabled: visitorEvaluationEnabled() });
+});
+
+// Toggle das flags (admin-only).
+app.put('/api/admin/settings', requireAuth, requireRole('admin'), (req, res) => {
+  const cur = readSettings();
+  const body = req.body || {};
+  if (typeof body.visitorEvaluationEnabled === 'boolean') {
+    cur.visitorEvaluationEnabled = body.visitorEvaluationEnabled;
+  }
+  writeJSON('settings.json', cur);
+  console.log(`[admin] settings atualizado por ${req.user.username}: visitorEvaluationEnabled=${cur.visitorEvaluationEnabled === true}`);
+  res.json({ visitorEvaluationEnabled: cur.visitorEvaluationEnabled === true });
+});
+
 // DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
 // plantadas durante pentest). Antes não havia rota; só dava pra apagar
 // editando o JSON manualmente.
@@ -1524,19 +1555,86 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Anthropic Chat Proxy (modelo padrão do projeto) ---
-// CHAT_MODEL: simulações de paciente (Trilha/FreePlay/Neuro). Sonnet 4.6.
-// HEAVY_MODEL: entrevistador (geração de prompts de pacientes). Opus 4.7.
-// EVAL_MODEL: avaliador (v15). Opus 4.7 com prompt caching no system de ~23k.
+// --- Provedores de IA ---
+// Dois provedores convivem por design:
+//  - Anthropic (CHAT_MODEL): SÓ as simulações de paciente (Trilha/FreePlay/
+//    Neuro). Sonnet 4.6 — equilíbrio velocidade/qualidade; o personagem não
+//    precisa de raciocínio oculto, responde direto.
+//  - OpenAI GPT-5.4 (reasoning): avaliador (v15), avaliador de duelo e
+//    entrevistador. São tarefas de raciocínio denso onde o modelo precisa
+//    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
+//    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
+//    content), o que mantém o Bloco 1 opaco por construção — diferente do Opus
+//    sem thinking, que externalizava a análise e vazava o gabarito.
 const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL || 'claude-sonnet-4-6';
-const HEAVY_MODEL = process.env.ANTHROPIC_HEAVY_MODEL || 'claude-opus-4-7';
-const EVAL_MODEL = process.env.ANTHROPIC_EVAL_MODEL || 'claude-opus-4-7';
+// Avaliador (v15 + duelo) roda no gpt-5.5. O entrevistador segue no full 5.4
+// (HEAVY) — geração de prompt de paciente é menos sensível a custo.
+const OPENAI_EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
+const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
+// reasoning_effort por caminho. Avaliador em 'medium' — o default da família
+// GPT-5.x (setado explícito p/ não depender de defaults da API e manter o
+// summary). O canal de raciocínio OCULTO mantém o cruzamento gabarito × log fora
+// da prosa que o ALUNO lê (Echo/ChatSession); NÃO zerar o canal (ir abaixo de
+// minimal), senão reabre o vazamento do Bloco 1 — causa-raiz do bug do Opus v15.
+const OPENAI_EVAL_EFFORT = process.env.OPENAI_EVAL_EFFORT || 'medium';
+const OPENAI_HEAVY_EFFORT = process.env.OPENAI_HEAVY_EFFORT || 'medium';
+// Avaliador da Simulação Livre (freeplay em treino). Por decisão do dono é um
+// modelo mais barato/antigo (5.4 default) e a avaliação é assumidamente MENOS
+// precisa que a do Competitivo — que reserva o EVAL (5.5). A simulação livre é
+// alto volume; o modelo bom fica pro que vale ranking. Selecionado em
+// /api/evaluate quando context.mode === 'training' e type === 'freeplay'.
+const OPENAI_SIM_MODEL = process.env.OPENAI_SIM_MODEL || 'gpt-5.4-2026-03-05';
+const OPENAI_SIM_EFFORT = process.env.OPENAI_SIM_EFFORT || 'medium';
 
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   const Anthropic = require('@anthropic-ai/sdk').default || require('@anthropic-ai/sdk');
   return new Anthropic({ apiKey });
+}
+
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  const OpenAI = require('openai').OpenAI || require('openai').default || require('openai');
+  return new OpenAI({ apiKey });
+}
+
+// Monta o array de mensagens no formato OpenAI: a instrução de sistema vai como
+// role 'developer' (papel de instruções dos reasoning models GPT-5), seguida dos
+// turnos user/assistant. Sem cache_control — o prompt caching da OpenAI é
+// automático no prefixo (>1024 tokens), então o system de ~32k é cacheado sozinho.
+function buildOpenAIMessages(systemPrompt, messages) {
+  const turns = (messages || [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m) => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : String(m.content || ''),
+    }))
+    .filter((m) => m.content);
+  return [{ role: 'developer', content: systemPrompt }, ...turns];
+}
+
+// Loga uso/custo de uma chamada OpenAI (cache hit, reasoning tokens, in/out).
+function logOpenAIUsage(label, model, usage) {
+  if (!usage) return;
+  console.log(
+    `${label} (${model}): cached=${usage.prompt_tokens_details?.cached_tokens || 0} reasoning=${usage.completion_tokens_details?.reasoning_tokens || 0} in=${usage.prompt_tokens || 0} out=${usage.completion_tokens || 0}`,
+  );
+}
+
+// Chamada não-streaming ao GPT-5.4 (entrevistador e avaliador de duelo).
+// max_completion_tokens precisa caber reasoning + saída visível: se for curto
+// demais, o modelo gasta o orçamento todo no reasoning e devolve content vazio.
+// Daí a folga generosa.
+async function openaiComplete({ openai, model, effort, systemPrompt, messages, maxCompletionTokens }) {
+  const resp = await openai.chat.completions.create({
+    model,
+    reasoning_effort: effort,
+    max_completion_tokens: maxCompletionTokens,
+    messages: buildOpenAIMessages(systemPrompt, messages),
+  });
+  return { text: resp.choices?.[0]?.message?.content || '', usage: resp.usage || null };
 }
 
 // Anthropic exige messages alternando user/assistant, sem role 'system' no array
@@ -1607,7 +1705,6 @@ function resolveChatSystemPrompt({ context, mode, user }) {
 
 app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   const { messages, context, mode, maxTokens } = req.body || {};
-  const anthropic = getAnthropic();
 
   // Bloqueia tentativas de injetar systemPrompt — visível no log do servidor
   // pra ajudar a debugar clientes antigos que ainda enviam o campo.
@@ -1624,21 +1721,52 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
+  // Default 1500 pra pacientes (Trilha/Simulação/Neuro) — resposta de
+  // paciente raramente passa de 3 parágrafos, e segura snappy. Entrevistador
+  // sobe pra 16000 (gera prompt de paciente longo).
+  const isEntrevistador = mode === 'entrevistador';
+  const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
+    ? Math.min(Math.floor(maxTokens), isEntrevistador ? 16000 : 4000)
+    : 1500;
+
+  // --- Entrevistador → GPT-5.4 (reasoning) ---
+  // Geração de prompt de paciente: tarefa longa e nuançada, roda no OpenAI como
+  // os avaliadores. Admin-only (garantido em resolveChatSystemPrompt). Resposta
+  // não-streaming (JSON) — o mesmo shape que o cliente já espera de /api/chat.
+  if (isEntrevistador) {
+    const openai = getOpenAI();
+    if (!openai) {
+      return res.json({
+        role: 'assistant',
+        content: '[Modo demonstração — OPENAI_API_KEY não configurada] Não é possível gerar prompts sem a chave da OpenAI.',
+      });
+    }
+    try {
+      // max_completion_tokens = saída desejada + folga pro reasoning oculto.
+      const { text, usage } = await openaiComplete({
+        openai,
+        model: OPENAI_HEAVY_MODEL,
+        effort: OPENAI_HEAVY_EFFORT,
+        systemPrompt: resolved.systemPrompt,
+        messages,
+        maxCompletionTokens: tokenCap + 16000,
+      });
+      logOpenAIUsage('Entrevistador', OPENAI_HEAVY_MODEL, usage);
+      return res.json({ role: 'assistant', content: text });
+    } catch (err) {
+      console.error('OpenAI entrevistador error:', err.message);
+      return res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    }
+  }
+
+  // --- Paciente → Anthropic (Sonnet 4.6) ---
+  const anthropic = getAnthropic();
   if (!anthropic) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?'
     });
   }
-
-  // Default 1500 pra pacientes (Trilha/Simulação/Neuro) — resposta de
-  // paciente raramente passa de 3 parágrafos, e segura snappy. Entrevistador
-  // sobe pra 16000 (gera prompt de paciente longo, mas sem thinking então
-  // 16k é folga real).
-  const isEntrevistador = mode === 'entrevistador';
-  const tokenCap = Number.isFinite(maxTokens) && maxTokens > 0
-    ? Math.min(Math.floor(maxTokens), isEntrevistador ? 16000 : 4000)
-    : 1500;
 
   const normalized = normalizeMessagesForAnthropic(messages);
   if (!normalized.length) {
@@ -1661,12 +1789,9 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   });
 
   try {
-    // Entrevistador roda no Opus 4.7 (prompt generation pede qualidade alta).
-    // Pacientes ficam no Sonnet 4.6. Ambos SEM thinking — thinking estava
-    // dobrando o custo sem ganho proporcional pra esses use cases.
-    const chosenModel = isEntrevistador ? HEAVY_MODEL : CHAT_MODEL;
+    // Pacientes ficam no Sonnet 4.6, SEM thinking — resposta rápida e natural.
     const params = {
-      model: chosenModel,
+      model: CHAT_MODEL,
       max_tokens: tokenCap,
       system: systemBlocks,
       messages: cachedMessages,
@@ -1681,7 +1806,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       .join('');
     if (message.usage) {
       console.log(
-        `Chat cache (${chosenModel}): read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
+        `Chat cache (${CHAT_MODEL}): read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
       );
     }
     res.json({ role: 'assistant', content: text });
@@ -1772,8 +1897,8 @@ function withBloco1(messages, bloco1) {
 }
 
 app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
-  const { messages, context } = req.body || {};
-  const anthropic = getAnthropic();
+  const { messages, context, showReasoning } = req.body || {};
+  const openai = getOpenAI();
 
   if (Object.prototype.hasOwnProperty.call(req.body || {}, 'systemPrompt')) {
     return res.status(400).json({
@@ -1785,42 +1910,65 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
-  if (!anthropic) {
+  // Gate de visitante: avaliação só roda pra visitante quando o admin liga o
+  // toggle (eventos/palestras). Server-side por segurança — o cliente já evita
+  // chamar, mas um visitante não pode forçar a avaliação batendo direto na rota.
+  if (req.user.role === 'visitor' && !visitorEvaluationEnabled()) {
+    return res.status(403).json({ error: 'A avaliação não está disponível para visitantes no momento.' });
+  }
+
+  if (!openai) {
     return res.json({
       role: 'assistant',
-      content: '[Modo demonstração — API Key não configurada] Não é possível realizar a avaliação sem a chave da API.'
+      content: '[Modo demonstração — OPENAI_API_KEY não configurada] Não é possível realizar a avaliação sem a chave da OpenAI.'
     });
   }
 
   const resolved = resolveEvaluatorSystemPrompt({ context });
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
+  // Split de modelo: Simulação Livre (freeplay + mode 'training') roda no avaliador
+  // barato (SIM/5.4); Competitivo, Neuro, Duelo e Trilha ficam no melhor (EVAL/5.5).
+  // O cliente sinaliza via context.mode. Sem mode (ex.: aba Avaliar Sessão do
+  // supervisor) cai no EVAL — avaliação manual deliberada merece o modelo bom.
+  const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
+  const evalModel = isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL;
+  const evalEffort = isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT;
+
   const bloco1 = resolveBloco1({ context });
   const finalMessages = withBloco1(messages, bloco1);
-  const normalized = normalizeMessagesForAnthropic(finalMessages);
-  if (!normalized.length) {
+  const inputTurns = (finalMessages || [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
+    .filter((m) => m.content);
+  if (!inputTurns.length) {
     return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
   }
 
+  // Reasoning visível: SÓ pra supervisor/admin e SÓ quando o cliente pede (aba
+  // Avaliar Sessão). O resumo do raciocínio referencia o Bloco 1 — jamais pode
+  // chegar ao aluno. O gate é por ROLE no servidor: a rota /avaliacao não tem
+  // guard de role no cliente (só o link some do nav), então não dá pra confiar
+  // no front. Aluno nunca recebe os eventos `data:{reasoning}`.
+  const canSeeReasoning = !!(req.user && (req.user.role === 'supervisor' || req.user.role === 'admin'));
+  const streamReasoning = canSeeReasoning && showReasoning === true;
+
   try {
-    // Prompt caching no system de ~32k tokens (avaliador v15) — a primeira
-    // chamada paga cache_creation (~1.25x), as próximas dentro de 5min leem
-    // a 10% do preço. Como o system raramente muda e cada avaliação reusa
-    // exatamente os mesmos bytes de prefix, o hit rate fica alto.
+    // Avaliador v15 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
+    // Bloco 1 × log e pontua os 6 critérios no canal de reasoning OCULTO — não
+    // sai no output_text, então o gabarito não vaza pro aluno (era o que o Opus
+    // sem thinking fazia errado, externalizando a análise). Quando o pedido vem
+    // da aba Avaliar Sessão (supervisor/admin), o RESUMO do raciocínio
+    // (reasoning.summary) é encaminhado à parte em eventos `data:{reasoning}` —
+    // a OpenAI não expõe a cadeia bruta, só o resumo. O prompt caching é
+    // automático no prefixo, então o system de ~32k é cacheado sozinho.
     //
-    // Sem thinking + effort high: o adaptive thinking estava gastando 8-15k
-    // tokens × $75/M = $0.60-$1.10 por avaliação só de raciocínio interno.
-    // Opus 4.7 já produz avaliação clínica densa sem precisar de thinking
-    // extendido — os 6 critérios + nota final cabem em ~3-5k de output.
-    //
-    // max_tokens=16000 é folga real (output típico fica em 3-5k tokens).
-    // Antes era 64000 pra acomodar thinking, agora não precisa.
-    // Resposta em STREAM (SSE). O avaliador (Opus, system de ~28k tokens)
-    // demora 30-90s; antes a gente bufferava tudo com finalMessage() e só então
-    // dava res.json() — o cliente/Cloudflare ficavam sem receber NENHUM byte
-    // por mais de 100s e o proxy cortava com 524 ("a avaliação não funciona na
-    // nuvem" / "sem avaliação registrada"). Streamando, o proxy vê o 1º byte na
-    // hora e mantém a conexão aberta enquanto os tokens fluem.
+    // STREAM (SSE) por causa do timeout de 100s do Cloudflare: o proxy corta
+    // (524) se ficar >100s sem byte. Gotcha do reasoning model: durante o
+    // raciocínio NÃO há output_text — o heartbeat ': keepalive' segura a conexão.
+    // max_output_tokens=64000 é só um TETO (reasoning + saída visível saem dele);
+    // não é reserva — só paga o gerado. Folga generosa garante que a prosa nunca
+    // trunque, independente do effort; se fosse curto, o modelo devolveria vazio.
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -1828,26 +1976,36 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     if (res.flushHeaders) res.flushHeaders();
     res.write(': ok\n\n'); // heartbeat inicial — garante TTFB baixo antes do 1º token
 
-    const stream = anthropic.messages.stream({
-      model: EVAL_MODEL,
-      max_tokens: 16000,
-      system: [
-        {
-          type: 'text',
-          text: resolved.systemPrompt,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: normalized,
-    });
-    stream.on('text', (delta) => {
-      if (delta) res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-    });
-    const message = await stream.finalMessage();
-    // Log de cache hits ajuda a confirmar que o caching tá funcionando.
-    if (message.usage) {
+    // Mantém a conexão viva durante a fase de reasoning (sem output deltas).
+    const heartbeat = setInterval(() => {
+      try { res.write(': keepalive\n\n'); } catch {}
+    }, 15000);
+
+    let usage = null;
+    try {
+      const stream = await openai.responses.create({
+        model: evalModel,
+        reasoning: { effort: evalEffort, summary: 'auto' },
+        max_output_tokens: 64000,
+        instructions: resolved.systemPrompt,
+        input: inputTurns,
+        stream: true,
+      });
+      for await (const ev of stream) {
+        if (ev.type === 'response.output_text.delta') {
+          if (ev.delta) res.write(`data: ${JSON.stringify({ delta: ev.delta })}\n\n`);
+        } else if (streamReasoning && ev.type === 'response.reasoning_summary_text.delta') {
+          if (ev.delta) res.write(`data: ${JSON.stringify({ reasoning: ev.delta })}\n\n`);
+        } else if (ev.type === 'response.completed') {
+          usage = ev.response?.usage || null;
+        }
+      }
+    } finally {
+      clearInterval(heartbeat);
+    }
+    if (usage) {
       console.log(
-        `Evaluate cache: read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
+        `Evaluate (${evalModel}${isFreeSim ? ' · sim-livre' : ''}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
       );
     }
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
@@ -2045,18 +2203,18 @@ function sanitizeDuelForUser(duel, user) {
 
 // Roda o avaliador comparativo nos dois logs e devolve as notas + texto limpo.
 async function runComparativeEvaluation(duel) {
-  const anthropic = getAnthropic();
+  const openai = getOpenAI();
   const challengerName = duel.challenger.name || 'Aluno A';
   const opponentName = duel.opponent.name || 'Aluno B';
   const logA = transcriptFromMessages(duel.challenger.messages, challengerName, duel.character.name);
   const logB = transcriptFromMessages(duel.opponent.messages, opponentName, duel.character.name);
 
-  if (!anthropic) {
+  if (!openai) {
     // Modo demonstração (sem API key): nota neutra pros dois, sem vencedor real.
     const criteria = { A1: 5, A2: 5, A3: 5, A4: 5, A5: 5, A6: 5, B1: 5, B2: 5, B3: 5, B4: 5, B5: 5, B6: 5 };
     const comp = comparativeScores(criteria);
     return {
-      evaluationClean: '[Modo demonstração — API Key não configurada] Avaliação comparativa indisponível.',
+      evaluationClean: '[Modo demonstração — OPENAI_API_KEY não configurada] Avaliação comparativa indisponível.',
       comp,
     };
   }
@@ -2067,21 +2225,16 @@ async function runComparativeEvaluation(duel) {
     `[LOG DO ALUNO A — ${challengerName}]\n${logA || '(sem mensagens)'}\n\n---\n\n` +
     `[LOG DO ALUNO B — ${opponentName}]\n${logB || '(sem mensagens)'}`;
 
-  const stream = anthropic.messages.stream({
-    model: EVAL_MODEL,
-    max_tokens: 16000,
-    system: [
-      { type: 'text', text: loadComparativoPrompt(), cache_control: { type: 'ephemeral' } },
-    ],
+  // Avaliador comparativo no GPT-5.4 (reasoning oculto → Bloco 1 não vaza).
+  const { text, usage } = await openaiComplete({
+    openai,
+    model: OPENAI_EVAL_MODEL,
+    effort: OPENAI_EVAL_EFFORT,
+    systemPrompt: loadComparativoPrompt(),
     messages: [{ role: 'user', content: userContent }],
+    maxCompletionTokens: 64000,
   });
-  const message = await stream.finalMessage();
-  const text = (message.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-  if (message.usage) {
-    console.log(
-      `Duel evaluate cache: read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
-    );
-  }
+  logOpenAIUsage('Duel evaluate', OPENAI_EVAL_MODEL, usage);
   const { clean, criteria } = extractSupervisorNotes(text);
   const comp = comparativeScores(criteria);
   return { evaluationClean: clean, comp };
