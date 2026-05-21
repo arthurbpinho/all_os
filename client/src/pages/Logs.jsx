@@ -3,6 +3,7 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
+import CriteriaTable, { V15_CRITERIA } from '../components/CriteriaTable';
 import { makeLogItems, downloadText } from '../logFiles';
 
 const TYPE_LABELS = {
@@ -11,48 +12,6 @@ const TYPE_LABELS = {
   neuro: 'Neuroavaliação',
 };
 
-// Nomes dos 6 critérios do avaliador v15 (chaves "1".."6"). criteriaScores só
-// chega pra supervisor/admin (o servidor esconde do aluno), então sempre que
-// existir pode ser exibido.
-const V15_CRITERIA = {
-  '1': 'Construção linguística',
-  '2': 'Relação terapêutica',
-  '3': 'Confiança transmitida',
-  '4': 'Priorização',
-  '5': 'Aprofundamento',
-  '6': 'Flexibilidade e Criatividade',
-};
-
-// Tabela de notas por critério (visível só a supervisor/admin). Renderiza
-// qualquer criteriaScores não-vazio, ordenando por chave numérica.
-function CriteriaTable({ criteriaScores }) {
-  if (!criteriaScores || typeof criteriaScores !== 'object') return null;
-  const entries = Object.entries(criteriaScores)
-    .filter(([, v]) => Number.isFinite(Number(v)))
-    .sort((a, b) => Number(a[0]) - Number(b[0]));
-  if (entries.length === 0) return null;
-  return (
-    <div className="criteria-table" style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
-        Notas por critério <span style={{ textTransform: 'none', letterSpacing: 0 }}>(visível só ao supervisor/admin)</span>
-      </div>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5 }}>
-        <tbody>
-          {entries.map(([k, v]) => (
-            <tr key={k} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
-              <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>
-                {V15_CRITERIA[k] || `Critério ${k}`}
-              </td>
-              <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: 'var(--marrs-deep)', whiteSpace: 'nowrap' }}>
-                {Number(v)}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 
 function formatDate(timestamp) {
   if (!timestamp) return '—';
