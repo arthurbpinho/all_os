@@ -1848,6 +1848,16 @@ function loadComparativoPrompt() {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
+// Avaliador de progressão: compara dois logs (Atendimento 1 e 2) do mesmo paciente.
+// Atendimento 2 é o objeto da avaliação; Atendimento 1 é referência contextual.
+function loadProgressaoPrompt() {
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-progressao-v1.md');
+  if (!fs.existsSync(promptFile)) {
+    throw new Error(`Prompt do avaliador de progressão não encontrado em ${promptFile}`);
+  }
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
 // Resolve o system prompt do avaliador server-side. Se context.type ===
 // 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
 // (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
@@ -2202,6 +2212,104 @@ function sanitizeDuelForUser(duel, user) {
 }
 
 // Roda o avaliador comparativo nos dois logs e devolve as notas + texto limpo.
+// Busca o último log (por timestamp) do usuário com um character específico.
+// Retorna o log completo ou null se não encontrado.
+function getLastLogForCharacter(userId, characterId) {
+  const logs = readJSON('logs.json');
+  const relevant = logs.filter(
+    (log) => log.userId === userId && log.itemId === characterId && log.messages && log.messages.length > 0
+  );
+  if (relevant.length === 0) return null;
+  return relevant.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+}
+
+// Extrai as notas (criteria) e pontos-para-revisar da avaliação anterior de um paciente.
+// Retorna { criteria, pointsToReview } ou { criteria: null, pointsToReview: '' } se não encontrado.
+function getPreviousFeedback(userId, characterId) {
+  const lastLog = getLastLogForCharacter(userId, characterId);
+  if (!lastLog) return { criteria: null, pointsToReview: '' };
+
+  const { criteria } = extractSupervisorNotes(lastLog.evaluation || '');
+
+  // Extrai a seção "Pontos para revisar com supervisor" do texto da avaliação.
+  // Padrão: procura por "Pontos para revisar com supervisor:" (case-insensitive)
+  const text = lastLog.evaluation || '';
+  const pointsMatch = text.match(/pontos?\s+para\s+revisar\s+com\s+supervisor[:\s]*([\s\S]*?)(?:\[notas-supervisor\]|$)/i);
+  const pointsToReview = pointsMatch ? pointsMatch[1].trim() : '';
+
+  return { criteria, pointsToReview };
+}
+
+// Executa avaliação de progressão: compara Atendimento 1 (anterior) vs Atendimento 2 (novo).
+// userMessages: array de mensagens da nova sessão (Log 2).
+// Retorna { evaluationClean, criteria } onde criteria tem apenas as 6 notas do Atendimento 2.
+async function runProgressionEvaluation(userId, characterId, userMessages) {
+  const openai = getOpenAI();
+
+  if (!openai) {
+    const criteria = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+    return {
+      evaluationClean: '[Modo demonstração — OPENAI_API_KEY não configurada] Avaliação de progressão indisponível.',
+      criteria,
+    };
+  }
+
+  // Busca Atendimento 1 (Log anterior)
+  const log1 = getLastLogForCharacter(userId, characterId);
+  if (!log1) {
+    return {
+      evaluationClean: 'Erro: Nenhum atendimento anterior encontrado para este paciente.',
+      criteria: null,
+    };
+  }
+
+  // Busca Bloco 1 do paciente
+  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: characterId } });
+
+  // Monta as transcrições dos dois atendimentos
+  const characterName = log1.itemTitle || 'Paciente';
+  const studentName = log1.userName || 'Aluno';
+
+  const transcript1 = transcriptFromMessages(log1.messages, studentName, characterName);
+  const transcript2 = transcriptFromMessages(userMessages, studentName, characterName);
+
+  // Busca feedback anterior (notas do Atendimento 1 + pontos para revisar)
+  const { criteria: previousCriteria, pointsToReview } = getPreviousFeedback(userId, characterId);
+
+  // Monta o bloco de feedback anterior (notas + pontos para revisar)
+  let previousFeedbackSection = '';
+  if (previousCriteria) {
+    const noteLines = Object.entries(previousCriteria)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(', ');
+    previousFeedbackSection = `[AVALIAÇÃO DO ATENDIMENTO 1 — Notas anteriores]\nNotas por critério: ${noteLines}\n`;
+    if (pointsToReview) {
+      previousFeedbackSection += `\nPontos para revisar com supervisor:\n${pointsToReview}`;
+    }
+  }
+
+  // Monta conteúdo para o avaliador (4 materiais conforme avaliador-progressao-v1.md)
+  const userContent =
+    (bloco1 ? `[BLOCO 1 DO CASO]\n${bloco1}\n\n---\n\n` : '') +
+    `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n` +
+    (previousFeedbackSection ? `${previousFeedbackSection}\n\n---\n\n` : '') +
+    `[ATENDIMENTO 2 — ${studentName} com ${characterName}]\n${transcript2 || '(sem mensagens)'}`;
+
+  const { text, usage } = await openaiComplete({
+    openai,
+    model: OPENAI_EVAL_MODEL,
+    effort: OPENAI_EVAL_EFFORT,
+    systemPrompt: loadProgressaoPrompt(),
+    messages: [{ role: 'user', content: userContent }],
+    maxCompletionTokens: 64000,
+  });
+
+  logOpenAIUsage('Progression evaluate', OPENAI_EVAL_MODEL, usage);
+  const { clean, criteria } = extractSupervisorNotes(text);
+
+  return { evaluationClean: clean, criteria };
+}
+
 async function runComparativeEvaluation(duel) {
   const openai = getOpenAI();
   const challengerName = duel.challenger.name || 'Aluno A';
@@ -2722,6 +2830,61 @@ app.get('/api/duels/social', requireAuth, (req, res) => {
     .map((g) => ({ ...g, duels: g.duels.sort((a, b) => new Date(b.date) - new Date(a.date)) }))
     .sort((a, b) => (b.count - a.count) || (a.opponent.name || '').localeCompare(b.opponent.name || '', 'pt-BR'));
   res.json(list);
+});
+
+// --- Avaliação de Progressão ---
+// Lista pacientes (characters) com os quais o usuário já interagiu,
+// permitindo seleção para avaliação de progressão.
+app.get('/api/progression/available-patients', requireAuth, (req, res) => {
+  const logs = readJSON('logs.json');
+  const userLogs = logs.filter((log) => log.userId === req.user.id && log.itemId && log.messages && log.messages.length > 0);
+
+  // Agrupa por character (itemId) e pega o mais recente de cada um
+  const patients = {};
+  for (const log of userLogs) {
+    if (!patients[log.itemId] || new Date(log.timestamp) > new Date(patients[log.itemId].timestamp)) {
+      patients[log.itemId] = log;
+    }
+  }
+
+  const list = Object.values(patients)
+    .map((log) => ({
+      characterId: log.itemId,
+      characterName: log.itemTitle || 'Paciente',
+      lastInteraction: log.timestamp,
+    }))
+    .sort((a, b) => new Date(b.lastInteraction) - new Date(a.lastInteraction));
+
+  res.json(list);
+});
+
+// Executa avaliação de progressão: compara última sessão anterior com nova sessão.
+app.post('/api/progression/evaluate', requireAuth, aiLimiter, async (req, res) => {
+  const { characterId, messages } = req.body || {};
+
+  if (!characterId || typeof characterId !== 'string') {
+    return res.status(400).json({ error: 'characterId obrigatório' });
+  }
+
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages deve ser um array' });
+  }
+
+  try {
+    const { evaluationClean, criteria } = await runProgressionEvaluation(req.user.id, characterId, messages);
+
+    if (!criteria) {
+      return res.status(400).json({ error: evaluationClean });
+    }
+
+    res.json({
+      evaluation: evaluationClean,
+      criteria,
+    });
+  } catch (err) {
+    console.error('Erro em /api/progression/evaluate:', err);
+    res.status(500).json({ error: 'Erro ao executar avaliação de progressão' });
+  }
 });
 
 // --- Notificações in-app ---
