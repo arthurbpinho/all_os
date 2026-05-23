@@ -20,6 +20,7 @@ import AdminUsers from './pages/AdminUsers';
 import Duelo from './pages/Duelo';
 import DuelSession from './pages/DuelSession';
 import DuelAccept from './pages/DuelAccept';
+import Progression from './pages/Progression';
 import LogsSociais from './pages/LogsSociais';
 import NotificationBell from './components/NotificationBell';
 import SystemUpdates from './components/SystemUpdates';
@@ -111,6 +112,11 @@ const ICONS = {
       <line x1="5" y1="14" x2="9" y2="18" />
       <line x1="7" y1="17" x2="4" y2="20" />
       <line x1="3" y1="19" x2="5" y2="21" />
+    </svg>
+  ),
+  progression: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
     </svg>
   ),
   social: (
@@ -282,6 +288,12 @@ export default function App() {
                   {ICONS.duel}<span>Duelo</span>
                 </Link>
               )}
+              {/* Progressão: avaliação de evolução em sessões repetidas. */}
+              {(isTherapist || isAdmin) && (
+                <Link to="/progression" className={isActive('/progression') ? 'active' : ''}>
+                  {ICONS.progression}<span>Progressão</span>
+                </Link>
+              )}
               {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
                   Será reaberta pra alunos/professores quando estiver pronta. */}
               {isAdmin && (
@@ -414,6 +426,7 @@ export default function App() {
           <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
           <Route path="/duelo/aceitar/:id" element={<DuelAccept user={user} />} />
           <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
+          <Route path="/progression" element={<Progression user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />

@@ -294,6 +294,10 @@ export const api = {
   // Logs sociais: duelos agrupados por oponente.
   getSocialLogs: () => request('/duels/social'),
 
+  // --- Progressão (avaliação de evolução em sessões repetidas) ---
+  getProgressionPatients: () => request('/progression/available-patients'),
+  evaluateProgression: (data) => request('/progression/evaluate', { method: 'POST', body: data }),
+
   // --- Notificações in-app ---
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),
