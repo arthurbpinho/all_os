@@ -1841,7 +1841,7 @@ function loadAvaliacaoPrompt() {
 // Avaliador comparativo (Duelo): recebe os dois logs do mesmo caso e devolve a
 // análise comparativa + JSON [notas-supervisor] com A1..A6 / B1..B6.
 function loadComparativoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-comparativo-v1.md');
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-comparativo-v2.md');
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador comparativo não encontrado em ${promptFile}`);
   }
