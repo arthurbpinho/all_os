@@ -1851,7 +1851,7 @@ function loadComparativoPrompt() {
 // Avaliador de progressão: compara dois logs (Atendimento 1 e 2) do mesmo paciente.
 // Atendimento 2 é o objeto da avaliação; Atendimento 1 é referência contextual.
 function loadProgressaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-progressao-v1.md');
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-progressao-v2.md');
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador de progressão não encontrado em ${promptFile}`);
   }
