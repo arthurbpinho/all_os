@@ -78,6 +78,8 @@ export default function EchoSession({ user, sessionType }) {
   const [evaluationText, setEvaluationText] = useState('');
   const [evalScore, setEvalScore] = useState(null);
   const [mmrResult, setMmrResult] = useState(null); // resultado MMR pós-partida competitiva
+  const [sidequest, setSidequest] = useState(null); // sidequest ativa (objetivo principal do Treinamento)
+  const [sidequestOutcome, setSidequestOutcome] = useState(null); // resultado pós-correção (concluída?)
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -103,6 +105,18 @@ export default function EchoSession({ user, sessionType }) {
       .catch(() => { /* mantém off se falhar */ });
     return () => { cancelled = true; };
   }, [isVisitor]);
+
+  // Sidequest ativa: só no Treinamento (freeplay sem competitivo) e para usuário
+  // real. Quando há, ela vira o objetivo principal exibido durante o atendimento
+  // e o avaliador de progressão decide se foi cumprida ao final.
+  useEffect(() => {
+    if (!isFreeSim || isVisitor) return;
+    let cancelled = false;
+    api.getMySidequest()
+      .then((d) => { if (!cancelled) setSidequest(d && d.active ? d.active : null); })
+      .catch(() => { /* sem sidequest se falhar */ });
+    return () => { cancelled = true; };
+  }, [isFreeSim, isVisitor]);
 
   // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
@@ -416,7 +430,7 @@ export default function EchoSession({ user, sessionType }) {
   // a Simulação Livre) têm avaliação, então "Avaliação" fica disponível quando há.
   function buildLogHeader() {
     return [
-      `Tipo: ${sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação'}`,
+      `Tipo: ${sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação'}`,
       `Caso: ${item?.name || '—'}`,
       `Terapeuta: ${user?.name || '—'}`,
       `Data: ${new Date().toLocaleString('pt-BR')}`,
@@ -477,7 +491,7 @@ export default function EchoSession({ user, sessionType }) {
         const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
         return `[${author}${star}]\n${m.content}${comment}`;
       }).join('\n\n---\n\n');
-      const sessionLabel = sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação';
+      const sessionLabel = sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação';
       try {
         const evalMsg = {
           role: 'user',
@@ -536,6 +550,8 @@ export default function EchoSession({ user, sessionType }) {
       // parseada do texto. Só faz override se o backend devolveu nota numérica.
       if (saved && Number.isFinite(saved.score)) setEvalScore(saved.score);
       if (saved && saved.mmr) setMmrResult(saved.mmr);
+      // Resultado da sidequest (Treinamento): concluída → celebração + título.
+      if (saved && saved.sidequest) setSidequestOutcome(saved.sidequest);
     } catch (err) {
       setSaveError(err.message || 'Erro ao salvar o log.');
     } finally {
@@ -706,6 +722,27 @@ export default function EchoSession({ user, sessionType }) {
             )}
           </div>
 
+          {sidequestOutcome && (
+            <div className={`sidequest-result ${sidequestOutcome.completed ? 'completed' : 'incomplete'}`}>
+              {sidequestOutcome.completed ? (
+                <>
+                  <div className="sidequest-result-badge">✦ Sidequest concluída</div>
+                  <h4>{sidequestOutcome.title}</h4>
+                  <p>
+                    Você desbloqueou o título <strong>{sidequestOutcome.rewardTitleLabel}</strong>.
+                    Escolha-o como seu subtítulo no <strong>Perfil</strong>.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="sidequest-result-badge incomplete">Sidequest ainda não concluída</div>
+                  <h4>{sidequestOutcome.title}</h4>
+                  <p>A missão continua ativa. Releia o objetivo e tente novamente no próximo atendimento.</p>
+                </>
+              )}
+            </div>
+          )}
+
           {isCompetitive && (
             <div className="mmr-result-card">
               {mmrResult ? (
@@ -743,10 +780,10 @@ export default function EchoSession({ user, sessionType }) {
 
           {isFreeSim && !isVisitor && (
             <div className="alert" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning, #d99100)' }}>
-              <strong>Avaliação de Simulação Livre — menos precisa.</strong> A análise e a
-              nota da simulação livre são mais imprecisas que as do modo Competitivo.
-              Para uma avaliação melhor dos seus atendimentos clínicos, priorize o{' '}
-              <strong>Competitivo</strong>.
+              <strong>Treinamento.</strong> Este é o espaço de prática e progressão: ao
+              reatender o mesmo paciente, a avaliação compara sua evolução com o
+              atendimento anterior. A nota de um primeiro atendimento isolado é menos
+              precisa que a do modo <strong>Competitivo</strong>.
             </div>
           )}
 
@@ -758,6 +795,8 @@ export default function EchoSession({ user, sessionType }) {
                   .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
                   .replace(/\[NOTA:[^\]]+\]\s*/g, '')
                   .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
+                  // [sidequest-resultado] (JSON de conclusão) é só pro sistema/supervisor.
+                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
                   // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
                   // some da visão do aluno, mas continua salvo no log.
                   .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
@@ -795,7 +834,7 @@ export default function EchoSession({ user, sessionType }) {
   // -------- TELA DE CHAT --------
   const sessionLabel = isCompetitive
     ? 'Competitivo'
-    : (sessionType === 'freeplay' ? 'Simulação' : 'Neuroavaliação');
+    : (sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação');
   // Diagnóstico temporário: deve logar a cada render com o sessionNumber atual.
   // Depois de clicar "passar sessão", o próximo render aqui deve mostrar #2.
   if (sessionStarted) console.log('[render] sessionNumber =', sessionNumber);
@@ -874,6 +913,14 @@ export default function EchoSession({ user, sessionType }) {
         </div>
       )}
 
+      {sidequest && (
+        <div className="sidequest-banner">
+          <div className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</div>
+          <div className="sidequest-banner-title">{sidequest.title}</div>
+          <div className="sidequest-banner-desc">{sidequest.description}</div>
+        </div>
+      )}
+
       <div className={`chat-messages ${!sessionStarted ? 'locked' : ''}`}>
         {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
           <div className="empty-chat" style={{ marginTop: 100 }}>
@@ -882,9 +929,11 @@ export default function EchoSession({ user, sessionType }) {
               : (sessionType === 'freeplay'
                 ? (isVisitor
                     ? (skipEvaluator
-                        ? 'Simulação livre — sessão de demonstração, sem avaliação ao final.'
-                        : 'Simulação livre — você recebe uma avaliação da IA ao final (demonstração).')
-                    : 'Simulação livre — recebe avaliação e nota ao final, porém menos precisas que o Competitivo. Para avaliar seus atendimentos clínicos, priorize o Competitivo.')
+                        ? 'Treinamento — sessão de demonstração, sem avaliação ao final.'
+                        : 'Treinamento — você recebe uma avaliação da IA ao final (demonstração).')
+                    : (sidequest
+                        ? 'Treinamento com sidequest ativa — o objetivo principal é a missão acima; a avaliação verifica se você a cumpriu.'
+                        : 'Treinamento — recebe avaliação e nota ao final. Ao reatender o mesmo paciente, sua evolução é comparada com o atendimento anterior.'))
                 : 'Neuroavaliação — avaliação ao final, foco no raciocínio diagnóstico.')}
           </div>
         )}
@@ -1031,7 +1080,9 @@ export default function EchoSession({ user, sessionType }) {
           : (skipEvaluator
             ? 'Tem certeza que deseja encerrar? Esta sessão não terá avaliação nem nota. (A avaliação para visitantes está desligada.)'
             : isFreeSim
-            ? 'Tem certeza? Esta é uma simulação livre: ela recebe avaliação e nota, porém MENOS precisas que o Competitivo (priorize o Competitivo para avaliar seus atendimentos clínicos). O log será salvo no seu histórico e você não poderá continuar este atendimento depois.'
+            ? (sidequest
+                ? 'Tem certeza? Esta é uma sessão de Treinamento com sidequest ativa — a avaliação vai verificar se você cumpriu a missão. O log será salvo e você não poderá continuar este atendimento depois.'
+                : 'Tem certeza? Esta é uma sessão de Treinamento: ela recebe avaliação e nota, e ao reatender o mesmo paciente sua evolução será comparada. O log será salvo no seu histórico e você não poderá continuar este atendimento depois.')
             : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.');
         const confirmLabel = empty
           ? (skipEvaluator ? 'Encerrar mesmo assim' : 'Enviar mesmo assim')

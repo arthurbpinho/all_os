@@ -7,30 +7,39 @@ import ScoreBadge from '../components/ScoreBadge';
 export default function FreePlay({ user }) {
   const [characters, setCharacters] = useState([]);
   const [bestScores, setBestScores] = useState({});
+  const [attended, setAttended] = useState(() => new Set());
+  const [sidequest, setSidequest] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
+  const isVisitor = user?.role === 'visitor';
+
   useEffect(() => {
-    // Logs do próprio usuário pra calcular a melhor nota por personagem.
-    // EchoSession (freeplay) não grava em progress.json — só em logs.json —
-    // então a fonte de verdade pra "melhor nota com esse paciente" é o log.
+    // Logs do próprio usuário pra calcular a melhor nota por personagem e saber
+    // quais pacientes já foram atendidos (reatender = progressão). EchoSession
+    // (freeplay) só grava em logs.json — então o log é a fonte de verdade.
     Promise.all([
       api.getFreeplay(),
       user?.id ? api.getLogs(user.id) : Promise.resolve([]),
+      isVisitor ? Promise.resolve({ active: null }) : api.getMySidequest().catch(() => ({ active: null })),
     ])
-      .then(([chars, logs]) => {
+      .then(([chars, logs, sq]) => {
         setCharacters(chars || []);
         const max = {};
+        const seen = new Set();
         for (const l of logs || []) {
           if (l.type !== 'freeplay') continue;
-          if (!Number.isFinite(l.score)) continue;
           if (!l.itemId) continue;
+          seen.add(String(l.itemId));
+          if (!Number.isFinite(l.score)) continue;
           if (max[l.itemId] === undefined || l.score > max[l.itemId]) {
             max[l.itemId] = l.score;
           }
         }
         setBestScores(max);
+        setAttended(seen);
+        setSidequest(sq && sq.active ? sq.active : null);
       })
       .catch((err) => setError(err.message || 'Erro ao carregar personagens'))
       .finally(() => setLoading(false));
@@ -39,15 +48,26 @@ export default function FreePlay({ user }) {
   return (
     <div>
       <div className="page-header">
-        <div className="eyebrow">Sistema 2 · Simulação Livre</div>
-        <h2><Typewriter text="Simu" /><span className="accent"><Typewriter text="lação" delayStart={180} /></span></h2>
+        <div className="eyebrow">Sistema 2 · Treinamento</div>
+        <h2><Typewriter text="Treina" /><span className="accent"><Typewriter text="mento" delayStart={180} /></span></h2>
         <p>
-          Pacientes simulados sem objetivo de treino estruturado por competência. Praticar escuta, manejo
-          relacional e tempo de sessão — sem nota nem avaliação ao final. Ao finalizar, o log é salvo no seu
-          histórico e enviado ao seu professor vinculado.
+          Atenda pacientes simulados para praticar escuta, manejo relacional e tempo de sessão. Ao reatender
+          um paciente que você já viu, a avaliação compara sua <strong>evolução</strong> com o atendimento
+          anterior. Ao finalizar, o log é salvo no seu histórico e enviado ao seu supervisor vinculado.
         </p>
         <div className="ornament" />
       </div>
+
+      {sidequest && (
+        <div className="sidequest-banner">
+          <div className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</div>
+          <div className="sidequest-banner-title">{sidequest.title}</div>
+          <div className="sidequest-banner-desc">{sidequest.description}</div>
+          <div className="sidequest-banner-hint">
+            Esta missão é o foco do seu próximo treino — escolha um paciente e persiga o objetivo acima.
+          </div>
+        </div>
+      )}
 
       {error && <div className="alert error">{error}</div>}
 
@@ -63,6 +83,7 @@ export default function FreePlay({ user }) {
         <div className="card-grid">
           {characters.map((char) => {
             const charBest = bestScores[char.id];
+            const isReturn = attended.has(String(char.id));
             return (
               <div
                 key={char.id}
@@ -79,6 +100,11 @@ export default function FreePlay({ user }) {
                 </div>
                 <div className="age">{char.age} anos</div>
                 <p>{char.description}</p>
+                {isReturn && (
+                  <div className="progression-tag" title="Você já atendeu este paciente — reatender avalia sua evolução">
+                    ↗ Progressão · reatendimento
+                  </div>
+                )}
               </div>
             );
           })}

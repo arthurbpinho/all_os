@@ -2414,6 +2414,7 @@ select option { background: var(--cream); color: var(--ink); }
 .achievement-card.earned.tier-silver   { border-top: 3px solid #8a9097; }
 .achievement-card.earned.tier-gold     { border-top: 3px solid #c8a04e; }
 .achievement-card.earned.tier-platinum { border-top: 3px solid var(--marrs); box-shadow: 0 0 0 1px rgba(0, 143, 143, 0.18); }
+.achievement-card.earned.tier-quest    { border-top: 3px solid #8a5cc4; box-shadow: 0 0 0 1px rgba(138, 92, 196, 0.18); }
 
 /* ──── Títulos desbloqueáveis (subtítulos) ──── */
 /* Pill exibido sob o nome (perfil, sidebar, ranking). Cor segue o tier. */
@@ -2435,6 +2436,7 @@ select option { background: var(--cream); color: var(--ink); }
 .player-title.tier-silver   { color: #5b6068; border-color: #8a9097; background: rgba(138, 144, 151, 0.1); }
 .player-title.tier-gold     { color: #97781f; border-color: #c8a04e; background: rgba(200, 160, 78, 0.12); }
 .player-title.tier-platinum { color: var(--marrs-dark, #066); border-color: var(--marrs, #008f8f); background: var(--marrs-50, #e6f4f4); }
+.player-title.tier-quest    { color: #6b3fa0; border-color: #8a5cc4; background: rgba(138, 92, 196, 0.1); }
 .profile-active-title { margin: 8px 0 4px; font-size: 12.5px; padding: 3px 12px; }
 
 /* Picker de títulos no perfil */
@@ -2456,6 +2458,7 @@ select option { background: var(--cream); color: var(--ink); }
 .title-chip.tier-silver   { border-color: rgba(138, 144, 151, 0.45); }
 .title-chip.tier-gold     { border-color: rgba(200, 160, 78, 0.5); }
 .title-chip.tier-platinum { border-color: rgba(0, 143, 143, 0.4); }
+.title-chip.tier-quest    { border-color: rgba(138, 92, 196, 0.45); }
 .title-chip.active {
   background: var(--marrs, #008f8f);
   color: #fff;
@@ -3124,3 +3127,100 @@ select option { background: var(--cream); color: var(--ink); }
   white-space: pre-wrap;
   font-size: 13px; line-height: 1.55; color: var(--ink-soft);
 }
+
+/* ─────────────────────── Sidequests ─────────────────────── */
+/* Banner do objetivo principal (Treinamento) — título em caixa alta + descrição */
+.sidequest-banner {
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(138, 92, 196, 0.35);
+  border-left: 4px solid #8a5cc4;
+  background: linear-gradient(135deg, rgba(138, 92, 196, 0.08), rgba(138, 92, 196, 0.02));
+}
+.sidequest-banner-label {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: #6b3fa0; margin-bottom: 4px;
+}
+.sidequest-banner-title {
+  font-size: 19px; font-weight: 800; letter-spacing: 0.02em;
+  text-transform: uppercase; color: var(--marrs-deep); line-height: 1.2;
+}
+.sidequest-banner-desc { font-size: 14px; line-height: 1.5; color: var(--ink-soft); margin-top: 4px; }
+.sidequest-banner-hint { font-size: 12.5px; color: #6b3fa0; margin-top: 8px; font-style: italic; }
+
+/* Card de resultado pós-sessão (concluída / não concluída) */
+.sidequest-result {
+  margin-bottom: 16px; padding: 16px 18px;
+  border-radius: var(--radius); border: 1px solid var(--line);
+}
+.sidequest-result.completed {
+  border-color: rgba(138, 92, 196, 0.4);
+  background: linear-gradient(135deg, rgba(138, 92, 196, 0.1), rgba(0, 143, 143, 0.05));
+}
+.sidequest-result.incomplete { border-left: 4px solid var(--line); background: var(--cream-2, #f3efe6); }
+.sidequest-result h4 { margin: 8px 0 6px; font-size: 17px; color: var(--marrs-deep); }
+.sidequest-result p { margin: 0; font-size: 13.5px; line-height: 1.5; color: var(--ink-soft); }
+.sidequest-result-badge {
+  display: inline-block; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 3px 10px; border-radius: 999px;
+  background: #8a5cc4; color: #fff;
+}
+.sidequest-result-badge.incomplete { background: var(--ink-soft); }
+
+/* Tag de reatendimento no card do paciente (Treinamento) */
+.progression-tag {
+  margin-top: 10px; display: inline-block;
+  font-size: 11.5px; font-weight: 600; color: #6b3fa0;
+  background: rgba(138, 92, 196, 0.1);
+  border: 1px solid rgba(138, 92, 196, 0.25);
+  border-radius: 999px; padding: 2px 10px;
+}
+
+/* ─────────────────────── Aba Terapeutas ─────────────────────── */
+.terapeutas-layout { display: grid; grid-template-columns: 260px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 760px) { .terapeutas-layout { grid-template-columns: 1fr; } }
+
+.terapeutas-list { display: flex; flex-direction: column; gap: 6px; }
+.terapeuta-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--cream-2, #f3efe6);
+  cursor: pointer; text-align: left; transition: border-color 0.15s, background 0.15s;
+  color: var(--ink);
+}
+.terapeuta-item:hover { border-color: var(--marrs); }
+.terapeuta-item.active { border-color: var(--marrs); background: var(--marrs-tint); }
+.terapeuta-avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--marrs); color: #fff; font-weight: 700; font-size: 13px; overflow: hidden;
+}
+.terapeuta-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.terapeuta-name { font-weight: 600; font-size: 14px; }
+
+/* Formulário e banco de sidequests */
+.sidequest-form { display: flex; flex-direction: column; gap: 12px; margin: 14px 0; }
+.sidequest-form label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 600; color: var(--marrs-deep); }
+.sidequest-form input, .sidequest-form textarea { font: inherit; }
+
+.sidequest-bank-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.sidequest-bank-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--cream-2, #f3efe6);
+}
+.sidequest-bank-title { font-weight: 700; font-size: 14px; color: var(--marrs-deep); }
+.sidequest-bank-desc { font-size: 13px; color: var(--ink-soft); margin-top: 2px; line-height: 1.45; }
+.sidequest-bank-reward { font-size: 12px; color: #6b3fa0; margin-top: 4px; }
+
+.sidequest-active-card {
+  padding: 12px 14px; border-radius: var(--radius);
+  border: 1px solid rgba(138, 92, 196, 0.35); border-left: 4px solid #8a5cc4;
+  background: rgba(138, 92, 196, 0.06);
+}
+.sidequest-assign-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.sidequest-assign-row select { flex: 1; min-width: 200px; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.sidequest-completed-list { display: flex; flex-direction: column; gap: 8px; }
+.sidequest-completed-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--cream-2, #f3efe6); }

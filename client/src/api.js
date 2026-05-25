@@ -298,6 +298,20 @@ export const api = {
   getProgressionPatients: () => request('/progression/available-patients'),
   evaluateProgression: (data) => request('/progression/evaluate', { method: 'POST', body: data }),
 
+  // --- Sidequests (missões clínicas do Treinamento) ---
+  // Aluno: sua sidequest ativa + concluídas.
+  getMySidequest: () => request('/me/sidequest'),
+  // Supervisor/admin: banco de sidequests reutilizáveis.
+  getSidequestBank: () => request('/sidequests/bank'),
+  createSidequest: (data) => request('/sidequests/bank', { method: 'POST', body: data }),
+  deleteSidequest: (id) => request(`/sidequests/bank/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // Sidequests de um aluno (ativa + concluídas).
+  getStudentSidequests: (userId) => request(`/sidequests/student/${encodeURIComponent(userId)}`),
+  assignSidequest: (userId, sidequestId) =>
+    request('/sidequests/assign', { method: 'POST', body: { userId, sidequestId } }),
+  unassignSidequest: (userId) =>
+    request('/sidequests/unassign', { method: 'POST', body: { userId } }),
+
   // --- Notificações in-app ---
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),
