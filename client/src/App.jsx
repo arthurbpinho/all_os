@@ -20,7 +20,7 @@ import AdminUsers from './pages/AdminUsers';
 import Duelo from './pages/Duelo';
 import DuelSession from './pages/DuelSession';
 import DuelAccept from './pages/DuelAccept';
-import Progression from './pages/Progression';
+import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
 import NotificationBell from './components/NotificationBell';
 import SystemUpdates from './components/SystemUpdates';
@@ -272,7 +272,7 @@ export default function App() {
                 </Link>
               )}
               <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
-                {ICONS.freeplay}<span>Simulação</span>
+                {ICONS.freeplay}<span>Treinamento</span>
               </Link>
               {/* Competitivo: mesmos personagens da Simulação, mas ranqueado (MMR).
                   Visitante não pontua (id efêmero), então não vê a aba. */}
@@ -288,12 +288,8 @@ export default function App() {
                   {ICONS.duel}<span>Duelo</span>
                 </Link>
               )}
-              {/* Progressão: avaliação de evolução em sessões repetidas. */}
-              {(isTherapist || isAdmin) && (
-                <Link to="/progression" className={isActive('/progression') ? 'active' : ''}>
-                  {ICONS.progression}<span>Progressão</span>
-                </Link>
-              )}
+              {/* Progressão deixou de ser aba separada: agora acontece dentro do
+                  Treinamento (reatender um paciente compara a evolução). */}
               {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
                   Será reaberta pra alunos/professores quando estiver pronta. */}
               {isAdmin && (
@@ -325,6 +321,11 @@ export default function App() {
               {isSupervisor && (
                 <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
                   {ICONS.supervisor}<span>Logs dos Alunos</span>
+                </Link>
+              )}
+              {(isSupervisor || isAdmin) && (
+                <Link to="/terapeutas" className={isActive('/terapeutas') ? 'active' : ''}>
+                  {ICONS.social}<span>Terapeutas</span>
                 </Link>
               )}
             </>
@@ -426,7 +427,9 @@ export default function App() {
           <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
           <Route path="/duelo/aceitar/:id" element={<DuelAccept user={user} />} />
           <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
-          <Route path="/progression" element={<Progression user={user} />} />
+          {/* Progressão foi integrada ao Treinamento — rota antiga redireciona. */}
+          <Route path="/progression" element={<Navigate to="/freeplay" replace />} />
+          <Route path="/terapeutas" element={<Terapeutas user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />

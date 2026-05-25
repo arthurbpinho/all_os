@@ -103,7 +103,10 @@ ${transcript}`;
 export function stripSupervisorBlock(text) {
   if (!text) return '';
   return String(text)
+    // [notas-supervisor] (notas por critério) — só supervisor/admin.
     .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
+    // [sidequest-resultado] (JSON de conclusão da sidequest) — só sistema/supervisor.
+    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
     .trim();
 }
 

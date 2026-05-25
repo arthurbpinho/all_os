@@ -310,6 +310,16 @@ if (!fs.existsSync(path.join(DATA_DIR, 'notifications.json'))) {
   writeJSON('notifications.json', {});
 }
 
+// Sidequests: missões clínicas que o supervisor atribui a um aluno e que viram
+// o objetivo principal no Treinamento (avaliadas pelo avaliador de progressão).
+//  - bank: catálogo reutilizável de sidequests (definições).
+//  - active: { <studentId>: <sidequest atribuída> } — no máx. 1 ativa por aluno.
+//  - completed: { <studentId>: [ <sidequest concluída + recompensa> ] }.
+// O Competitivo (MMR) ignora sidequests inteiramente.
+if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
+  writeJSON('sidequests.json', { bank: [], active: {}, completed: {} });
+}
+
 function readMMR() {
   const data = readJSON('mmr.json', { players: {}, characters: {} });
   if (!data.players) data.players = {};
@@ -329,8 +339,15 @@ function publicUser(u) {
   // de módulo já inicializada no momento em que publicUser roda (request time).
   if (safe.activeTitle) {
     const def = ACHIEVEMENT_DEFS.find((d) => d.id === safe.activeTitle);
-    safe.titleLabel = def ? def.title : null;
-    safe.titleTier = def ? def.tier : null;
+    if (def) {
+      safe.titleLabel = def.title;
+      safe.titleTier = def.tier;
+    } else {
+      // Pode ser um título de recompensa de sidequest (qt-*).
+      const quest = resolveQuestTitle(safe.id, safe.activeTitle);
+      safe.titleLabel = quest ? quest.label : null;
+      safe.titleTier = quest ? quest.tier : null;
+    }
   }
   if (safe.role === 'therapist' && safe.teacherId) {
     try {
@@ -481,6 +498,18 @@ app.post('/api/me/title', requireAuth, (req, res) => {
 
   if (!titleId) {
     users[idx].activeTitle = '';
+    writeJSON('users.json', users);
+    return res.json(publicUser(users[idx]));
+  }
+
+  // Título de recompensa de sidequest (qt-*): valida contra as sidequests
+  // concluídas pelo próprio usuário (não vive em ACHIEVEMENT_DEFS).
+  if (String(titleId).startsWith('qt-')) {
+    const quest = resolveQuestTitle(req.user.id, titleId);
+    if (!quest) {
+      return res.status(403).json({ error: 'Você ainda não desbloqueou esse título.' });
+    }
+    users[idx].activeTitle = titleId;
     writeJSON('users.json', users);
     return res.json(publicUser(users[idx]));
   }
@@ -927,6 +956,22 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
     earnedAt: ach[userId][def.id] || null,
   }));
 
+  // Sidequests concluídas entram como conquistas (tier 'quest'): aparecem nas
+  // "Metas" e ficam selecionáveis como subtítulo, igual às demais conquistas.
+  const completedQuests = readSidequests().completed[userId] || [];
+  for (const q of completedQuests) {
+    achievements.push({
+      id: q.rewardTitleId,
+      icon: '✦',
+      title: q.rewardTitleLabel,
+      description: `Sidequest concluída: ${q.title}`,
+      tier: q.rewardTitleTier || 'quest',
+      earned: true,
+      earnedAt: q.completedAt || null,
+      sidequest: true,
+    });
+  }
+
   const validScores = userLogs.map((l) => l.score).filter((s) => Number.isFinite(s));
   const stats = {
     totalSessions: userLogs.length,
@@ -1278,6 +1323,44 @@ function extractSupervisorNotes(evaluation) {
   return { clean, criteria: parseSupervisorPayload(payload) };
 }
 
+// Extrai o bloco [sidequest-resultado] (avaliador de progressão com sidequest
+// ativa): { sidequest_completed, justification }. O bloco vem ANTES do
+// [notas-supervisor], então rode esta extração no texto já limpo das notas.
+// Retorna { clean, result } — result null quando não há bloco. Destinado a
+// supervisor/sistema; o aluno nunca vê o JSON.
+function extractSidequestResult(evaluation) {
+  const text = typeof evaluation === 'string' ? evaluation : '';
+  const markerMatch = text.match(/\[sidequest-resultado\]/i);
+  if (!markerMatch) return { clean: text, result: null };
+  const markerIdx = markerMatch.index;
+  const after = text.slice(markerIdx);
+  const jsonMatch = after.match(/\{[\s\S]*?\}/);
+  let result = null;
+  // Fim do bloco: até o fim do JSON (ou da linha do marcador, se não houver JSON).
+  // Splice só do próprio bloco — assim a extração independe da ordem em relação
+  // ao [notas-supervisor].
+  let blockEnd = markerIdx + (after.match(/\[sidequest-resultado\][^\n]*/i)[0].length);
+  if (jsonMatch) {
+    blockEnd = markerIdx + jsonMatch.index + jsonMatch[0].length;
+    try {
+      const obj = JSON.parse(jsonMatch[0]);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        const v = obj.sidequest_completed;
+        result = {
+          completed: v === true || String(v).toLowerCase() === 'true',
+          justification: typeof obj.justification === 'string' ? obj.justification : '',
+        };
+      }
+    } catch {}
+  }
+  // Remove também um separador "---" imediatamente antes do marcador.
+  const before = text.slice(0, markerIdx);
+  const sep = before.match(/\n*-{3,}[^\S\n]*\n*$/);
+  const start = sep ? before.length - sep[0].length : markerIdx;
+  const clean = (text.slice(0, start) + text.slice(blockEnd)).replace(/\n{3,}/g, '\n\n').trim();
+  return { clean, result };
+}
+
 app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // Allowlist explícita de campos: visitor não consegue "plantar bandeira"
   // com campos arbitrários, e mass-assignment fica bloqueado. userId/userName
@@ -1307,7 +1390,11 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // grava a avaliação SEM o bloco e guarda as notas em criteriaScores (que o GET
   // esconde do aluno). criteriaScores explícito no body (fluxo da trilha) tem
   // prioridade.
-  const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(body.evaluation);
+  // Extrai primeiro o [sidequest-resultado] (remove só o próprio bloco, em
+  // qualquer posição), depois o [notas-supervisor] (até o fim). Assim a extração
+  // independe da ordem em que o avaliador emitiu os dois blocos.
+  const { clean: cleanAfterSq, result: sidequestResult } = extractSidequestResult(body.evaluation);
+  const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(cleanAfterSq);
 
   // Nota final: calculada em CÓDIGO a partir das notas por critério do bloco
   // [notas-supervisor] (avaliadores v15/progressão). A IA não emite mais a nota
@@ -1370,7 +1457,34 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     mmrResult = result;
   }
 
-  res.json({ ...log, mmr: mmrResult });
+  // Sidequest: só no Treinamento (freeplay + mode 'training'). Se o aluno tinha
+  // uma sidequest ativa e o avaliador a marcou como cumprida, conclui aqui —
+  // move pra histórico, concede o título de recompensa e devolve o resultado pra
+  // tela pós-sessão celebrar. O Competitivo (mode 'competitive') nunca entra.
+  let sidequestOutcome = null;
+  if (log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor') {
+    const active = getActiveSidequest(req.user.id);
+    if (active && sidequestResult) {
+      if (sidequestResult.completed) {
+        const record = completeSidequest(req.user.id, sidequestResult.justification, {
+          characterId: log.itemId,
+          characterName: log.itemTitle,
+        });
+        if (record) {
+          sidequestOutcome = {
+            completed: true,
+            title: record.title,
+            rewardTitleId: record.rewardTitleId,
+            rewardTitleLabel: record.rewardTitleLabel,
+          };
+        }
+      } else {
+        sidequestOutcome = { completed: false, title: active.title };
+      }
+    }
+  }
+
+  res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome });
 });
 
 // --- Ranking global de jogadores (por MMR competitivo) ---
@@ -1392,14 +1506,22 @@ app.get('/api/ranking', requireAuth, (req, res) => {
       const state = mmr.players[u.id];
       if (!state || state.n < 1) return null; // só quem jogou competitivo
       const view = mmrEngine.playerView(state);
-      const def = u.activeTitle ? ACHIEVEMENT_DEFS.find((d) => d.id === u.activeTitle) : null;
+      let titleLabel = null, titleTier = null;
+      if (u.activeTitle) {
+        const def = ACHIEVEMENT_DEFS.find((d) => d.id === u.activeTitle);
+        if (def) { titleLabel = def.title; titleTier = def.tier; }
+        else {
+          const quest = resolveQuestTitle(u.id, u.activeTitle);
+          if (quest) { titleLabel = quest.label; titleTier = quest.tier; }
+        }
+      }
       return {
         userId: u.id,
         name: u.name || u.username,
         profilePhoto: u.profilePhoto || '',
         role: u.role,
-        title: def ? def.title : null,
-        titleTier: def ? def.tier : null,
+        title: titleLabel,
+        titleTier: titleTier,
         mmr: view.mmr,
         calibrating: view.calibrating,
         matchesRemaining: view.matchesRemaining,
@@ -1556,17 +1678,23 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 });
 
 // --- Provedores de IA ---
-// Dois provedores convivem por design:
-//  - Anthropic (CHAT_MODEL): SÓ as simulações de paciente (Trilha/FreePlay/
-//    Neuro). Sonnet 4.6 — equilíbrio velocidade/qualidade; o personagem não
-//    precisa de raciocínio oculto, responde direto.
-//  - OpenAI GPT-5.4 (reasoning): avaliador (v15), avaliador de duelo e
+// Tudo roda na OpenAI por design:
+//  - Pacientes (PATIENT_MODEL): as simulações de paciente de TODAS as abas
+//    (Trilha/Treinamento/Neuro/Duelo). gpt-5.4-mini com effort 'minimal' — o
+//    personagem responde direto, rápido e natural, sem raciocínio denso. O
+//    prompt caching da OpenAI é automático no prefixo (system + histórico).
+//  - OpenAI GPT-5.x (reasoning): avaliador (v15), avaliador de duelo e
 //    entrevistador. São tarefas de raciocínio denso onde o modelo precisa
 //    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
-//    content), o que mantém o Bloco 1 opaco por construção — diferente do Opus
-//    sem thinking, que externalizava a análise e vazava o gabarito.
+//    content), o que mantém o Bloco 1 opaco por construção.
+// CHAT_MODEL (Anthropic) ficou legado — getAnthropic não é mais chamado.
 const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL || 'claude-sonnet-4-6';
+// Modelo dos pacientes (chat de simulação). Mini da família 5.4. O personagem
+// responde direto, SEM reasoning — effort 'none' (o gpt-5.4-mini não aceita
+// 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
+const PATIENT_MODEL = process.env.OPENAI_PATIENT_MODEL || 'gpt-5.4-mini-2026-03-17';
+const PATIENT_EFFORT = process.env.OPENAI_PATIENT_EFFORT || 'none';
 // Avaliador (v15 + duelo) roda no gpt-5.5. O entrevistador segue no full 5.4
 // (HEAVY) — geração de prompt de paciente é menos sensível a custo.
 const OPENAI_EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
@@ -1759,59 +1887,40 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     }
   }
 
-  // --- Paciente → Anthropic (Sonnet 4.6) ---
-  const anthropic = getAnthropic();
-  if (!anthropic) {
+  // --- Paciente → OpenAI (gpt-5.4-mini, effort none) ---
+  // O personagem responde direto, SEM reasoning. Prompt caching da OpenAI é
+  // automático no prefixo (>1024 tokens), então o system + histórico (chat de
+  // 50-100 turnos) é cacheado sozinho a partir do 2º turno.
+  const openai = getOpenAI();
+  if (!openai) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?'
     });
   }
 
-  const normalized = normalizeMessagesForAnthropic(messages);
-  if (!normalized.length) {
+  const validTurns = (messages || []).filter(
+    (m) => m && (m.role === 'user' || m.role === 'assistant') &&
+      (typeof m.content === 'string' ? m.content : String(m.content || '')),
+  );
+  if (!validTurns.length) {
     return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
   }
 
-  // Prompt caching: cache_control no system + último user message.
-  // Em chat de paciente com 50-100 turnos isso reduz o custo de input em ~10x
-  // — system+histórico viram cache_read (10% do preço) a partir do 2º turno.
-  // Cada novo turno paga cache_creation só do delta (último user message).
-  const systemBlocks = [
-    { type: 'text', text: resolved.systemPrompt, cache_control: { type: 'ephemeral' } },
-  ];
-  const cachedMessages = normalized.map((m, i) => {
-    if (i !== normalized.length - 1) return m;
-    return {
-      role: m.role,
-      content: [{ type: 'text', text: m.content, cache_control: { type: 'ephemeral' } }],
-    };
-  });
-
   try {
-    // Pacientes ficam no Sonnet 4.6, SEM thinking — resposta rápida e natural.
-    const params = {
-      model: CHAT_MODEL,
-      max_tokens: tokenCap,
-      system: systemBlocks,
-      messages: cachedMessages,
-    };
-    // Stream + getFinalMessage pra evitar timeout HTTP em maxTokens altos;
-    // resposta final tem o mesmo shape de uma chamada não-streaming.
-    const stream = anthropic.messages.stream(params);
-    const message = await stream.finalMessage();
-    const text = (message.content || [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('');
-    if (message.usage) {
-      console.log(
-        `Chat cache (${CHAT_MODEL}): read=${message.usage.cache_read_input_tokens || 0} create=${message.usage.cache_creation_input_tokens || 0} input=${message.usage.input_tokens || 0} output=${message.usage.output_tokens || 0}`,
-      );
-    }
+    // effort 'none' = sem reasoning → resposta direta e rápida.
+    const { text, usage } = await openaiComplete({
+      openai,
+      model: PATIENT_MODEL,
+      effort: PATIENT_EFFORT,
+      systemPrompt: resolved.systemPrompt,
+      messages,
+      maxCompletionTokens: tokenCap + 2000,
+    });
+    logOpenAIUsage('Chat paciente', PATIENT_MODEL, usage);
     res.json({ role: 'assistant', content: text });
   } catch (err) {
-    console.error('Anthropic error:', err.message);
+    console.error('OpenAI paciente error:', err.message);
     res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
   }
 });
@@ -1937,20 +2046,76 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const resolved = resolveEvaluatorSystemPrompt({ context });
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-  // Split de modelo: Simulação Livre (freeplay + mode 'training') roda no avaliador
-  // barato (SIM/5.4); Competitivo, Neuro, Duelo e Trilha ficam no melhor (EVAL/5.5).
-  // O cliente sinaliza via context.mode. Sem mode (ex.: aba Avaliar Sessão do
-  // supervisor) cai no EVAL — avaliação manual deliberada merece o modelo bom.
+  // Split de modelo: Treinamento simples (1º atendimento, sem sidequest) roda no
+  // avaliador barato (SIM/5.4). Competitivo, Neuro, Duelo e Trilha ficam no
+  // melhor (EVAL/5.5). O cliente sinaliza via context.mode; sem mode (aba Avaliar
+  // Sessão) cai no EVAL.
   const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
-  const evalModel = isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL;
-  const evalEffort = isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT;
+  let systemPrompt = resolved.systemPrompt;
+  let evalModel = isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL;
+  let evalEffort = isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT;
+  let inputTurns;
+  let progressionMode = false;
+  let sidequestActive = false;
 
-  const bloco1 = resolveBloco1({ context });
-  const finalMessages = withBloco1(messages, bloco1);
-  const inputTurns = (finalMessages || [])
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
-    .filter((m) => m.content);
+  // Treinamento conectado à progressão + sidequests. Quando o aluno reatende um
+  // paciente (há log anterior) OU tem uma sidequest ativa, a avaliação passa a
+  // rodar no AVALIADOR DE PROGRESSÃO, com o contexto montado server-side: Bloco 1
+  // + Atendimento 1 + feedback anterior + sidequest ativa, seguido do atendimento
+  // que o cliente enviou (Atendimento 2). É a avaliação "de verdade", então usa o
+  // modelo melhor (EVAL/5.5). O Competitivo (MMR) nunca entra aqui.
+  if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
+    const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
+    const activeSq = getActiveSidequest(req.user.id);
+    if (prevLog || activeSq) {
+      progressionMode = true;
+      sidequestActive = !!activeSq;
+      systemPrompt = loadProgressaoPrompt();
+      evalModel = OPENAI_EVAL_MODEL;
+      evalEffort = OPENAI_EVAL_EFFORT;
+
+      const studentName = req.user.name || 'Aluno';
+      const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
+      const characterName = (prevLog && prevLog.itemTitle) || (freeChar && freeChar.name) || 'Paciente';
+      const bloco1p = resolveBloco1({ context });
+
+      // Atendimento 2 = a sessão que o cliente acabou de enviar para correção.
+      const atd2Content = (messages || [])
+        .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+        .map((m) => (typeof m.content === 'string' ? m.content : String(m.content || '')))
+        .filter(Boolean)
+        .join('\n\n');
+
+      let content = '';
+      if (bloco1p) content += `[BLOCO 1 DO CASO] (critério de correção/gabarito)\n${bloco1p}\n\n---\n\n`;
+      if (prevLog) {
+        const transcript1 = transcriptFromMessages(prevLog.messages, studentName, characterName);
+        content += `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n`;
+        const { criteria: prevCriteria, pointsToReview } = getPreviousFeedback(req.user.id, context.itemId);
+        if (prevCriteria) {
+          const noteLines = Object.entries(prevCriteria).map(([k, v]) => `${k}: ${v}`).join(', ');
+          content += `[AVALIAÇÃO DO ATENDIMENTO 1 — Notas anteriores]\nNotas por critério: ${noteLines}\n`;
+          if (pointsToReview) content += `\nPontos para revisar com supervisor:\n${pointsToReview}`;
+          content += `\n\n---\n\n`;
+        }
+      }
+      if (activeSq) {
+        content += `[SIDEQUEST ATIVA]\nTÍTULO: ${activeSq.title}\nDescrição: ${activeSq.description}\n\nEsta sidequest é o objetivo principal deste atendimento. Avalie primariamente se o aluno a cumpriu e emita o bloco [sidequest-resultado] conforme a especificação.\n\n---\n\n`;
+      }
+      content += `[ATENDIMENTO 2 — ${studentName} com ${characterName}] (objeto da avaliação)\n${atd2Content || '(sem mensagens)'}`;
+
+      inputTurns = [{ role: 'user', content }];
+    }
+  }
+
+  if (!progressionMode) {
+    const bloco1 = resolveBloco1({ context });
+    const finalMessages = withBloco1(messages, bloco1);
+    inputTurns = (finalMessages || [])
+      .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+      .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
+      .filter((m) => m.content);
+  }
   if (!inputTurns.length) {
     return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
   }
@@ -1997,7 +2162,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         model: evalModel,
         reasoning: { effort: evalEffort, summary: 'auto' },
         max_output_tokens: 64000,
-        instructions: resolved.systemPrompt,
+        instructions: systemPrompt,
         input: inputTurns,
         stream: true,
       });
@@ -2015,7 +2180,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     }
     if (usage) {
       console.log(
-        `Evaluate (${evalModel}${isFreeSim ? ' · sim-livre' : ''}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
+        `Evaluate (${evalModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isFreeSim ? ' · treino' : '')}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
       );
     }
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
@@ -2885,6 +3050,193 @@ app.post('/api/progression/evaluate', requireAuth, aiLimiter, async (req, res) =
     console.error('Erro em /api/progression/evaluate:', err);
     res.status(500).json({ error: 'Erro ao executar avaliação de progressão' });
   }
+});
+
+// --- Sidequests (missões clínicas do Treinamento) ---
+// Banco de definições reutilizáveis + atribuição ativa por aluno (máx. 1) +
+// histórico de concluídas com o título de recompensa. Funções declaradas aqui
+// são hoisted, então publicUser/ranking/gamification (acima) já as enxergam.
+function readSidequests() {
+  const data = readJSON('sidequests.json', { bank: [], active: {}, completed: {} });
+  if (!Array.isArray(data.bank)) data.bank = [];
+  if (!data.active || typeof data.active !== 'object') data.active = {};
+  if (!data.completed || typeof data.completed !== 'object') data.completed = {};
+  return data;
+}
+function writeSidequests(data) { writeJSON('sidequests.json', data); }
+
+function getActiveSidequest(userId) {
+  return readSidequests().active[userId] || null;
+}
+
+// Resolve um título de recompensa (qt-*) para { label, tier } a partir das
+// sidequests concluídas pelo usuário. Null se o usuário não o desbloqueou.
+function resolveQuestTitle(userId, titleId) {
+  if (!titleId || !String(titleId).startsWith('qt-')) return null;
+  const list = readSidequests().completed[userId] || [];
+  const found = list.find((c) => c.rewardTitleId === titleId);
+  return found ? { label: found.rewardTitleLabel, tier: found.rewardTitleTier || 'quest' } : null;
+}
+
+// Snapshot público de uma sidequest atribuída (sem campos internos sensíveis).
+function publicSidequest(sq) {
+  if (!sq) return null;
+  return {
+    sidequestId: sq.sidequestId,
+    title: sq.title,
+    description: sq.description,
+    rewardTitleId: sq.rewardTitleId,
+    rewardTitleLabel: sq.rewardTitleLabel,
+    assignedAt: sq.assignedAt || null,
+  };
+}
+
+// Marca a sidequest ativa de um aluno como concluída: move pra completed,
+// concede o título de recompensa e limpa a ativa. Idempotente (no-op sem ativa).
+// Retorna o registro de conclusão ou null.
+function completeSidequest(userId, justification, ctx = {}) {
+  const data = readSidequests();
+  const active = data.active[userId];
+  if (!active) return null;
+  const record = {
+    sidequestId: active.sidequestId,
+    title: active.title,
+    description: active.description,
+    rewardTitleId: active.rewardTitleId,
+    rewardTitleLabel: active.rewardTitleLabel,
+    rewardTitleTier: active.rewardTitleTier || 'quest',
+    justification: clampStr(justification, 1000),
+    completedAt: new Date().toISOString(),
+    characterId: ctx.characterId || null,
+    characterName: ctx.characterName || null,
+  };
+  if (!Array.isArray(data.completed[userId])) data.completed[userId] = [];
+  data.completed[userId].push(record);
+  delete data.active[userId];
+  writeSidequests(data);
+  return record;
+}
+
+const SQ_MAX_TITLE = 120;
+const SQ_MAX_DESC = 2000;
+
+function canManageSidequests(user) {
+  return !!(user && (user.role === 'supervisor' || user.role === 'admin'));
+}
+
+// Banco de sidequests reutilizáveis (supervisor/admin).
+app.get('/api/sidequests/bank', requireAuth, (req, res) => {
+  if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
+  res.json(readSidequests().bank);
+});
+
+app.post('/api/sidequests/bank', requireAuth, (req, res) => {
+  if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
+  const title = clampStr(req.body && req.body.title, SQ_MAX_TITLE).trim();
+  const description = clampStr(req.body && req.body.description, SQ_MAX_DESC).trim();
+  const rewardTitle = clampStr(req.body && req.body.rewardTitle, SQ_MAX_TITLE).trim();
+  if (!title || !description) {
+    return res.status(400).json({ error: 'Título e descrição são obrigatórios.' });
+  }
+  if (!rewardTitle) {
+    return res.status(400).json({ error: 'Título de recompensa é obrigatório.' });
+  }
+  const data = readSidequests();
+  const id = 'sq-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
+  const entry = {
+    id,
+    title,
+    description,
+    rewardTitleId: 'qt-' + id,
+    rewardTitleLabel: rewardTitle,
+    rewardTitleTier: 'quest',
+    createdBy: req.user.id,
+    createdByName: req.user.name || req.user.username,
+    createdAt: new Date().toISOString(),
+  };
+  data.bank.push(entry);
+  writeSidequests(data);
+  res.json(entry);
+});
+
+app.delete('/api/sidequests/bank/:id', requireAuth, (req, res) => {
+  if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
+  const data = readSidequests();
+  const before = data.bank.length;
+  data.bank = data.bank.filter((s) => s.id !== req.params.id);
+  if (data.bank.length === before) return res.status(404).json({ error: 'Sidequest não encontrada.' });
+  writeSidequests(data);
+  res.json({ ok: true });
+});
+
+// Sidequests de um aluno (ativa + concluídas). Supervisor (só seus alunos),
+// admin (todos) ou o próprio aluno.
+app.get('/api/sidequests/student/:userId', requireAuth, (req, res) => {
+  if (!canAccessUserResource(req.user, req.params.userId)) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+  const data = readSidequests();
+  res.json({
+    active: publicSidequest(data.active[req.params.userId] || null),
+    completed: data.completed[req.params.userId] || [],
+  });
+});
+
+// Atribui (ou substitui) a sidequest ativa de um aluno. Máx. 1 por aluno.
+app.post('/api/sidequests/assign', requireAuth, (req, res) => {
+  if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
+  const { userId, sidequestId } = req.body || {};
+  if (!userId || !sidequestId) {
+    return res.status(400).json({ error: 'userId e sidequestId são obrigatórios.' });
+  }
+  if (!canAccessUserResource(req.user, userId)) {
+    return res.status(403).json({ error: 'Você não supervisiona este aluno.' });
+  }
+  const users = readJSON('users.json');
+  const target = users.find((u) => u.id === userId);
+  if (!target || target.role !== 'therapist') {
+    return res.status(400).json({ error: 'Sidequests só podem ser atribuídas a terapeutas.' });
+  }
+  const data = readSidequests();
+  const def = data.bank.find((s) => s.id === sidequestId);
+  if (!def) return res.status(404).json({ error: 'Sidequest não encontrada no banco.' });
+  data.active[userId] = {
+    sidequestId: def.id,
+    title: def.title,
+    description: def.description,
+    rewardTitleId: def.rewardTitleId,
+    rewardTitleLabel: def.rewardTitleLabel,
+    rewardTitleTier: def.rewardTitleTier || 'quest',
+    assignedBy: req.user.id,
+    assignedByName: req.user.name || req.user.username,
+    assignedAt: new Date().toISOString(),
+  };
+  writeSidequests(data);
+  res.json({ active: publicSidequest(data.active[userId]) });
+});
+
+// Remove a sidequest ativa de um aluno (sem concluí-la).
+app.post('/api/sidequests/unassign', requireAuth, (req, res) => {
+  if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId é obrigatório.' });
+  if (!canAccessUserResource(req.user, userId)) {
+    return res.status(403).json({ error: 'Você não supervisiona este aluno.' });
+  }
+  const data = readSidequests();
+  if (data.active[userId]) { delete data.active[userId]; writeSidequests(data); }
+  res.json({ ok: true });
+});
+
+// Sidequest do próprio usuário (Treinamento mostra a ativa; perfil mostra as
+// concluídas). Visitante nunca tem sidequest.
+app.get('/api/me/sidequest', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json({ active: null, completed: [] });
+  const data = readSidequests();
+  res.json({
+    active: publicSidequest(data.active[req.user.id] || null),
+    completed: data.completed[req.user.id] || [],
+  });
 });
 
 // --- Notificações in-app ---
