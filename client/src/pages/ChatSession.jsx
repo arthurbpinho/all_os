@@ -392,9 +392,11 @@ export default function ChatSession({ user }) {
   }
 
   // Builders de texto pro <LogActions> (copiar/baixar log / avaliação / tudo).
+  // Header MINIMAL: só Terapeuta + Exercício. Nota geral fica apenas dentro da
+  // seção de avaliação (mesma decisão que vale pra freeplay/neuro em
+  // EchoSession e pros logs salvos em Logs.jsx).
   function chatLogHeader() {
-    const skillName = SKILL_NAMES[item.skillId] || '';
-    return `Trilha · ${skillName}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nDuração: ${formatTime(elapsed)}\nTerapeuta: ${user.name}${score !== null ? `\nNota final: ${score > 0 ? '+' : ''}${score}` : ''}`;
+    return `Terapeuta: ${user.name}\nExercício: ${item.title}`;
   }
   function chatTranscript() {
     return messages
@@ -402,9 +404,14 @@ export default function ChatSession({ user }) {
       .map((m) => `[${m.role === 'user' ? user.name : item.title}]\n${m.content}`)
       .join('\n\n---\n\n');
   }
+  function chatEvaluationBody() {
+    const clean = stripSupervisorBlock(evaluationText);
+    const line = score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n\n` : '';
+    return `${line}${clean}`;
+  }
   const logText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}`;
-  const evalText = () => `${chatLogHeader()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`.trimEnd();
-  const bothText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`;
+  const evalText = () => `${chatLogHeader()}${evalSectionTxt(chatEvaluationBody())}`.trimEnd();
+  const bothText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}${evalSectionTxt(chatEvaluationBody())}`;
   const logFileBase = () => (item?.title ? `trilha-${item.title}` : 'trilha');
   // Download rápido do log no cabeçalho (durante a sessão ainda não há avaliação).
   function downloadLog() {

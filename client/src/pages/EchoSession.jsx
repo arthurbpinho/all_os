@@ -428,15 +428,15 @@ export default function EchoSession({ user, sessionType }) {
   // Builders de texto pro <LogActions> (copiar/baixar log / avaliação / tudo).
   // O aluno nunca recebe o bloco [notas-supervisor]. Todas as sessões (inclusive
   // a Simulação Livre) têm avaliação, então "Avaliação" fica disponível quando há.
+  //
+  // Header MINIMAL por decisão de produto: log limpo só com Terapeuta + Caso +
+  // transcrição. A nota numérica vive APENAS na seção de avaliação (não no
+  // header), pra que o log cru fique livre de score quando exportado isolado.
   function buildLogHeader() {
     return [
-      `Tipo: ${sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação'}`,
-      `Caso: ${item?.name || '—'}`,
       `Terapeuta: ${user?.name || '—'}`,
-      `Data: ${new Date().toLocaleString('pt-BR')}`,
-      `Duração: ${formatTime(elapsed)}`,
-      evalScore !== null ? `Nota final: ${evalScore}` : null,
-    ].filter(Boolean).join('\n');
+      `Caso: ${item?.name || '—'}`,
+    ].join('\n');
   }
   function buildTranscript() {
     return messages.filter((m) => !m.isSystem).map((m) => {
@@ -446,9 +446,16 @@ export default function EchoSession({ user, sessionType }) {
       return `[${author}${star}]\n${m.content}${comment}`;
     }).join('\n\n---\n\n');
   }
+  // Texto da avaliação prefixado pela nota geral (única menção da nota num log
+  // exportado). Limpo do bloco [notas-supervisor] que é só pra backend.
+  function buildEvaluationBody() {
+    const clean = stripSupervisorBlock(evaluationText);
+    const score = evalScore !== null ? `Nota final: ${evalScore}\n\n` : '';
+    return `${score}${clean}`;
+  }
   const logText = () => `${buildLogHeader()}\n\n---\n\n${buildTranscript()}`;
-  const evalText = () => `${buildLogHeader()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`.trimEnd();
-  const bothText = () => `${buildLogHeader()}\n\n---\n\n${buildTranscript()}${evalSectionTxt(stripSupervisorBlock(evaluationText))}`;
+  const evalText = () => `${buildLogHeader()}${evalSectionTxt(buildEvaluationBody())}`.trimEnd();
+  const bothText = () => `${buildLogHeader()}\n\n---\n\n${buildTranscript()}${evalSectionTxt(buildEvaluationBody())}`;
 
   function handleFinalize() {
     if (!sessionStarted || sessionEnded) return;
