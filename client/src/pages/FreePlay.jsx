@@ -9,6 +9,10 @@ export default function FreePlay({ user }) {
   const [bestScores, setBestScores] = useState({});
   const [attended, setAttended] = useState(() => new Set());
   const [sidequest, setSidequest] = useState(null);
+  // titulares: mapa { characterId: titularSummary } do modo Desafio. Cada card
+  // mostra a foto+nome no canto inferior direito (clique → /chat/desafio/<id>),
+  // ou o 👑 quando não há Titular.
+  const [titulares, setTitulares] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const navigate = useNavigate();
@@ -23,8 +27,9 @@ export default function FreePlay({ user }) {
       api.getFreeplay(),
       user?.id ? api.getLogs(user.id) : Promise.resolve([]),
       isVisitor ? Promise.resolve({ active: null }) : api.getMySidequest().catch(() => ({ active: null })),
+      api.getTitulares().catch(() => ({})),
     ])
-      .then(([chars, logs, sq]) => {
+      .then(([chars, logs, sq, tit]) => {
         setCharacters(chars || []);
         const max = {};
         const seen = new Set();
@@ -40,10 +45,19 @@ export default function FreePlay({ user }) {
         setBestScores(max);
         setAttended(seen);
         setSidequest(sq && sq.active ? sq.active : null);
+        setTitulares(tit || {});
       })
       .catch((err) => setError(err.message || 'Erro ao carregar personagens'))
       .finally(() => setLoading(false));
   }, [user]);
+
+  // Wrapper que para a propagação: o card inteiro tem onClick (atende normal),
+  // então o footer de coroa precisa stopPropagation antes de navegar pra rota
+  // de Desafio. Senão, clicar na foto do Titular dispararia AMBOS os navegues.
+  function openDesafio(e, characterId) {
+    e.stopPropagation();
+    navigate(`/chat/desafio/${characterId}`);
+  }
 
   return (
     <div>
@@ -84,6 +98,7 @@ export default function FreePlay({ user }) {
           {characters.map((char) => {
             const charBest = bestScores[char.id];
             const isReturn = attended.has(String(char.id));
+            const titular = titulares[char.id];
             return (
               <div
                 key={char.id}
@@ -105,11 +120,49 @@ export default function FreePlay({ user }) {
                     ↗ Progressão · reatendimento
                   </div>
                 )}
+                {/* Footer de coroa (modo Desafio). Se há Titular: foto+nome
+                    clicáveis abrem a sessão de Desafio. Se não há: botão 👑
+                    pequeno permite reivindicar a posição. Clique aqui NÃO
+                    abre o atendimento normal (stopPropagation). */}
+                {titular ? (
+                  <button
+                    type="button"
+                    className="titular-footer"
+                    onClick={(e) => openDesafio(e, char.id)}
+                    title={titular.isVisitor
+                      ? `${titular.name} é Titular — clique para desafiar`
+                      : `${titular.name} é Titular deste caso — clique para desafiar`}
+                  >
+                    <span className="crown-emoji" aria-hidden>👑</span>
+                    <span className="titular-avatar">
+                      {titular.profilePhoto
+                        ? <img src={titular.profilePhoto} alt={titular.name} />
+                        : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>}
+                    </span>
+                    <span className="titular-name">{titular.name}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="titular-claim-btn"
+                    onClick={(e) => openDesafio(e, char.id)}
+                    title="Ninguém é Titular ainda — clique para garantir seu título"
+                    aria-label="Reivindicar título"
+                  >
+                    <span aria-hidden>👑</span>
+                  </button>
+                )}
               </div>
             );
           })}
         </div>
       )}
+
+      {/* CTA flutuante no canto inferior direito da página de Treinamento.
+          Lembra ao aluno que clicar no rosto do Titular abre o modo Desafio. */}
+      <div className="desafio-cta" role="note">
+        Desafie seus amigos no modo <span aria-hidden>👑</span> clicando no ícone para ser titular de um paciente
+      </div>
     </div>
   );
 }

@@ -14,6 +14,8 @@ export default function AdminFreeplay() {
   const [editingId, setEditingId] = useState(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState('');
+  // Feedback transitório do botão "Copiar Bloco 1" (some sozinho em 1.6s).
+  const [copyStatus, setCopyStatus] = useState(''); // '' | 'ok' | 'fail'
 
   function load() {
     setLoading(true);
@@ -57,6 +59,33 @@ export default function AdminFreeplay() {
     }
     setFormError('');
     setForm((prev) => ({ ...prev, evaluationCriteria: extracted }));
+  }
+
+  // Copia o conteúdo atual do Bloco 1 pro clipboard, pra editar em um editor
+  // externo. Usa navigator.clipboard (HTTPS/localhost); fallback via textarea
+  // temporária + document.execCommand quando a API moderna não tá disponível.
+  async function copyBloco1() {
+    const text = form.evaluationCriteria || '';
+    if (!text.trim()) return;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        if (!ok) throw new Error('execCommand falhou');
+      }
+      setCopyStatus('ok');
+    } catch {
+      setCopyStatus('fail');
+    }
+    setTimeout(() => setCopyStatus(''), 1600);
   }
 
   async function handleSubmit(e) {
@@ -172,15 +201,28 @@ export default function AdminFreeplay() {
                   <label htmlFor="evaluationCriteria" style={{ marginBottom: 0 }}>
                     Critério de correção <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(gabarito do avaliador)</em>
                   </label>
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={generateBloco1}
-                    disabled={!form.specificInstruction.trim()}
-                    title="Copia as seções II a V do prompt do personagem para este campo"
-                  >
-                    Gerar Bloco 1
-                  </button>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {copyStatus === 'ok' && <span style={{ fontSize: 12, color: 'var(--success, #14a37f)' }}>Copiado ✓</span>}
+                    {copyStatus === 'fail' && <span style={{ fontSize: 12, color: 'var(--terra)' }}>Falha ao copiar</span>}
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={copyBloco1}
+                      disabled={!form.evaluationCriteria.trim()}
+                      title="Copia o Bloco 1 atual para a área de transferência (útil para editar em um editor externo)"
+                    >
+                      Copiar Bloco 1
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={generateBloco1}
+                      disabled={!form.specificInstruction.trim()}
+                      title="Copia as seções II a V do prompt do personagem para este campo"
+                    >
+                      Gerar Bloco 1
+                    </button>
+                  </div>
                 </div>
                 <textarea id="evaluationCriteria" name="evaluationCriteria" value={form.evaluationCriteria} onChange={handleChange} placeholder="Hipóteses corretas, sintomas que o aluno deve identificar, condutas esperadas, red flags… (não aparece para o aluno; vai apenas para o avaliador junto com o log)" style={{ minHeight: 160 }} />
                 <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>

@@ -7,6 +7,7 @@ import Competitive from './pages/Competitive';
 import NeuroEval from './pages/NeuroEval';
 import ChatSession from './pages/ChatSession';
 import EchoSession from './pages/EchoSession';
+import ChallengeSession from './pages/ChallengeSession';
 import Logs from './pages/Logs';
 import AdminExercises from './pages/AdminExercises';
 import AdminFreeplay from './pages/AdminFreeplay';
@@ -315,7 +316,7 @@ export default function App() {
               )}
               {(isTherapist || isAdmin) && (
                 <Link to="/duelo/logs" className={isActive('/duelo/logs') ? 'active' : ''}>
-                  {ICONS.social}<span>Logs Sociais</span>
+                  {ICONS.social}<span>Logs de Duelo</span>
                 </Link>
               )}
               {isSupervisor && (
@@ -400,9 +401,17 @@ export default function App() {
                     {user.titleLabel}
                   </div>
                 )}
+                {/* Coroa (modo Desafio): mostra a 1ª na sidebar se houver.
+                    Lista completa fica no Perfil. */}
+                {Array.isArray(user.crowns) && user.crowns.length > 0 && (
+                  <div className="player-crown" title={user.crowns.length > 1 ? `Titular de ${user.crowns.length} casos` : `Titular de ${user.crowns[0].characterName}`} style={{ marginTop: 2 }}>
+                    {user.crowns[0].label}
+                    {user.crowns.length > 1 && <span className="crown-extra"> +{user.crowns.length - 1}</span>}
+                  </div>
+                )}
                 <div className="profile-mini-role">
                   {streak?.isAlive
-                    ? `${streak.current} ${streak.current === 1 ? 'dia consecutivo' : 'dias consecutivos'}`
+                    ? `${streak.current} ${streak.current === 1 ? 'semana consecutiva' : 'semanas consecutivas'}`
                     : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador')}
                 </div>
               </div>
@@ -419,6 +428,7 @@ export default function App() {
           <Route path="/skills" element={<SkillMap user={user} />} />
           <Route path="/chat/exercise/:id" element={<ChatSession user={user} />} />
           <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
+          <Route path="/chat/desafio/:id" element={<ChallengeSession user={user} />} />
           <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
           <Route path="/freeplay" element={<FreePlay user={user} />} />
           <Route path="/competitivo" element={<Competitive user={user} />} />

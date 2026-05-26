@@ -312,6 +312,83 @@ export const api = {
   unassignSidequest: (userId) =>
     request('/sidequests/unassign', { method: 'POST', body: { userId } }),
 
+  // --- Modo Desafio (titular-desafiante) ---
+  // Mapa { characterId: titularSummary } pra renderizar os cards do FreePlay.
+  // Visitantes Titulares aparecem como { isVisitor:true, name:"Um visitante" }.
+  getTitulares: () => request('/desafio/titulares'),
+  // Coroas (👑) do usuário logado — personagens onde ele é Titular atual.
+  // Já vem em /api/me como user.crowns; este endpoint serve pra refresh
+  // após perder/ganhar coroa sem precisar refazer login.
+  getMyCrowns: () => request('/me/crowns'),
+  // Estado de uma sessão de Desafio antes de começar: 'reivindicar' (sem
+  // Titular), 'desafiar' (com Titular) ou 'auto-titular' (você já é).
+  getDesafioState: (characterId) => request(`/desafio/state/${encodeURIComponent(characterId)}`),
+  // Reivindica a posição de Titular (não há Titular atual). Independente da
+  // nota — o aluno vira Titular ao final do atendimento.
+  reivindicarTitular: (data) => request('/desafio/reivindicar', { method: 'POST', body: data }),
+  // Desafia o Titular atual via SSE: stream do avaliador titular-desafiante
+  // + evento final `data:{done, outcome, evaluation, justification, titular}`.
+  // onToken(delta, full) opcional pra exibir o texto chegando ao vivo.
+  desafiarTitular: async (data, onToken) => {
+    const token = getToken();
+    const res = await fetch(BASE + '/desafio/desafiar', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(data),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      notifySessionExpired();
+      const err = await res.json().catch(() => ({ error: 'Sessão expirada' }));
+      throw new Error(err.error || 'Sessão expirada');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Erro no desafio' }));
+      throw new Error(err.error || 'Erro no desafio');
+    }
+    const ctype = res.headers.get('content-type') || '';
+    if (!ctype.includes('text/event-stream') || !res.body) {
+      // Modo demonstração / fallback sem stream — devolve JSON cru.
+      return res.json();
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let full = '';
+    let finalPayload = null;
+    let streamError = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const event = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch { continue; }
+          if (obj.delta) {
+            full += obj.delta;
+            if (onToken) { try { onToken(obj.delta, full); } catch {} }
+          } else if (obj.done) {
+            finalPayload = obj;
+          } else if (obj.error) {
+            streamError = obj.error;
+          }
+        }
+      }
+    }
+    if (streamError) throw new Error(streamError);
+    return { evaluationStream: full, ...(finalPayload || {}) };
+  },
+
   // --- Notificações in-app ---
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),

@@ -55,7 +55,7 @@ export default function Missoes({ user }) {
           </div>
           <div className="streak-count">
             <strong>{streak.current}</strong>
-            <span> {streak.current === 1 ? 'dia' : 'dias'}</span>
+            <span> {streak.current === 1 ? 'semana' : 'semanas'}</span>
             {streak.status === 'monthly' && <span className="streak-tier-pill monthly">Mensal</span>}
             {streak.status === 'weekly' && <span className="streak-tier-pill weekly">Semanal</span>}
           </div>
@@ -64,15 +64,15 @@ export default function Missoes({ user }) {
               streak.status === 'monthly' ? (
                 <span>Constância mensal mantida — marco registrado no perfil.</span>
               ) : streak.status === 'weekly' ? (
-                <span>Constância semanal ativa. Faltam <strong>{streak.daysToMonthly}</strong> dia(s) para a marca mensal.</span>
+                <span>Constância semanal ativa. Faltam <strong>{streak.weeksToMonthly}</strong> {streak.weeksToMonthly === 1 ? 'semana' : 'semanas'} para a marca mensal.</span>
               ) : (
-                <span>Faltam <strong>{streak.daysToWeekly}</strong> dia(s) para a marca semanal.</span>
+                <span>Conclua um atendimento esta semana para começar uma sequência de constância.</span>
               )
             ) : (
-              <span>Conclua um exercício hoje para retomar sua constância.</span>
+              <span>Conclua um atendimento esta semana para retomar sua constância.</span>
             )}
           </div>
-          <div className="streak-record">Sequência máxima registrada: <strong>{streak.longest}</strong> dia(s)</div>
+          <div className="streak-record">Sequência máxima registrada: <strong>{streak.longest}</strong> {streak.longest === 1 ? 'semana' : 'semanas'}</div>
         </div>
       </div>
 

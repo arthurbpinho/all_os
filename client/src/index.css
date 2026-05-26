@@ -392,11 +392,12 @@ select option { background: var(--cream); color: var(--ink); }
 }
 
 .character-card {
+  position: relative;
   background: var(--cream);
   border: 1px solid var(--sand);
   border-left: 4px solid var(--marrs);
   border-radius: 0 var(--radius) var(--radius) 0;
-  padding: 22px 24px;
+  padding: 22px 24px 52px 24px; /* espaço extra embaixo pro footer de coroa */
   cursor: pointer;
   transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
 }
@@ -460,6 +461,140 @@ select option { background: var(--cream); color: var(--ink); }
   border: 1px solid rgba(20, 86, 78, 0.18);
 }
 .character-card .difficulty-tag strong { font-size: 13px; letter-spacing: 0; }
+
+/* ────────────────────────────────────────
+   Modo Desafio (titular-desafiante)
+   ──────────────────────────────────────── */
+
+/* Footer no canto inferior direito do card de paciente — mostra o Titular
+   atual (foto+nome) quando há, ou um pequeno botão 👑 quando ninguém é
+   Titular. Clique aqui NÃO abre o atendimento normal (stopPropagation no JSX);
+   navega pra /chat/desafio/:id. */
+.titular-footer {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+  padding: 4px 10px 4px 6px;
+  background: var(--cream-2, #f5ecdf);
+  border: 1px solid var(--sand);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--marrs-deep);
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.titular-footer:hover {
+  transform: translateY(-1px);
+  border-color: var(--marrs);
+  box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.08));
+}
+.titular-footer .crown-emoji { font-size: 13px; line-height: 1; }
+.titular-footer .titular-avatar {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--cream);
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.titular-footer .titular-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.titular-footer .titular-name {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+/* Botão 👑 (reivindicar Titular — ninguém ocupa a posição ainda). Compacto,
+   só ícone. */
+.titular-claim-btn {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--cream-2, #f5ecdf);
+  border: 1px dashed var(--sand);
+  border-radius: 50%;
+  font-size: 16px;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.15s ease, transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.titular-claim-btn:hover {
+  opacity: 1;
+  transform: translateY(-1px) scale(1.05);
+  border-color: var(--marrs);
+  border-style: solid;
+  background: var(--cream);
+}
+
+/* CTA flutuante no canto inferior direito da página de Treinamento. Pequeno,
+   discreto — só lembra ao aluno que a coroa abre o modo Desafio. */
+.desafio-cta {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  max-width: 280px;
+  padding: 10px 14px;
+  background: var(--cream-2, #f5ecdf);
+  border: 1px solid var(--sand);
+  border-radius: var(--radius, 8px);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+  line-height: 1.45;
+  box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.08));
+  z-index: 5;
+  pointer-events: none; /* não captura clique sobre cards */
+}
+
+/* Chips de coroa no Perfil (lista completa de títulos de Titular atuais). */
+.crown-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.crown-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  background: var(--cream-2, #f5ecdf);
+  border: 1px solid var(--marrs);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--marrs-deep);
+  font-weight: 500;
+}
+
+/* Coroa pequena na sidebar (sob o nome do usuário). */
+.player-crown {
+  font-size: 12px;
+  color: var(--marrs-deep);
+  font-weight: 500;
+  line-height: 1.3;
+}
+.player-crown .crown-extra {
+  color: var(--muted);
+  font-weight: 400;
+}
 
 /* ────────────────────────────────────────
    SKILL MAP — adaptado ao tema claro
