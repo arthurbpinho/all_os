@@ -69,19 +69,16 @@ function ExpiryNote({ log, style }) {
 // Monta os textos de um log salvo: logStr (só transcrição), evalStr (avaliação +
 // notas por critério, quando houver) e bothStr (tudo). hasEval indica se há
 // avaliação/critérios pra oferecer os botões de "Avaliação"/"Tudo".
+//
+// Header MINIMAL por decisão de produto: log limpo só com Terapeuta + Caso.
+// A nota numérica vive APENAS na seção de avaliação (prefixo "Nota final: X"),
+// nunca no header — o log cru fica sem score quando exportado isolado.
 function buildLogStrings(log) {
   const messages = Array.isArray(log.messages) ? log.messages : [];
   const header = [
-    `Tipo: ${TYPE_LABELS[log.type] || log.type || '—'}`,
-    `Caso: ${log.itemTitle || log.title || '—'}`,
     `Terapeuta: ${log.userName || '—'}`,
-    `Data: ${formatDate(log.timestamp || log.createdAt)}`,
-    log.durationSeconds
-      ? `Duração: ${Math.floor(log.durationSeconds / 60).toString().padStart(2, '0')}:${(log.durationSeconds % 60).toString().padStart(2, '0')}`
-      : null,
-    log.score != null ? `Nota: ${log.score}` : null,
-    (() => { const e = logExpiresAt(log); return e ? `Expira em: ${e.toLocaleDateString('pt-BR')}` : null; })(),
-  ].filter(Boolean).join('\n');
+    `Caso: ${log.itemTitle || log.title || '—'}`,
+  ].join('\n');
 
   const transcript = messages
     .filter((m) => !m.isSystem)
@@ -97,8 +94,12 @@ function buildLogStrings(log) {
     })
     .join('\n\n---\n\n');
 
+  // Avaliação prefixada pela nota geral — único lugar onde o score aparece.
+  // Sem evaluation, não criamos seção mesmo que haja score (mantém o
+  // comportamento original de hasEval = !!evalPart || !!criteriaPart).
+  const scoreLine = log.score != null ? `Nota final: ${log.score}\n\n` : '';
   const evalPart = log.evaluation
-    ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${log.evaluation}`
+    ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${scoreLine}${log.evaluation}`
     : '';
 
   // Notas por critério (só nos downloads de supervisor/admin — o aluno nem
