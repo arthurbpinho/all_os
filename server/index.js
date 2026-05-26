@@ -320,6 +320,16 @@ if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
   writeJSON('sidequests.json', { bank: [], active: {}, completed: {} });
 }
 
+// Modo Desafio (titular-desafiante): mapa { <characterId>: { titular, log } }.
+// Vive dentro do Treinamento como aba paralela — não toca em logs.json,
+// progressão, sidequests nem MMR. Quando o aluno clica no rosto do Titular
+// atual entra como Desafiante; quando ninguém é Titular, clicar no 👑 inicia
+// uma reivindicação (vira Titular ao final, independente da nota). Visitantes
+// podem ser Titular, mas ficam como "Um visitante" (sem persistência de ID).
+if (!fs.existsSync(path.join(DATA_DIR, 'desafio.json'))) {
+  writeJSON('desafio.json', { titulares: {} });
+}
+
 function readMMR() {
   const data = readJSON('mmr.json', { players: {}, characters: {} });
   if (!data.players) data.players = {};
@@ -356,6 +366,12 @@ function publicUser(u) {
       if (teacher && teacher.name) safe.teacherName = teacher.name;
     } catch {}
   }
+  // Coroas (modo Desafio): lista de personagens onde o usuário é Titular atual.
+  // Visitante recebe [] — id efêmero, não persistimos titularidade dele em
+  // termos de identidade. getUserCrowns lê desafio.json e filtra por userId.
+  try {
+    safe.crowns = getUserCrowns(safe.id);
+  } catch { safe.crowns = []; }
   return safe;
 }
 
@@ -786,13 +802,14 @@ const ACHIEVEMENT_DEFS = [
   { id: 'trilha_skill_5',      icon: '▲', title: 'Autoconhecimento',    description: 'Concluiu todos os exercícios da competência Eu.',                                   tier: 'silver' },
   { id: 'trilha_master',       icon: '◆', title: 'Programa concluído', description: 'Concluiu todos os exercícios das 5 competências.',                                  tier: 'platinum' },
   { id: 'high_score',          icon: '★', title: 'Excelência técnica', description: 'Atingiu pontuação ≥ 25 em uma única sessão.',                                       tier: 'gold' },
+  { id: 'meteu_o_lacan',       icon: '⊛', title: 'Meteu o Lacan',       description: 'Tirou ≥ 70 em uma sessão com até 15 mensagens — eficiência clínica.',              tier: 'gold' },
   { id: 'speed_demon',         icon: '↗', title: 'Eficiência',          description: 'Concluiu uma sessão em menos de 5 min com pontuação positiva.',                     tier: 'silver' },
   { id: 'early_bird',          icon: '◔', title: 'Madrugador',          description: 'Realizou uma sessão antes das 7h.',                                                 tier: 'bronze' },
   { id: 'night_owl',           icon: '◑', title: 'Sessão noturna',      description: 'Realizou uma sessão depois das 23h.',                                               tier: 'bronze' },
   { id: 'centena',             icon: '∞', title: 'Centena',             description: '100 sessões concluídas.',                                                           tier: 'platinum' },
   { id: 'polivalente',         icon: '◉', title: 'Versatilidade',       description: 'Concluiu sessão de cada tipo (trilha, simulação, neuro) num mesmo dia.',           tier: 'gold' },
-  { id: 'streak_7_ever',       icon: '●', title: 'Constância',          description: 'Manteve constância de 7 dias ao menos uma vez.',                                    tier: 'silver' },
-  { id: 'streak_30_ever',      icon: '●', title: 'Persistência',        description: 'Manteve constância de 30 dias ao menos uma vez.',                                   tier: 'platinum' },
+  { id: 'streak_7_ever',       icon: '●', title: 'Constância',          description: 'Manteve constância de 4 semanas consecutivas ao menos uma vez.',                    tier: 'silver' },
+  { id: 'streak_30_ever',      icon: '●', title: 'Persistência',        description: 'Manteve constância de 12 semanas consecutivas ao menos uma vez.',                   tier: 'platinum' },
   { id: 'highlights_10',       icon: '◎', title: 'Curador',             description: 'Marcou 10 mensagens como destaque em sessões.',                                     tier: 'silver' },
   { id: 'all_difficulties',    icon: '⊟', title: 'Calibragem',          description: 'Concluiu exercícios das 3 dificuldades (iniciante, intermediário, avançado).',     tier: 'silver' },
   { id: 'lua_cheia',           icon: '◐', title: 'Amplitude',           description: 'Realizou sessões antes das 7h e depois das 23h em dias diferentes.',               tier: 'gold' },
@@ -802,25 +819,46 @@ function dayKey(timestamp) {
   return new Date(timestamp).toISOString().slice(0, 10);
 }
 
+// Chave de semana (ISO 8601 simplificado): retorna a data ISO da SEGUNDA-feira
+// da semana de `timestamp` em UTC. Duas datas têm a mesma semana se compartilham
+// a mesma "monday key" (formato YYYY-MM-DD). Diferença entre duas mondays
+// consecutivas é exatamente 7 dias — facilita o cálculo de runs.
+function weekKey(timestamp) {
+  const d = new Date(timestamp);
+  // getUTCDay(): domingo=0..sábado=6. Convertendo pra ISO (segunda=1..domingo=7):
+  const isoDay = d.getUTCDay() || 7;
+  const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - (isoDay - 1)));
+  return monday.toISOString().slice(0, 10);
+}
+
+// Streak em SEMANAS consecutivas. Uma semana é "ativa" quando o usuário tem
+// pelo menos um log nela (qualquer dia entre segunda e domingo UTC). Mudou de
+// streak diária — a régua agora é constância semanal: você não precisa abrir
+// o app todo dia, só pelo menos uma vez por semana pra manter a sequência.
 function computeStreak(userLogs) {
   if (!userLogs.length) {
-    return { current: 0, longest: 0, isAlive: false, lastActiveDate: null, status: 'none', daysToWeekly: 7, daysToMonthly: 30 };
+    return {
+      current: 0, longest: 0, isAlive: false, lastActiveDate: null,
+      status: 'none', daysToNextWeek: 7, weeksToMonthly: 4,
+    };
   }
-  const days = new Set(userLogs.map((l) => dayKey(l.timestamp || l.createdAt || Date.now())));
-  const today = dayKey(Date.now());
-  const yesterday = dayKey(Date.now() - 86400000);
+  const weeks = new Set(userLogs.map((l) => weekKey(l.timestamp || l.createdAt || Date.now())));
+  const thisWeek = weekKey(Date.now());
+  const lastWeek = weekKey(Date.now() - 7 * 86400000);
 
-  let cursor = days.has(today) ? today : (days.has(yesterday) ? yesterday : null);
+  // Cursor: começa na semana atual (se tem log) ou na anterior (carência de 1
+  // semana — você não perde a streak imediatamente quando vira a segunda).
+  let cursor = weeks.has(thisWeek) ? thisWeek : (weeks.has(lastWeek) ? lastWeek : null);
   let current = 0;
   if (cursor) {
     const d = new Date(cursor + 'T00:00:00Z');
-    while (days.has(d.toISOString().slice(0, 10))) {
+    while (weeks.has(d.toISOString().slice(0, 10))) {
       current++;
-      d.setUTCDate(d.getUTCDate() - 1);
+      d.setUTCDate(d.getUTCDate() - 7);
     }
   }
 
-  const sorted = [...days].sort();
+  const sorted = [...weeks].sort();
   let longest = 0;
   let run = 0;
   for (let i = 0; i < sorted.length; i++) {
@@ -828,14 +866,25 @@ function computeStreak(userLogs) {
     const prev = new Date(sorted[i - 1] + 'T00:00:00Z');
     const cur = new Date(sorted[i] + 'T00:00:00Z');
     const diff = Math.round((cur - prev) / 86400000);
-    if (diff === 1) run++;
+    if (diff === 7) run++;
     else { longest = Math.max(longest, run); run = 1; }
   }
   longest = Math.max(longest, run);
 
   const isAlive = current > 0;
-  const lastActiveDate = days.has(today) ? today : (days.has(yesterday) ? yesterday : sorted[sorted.length - 1] || null);
-  const status = current >= 30 ? 'monthly' : current >= 7 ? 'weekly' : 'none';
+  // Última data de atividade real (pra UI mostrar "última sessão em...").
+  const allDays = userLogs
+    .map((l) => dayKey(l.timestamp || l.createdAt || Date.now()))
+    .sort();
+  const lastActiveDate = allDays[allDays.length - 1] || null;
+  // status: 4+ semanas = mensal; 1+ = semanal; 0 = none.
+  const status = current >= 4 ? 'monthly' : current >= 1 ? 'weekly' : 'none';
+
+  // Dias até a próxima segunda UTC (quando uma nova semana começa). Se hoje é
+  // segunda, fica 7; se domingo, fica 1.
+  const now = new Date();
+  const isoDayNow = now.getUTCDay() || 7;
+  const daysToNextWeek = 8 - isoDayNow;
 
   return {
     current,
@@ -843,8 +892,8 @@ function computeStreak(userLogs) {
     isAlive,
     lastActiveDate,
     status,
-    daysToWeekly: Math.max(0, 7 - current),
-    daysToMonthly: Math.max(0, 30 - current),
+    daysToNextWeek,
+    weeksToMonthly: Math.max(0, 4 - current),
   };
 }
 
@@ -886,6 +935,11 @@ function computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro)
 
   if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 25)) earned.add('high_score');
   if (userLogs.some((l) => (l.durationSeconds || 9999) < 300 && Number.isFinite(l.score) && l.score > 0)) earned.add('speed_demon');
+  // Meteu o Lacan: ≥70 em uma sessão com no máximo 15 mensagens (paciente +
+  // aluno combinados, já sem isSystem — o saveLog filtra isso antes de gravar).
+  if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 70 && Array.isArray(l.messages) && l.messages.length <= 15)) {
+    earned.add('meteu_o_lacan');
+  }
 
   let hasEarly = false;
   let hasLate = false;
@@ -908,8 +962,8 @@ function computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro)
     earned.add('polivalente');
   }
 
-  if (streak.longest >= 7)  earned.add('streak_7_ever');
-  if (streak.longest >= 30) earned.add('streak_30_ever');
+  if (streak.longest >= 4)  earned.add('streak_7_ever');   // 4 semanas consecutivas (≈1 mês)
+  if (streak.longest >= 12) earned.add('streak_30_ever');  // 12 semanas consecutivas (≈3 meses)
 
   let highlights = 0;
   for (const l of userLogs) {
@@ -3264,6 +3318,371 @@ app.post('/api/notifications/read-all', requireAuth, (req, res) => {
   for (const n of items) if (!n.read) { n.read = true; dirty = true; }
   if (dirty) writeNotifications(all);
   res.json({ ok: true });
+});
+
+// ============================================================================
+// MODO DESAFIO (titular-desafiante) — aba paralela dentro do Treinamento
+// ============================================================================
+// Sistema isolado: NÃO toca em logs.json, progressão, sidequests nem MMR.
+// Cada paciente tem no máximo um Titular por vez; quem clica no rosto do
+// Titular atual entra como Desafiante (avaliador titular-desafiante decide se
+// assume); quando ninguém é Titular, clicar no 👑 reivindica a posição (vira
+// Titular ao final, independente da nota). Visitantes podem ser Titular mas
+// não persistimos identidade — aparecem como "Um visitante" (incentivo pra
+// usuários reais substituírem).
+
+const DESAFIO_MAX_MESSAGES = 500;
+const DESAFIO_MAX_MESSAGE_LEN = 20000;
+
+function readDesafio() {
+  const data = readJSON('desafio.json', { titulares: {} });
+  if (!data.titulares || typeof data.titulares !== 'object') data.titulares = {};
+  return data;
+}
+function writeDesafio(data) { writeJSON('desafio.json', data); }
+
+// Snapshot público de um Titular pra cards do FreePlay. Não inclui o log do
+// titular (esse fica server-side, só vai pro avaliador). Visitante vira
+// "Um visitante" — não há nome próprio nem foto.
+function publicTitular(t) {
+  if (!t) return null;
+  if (t.isVisitor) {
+    return {
+      isVisitor: true,
+      name: 'Um visitante',
+      profilePhoto: '',
+      claimedAt: t.claimedAt || null,
+      lastDefendedAt: t.lastDefendedAt || null,
+    };
+  }
+  return {
+    isVisitor: false,
+    userId: t.userId || null,
+    name: t.userName || 'Terapeuta',
+    profilePhoto: t.userPhoto || '',
+    claimedAt: t.claimedAt || null,
+    lastDefendedAt: t.lastDefendedAt || null,
+  };
+}
+
+// Lista de coroas (títulos temporários "👑 <personagem>") de um usuário real.
+// Atravessa todos os titulares e devolve os personagens onde o userId é
+// Titular. Visitante nunca tem coroa persistente (id efêmero).
+function getUserCrowns(userId) {
+  if (!userId || String(userId).startsWith('visitor-')) return [];
+  const { titulares } = readDesafio();
+  const out = [];
+  for (const [characterId, t] of Object.entries(titulares)) {
+    if (!t || t.isVisitor) continue;
+    if (t.userId === userId) {
+      out.push({
+        characterId,
+        characterName: t.characterName || 'Paciente',
+        label: `👑 ${t.characterName || 'Paciente'}`,
+      });
+    }
+  }
+  return out;
+}
+
+// Sanitiza mensagens enviadas pelo cliente ao concluir um desafio.
+function cleanDesafioMessages(rawMessages) {
+  const arr = Array.isArray(rawMessages) ? rawMessages.slice(0, DESAFIO_MAX_MESSAGES) : [];
+  return arr
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && !m.isSystem)
+    .map((m) => ({
+      role: m.role,
+      content: clampStr(m.content, DESAFIO_MAX_MESSAGE_LEN),
+      highlighted: !!m.highlighted,
+      comment: clampStr(m.comment, 2000),
+    }));
+}
+
+// Avaliador titular-desafiante: mesma família dos demais avaliadores em
+// avaliacao/. Comparativo, mas com resultado binário (Titular permanece ou
+// Desafiante assume). Output NÃO carrega notas numéricas — só o bloco
+// [titular-desafiante-resultado] com {"desafiante_assume": bool, "justification": "..."}.
+function loadTitularDesafiantePrompt() {
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-titular-desafiante-v2.md');
+  if (!fs.existsSync(promptFile)) {
+    throw new Error(`Prompt do avaliador titular-desafiante não encontrado em ${promptFile}`);
+  }
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
+// Extrai o bloco [titular-desafiante-resultado] do output do avaliador.
+// Mesma forma do [sidequest-resultado] — JSON cru após marcador. Retorna
+// { clean, result } onde result = { desafianteAssume, justification } ou null.
+function extractTitularDesafianteResult(evaluation) {
+  const text = typeof evaluation === 'string' ? evaluation : '';
+  const markerMatch = text.match(/\[titular-desafiante-resultado\]/i);
+  if (!markerMatch) return { clean: text, result: null };
+  const markerIdx = markerMatch.index;
+  const after = text.slice(markerIdx);
+  const jsonMatch = after.match(/\{[\s\S]*?\}/);
+  let result = null;
+  let blockEnd = markerIdx + (after.match(/\[titular-desafiante-resultado\][^\n]*/i)[0].length);
+  if (jsonMatch) {
+    blockEnd = markerIdx + jsonMatch.index + jsonMatch[0].length;
+    try {
+      const obj = JSON.parse(jsonMatch[0]);
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        const v = obj.desafiante_assume;
+        result = {
+          desafianteAssume: v === true || String(v).toLowerCase() === 'true',
+          justification: typeof obj.justification === 'string' ? obj.justification : '',
+        };
+      }
+    } catch {}
+  }
+  // Remove também um separador "---" imediatamente antes do marcador.
+  const before = text.slice(0, markerIdx);
+  const sep = before.match(/\n*-{3,}[^\S\n]*\n*$/);
+  const start = sep ? before.length - sep[0].length : markerIdx;
+  const clean = (text.slice(0, start) + text.slice(blockEnd)).replace(/\n{3,}/g, '\n\n').trim();
+  return { clean, result };
+}
+
+// Resolve o "lado" titular pro card (usado tanto na lista pública quanto no
+// estado de início de uma sessão de desafio).
+app.get('/api/desafio/titulares', requireAuth, (req, res) => {
+  const { titulares } = readDesafio();
+  const out = {};
+  for (const [characterId, t] of Object.entries(titulares)) {
+    out[characterId] = publicTitular(t);
+  }
+  res.json(out);
+});
+
+// Coroas do usuário logado (lista de personagens onde ele é Titular).
+// Visitante recebe [] — não tem coroa persistente.
+app.get('/api/me/crowns', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') return res.json([]);
+  res.json(getUserCrowns(req.user.id));
+});
+
+// Estado inicial pra uma sessão de Desafio. Antes de começar o atendimento, o
+// cliente bate aqui pra saber se vai entrar como Reivindicante (sem Titular
+// atual) ou Desafiante (há Titular). Validamos que o personagem existe.
+app.get('/api/desafio/state/:characterId', requireAuth, (req, res) => {
+  const characters = readJSON('freeplay-characters.json');
+  const char = characters.find((c) => String(c.id) === String(req.params.characterId));
+  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
+  const { titulares } = readDesafio();
+  const t = titulares[char.id];
+  if (!t) {
+    return res.json({
+      mode: 'reivindicar',
+      character: { id: char.id, name: char.name },
+      titular: null,
+    });
+  }
+  // Bloqueio: usuário não pode "desafiar a si mesmo" — já é Titular.
+  if (!t.isVisitor && req.user.role !== 'visitor' && t.userId === req.user.id) {
+    return res.json({
+      mode: 'auto-titular',
+      character: { id: char.id, name: char.name },
+      titular: publicTitular(t),
+    });
+  }
+  return res.json({
+    mode: 'desafiar',
+    character: { id: char.id, name: char.name },
+    titular: publicTitular(t),
+  });
+});
+
+// Reivindica um Titular (não há Titular atual). Sem avaliação clínica — o aluno
+// vira Titular automaticamente, independente da nota. O log dele fica salvo
+// como referência pro próximo Desafiante. Race condition: se outro reivindicou
+// no meio do caminho, devolvemos 409 e o cliente entra como Desafiante.
+app.post('/api/desafio/reivindicar', requireAuth, writeLimiter, (req, res) => {
+  const body = req.body || {};
+  const characters = readJSON('freeplay-characters.json');
+  const char = characters.find((c) => String(c.id) === String(body.characterId));
+  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
+
+  const data = readDesafio();
+  if (data.titulares[char.id]) {
+    return res.status(409).json({
+      error: 'Alguém já reivindicou este Titular enquanto você atendia. Vá pra desafiar.',
+      titular: publicTitular(data.titulares[char.id]),
+    });
+  }
+
+  const messages = cleanDesafioMessages(body.messages);
+  if (!messages.length) {
+    return res.status(400).json({ error: 'A sessão precisa ter ao menos uma mensagem.' });
+  }
+
+  const isVisitor = req.user.role === 'visitor';
+  const now = new Date().toISOString();
+  data.titulares[char.id] = {
+    characterName: char.name,
+    isVisitor,
+    userId: isVisitor ? null : req.user.id,
+    userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
+    userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
+    logMessages: messages,
+    durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
+    claimedAt: now,
+    lastDefendedAt: now,
+  };
+  writeDesafio(data);
+
+  res.json({
+    ok: true,
+    kind: 'claimed',
+    character: { id: char.id, name: char.name },
+    titular: publicTitular(data.titulares[char.id]),
+    isVisitor,
+  });
+});
+
+// Desafia o Titular atual: o cliente envia seu log; o servidor carrega o log
+// do Titular, monta o contexto pro avaliador titular-desafiante, roda o modelo
+// em stream (mesmo padrão SSE de /api/evaluate por causa do timeout do
+// Cloudflare), parseia o bloco [titular-desafiante-resultado] no final, e
+// atualiza o Titular se o Desafiante assumiu. O cliente recebe a prosa
+// chegando em deltas + um evento final `data:{done, outcome}` com o resultado.
+app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
+  const body = req.body || {};
+  const openai = getOpenAI();
+
+  const characters = readJSON('freeplay-characters.json');
+  const char = characters.find((c) => String(c.id) === String(body.characterId));
+  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
+
+  const data = readDesafio();
+  const titular = data.titulares[char.id];
+  if (!titular) {
+    return res.status(409).json({
+      error: 'Não há Titular para este caso. Reivindique a posição em vez de desafiar.',
+    });
+  }
+  // Bloqueio: não pode desafiar a si mesmo.
+  if (!titular.isVisitor && req.user.role !== 'visitor' && titular.userId === req.user.id) {
+    return res.status(409).json({ error: 'Você já é o Titular deste caso — não pode se desafiar.' });
+  }
+
+  if (req.user.role === 'visitor' && !visitorEvaluationEnabled()) {
+    return res.status(403).json({ error: 'A avaliação não está disponível para visitantes no momento.' });
+  }
+
+  const desafianteMessages = cleanDesafioMessages(body.messages);
+  if (!desafianteMessages.length) {
+    return res.status(400).json({ error: 'A sessão do Desafiante precisa ter ao menos uma mensagem.' });
+  }
+
+  if (!openai) {
+    // Sem chave OpenAI: não dá pra rodar avaliador comparativo. Mantém o
+    // Titular atual e devolve mensagem de erro pro cliente (sem trocar nada).
+    return res.json({
+      ok: true,
+      kind: 'challenge',
+      outcome: 'titular-permanece',
+      evaluation: '[Modo demonstração — OPENAI_API_KEY não configurada] O avaliador titular-desafiante não pôde rodar; o Titular permanece.',
+      titular: publicTitular(titular),
+    });
+  }
+
+  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: char.id } });
+  const titularName = titular.isVisitor ? 'Titular (visitante)' : (titular.userName || 'Titular');
+  const desafianteName = req.user.role === 'visitor' ? 'Desafiante (visitante)' : (req.user.name || req.user.username || 'Desafiante');
+  const logTitular = transcriptFromMessages(titular.logMessages || [], titularName, char.name);
+  const logDesafiante = transcriptFromMessages(desafianteMessages, desafianteName, char.name);
+
+  const userContent =
+    (bloco1 ? `[BLOCO 1 DO CASO] (referência interna do avaliador — gabarito)\n${bloco1}\n\n---\n\n` : '') +
+    `[LOG DO TITULAR — ${titularName} com ${char.name}]\n${logTitular || '(sem mensagens)'}\n\n---\n\n` +
+    `[LOG DO DESAFIANTE — ${desafianteName} com ${char.name}]\n${logDesafiante || '(sem mensagens)'}`;
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.flushHeaders) res.flushHeaders();
+  res.write(': ok\n\n');
+  const heartbeat = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch {}
+  }, 15000);
+
+  let fullText = '';
+  let usage = null;
+  try {
+    const stream = await openai.responses.create({
+      model: OPENAI_EVAL_MODEL,
+      reasoning: { effort: OPENAI_EVAL_EFFORT, summary: 'auto' },
+      max_output_tokens: 64000,
+      instructions: loadTitularDesafiantePrompt(),
+      input: [{ role: 'user', content: userContent }],
+      stream: true,
+    });
+    for await (const ev of stream) {
+      if (ev.type === 'response.output_text.delta') {
+        if (ev.delta) {
+          fullText += ev.delta;
+          res.write(`data: ${JSON.stringify({ delta: ev.delta })}\n\n`);
+        }
+      } else if (ev.type === 'response.completed') {
+        usage = ev.response?.usage || null;
+      }
+    }
+    if (usage) logOpenAIUsage('Desafio (titular-desafiante)', OPENAI_EVAL_MODEL, usage);
+  } catch (err) {
+    clearInterval(heartbeat);
+    console.error('Desafio evaluate error:', err.message);
+    try { res.write(`data: ${JSON.stringify({ error: 'Erro ao comunicar com a IA: ' + err.message })}\n\n`); } catch {}
+    res.end();
+    return;
+  }
+  clearInterval(heartbeat);
+
+  // Parse do bloco [titular-desafiante-resultado] + atualização de estado.
+  // Se o desafiante assume, troca o Titular. Read-modify-write atômico no
+  // mesmo request — improvável ter race aqui (avaliação demora minutos).
+  const { clean, result } = extractTitularDesafianteResult(fullText);
+  let outcome = 'titular-permanece';
+  let newTitular = titular;
+  if (result && result.desafianteAssume) {
+    outcome = 'desafiante-assume';
+    const fresh = readDesafio();
+    const isVisitor = req.user.role === 'visitor';
+    const now = new Date().toISOString();
+    fresh.titulares[char.id] = {
+      characterName: char.name,
+      isVisitor,
+      userId: isVisitor ? null : req.user.id,
+      userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
+      userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
+      logMessages: desafianteMessages,
+      durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
+      claimedAt: now,
+      lastDefendedAt: now,
+    };
+    writeDesafio(fresh);
+    newTitular = fresh.titulares[char.id];
+  } else {
+    // Titular permaneceu: só atualiza lastDefendedAt.
+    const fresh = readDesafio();
+    if (fresh.titulares[char.id]) {
+      fresh.titulares[char.id].lastDefendedAt = new Date().toISOString();
+      writeDesafio(fresh);
+      newTitular = fresh.titulares[char.id];
+    }
+  }
+
+  // Sinaliza fim com payload final (cliente já remontou a prosa via deltas).
+  // Mandamos `clean` também porque o cliente exibe o texto sem o bloco JSON.
+  res.write(`data: ${JSON.stringify({
+    done: true,
+    outcome,
+    evaluation: clean,
+    justification: result ? result.justification : '',
+    titular: publicTitular(newTitular),
+    character: { id: char.id, name: char.name },
+  })}\n\n`);
+  res.end();
 });
 
 // Serve static files in production

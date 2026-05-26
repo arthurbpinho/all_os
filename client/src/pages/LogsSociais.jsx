@@ -114,7 +114,7 @@ export default function LogsSociais({ user }) {
     <div>
       <div className="page-header">
         <div className="eyebrow">Duelo · Histórico</div>
-        <h2>Logs <span className="accent"><Typewriter text="Sociais" /></span></h2>
+        <h2>Logs <span className="accent"><Typewriter text="de Duelo" /></span></h2>
         <p>Seus duelos agrupados por adversário, do mais frequente ao menos. Toque em um duelo para ver o resultado e a análise comparativa.</p>
         <div className="ornament" />
       </div>

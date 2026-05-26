@@ -7,7 +7,7 @@ import ScoreBadge from '../components/ScoreBadge';
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
 // envia, o avaliador comparativo roda no backend e o resultado (vencedor + as
 // duas notas + análise) aparece aqui. Enquanto o oponente não termina, fica
-// pendente (você pode aguardar aqui ou ver depois nos Logs Sociais).
+// pendente (você pode aguardar aqui ou ver depois nos Logs de Duelo).
 
 const POLL_MS = 5000;
 
@@ -267,10 +267,10 @@ export default function DuelSession({ user }) {
           <h3 style={{ marginTop: 16 }}>Aguardando {opponentName} terminar…</h3>
           <p style={{ color: 'var(--ink-soft)', maxWidth: 460, margin: '8px auto 0', lineHeight: 1.6 }}>
             Seu resultado fica pendente até a outra pessoa concluir o atendimento de <strong>{character?.name}</strong>.
-            Você pode esperar aqui (atualiza sozinho) ou ver depois nos Logs Sociais.
+            Você pode esperar aqui (atualiza sozinho) ou ver depois nos Logs de Duelo.
           </p>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 22, flexWrap: 'wrap' }}>
-            <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Ver depois (Logs Sociais)</button>
+            <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Ver depois (Logs de Duelo)</button>
           </div>
         </div>
       </div>
@@ -283,7 +283,7 @@ export default function DuelSession({ user }) {
       return (
         <div className="post-session">
           <div className="alert">Resultado indisponível para este duelo.</div>
-          <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Logs Sociais</button>
+          <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Logs de Duelo</button>
         </div>
       );
     }
@@ -361,7 +361,7 @@ export default function DuelSession({ user }) {
         )}
 
         <div className="post-session-actions">
-          <button className="btn btn-primary" onClick={() => navigate('/duelo/logs')}>Logs Sociais</button>
+          <button className="btn btn-primary" onClick={() => navigate('/duelo/logs')}>Logs de Duelo</button>
           <button className="btn btn-outline" onClick={() => navigate('/duelo')}>Novo duelo</button>
         </div>
       </div>

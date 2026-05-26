@@ -14,6 +14,7 @@ server/data/migrations.json
 server/data/mmr.json
 server/data/duels.json
 server/data/notifications.json
+server/data/desafio.json
 server/data/tmp_audio.webm
 
 # Backups locais
