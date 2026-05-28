@@ -2116,8 +2116,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // paciente (há log anterior) OU tem uma sidequest ativa, a avaliação passa a
   // rodar no AVALIADOR DE PROGRESSÃO, com o contexto montado server-side: Bloco 1
   // + Atendimento 1 + feedback anterior + sidequest ativa, seguido do atendimento
-  // que o cliente enviou (Atendimento 2). É a avaliação "de verdade", então usa o
-  // modelo melhor (EVAL/5.5). O Competitivo (MMR) nunca entra aqui.
+  // que o cliente enviou (Atendimento 2). Continua sendo Treinamento, então roda
+  // no SIM/5.4 (herdado de isFreeSim acima) — o 5.5 fica só pro Competitivo, Neuro,
+  // Duelo e Trilha. O Competitivo (MMR) nunca entra aqui.
   if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
     const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
     const activeSq = getActiveSidequest(req.user.id);
@@ -2125,8 +2126,6 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       progressionMode = true;
       sidequestActive = !!activeSq;
       systemPrompt = loadProgressaoPrompt();
-      evalModel = OPENAI_EVAL_MODEL;
-      evalEffort = OPENAI_EVAL_EFFORT;
 
       const studentName = req.user.name || 'Aluno';
       const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
@@ -3492,12 +3491,21 @@ app.get('/api/desafio/state/:characterId', requireAuth, (req, res) => {
   });
 });
 
-// Reivindica um Titular (não há Titular atual). Sem avaliação clínica — o aluno
-// vira Titular automaticamente, independente da nota. O log dele fica salvo
-// como referência pro próximo Desafiante. Race condition: se outro reivindicou
-// no meio do caminho, devolvemos 409 e o cliente entra como Desafiante.
-app.post('/api/desafio/reivindicar', requireAuth, writeLimiter, (req, res) => {
+// Reivindica um Titular (não há Titular atual). O aluno vira Titular ao final,
+// SEMPRE — independente da nota; reivindicar nunca "falha". Mas, como todo
+// atendimento do Treinamento, agora recebe avaliação clínica: rodamos o
+// avaliador individual (v15) sobre o log do reivindicante e devolvemos a prosa
+// de feedback. Por viver no Modo Desafio, a avaliação é OPACA — o bloco oculto
+// [notas-supervisor] é stripado server-side ANTES de qualquer byte chegar ao
+// cliente (a nota nunca aparece, nem ao aluno nem ao supervisor; ver opacidade
+// do titular-desafiante). Reivindicamos PRIMEIRO (write atômico instantâneo) e
+// só então rodamos a avaliação — assim a avaliação demorada não abre janela de
+// race com outro reivindicante. Responde em SSE (mesmo padrão de /api/evaluate
+// e /desafio/desafiar) por causa do timeout de 100s do Cloudflare; cai pra JSON
+// quando não há avaliador (visitante sem toggle, ou OPENAI_API_KEY ausente).
+app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) => {
   const body = req.body || {};
+  const openai = getOpenAI();
   const characters = readJSON('freeplay-characters.json');
   const char = characters.find((c) => String(c.id) === String(body.characterId));
   if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
@@ -3516,6 +3524,8 @@ app.post('/api/desafio/reivindicar', requireAuth, writeLimiter, (req, res) => {
   }
 
   const isVisitor = req.user.role === 'visitor';
+
+  // Reivindica imediatamente (vira Titular independente da avaliação).
   const now = new Date().toISOString();
   data.titulares[char.id] = {
     characterName: char.name,
@@ -3530,13 +3540,109 @@ app.post('/api/desafio/reivindicar', requireAuth, writeLimiter, (req, res) => {
   };
   writeDesafio(data);
 
-  res.json({
-    ok: true,
+  const titularPublic = publicTitular(data.titulares[char.id]);
+
+  // Sem avaliador disponível (visitante com toggle off, ou sem chave OpenAI):
+  // reivindica sem avaliação e devolve JSON (o cliente trata os dois formatos).
+  const skipEval = (isVisitor && !visitorEvaluationEnabled()) || !openai;
+  if (skipEval) {
+    return res.json({
+      ok: true,
+      kind: 'claimed',
+      character: { id: char.id, name: char.name },
+      titular: titularPublic,
+      isVisitor,
+      evaluation: '',
+    });
+  }
+
+  // Avaliação individual (v15) do log do reivindicante, em stream. Opaca: o
+  // bloco [notas-supervisor] é cortado durante o stream (não enviamos os deltas
+  // a partir do marcador) e o `clean` final passa por extractSupervisorNotes.
+  const context = { type: 'freeplay', itemId: char.id };
+  const systemPrompt = loadAvaliacaoPrompt();
+  const bloco1 = resolveBloco1({ context });
+  const evalMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+  const inputTurns = withBloco1(evalMessages, bloco1)
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
+    .filter((m) => m.content);
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.flushHeaders) res.flushHeaders();
+  res.write(': ok\n\n');
+  const heartbeat = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch {}
+  }, 15000);
+
+  // Marcador do bloco oculto de notas (mesmo regex do extractSupervisorNotes).
+  const NOTES_RE = /\n*(?:-{3,}[^\S\n]*\r?\n+)?\[notas-supervisor\]/i;
+  let fullText = '';
+  let forwarding = true; // vira false ao detectar o início do bloco de notas
+  let usage = null;
+  try {
+    const stream = await openai.responses.create({
+      model: OPENAI_SIM_MODEL,
+      reasoning: { effort: OPENAI_SIM_EFFORT, summary: 'auto' },
+      max_output_tokens: 64000,
+      instructions: systemPrompt,
+      input: inputTurns,
+      stream: true,
+    });
+    for await (const ev of stream) {
+      if (ev.type === 'response.output_text.delta') {
+        if (!ev.delta) continue;
+        const prevLen = fullText.length;
+        fullText += ev.delta;
+        if (!forwarding) continue;
+        const m = fullText.match(NOTES_RE);
+        if (!m) {
+          res.write(`data: ${JSON.stringify({ delta: ev.delta })}\n\n`);
+        } else {
+          // Emite só o trecho deste delta que vem ANTES do marcador, depois
+          // para de encaminhar (as notas nunca chegam ao cliente).
+          forwarding = false;
+          const cut = m.index;
+          if (cut > prevLen) {
+            res.write(`data: ${JSON.stringify({ delta: fullText.slice(prevLen, cut) })}\n\n`);
+          }
+        }
+      } else if (ev.type === 'response.completed') {
+        usage = ev.response?.usage || null;
+      }
+    }
+    if (usage) logOpenAIUsage('Reivindicar (v15 opaco)', OPENAI_SIM_MODEL, usage);
+  } catch (err) {
+    clearInterval(heartbeat);
+    console.error('Reivindicar evaluate error:', err.message);
+    // A reivindicação já foi gravada; só sinaliza que a avaliação falhou.
+    try {
+      res.write(`data: ${JSON.stringify({
+        done: true,
+        kind: 'claimed',
+        evaluation: '',
+        error: 'A reivindicação foi registrada, mas a avaliação falhou: ' + err.message,
+        titular: titularPublic,
+        character: { id: char.id, name: char.name },
+      })}\n\n`);
+    } catch {}
+    res.end();
+    return;
+  }
+  clearInterval(heartbeat);
+
+  const { clean } = extractSupervisorNotes(fullText);
+  res.write(`data: ${JSON.stringify({
+    done: true,
     kind: 'claimed',
+    evaluation: clean,
+    titular: titularPublic,
     character: { id: char.id, name: char.name },
-    titular: publicTitular(data.titulares[char.id]),
-    isVisitor,
-  });
+  })}\n\n`);
+  res.end();
 });
 
 // Desafia o Titular atual: o cliente envia seu log; o servidor carrega o log
@@ -3611,8 +3717,8 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
   let usage = null;
   try {
     const stream = await openai.responses.create({
-      model: OPENAI_EVAL_MODEL,
-      reasoning: { effort: OPENAI_EVAL_EFFORT, summary: 'auto' },
+      model: OPENAI_SIM_MODEL,
+      reasoning: { effort: OPENAI_SIM_EFFORT, summary: 'auto' },
       max_output_tokens: 64000,
       instructions: loadTitularDesafiantePrompt(),
       input: [{ role: 'user', content: userContent }],
@@ -3628,7 +3734,7 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
         usage = ev.response?.usage || null;
       }
     }
-    if (usage) logOpenAIUsage('Desafio (titular-desafiante)', OPENAI_EVAL_MODEL, usage);
+    if (usage) logOpenAIUsage('Desafio (titular-desafiante)', OPENAI_SIM_MODEL, usage);
   } catch (err) {
     clearInterval(heartbeat);
     console.error('Desafio evaluate error:', err.message);
