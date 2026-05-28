@@ -325,7 +325,70 @@ export const api = {
   getDesafioState: (characterId) => request(`/desafio/state/${encodeURIComponent(characterId)}`),
   // Reivindica a posição de Titular (não há Titular atual). Independente da
   // nota — o aluno vira Titular ao final do atendimento.
-  reivindicarTitular: (data) => request('/desafio/reivindicar', { method: 'POST', body: data }),
+  // Reivindica o Titular (não há Titular atual). Vira Titular sempre, mas agora
+  // recebe avaliação individual (v15) opaca em SSE — mesmo padrão de stream do
+  // desafiar. Quando não há avaliador (visitante sem toggle / sem chave), o
+  // servidor devolve JSON cru (kind:'claimed', evaluation:''). onToken(delta,
+  // full) opcional pra exibir o feedback chegando ao vivo.
+  reivindicarTitular: async (data, onToken) => {
+    const token = getToken();
+    const res = await fetch(BASE + '/desafio/reivindicar', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(data),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      notifySessionExpired();
+      const err = await res.json().catch(() => ({ error: 'Sessão expirada' }));
+      throw new Error(err.error || 'Sessão expirada');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Erro ao reivindicar' }));
+      throw new Error(err.error || 'Erro ao reivindicar');
+    }
+    const ctype = res.headers.get('content-type') || '';
+    if (!ctype.includes('text/event-stream') || !res.body) {
+      // Sem avaliador (visitante sem toggle / sem chave) — JSON cru.
+      return res.json();
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let full = '';
+    let finalPayload = null;
+    let streamError = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const event = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch { continue; }
+          if (obj.delta) {
+            full += obj.delta;
+            if (onToken) { try { onToken(obj.delta, full); } catch {} }
+          } else if (obj.done) {
+            finalPayload = obj;
+          } else if (obj.error && !obj.done) {
+            streamError = obj.error;
+          }
+        }
+      }
+    }
+    if (streamError) throw new Error(streamError);
+    return { evaluationStream: full, ...(finalPayload || {}) };
+  },
   // Desafia o Titular atual via SSE: stream do avaliador titular-desafiante
   // + evento final `data:{done, outcome, evaluation, justification, titular}`.
   // onToken(delta, full) opcional pra exibir o texto chegando ao vivo.

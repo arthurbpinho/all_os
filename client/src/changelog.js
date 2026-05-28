@@ -8,51 +8,73 @@
 
 export const CHANGELOG = [
   {
+    date: '2026-05-28',
+    title: 'Avaliação de volta no Treinamento + correções',
+    body: `Resumo do que entrou hoje:
+
+🔹 Avaliação sempre presente:
+• O Treinamento voltou a receber avaliação ao final de cada atendimento — e a progressão de cada paciente também. Agora SEMPRE tem feedback, não importa o modo da sessão.
+• A nota do Treinamento conta para a sua evolução naquele paciente, mas não entra no Competitivo (o ranking continua valendo só pelo Competitivo).
+
+🔹 Modo Desafio (👑):
+• Quem reivindica um paciente (o primeiro a assumir, quando ninguém é Titular) agora também recebe a avaliação do próprio atendimento — antes ficava só com o log.
+• A nota do Modo Desafio nunca aparece: o que vale é o resultado (assumir ou não a posição) e a análise em texto.
+
+🔹 Atualizações no celular:
+• Corrigido o painel de Atualizações, que estava mal formatado e cortando parte da tela no celular.`,
+  },
+  {
+    date: '2026-05-26',
+    title: 'Modo Desafio e logs mais limpos',
+    body: `🔹 Modo Desafio (👑):
+• Dispute a "titularidade" de um paciente. Quando ninguém é Titular, você reivindica a posição; havendo um Titular, você o desafia e a IA decide quem fica com a coroa.
+• O título 👑 do paciente aparece no seu perfil enquanto você for o Titular.
+
+🔹 Logs mais limpos:
+• O log exportado ficou enxuto: o cabeçalho foi reduzido e a nota geral aparece apenas dentro da seção "Avaliação da IA".`,
+  },
+  {
+    date: '2026-05-25',
+    title: 'Progressão e Side Quests no Treinamento',
+    body: `🔹 Treinamento (antes "Simulação Livre"):
+• A Simulação Livre virou Treinamento, e a progressão passou a acontecer dentro dele: ao reatender um paciente, a avaliação leva em conta o atendimento anterior e o seu feedback, acompanhando a sua evolução no caso.
+
+🔹 Side Quests:
+• Objetivos especiais atribuídos pelo seu supervisor. Quando uma está ativa, ela vira o objetivo principal do atendimento; ao cumpri-la, você ganha um título de recompensa.
+
+🔹 Aba "Terapeutas" (supervisores e admin):
+• Banco de side quests, atribuição aos alunos e histórico — com atalhos para os logs e para avaliar a sessão.`,
+  },
+  {
     date: '2026-05-20',
     title: 'Atualizações Importantes ⚠️',
     body: `Olá, pessoal! Temos novos recursos e correções implementados na plataforma hoje. Segue o resumo do que já está disponível para testes:
 
 🔹 Calibração e Competitivo:
-
-    Calibração de Nível: Agora são necessárias 5 sessões de terapia para calibrar e definir seu nível inicial no sistema.
-
-    Consistência no Ranking: A nota geral e as colocações passam a exigir consistência, sendo calculadas com base no seu histórico acumulado de múltiplos atendimentos.
+• Calibração de Nível: agora são necessárias 5 sessões de terapia para calibrar e definir seu nível inicial no sistema.
+• Consistência no Ranking: a nota geral e as colocações passam a exigir consistência, sendo calculadas com base no seu histórico acumulado de múltiplos atendimentos.
 
 🔹 Duelos e Treinamento:
-
-    Duelo Social: Novo módulo com avaliação cruzada e registro de logs.
-
-    Competitivo vs. Treino: Divisão clara entre o sistema competitivo e o de treinamento. Os convites agora podem ser enviados tanto diretamente por WhatsApp quanto pelas notificações internas.
+• Duelo Social: novo módulo com avaliação cruzada e registro de logs.
+• Competitivo vs. Treino: divisão clara entre o sistema competitivo e o de treinamento. Os convites agora podem ser enviados tanto por WhatsApp quanto pelas notificações internas.
 
 🔹 Simulação Clínica:
-
-    Pacientes Dinâmicos: A dificuldade dos pacientes agora é dinâmica, ajustando-se de forma adaptativa com base nas tentativas de atendimento.
+• Pacientes Dinâmicos: a dificuldade dos pacientes agora é dinâmica, ajustando-se de forma adaptativa com base nas tentativas de atendimento.
 
 🔹 Sistema e Perfil:
-
-    Notificações: Central de notificações ativa, incluindo o sistema de convites entre usuários.
-
-    Segurança: Liberada a opção para alteração de senha (RECOMENDADO).
-
-    Títulos no Perfil: Implementação inicial da exibição de títulos baseados em conquistas (recurso ainda em desenvolvimento).
+• Notificações: central de notificações ativa, incluindo o sistema de convites entre usuários.
+• Segurança: liberada a opção para alteração de senha (RECOMENDADO).
+• Títulos no Perfil: exibição inicial de títulos baseados em conquistas.
 
 🔹 Logs Sociais e Duelos (correções):
-
-    Cancelar convite: agora dá pra cancelar um convite de duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.
-
-    Baixar o log: nos duelos concluídos, dá pra baixar o log completo (avaliação cruzada + notas + as duas sessões). Cada pessoa só acessa os próprios duelos, e tudo é apagado automaticamente 30 dias após a criação.
-
-    Layout no celular: corrigida a formatação do painel de Atualizações/Notificações e da lista de Logs Sociais (incluindo o botão de baixar), que estavam quebrados no celular.
+• Cancelar convite: agora dá pra cancelar um convite de duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.
+• Baixar o log: nos duelos concluídos, dá pra baixar o log completo (avaliação cruzada + notas + as duas sessões). Cada pessoa só acessa os próprios duelos, e tudo é apagado automaticamente 30 dias após a criação.
+• Layout no celular: corrigida a formatação do painel de Atualizações/Notificações e da lista de Logs Sociais.
 
 🔹 Avaliação e Logs (correções):
-
-    Avaliação na nuvem: corrigido o erro que deixava a avaliação "sem resposta" em sessões mais longas — a análise agora chega de forma contínua, sem travar.
-
-    Avaliador correto: a avaliação de sessão voltou a usar o avaliador certo (v15).
-
-    Simulação Livre: passa a ser de prática pura — sem nota nem avaliação ao final, apenas o log da sessão. A avaliação automática fica no Competitivo, na Neuroavaliação e na Trilha (o Duelo segue com sua avaliação cruzada).
-
-    Copiar e baixar logs: em todos os lugares com log, agora dá pra copiar ou baixar separadamente o log, a avaliação, ou os dois juntos.
+• Avaliação na nuvem: corrigido o erro que deixava a avaliação "sem resposta" em sessões mais longas — a análise agora chega de forma contínua, sem travar.
+• Avaliador correto: a avaliação de sessão voltou a usar o avaliador certo (v15).
+• Copiar e baixar logs: em todos os lugares com log, agora dá pra copiar ou baixar separadamente o log, a avaliação, ou os dois juntos.
 
 Aproveitem os novos recursos e continuem enviando os feedbacks com base na prática de vocês!`,
   },

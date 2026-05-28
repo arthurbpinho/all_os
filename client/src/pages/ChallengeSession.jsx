@@ -5,10 +5,12 @@ import { api } from '../api';
 // Sessão do modo Desafio (titular-desafiante). Vive dentro da aba Treinamento
 // como atalho clicando no canto inferior direito do card de um paciente:
 // - Quando NÃO há Titular do caso → modo 'reivindicar': o aluno atende, vira
-//   Titular ao final independente da nota (sem avaliação clínica).
+//   Titular ao final independente da nota, e recebe avaliação individual (v15)
+//   do seu atendimento — opaca, sem nota (consistente com a opacidade do modo).
 // - Quando HÁ Titular → modo 'desafiar': o aluno atende, o avaliador
 //   titular-desafiante compara o log dele com o do Titular atual e decide
 //   binariamente se o Desafiante assume.
+// Ambos os avaliadores rodam no SIM/5.4 (Desafio vive no Treinamento).
 //
 // ISOLAMENTO: o log NÃO entra em logs.json, não puxa sidequest, não conta
 // melhor-score, não toca o MMR competitivo. Vive em desafio.json à parte.
@@ -203,8 +205,9 @@ export default function ChallengeSession({ user }) {
 
     try {
       if (state?.mode === 'reivindicar') {
-        const res = await api.reivindicarTitular(payload);
+        const res = await api.reivindicarTitular(payload, (_delta, full) => setStreamingText(full));
         setOutcome(res.kind === 'claimed' ? 'claimed' : 'titular-permanece');
+        setEvaluationText(res.evaluation || res.evaluationStream || '');
         setNewTitular(res.titular || null);
       } else {
         // Modo desafiar: stream do avaliador titular-desafiante.
@@ -288,7 +291,7 @@ export default function ChallengeSession({ user }) {
               <span className="spinner" />
               <span style={{ marginLeft: 12 }}>
                 {state.mode === 'reivindicar'
-                  ? 'Registrando sua reivindicação…'
+                  ? 'Você vira Titular. A IA está avaliando seu atendimento — pode levar alguns segundos.'
                   : 'A IA está comparando seu trabalho com o do Titular. Pode levar alguns segundos.'}
               </span>
               {streamingText && (
@@ -303,10 +306,16 @@ export default function ChallengeSession({ user }) {
                 Você foi marcado como Titular de <strong>{state.character.name}</strong>. Até alguém te desafiar e
                 vencer, esse título fica seu — aparece no seu perfil como <strong>👑 {state.character.name}</strong>.
               </div>
-              <p style={{ color: 'var(--ink-soft)', fontSize: 14 }}>
-                A reivindicação não recebe avaliação clínica. Seu log fica salvo como base de comparação para
-                quem te desafiar no futuro.
-              </p>
+              {evaluationText ? (
+                <div className="post-evaluation">
+                  <h4>Avaliação do seu atendimento</h4>
+                  <div className="post-evaluation-body">{evaluationText}</div>
+                </div>
+              ) : (
+                <p style={{ color: 'var(--ink-soft)', fontSize: 14 }}>
+                  Seu log fica salvo como base de comparação para quem te desafiar no futuro.
+                </p>
+              )}
             </>
           ) : (
             <>
@@ -399,7 +408,7 @@ export default function ChallengeSession({ user }) {
         {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
           <div className="empty-chat" style={{ marginTop: 100 }}>
             {state.mode === 'reivindicar'
-              ? `Ninguém é Titular de ${state.character.name} ainda. Atenda e você vira Titular ao final — independente da nota. Seu log fica de base para desafios futuros.`
+              ? `Ninguém é Titular de ${state.character.name} ainda. Atenda e você vira Titular ao final — independente da nota — e recebe a avaliação do seu atendimento. Seu log fica de base para desafios futuros.`
               : `${titular?.name || 'O Titular atual'} detém a posição de ${state.character.name}. Atenda o paciente; a IA vai comparar seu trabalho com o do Titular e decidir se você assume.`}
           </div>
         )}
@@ -460,7 +469,7 @@ export default function ChallengeSession({ user }) {
             <h4>Pronto para começar?</h4>
             <p>
               {state.mode === 'reivindicar'
-                ? `Você está reivindicando a posição de Titular de ${state.character.name}. Atenda como faria em qualquer sessão — vira Titular ao final, independente da nota.`
+                ? `Você está reivindicando a posição de Titular de ${state.character.name}. Atenda como faria em qualquer sessão — vira Titular ao final, independente da nota, e recebe a avaliação do seu atendimento.`
                 : `Você está desafiando ${titular?.name || 'o Titular atual'} pela posição de ${state.character.name}. Faça seu melhor — a IA vai comparar.`}
             </p>
             <button className="btn btn-primary btn-lg" onClick={handleStart}>
@@ -506,7 +515,7 @@ export default function ChallengeSession({ user }) {
                 {empty
                   ? 'A sessão não tem mensagens ainda. Tem certeza que deseja enviar?'
                   : isReivindicar
-                    ? `Ao concluir, você vira Titular de ${state.character.name} (independente da nota). Esta sessão não receberá avaliação clínica detalhada.`
+                    ? `Ao concluir, você vira Titular de ${state.character.name} (independente da nota) e recebe a avaliação do seu atendimento. A avaliação é definitiva — não dá pra continuar este atendimento depois.`
                     : `Sua sessão será comparada com a do Titular atual pela IA. Se você for melhor, assume a posição; senão, o Titular permanece. Esta avaliação é definitiva — não dá pra continuar este atendimento depois.`}
               </p>
               <div className="modal-actions">

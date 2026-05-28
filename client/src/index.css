@@ -3260,6 +3260,8 @@ select option { background: var(--cream); color: var(--ink); }
 .sys-update-title { font-weight: 700; color: var(--marrs-deep); font-size: 14.5px; margin-bottom: 6px; }
 .sys-update-body {
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   font-size: 13px; line-height: 1.55; color: var(--ink-soft);
 }
 
