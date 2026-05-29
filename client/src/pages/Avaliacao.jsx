@@ -5,6 +5,7 @@ import Typewriter from '../components/Typewriter';
 import LogActions from '../components/LogActions';
 import CriteriaTable from '../components/CriteriaTable';
 import { makeLogItems } from '../logFiles';
+import { useWakeLock } from '../useWakeLock';
 
 export default function Avaliacao({ user }) {
   // As notas por critério (bloco [notas-supervisor]) só aparecem pra
@@ -24,6 +25,9 @@ export default function Avaliacao({ user }) {
   const [liveReasoning, setLiveReasoning] = useState('');
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
+  useWakeLock(loading);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

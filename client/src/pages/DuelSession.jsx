@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import ScoreBadge from '../components/ScoreBadge';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
+import { useWakeLock } from '../useWakeLock';
 
 // Sessão de duelo: você atende o personagem do duelo na sua própria sessão.
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
@@ -34,6 +35,10 @@ export default function DuelSession({ user }) {
 
   const [submitting, setSubmitting] = useState(false); // enviando/avaliando
   const [view, setView] = useState('loading'); // loading | session | waiting | result | evaluating
+
+  // Mantém a tela ativa durante o envio/avaliação. Não inclui 'waiting' (espera
+  // pelo oponente), que pode durar horas — aí não faz sentido segurar a tela.
+  useWakeLock(submitting || view === 'evaluating');
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
