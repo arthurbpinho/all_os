@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import ScoreBadge from '../components/ScoreBadge';
+import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 
 // Sessão de duelo: você atende o personagem do duelo na sua própria sessão.
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
@@ -88,10 +89,13 @@ export default function DuelSession({ user }) {
   // Cronômetro
   useEffect(() => {
     if (view === 'session' && sessionStarted) {
-      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+      timerRef.current = setInterval(() => setElapsed(nextActiveElapsed), 1000);
       return () => clearInterval(timerRef.current);
     }
   }, [view, sessionStarted]);
+
+  // Limite de tempo ativo da sessão atingido (200 min "no chat").
+  const limitReached = elapsed >= SESSION_LIMIT_SECONDS;
 
   // Autosave local enquanto atende.
   useEffect(() => {
@@ -152,7 +156,7 @@ export default function DuelSession({ user }) {
 
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || !sessionStarted) return;
+    if (!trimmed || isTyping || !sessionStarted || limitReached) return;
     const userMsg = { role: 'user', content: trimmed, highlighted: false, comment: '' };
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
@@ -341,7 +345,7 @@ export default function DuelSession({ user }) {
                   {r.mmr?.reason === 'anti_smurf'
                     ? 'Como a diferença de nível foi muito grande, este duelo não foi contabilizado para o competitivo.'
                     : r.mmr?.reason === 'calibrating'
-                    ? 'Este duelo não contou para o competitivo — um dos jogadores ainda está em calibração (precisa completar as 5 primeiras partidas).'
+                    ? 'Este duelo não contou para o competitivo — um dos jogadores ainda está em calibração (precisa completar as 3 primeiras partidas).'
                     : r.mmr?.reason === 'visitor'
                     ? 'Duelos competitivos valem só entre jogadores cadastrados — este não contou para o MMR.'
                     : 'Este duelo não foi contabilizado para o competitivo.'}
@@ -384,7 +388,7 @@ export default function DuelSession({ user }) {
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {sessionStarted && (
-            <div className="timer-chip" title="Duração da sessão">
+            <div className={`timer-chip ${limitReached ? 'limit' : ''}`} title={limitReached ? `Limite de ${SESSION_LIMIT_MINUTES} min atingido` : 'Tempo no chat (pausa fora dele)'}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
               <span>{formatTime(elapsed)}</span>
             </div>
@@ -468,6 +472,11 @@ export default function DuelSession({ user }) {
               Iniciar atendimento
             </button>
           </div>
+        </div>
+      ) : limitReached ? (
+        <div className="chat-input-area session-limit-bar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+          <span>Limite de {SESSION_LIMIT_MINUTES} min de sessão atingido. Finalize o duelo para concluir.</span>
         </div>
       ) : (
         <div className="chat-input-area">

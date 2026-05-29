@@ -354,21 +354,38 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
 
   // === Títulos desbloqueáveis ===
   describe('POST /api/me/title', () => {
-    it('rejeita título não desbloqueado (403) e aceita após desbloquear', async () => {
+    it('só ouro resgatada vira título: bronze é rejeitada; ouro exige resgate antes', async () => {
       const aluno = await loginAs('aluno');
-      // sem sessões: nenhuma conquista → 403
-      const fail = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'first_session' });
-      expect(fail.status).toBe(403);
-      // cria 1 sessão → desbloqueia 'first_session'
+      // sem sessões: nada cumprido → 403
+      const fail0 = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'excelencia' });
+      expect(fail0.status).toBe(403);
+      // 1 sessão desbloqueia 'first_session' (bronze) — mas bronze NÃO vira título
       await request(app).post('/api/logs').set(authHeader(aluno))
         .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'x' });
-      const ok = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'first_session' });
+      const bronze = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'first_session' });
+      expect(bronze.status).toBe(403);
+      // sessão com nota 95 cumpre 'excelencia' (ouro)
+      await request(app).post('/api/logs').set(authHeader(aluno))
+        .send({ type: 'freeplay', itemId: 'fp-test-1', itemTitle: 'Sofia', score: 95 });
+      // ouro cumprida mas NÃO resgatada → setar título falha
+      const notClaimed = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'excelencia' });
+      expect(notClaimed.status).toBe(403);
+      // resgata e então seta
+      const claim = await request(app).post('/api/achievements/excelencia/claim').set(authHeader(aluno));
+      expect(claim.status).toBe(200);
+      const ok = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'excelencia' });
       expect(ok.status).toBe(200);
-      expect(ok.body.activeTitle).toBe('first_session');
+      expect(ok.body.activeTitle).toBe('excelencia');
       expect(ok.body.titleLabel).toBeTruthy();
       // título vazio limpa
       const clear = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: '' });
       expect(clear.body.activeTitle).toBe('');
+    });
+
+    it('não resgata conquista cujo requisito não foi cumprido (403)', async () => {
+      const aluno = await loginAs('aluno');
+      const r = await request(app).post('/api/achievements/excelencia/claim').set(authHeader(aluno));
+      expect(r.status).toBe(403);
     });
 
     it('titleId inexistente retorna 400', async () => {

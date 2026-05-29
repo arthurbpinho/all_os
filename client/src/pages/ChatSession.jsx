@@ -10,6 +10,7 @@ import {
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
+import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { makeLogItems, evalSection as evalSectionTxt, downloadText } from '../logFiles';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 
@@ -48,7 +49,6 @@ export default function ChatSession({ user }) {
   const audioChunksRef = useRef([]);
   const textareaRef = useRef(null);
   const timerRef = useRef(null);
-  const startedAtRef = useRef(null);
   const autosaveTimerRef = useRef(null);
   const restoredRef = useRef(false);
   const finishedRef = useRef(false);
@@ -79,8 +79,6 @@ export default function ChatSession({ user }) {
             const savedElapsed = saved.elapsedSeconds || 0;
             setMessages(saved.messages);
             setElapsed(savedElapsed);
-            // Ajusta startedAtRef pra que o cronômetro continue do ponto onde parou
-            startedAtRef.current = Date.now() - savedElapsed * 1000;
             setSessionStarted(true);
           }
         }
@@ -141,18 +139,18 @@ export default function ChatSession({ user }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  // Cronômetro: começa quando o usuário clica em Iniciar atendimento, para ao finalizar
+  // Cronômetro: conta SÓ enquanto a pessoa está no chat (aba/app visível). Começa
+  // ao iniciar o atendimento e para ao finalizar. Não usa relógio de parede — tempo
+  // fora do chat (background, app fechado, outra aba) não é contado.
   useEffect(() => {
-    if (sessionStarted && phase === PHASE_SIMULATION && !startedAtRef.current) {
-      startedAtRef.current = Date.now();
-    }
-    if (sessionStarted && phase === PHASE_SIMULATION && startedAtRef.current) {
-      timerRef.current = setInterval(() => {
-        setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
-      }, 1000);
+    if (sessionStarted && phase === PHASE_SIMULATION) {
+      timerRef.current = setInterval(() => setElapsed(nextActiveElapsed), 1000);
       return () => clearInterval(timerRef.current);
     }
   }, [sessionStarted, phase]);
+
+  // Limite de tempo ativo da sessão atingido (200 min "no chat").
+  const limitReached = elapsed >= SESSION_LIMIT_SECONDS;
 
   function formatTime(secs) {
     const m = Math.floor(secs / 60).toString().padStart(2, '0');
@@ -188,7 +186,7 @@ export default function ChatSession({ user }) {
 
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || phase !== PHASE_SIMULATION || !sessionStarted) return;
+    if (!trimmed || isTyping || phase !== PHASE_SIMULATION || !sessionStarted || limitReached) return;
 
     const userMsg = { role: 'user', content: trimmed };
     const updated = [...messages, userMsg];
@@ -431,7 +429,6 @@ export default function ChatSession({ user }) {
     setMessages([]);
     setInput('');
     setElapsed(0);
-    startedAtRef.current = null;
     setSessionStarted(false);
     setError('');
     // Reabilita a persistência para a próxima sessão iniciada.
@@ -483,7 +480,6 @@ export default function ChatSession({ user }) {
         setMessages(save.messages);
         const sec = Number.isFinite(save.elapsedSeconds) ? save.elapsedSeconds : 0;
         setElapsed(sec);
-        startedAtRef.current = Date.now() - sec * 1000;
         setSessionStarted(true);
         setError('');
       } catch (err) {
@@ -617,7 +613,7 @@ export default function ChatSession({ user }) {
         </div>
 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div className="timer-chip" title="Duração da sessão">
+          <div className={`timer-chip ${limitReached ? 'limit' : ''}`} title={limitReached ? `Limite de ${SESSION_LIMIT_MINUTES} min atingido` : 'Tempo no chat (pausa fora dele)'}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
             <span>{formatTime(elapsed)}</span>
           </div>
@@ -717,6 +713,11 @@ export default function ChatSession({ user }) {
             <span className="spinner" />
             <span>Transcrevendo áudio…</span>
           </div>
+        </div>
+      ) : limitReached ? (
+        <div className="chat-input-area session-limit-bar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+          <span>Limite de {SESSION_LIMIT_MINUTES} min de sessão atingido. Finalize a sessão para concluir.</span>
         </div>
       ) : (
         <div className="chat-input-area">

@@ -9,6 +9,7 @@ export default function FreePlay({ user }) {
   const [bestScores, setBestScores] = useState({});
   const [attended, setAttended] = useState(() => new Set());
   const [sidequest, setSidequest] = useState(null);
+  const [dailyMission, setDailyMission] = useState(null); // { mission, completed }
   // titulares: mapa { characterId: titularSummary } do modo Desafio. Cada card
   // mostra a foto+nome no canto inferior direito (clique → /chat/desafio/<id>),
   // ou o 👑 quando não há Titular.
@@ -28,8 +29,9 @@ export default function FreePlay({ user }) {
       user?.id ? api.getLogs(user.id) : Promise.resolve([]),
       isVisitor ? Promise.resolve({ active: null }) : api.getMySidequest().catch(() => ({ active: null })),
       api.getTitulares().catch(() => ({})),
+      isVisitor ? Promise.resolve({ mission: null }) : api.getMyDailyMission().catch(() => ({ mission: null })),
     ])
-      .then(([chars, logs, sq, tit]) => {
+      .then(([chars, logs, sq, tit, daily]) => {
         setCharacters(chars || []);
         const max = {};
         const seen = new Set();
@@ -46,6 +48,7 @@ export default function FreePlay({ user }) {
         setAttended(seen);
         setSidequest(sq && sq.active ? sq.active : null);
         setTitulares(tit || {});
+        setDailyMission(daily && daily.mission ? daily : null);
       })
       .catch((err) => setError(err.message || 'Erro ao carregar personagens'))
       .finally(() => setLoading(false));
@@ -79,6 +82,21 @@ export default function FreePlay({ user }) {
           <div className="sidequest-banner-desc">{sidequest.description}</div>
           <div className="sidequest-banner-hint">
             Esta missão é o foco do seu próximo treino — escolha um paciente e persiga o objetivo acima.
+          </div>
+        </div>
+      )}
+
+      {dailyMission && (
+        <div className={`sidequest-banner daily-mission-banner ${dailyMission.completed ? 'completed' : ''}`}>
+          <div className="sidequest-banner-label">
+            ◷ Missão diária{dailyMission.completed ? ' · concluída hoje ✓' : ' · desafio do dia'}
+          </div>
+          <div className="sidequest-banner-title">{dailyMission.mission.title}</div>
+          <div className="sidequest-banner-desc">{dailyMission.mission.description}</div>
+          <div className="sidequest-banner-hint">
+            {dailyMission.completed
+              ? 'Você já cumpriu o desafio de hoje. Amanhã entra uma nova missão.'
+              : 'Desafio do dia (rotaciona diariamente). Cumpra durante um atendimento de Treinamento para ganhar a recompensa.'}
           </div>
         </div>
       )}

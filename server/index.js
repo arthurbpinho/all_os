@@ -499,10 +499,9 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Define o "título" (subtítulo) ativo exibido no perfil e no ranking. Só
-// permite títulos de conquistas que o usuário REALMENTE desbloqueou — a posse
-// é revalidada server-side via computeEarnedAchievements (não confia no client).
-// titleId vazio limpa o título.
+// Define o "título" (subtítulo) ativo exibido no perfil e no ranking. SÓ
+// conquistas de OURO valem como título — e somente se já RESGATADAS pelo
+// usuário (achievements.json). Sidequests (qt-*) também valem. titleId vazio limpa.
 app.post('/api/me/title', requireAuth, (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não pode definir título.' });
@@ -532,23 +531,45 @@ app.post('/api/me/title', requireAuth, (req, res) => {
 
   const def = ACHIEVEMENT_DEFS.find((d) => d.id === titleId);
   if (!def) return res.status(400).json({ error: 'Título inválido.' });
+  if (def.tier !== 'gold') {
+    return res.status(403).json({ error: 'Apenas conquistas de ouro podem virar título de perfil.' });
+  }
 
-  const allLogs = readJSON('logs.json');
-  const userLogs = allLogs.filter((l) => l.userId === req.user.id);
-  const streak = computeStreak(userLogs);
-  const earned = computeEarnedAchievements(
-    userLogs,
-    streak,
-    readJSON('exercises.json'),
-    readJSON('freeplay-characters.json'),
-    readJSON('neuro-characters.json'),
-  );
-  if (!earned.has(titleId)) {
-    return res.status(403).json({ error: 'Você ainda não desbloqueou esse título.' });
+  // Precisa estar RESGATADA (claim). O claim já revalidou o critério server-side.
+  const ach = readJSON('achievements.json', {});
+  if (!(ach[req.user.id] && ach[req.user.id][titleId])) {
+    return res.status(403).json({ error: 'Você precisa resgatar essa conquista antes de exibi-la.' });
   }
   users[idx].activeTitle = titleId;
   writeJSON('users.json', users);
   res.json(publicUser(users[idx]));
+});
+
+// Resgatar ("claim") uma conquista. Só grava se o critério estiver de fato
+// cumprido (revalidado server-side via achievementsForUser). Visitante não resgata.
+app.post('/api/achievements/:id/claim', requireAuth, (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não acumula conquistas.' });
+  }
+  const id = req.params.id;
+  const def = ACHIEVEMENT_DEFS.find((d) => d.id === id);
+  if (!def) return res.status(404).json({ error: 'Conquista inválida.' });
+
+  const userId = req.user.id;
+  const userLogs = readJSON('logs.json').filter((l) => l.userId === userId);
+  const streak = computeStreak(userLogs);
+  const { unlocked } = achievementsForUser(userId, userLogs, streak, readJSON('freeplay-characters.json'));
+  if (!unlocked.has(id)) {
+    return res.status(403).json({ error: 'Você ainda não cumpriu o requisito desta conquista.' });
+  }
+
+  const ach = readJSON('achievements.json', {});
+  if (!ach[userId]) ach[userId] = {};
+  if (!ach[userId][id]) {
+    ach[userId][id] = new Date().toISOString();
+    writeJSON('achievements.json', ach);
+  }
+  res.json({ id, claimed: true, claimedAt: ach[userId][id], tier: def.tier, title: def.title });
 });
 
 // --- Profile ---
@@ -791,29 +812,50 @@ app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin')
 });
 
 // --- Indicadores: constância, objetivos diários, metas ---
+// Conquistas separadas por dificuldade: bronze, silver (prata), gold (ouro).
+// SÓ as de OURO valem como título de perfil (ver POST /api/me/title).
+// `target` (opcional) = meta numérica → ganha barra de progresso no front; o
+// valor atual vem em `progress[id]` (computado em computeAchievements).
+// As conquistas são RESGATÁVEIS ("claim"): ficam disponíveis quando o critério
+// é cumprido (`unlocked`) e só contam como ganhas (`earned`) após o resgate
+// (POST /api/achievements/:id/claim, gravado em achievements.json).
 const ACHIEVEMENT_DEFS = [
-  { id: 'first_session',       icon: '◐', title: 'Primeira sessão',     description: 'Concluiu sua primeira sessão na plataforma.',                                       tier: 'bronze' },
-  { id: 'simulacao_complete',  icon: '◇', title: 'Repertório clínico',  description: 'Concluiu todos os personagens da Simulação.',                                       tier: 'gold' },
-  { id: 'neuro_complete',      icon: '◈', title: 'Avaliação completa', description: 'Concluiu todos os personagens da Neuroavaliação.',                                  tier: 'gold' },
-  { id: 'trilha_skill_1',      icon: '▲', title: 'Hermenêutica plena',  description: 'Concluiu todos os exercícios da competência Hermenêutica.',                         tier: 'silver' },
-  { id: 'trilha_skill_2',      icon: '▲', title: 'Estrutura consolidada', description: 'Concluiu todos os exercícios da competência Estrutura.',                           tier: 'silver' },
-  { id: 'trilha_skill_3',      icon: '▲', title: 'Empatia consolidada',  description: 'Concluiu todos os exercícios da competência Empatia.',                              tier: 'silver' },
-  { id: 'trilha_skill_4',      icon: '▲', title: 'Olho clínico',        description: 'Concluiu todos os exercícios da competência Especificidade do caso.',               tier: 'silver' },
-  { id: 'trilha_skill_5',      icon: '▲', title: 'Autoconhecimento',    description: 'Concluiu todos os exercícios da competência Eu.',                                   tier: 'silver' },
-  { id: 'trilha_master',       icon: '◆', title: 'Programa concluído', description: 'Concluiu todos os exercícios das 5 competências.',                                  tier: 'platinum' },
-  { id: 'high_score',          icon: '★', title: 'Excelência técnica', description: 'Atingiu pontuação ≥ 25 em uma única sessão.',                                       tier: 'gold' },
-  { id: 'meteu_o_lacan',       icon: '⊛', title: 'Meteu o Lacan',       description: 'Tirou ≥ 70 em uma sessão com até 15 mensagens — eficiência clínica.',              tier: 'gold' },
-  { id: 'speed_demon',         icon: '↗', title: 'Eficiência',          description: 'Concluiu uma sessão em menos de 5 min com pontuação positiva.',                     tier: 'silver' },
-  { id: 'early_bird',          icon: '◔', title: 'Madrugador',          description: 'Realizou uma sessão antes das 7h.',                                                 tier: 'bronze' },
-  { id: 'night_owl',           icon: '◑', title: 'Sessão noturna',      description: 'Realizou uma sessão depois das 23h.',                                               tier: 'bronze' },
-  { id: 'centena',             icon: '∞', title: 'Centena',             description: '100 sessões concluídas.',                                                           tier: 'platinum' },
-  { id: 'polivalente',         icon: '◉', title: 'Versatilidade',       description: 'Concluiu sessão de cada tipo (trilha, simulação, neuro) num mesmo dia.',           tier: 'gold' },
-  { id: 'streak_7_ever',       icon: '●', title: 'Constância',          description: 'Manteve constância de 4 semanas consecutivas ao menos uma vez.',                    tier: 'silver' },
-  { id: 'streak_30_ever',      icon: '●', title: 'Persistência',        description: 'Manteve constância de 12 semanas consecutivas ao menos uma vez.',                   tier: 'platinum' },
-  { id: 'highlights_10',       icon: '◎', title: 'Curador',             description: 'Marcou 10 mensagens como destaque em sessões.',                                     tier: 'silver' },
-  { id: 'all_difficulties',    icon: '⊟', title: 'Calibragem',          description: 'Concluiu exercícios das 3 dificuldades (iniciante, intermediário, avançado).',     tier: 'silver' },
-  { id: 'lua_cheia',           icon: '◐', title: 'Amplitude',           description: 'Realizou sessões antes das 7h e depois das 23h em dias diferentes.',               tier: 'gold' },
+  // ---------- BRONZE ----------
+  { id: 'first_session',  icon: '◐', title: 'Primeira Sessão',            description: 'Concluiu sua primeira sessão na plataforma.',                          tier: 'bronze' },
+  { id: 'first_ranked',   icon: '◔', title: 'Primeira sessão ranqueada',  description: 'Concluiu sua primeira sessão no modo Competitivo.',                     tier: 'bronze' },
+  { id: 'madrugador',     icon: '☾', title: 'Madrugador',                 description: 'Realizou uma sessão entre 1h e 5h da madrugada.',                       tier: 'bronze' },
+  { id: 'changed_photo',  icon: '☺', title: 'Não sou mais o Isaac',       description: 'Trocou a foto de perfil padrão pela sua.',                              tier: 'bronze' },
+  { id: 'invited_friend', icon: '✉', title: 'Chamei um amigo!',           description: 'Convidou um visitante para um duelo de treino (não ranqueado).',        tier: 'bronze' },
+
+  // ---------- PRATA ----------
+  { id: 'constancia',     icon: '●', title: 'Constância',                 description: 'Manteve constância de 4 semanas consecutivas.',                         tier: 'silver', target: 4 },
+  { id: 'eficiencia',     icon: '↗', title: 'Eficiência',                 description: 'Concluiu uma sessão em menos de 5 min com pontuação acima de 60.',      tier: 'silver' },
+  { id: 'consistente',    icon: '≡', title: 'Consistente',                description: 'Jogou uma partida ranqueada sem alterar o seu MMR.',                    tier: 'silver' },
+  { id: 'papagaio',       icon: '◍', title: 'Papagaio',                   description: 'Usou o botão de microfone 100 vezes.',                                  tier: 'silver', target: 100 },
+  { id: 'destronador',    icon: '⇅', title: 'Destronador',                description: 'No Modo Desafio, retomou um paciente que acabou de perder.',            tier: 'silver' },
+  { id: 'bom_garoto',     icon: '✓', title: 'Bom garoto',                 description: 'Cumpriu todas as missões diárias por 7 dias seguidos.',                 tier: 'silver', target: 7 },
+
+  // ---------- OURO (valem título de perfil) ----------
+  { id: 'simulacao_complete', icon: '◇', title: 'Repertório Clínico',     description: 'Concluiu todos os personagens da Simulação.',                           tier: 'gold' },
+  { id: 'excelencia',         icon: '★', title: 'Excelência Técnica',     description: 'Atingiu pontuação maior ou igual a 90 em uma sessão.',                  tier: 'gold' },
+  { id: 'perfeicao',          icon: '✪', title: 'Perfeição',              description: 'Tirou nota 100 em uma sessão.',                                         tier: 'gold' },
+  { id: 'meteu_o_lacan',      icon: '⊛', title: 'Meteu o Lacan',          description: 'Tirou 80 ou mais em uma sessão com até 10 mensagens.',                  tier: 'gold' },
+  { id: 'estrelinha',         icon: '✶', title: 'Estrelinha',             description: 'Marcou 1000 mensagens como destaque.',                                  tier: 'gold', target: 1000 },
+  { id: 'centena',            icon: '∞', title: 'Centena',                description: 'Concluiu 100 sessões em qualquer modo.',                                tier: 'gold', target: 100 },
+  { id: 'persistencia',       icon: '❖', title: 'Persistência',           description: 'Manteve constância por 20 semanas.',                                    tier: 'gold', target: 20 },
+  { id: 'rei',                icon: '♛', title: 'Rei',                     description: 'Foi Titular de 7 pacientes ao mesmo tempo.',                            tier: 'gold', target: 7 },
+  { id: 'duelista',           icon: '⚔', title: 'Duelista',               description: 'Venceu 10 duelos ranqueados.',                                          tier: 'gold', target: 10 },
+  { id: 'invicto',            icon: '⚑', title: 'Invicto',                description: 'Venceu 5 duelos ranqueados consecutivos.',                              tier: 'gold', target: 5 },
+  { id: 'davi_golias',        icon: '◭', title: 'Davi e Golias',          description: 'Venceu um duelo ranqueado contra alguém com 30+ de MMR a mais que você.', tier: 'gold' },
+  { id: 'vinganca',           icon: '⚡', title: 'Vingança',               description: 'No Modo Desafio, roubou um paciente de quem já tinha roubado um seu.',  tier: 'gold' },
 ];
+
+// Foto de perfil padrão ("Isaac"): a conquista "Não sou mais o Isaac" dispara
+// quando o usuário troca por qualquer outra.
+const DEFAULT_PROFILE_PHOTO = '/profiles_icon/isaacdeterno.jpeg';
+function isDefaultProfilePhoto(photo) {
+  return !photo || photo === DEFAULT_PROFILE_PHOTO;
+}
 
 function dayKey(timestamp) {
   return new Date(timestamp).toISOString().slice(0, 10);
@@ -901,84 +943,212 @@ function computeDailyMissions(userLogs) {
   const today = dayKey(Date.now());
   const todayLogs = userLogs.filter((l) => dayKey(l.timestamp) === today);
   const totalToday = todayLogs.length;
-  const exerciseToday = todayLogs.filter((l) => l.type === 'exercise').length;
-  const fastGood = todayLogs.some((l) => l.type === 'freeplay' && (l.durationSeconds || 9999) <= 600 && (l.score || 0) >= 8);
-  const neuroDone = todayLogs.some((l) => l.type === 'neuro');
+  const rankedToday = todayLogs.filter((l) => l.mode === 'competitive').length;
 
   return [
-    { id: 'daily_1exercise', icon: '◯', title: 'Sessão diária',     description: 'Conclua 1 exercício hoje (qualquer tipo)',                       target: 1, progress: Math.min(totalToday, 1), completed: totalToday >= 1 },
-    { id: 'daily_2trilha',   icon: '◎', title: 'Foco na trilha',    description: 'Conclua 2 exercícios da trilha hoje',                            target: 2, progress: Math.min(exerciseToday, 2), completed: exerciseToday >= 2 },
-    { id: 'daily_efficiency',icon: '↗', title: 'Aclamação',         description: 'Conclua uma Simulação em até 10 min com pontuação ≥ 8',         target: 1, progress: fastGood ? 1 : 0, completed: fastGood },
-    { id: 'daily_neuro',     icon: '◈', title: 'Construir Sinapses',description: 'Conclua uma Neuroavaliação hoje',                                target: 1, progress: neuroDone ? 1 : 0, completed: neuroDone },
+    { id: 'daily_session', icon: '◯', title: 'Sessão diária', description: 'Conclua 1 sessão hoje (qualquer modo)', target: 1, progress: Math.min(totalToday, 1), completed: totalToday >= 1 },
+    { id: 'daily_ranked',  icon: '◔', title: 'Competindo',    description: 'Conclua 1 sessão ranqueada hoje',       target: 1, progress: Math.min(rankedToday, 1), completed: rankedToday >= 1 },
   ];
 }
 
-function computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro) {
-  const exerciseIds = new Set(userLogs.filter((l) => l.type === 'exercise' && l.itemId).map((l) => String(l.itemId)));
-  const freeplayIds = new Set(userLogs.filter((l) => l.type === 'freeplay' && l.itemId).map((l) => String(l.itemId)));
-  const neuroIds    = new Set(userLogs.filter((l) => l.type === 'neuro'    && l.itemId).map((l) => String(l.itemId)));
+// Todas as missões diárias completas hoje? (base do streak da conquista "Bom garoto")
+function allDailyMissionsCompleteToday(userLogs) {
+  const missions = computeDailyMissions(userLogs);
+  return missions.length > 0 && missions.every((m) => m.completed);
+}
 
-  const earned = new Set();
+// --- Contadores diversos persistidos (uso de microfone etc.) ---
+function getMicUses(userId) {
+  const c = readJSON('counters.json', {});
+  return (c[userId] && c[userId].micUses) || 0;
+}
+function bumpMicUses(userId) {
+  const c = readJSON('counters.json', {});
+  if (!c[userId]) c[userId] = {};
+  c[userId].micUses = (c[userId].micUses || 0) + 1;
+  writeJSON('counters.json', c);
+}
 
-  if (userLogs.length >= 1) earned.add('first_session');
+// --- Streak de missões diárias (conquista "Bom garoto" = 7 dias seguidos) ---
+function getDailyMissionStreak(userId) {
+  const d = readJSON('daily-missions.json', {});
+  return d[userId] || { current: 0, best: 0, lastDate: null };
+}
+function updateDailyMissionStreak(userId, userLogs) {
+  if (!allDailyMissionsCompleteToday(userLogs)) return;
+  const store = readJSON('daily-missions.json', {});
+  const today = dayKey(Date.now());
+  const rec = store[userId] || { current: 0, best: 0, lastDate: null };
+  if (rec.lastDate === today) return; // já contado hoje
+  const yesterday = dayKey(Date.now() - 24 * 60 * 60 * 1000);
+  rec.current = rec.lastDate === yesterday ? (rec.current || 0) + 1 : 1;
+  rec.lastDate = today;
+  rec.best = Math.max(rec.best || 0, rec.current);
+  store[userId] = rec;
+  writeJSON('daily-missions.json', store);
+}
 
-  if (freeplay.length > 0 && freeplay.every((c) => freeplayIds.has(String(c.id)))) earned.add('simulacao_complete');
-  if (neuro.length > 0    && neuro.every((c)    => neuroIds.has(String(c.id))))    earned.add('neuro_complete');
+// --- Histórico de trocas de titularidade do Modo Desafio (Vingança/Destronador) ---
+// Cada entrada: { characterId, characterName, fromUserId, toUserId, reason, at }.
+// fromUserId null = posição estava vaga (reivindicação inicial).
+function appendDesafioHistory(entry) {
+  const hist = readJSON('desafio-history.json', []);
+  hist.push({ ...entry, at: new Date().toISOString() });
+  if (hist.length > 5000) hist.splice(0, hist.length - 5000); // teto defensivo
+  writeJSON('desafio-history.json', hist);
+}
 
-  for (let s = 1; s <= 5; s++) {
-    const phases = exercises.filter((e) => Number(e.skillId) === s);
-    if (phases.length > 0 && phases.every((p) => exerciseIds.has(String(p.id)))) {
-      earned.add(`trilha_skill_${s}`);
+// --- Helpers de duelo (conquistas competitivas) ---
+// Visão do usuário num duelo ranqueado concluído, ou null se não se aplica.
+function duelUserView(duel, userId) {
+  const m = duel && duel.result && duel.result.mmr;
+  if (!m || !m.ranked) return null;
+  let side = null;
+  if (duel.challenger && duel.challenger.userId === userId) side = 'challenger';
+  else if (duel.opponent && duel.opponent.userId === userId) side = 'opponent';
+  if (!side) return null;
+  const mine = m[side];
+  const other = side === 'challenger' ? m.opponent : m.challenger;
+  if (!mine || !other) return null;
+  return {
+    won: duel.result.winner === side,
+    myBefore: mine.before,
+    myAfter: mine.after,
+    oppBefore: other.before,
+    at: duel.result.evaluatedAt || duel.updatedAt || duel.createdAt || '',
+  };
+}
+// Duelos ranqueados do usuário, mais antigo → mais recente (para sequências).
+function userRankedDuelViews(duels, userId) {
+  return (duels || [])
+    .map((d) => duelUserView(d, userId))
+    .filter(Boolean)
+    .sort((a, b) => new Date(a.at) - new Date(b.at));
+}
+
+// --- Helpers de Modo Desafio sobre o histórico de trocas ---
+// Vingança: alguém roubou um paciente meu e, depois, eu roubei um paciente dele.
+function desafioRevenge(history, userId) {
+  const evts = [...(history || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
+  const tookFromMeAt = {}; // X -> instante em que X me roubou um paciente
+  for (const e of evts) {
+    if (e.fromUserId === userId && e.toUserId && e.toUserId !== userId && !tookFromMeAt[e.toUserId]) {
+      tookFromMeAt[e.toUserId] = e.at;
+    }
+    if (e.toUserId === userId && e.fromUserId && tookFromMeAt[e.fromUserId] &&
+        new Date(tookFromMeAt[e.fromUserId]) < new Date(e.at)) {
+      return true;
     }
   }
-  if ([1, 2, 3, 4, 5].every((s) => earned.has(`trilha_skill_${s}`))) earned.add('trilha_master');
-
-  if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 25)) earned.add('high_score');
-  if (userLogs.some((l) => (l.durationSeconds || 9999) < 300 && Number.isFinite(l.score) && l.score > 0)) earned.add('speed_demon');
-  // Meteu o Lacan: ≥70 em uma sessão com no máximo 15 mensagens (paciente +
-  // aluno combinados, já sem isSystem — o saveLog filtra isso antes de gravar).
-  if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 70 && Array.isArray(l.messages) && l.messages.length <= 15)) {
-    earned.add('meteu_o_lacan');
+  return false;
+}
+// Destronador: retomei um paciente logo após perdê-lo (troca consecutiva na
+// mesma posição: eu perdi e a mudança seguinte daquele personagem é eu de volta).
+function desafioRetake(history, userId) {
+  const byChar = {};
+  for (const e of (history || [])) {
+    if (!byChar[e.characterId]) byChar[e.characterId] = [];
+    byChar[e.characterId].push(e);
   }
-
-  let hasEarly = false;
-  let hasLate = false;
-  for (const l of userLogs) {
-    const h = new Date(l.timestamp).getHours();
-    if (h < 7) { earned.add('early_bird'); hasEarly = true; }
-    if (h >= 23) { earned.add('night_owl'); hasLate = true; }
+  for (const cid of Object.keys(byChar)) {
+    const evts = byChar[cid].sort((a, b) => new Date(a.at) - new Date(b.at));
+    for (let i = 1; i < evts.length; i++) {
+      if (evts[i].toUserId === userId && evts[i - 1].fromUserId === userId) return true;
+    }
   }
-  if (hasEarly && hasLate) earned.add('lua_cheia');
+  return false;
+}
 
-  if (userLogs.length >= 100) earned.add('centena');
+// Cálculo unificado das conquistas. Retorna { unlocked:Set, progress:{} }.
+// `unlocked` = critério cumprido (resgatável); `progress[id]` = valor atual das
+// que têm meta (barra de progresso no front).
+function computeAchievements(ctx) {
+  const { userLogs, streak, freeplay, duels, crownsCount, micUses, desafioHistory, profilePhoto, dailyStreakBest, userId } = ctx;
+  const unlocked = new Set();
+  const progress = {};
+  const add = (id) => unlocked.add(id);
+  const scores = userLogs.map((l) => l.score).filter((s) => Number.isFinite(s));
 
-  const byDay = {};
-  for (const l of userLogs) {
-    const k = dayKey(l.timestamp);
-    if (!byDay[k]) byDay[k] = new Set();
-    byDay[k].add(l.type);
-  }
-  if (Object.values(byDay).some((s) => s.has('exercise') && s.has('freeplay') && s.has('neuro'))) {
-    earned.add('polivalente');
-  }
+  // ---------- BRONZE ----------
+  if (userLogs.length >= 1) add('first_session');
+  if (userLogs.some((l) => l.mode === 'competitive')) add('first_ranked');
+  if (userLogs.some((l) => { const h = new Date(l.timestamp).getHours(); return h >= 1 && h < 5; })) add('madrugador');
+  if (!isDefaultProfilePhoto(profilePhoto)) add('changed_photo');
+  if ((duels || []).some((d) => d.mode !== 'competitive' && d.challenger && d.challenger.userId === userId && d.opponent && (d.opponent.isVisitor || d.opponent.kind === 'open'))) add('invited_friend');
 
-  if (streak.longest >= 4)  earned.add('streak_7_ever');   // 4 semanas consecutivas (≈1 mês)
-  if (streak.longest >= 12) earned.add('streak_30_ever');  // 12 semanas consecutivas (≈3 meses)
+  // ---------- PRATA ----------
+  progress.constancia = streak.longest;
+  if (streak.longest >= 4) add('constancia');
+
+  if (userLogs.some((l) => (l.durationSeconds || 9999) < 300 && Number.isFinite(l.score) && l.score > 60)) add('eficiencia');
+
+  const consistentPvE = userLogs.some((l) => l.mode === 'competitive' && Number.isFinite(l.mmrBefore) && Number.isFinite(l.mmrAfter) && Math.round(l.mmrBefore) === Math.round(l.mmrAfter));
+  const consistentDuel = userRankedDuelViews(duels, userId).some((v) => Number.isFinite(v.myBefore) && Number.isFinite(v.myAfter) && Math.round(v.myBefore) === Math.round(v.myAfter));
+  if (consistentPvE || consistentDuel) add('consistente');
+
+  progress.papagaio = micUses || 0;
+  if ((micUses || 0) >= 100) add('papagaio');
+
+  if (desafioRetake(desafioHistory, userId)) add('destronador');
+
+  progress.bom_garoto = dailyStreakBest || 0;
+  if ((dailyStreakBest || 0) >= 7) add('bom_garoto');
+
+  // ---------- OURO (valem título de perfil) ----------
+  const freeplayIds = new Set(userLogs.filter((l) => l.type === 'freeplay' && l.itemId).map((l) => String(l.itemId)));
+  progress.simulacao_complete = (freeplay || []).filter((c) => freeplayIds.has(String(c.id))).length;
+  if ((freeplay || []).length > 0 && freeplay.every((c) => freeplayIds.has(String(c.id)))) add('simulacao_complete');
+
+  if (scores.some((s) => s >= 90)) add('excelencia');
+  if (scores.some((s) => s >= 100)) add('perfeicao');
+  if (userLogs.some((l) => Number.isFinite(l.score) && l.score >= 80 && Array.isArray(l.messages) && l.messages.length <= 10)) add('meteu_o_lacan');
 
   let highlights = 0;
-  for (const l of userLogs) {
-    if (Array.isArray(l.messages)) highlights += l.messages.filter((m) => m && m.highlighted).length;
-  }
-  if (highlights >= 10) earned.add('highlights_10');
+  for (const l of userLogs) if (Array.isArray(l.messages)) highlights += l.messages.filter((m) => m && m.highlighted).length;
+  progress.estrelinha = highlights;
+  if (highlights >= 1000) add('estrelinha');
 
-  const difficultiesDone = new Set(
-    userLogs.filter((l) => l.type === 'exercise' && l.difficulty).map((l) => l.difficulty)
-  );
-  if (['iniciante', 'intermediario', 'avancado'].every((d) => difficultiesDone.has(d))) {
-    earned.add('all_difficulties');
-  }
+  progress.centena = userLogs.length;
+  if (userLogs.length >= 100) add('centena');
 
-  return earned;
+  progress.persistencia = streak.longest;
+  if (streak.longest >= 20) add('persistencia');
+
+  progress.rei = crownsCount || 0;
+  if ((crownsCount || 0) >= 7) add('rei');
+
+  const views = userRankedDuelViews(duels, userId);
+  const rankedWins = views.filter((v) => v.won).length;
+  progress.duelista = rankedWins;
+  if (rankedWins >= 10) add('duelista');
+
+  let cur = 0, bestStreak = 0;
+  for (const v of views) { if (v.won) { cur += 1; bestStreak = Math.max(bestStreak, cur); } else { cur = 0; } }
+  progress.invicto = bestStreak;
+  if (bestStreak >= 5) add('invicto');
+
+  if (views.some((v) => v.won && Number.isFinite(v.oppBefore) && Number.isFinite(v.myBefore) && (v.oppBefore - v.myBefore) >= 30)) add('davi_golias');
+
+  if (desafioRevenge(desafioHistory, userId)) add('vinganca');
+
+  return { unlocked, progress };
+}
+
+// Monta o contexto e roda computeAchievements para um usuário. Centraliza a
+// leitura das várias fontes (logs, duelos, coroas, contadores, histórico).
+function achievementsForUser(userId, userLogs, streak, freeplay) {
+  return computeAchievements({
+    userLogs,
+    streak,
+    freeplay,
+    duels: readDuels(),
+    crownsCount: getUserCrowns(userId).length,
+    micUses: getMicUses(userId),
+    desafioHistory: readJSON('desafio-history.json', []),
+    profilePhoto: (readJSON('users.json').find((u) => u.id === userId) || {}).profilePhoto,
+    dailyStreakBest: getDailyMissionStreak(userId).best || 0,
+    userId,
+  });
 }
 
 app.get('/api/gamification/:userId', requireAuth, (req, res) => {
@@ -988,30 +1158,37 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
   const userId = req.params.userId;
   const allLogs = readJSON('logs.json');
   const userLogs = allLogs.filter((l) => l.userId === userId);
-  const exercises = readJSON('exercises.json');
   const freeplay  = readJSON('freeplay-characters.json');
-  const neuro     = readJSON('neuro-characters.json');
 
   const streak = computeStreak(userLogs);
   const dailyMissions = computeDailyMissions(userLogs);
-  const earnedSet = computeEarnedAchievements(userLogs, streak, exercises, freeplay, neuro);
+  const { unlocked, progress } = achievementsForUser(userId, userLogs, streak, freeplay);
 
+  // claimed = conquistas RESGATADAS (gravadas em achievements.json). Não há mais
+  // resgate automático: o usuário precisa resgatar (POST /api/achievements/:id/claim).
   const ach = readJSON('achievements.json', {});
-  if (!ach[userId]) ach[userId] = {};
-  let dirty = false;
-  for (const id of earnedSet) {
-    if (!ach[userId][id]) { ach[userId][id] = new Date().toISOString(); dirty = true; }
-  }
-  if (dirty) writeJSON('achievements.json', ach);
+  const claimedMap = ach[userId] || {};
 
-  const achievements = ACHIEVEMENT_DEFS.map((def) => ({
-    ...def,
-    earned: earnedSet.has(def.id),
-    earnedAt: ach[userId][def.id] || null,
-  }));
+  const achievements = ACHIEVEMENT_DEFS.map((def) => {
+    const isUnlocked = unlocked.has(def.id);
+    const claimedAt = claimedMap[def.id] || null;
+    const out = {
+      ...def,
+      unlocked: isUnlocked,
+      claimed: !!claimedAt,
+      claimable: isUnlocked && !claimedAt,
+      earned: !!claimedAt,          // compat: "ganha" = resgatada
+      earnedAt: claimedAt,
+    };
+    if (Number.isFinite(def.target)) {
+      out.progressRaw = progress[def.id] || 0;
+      out.progress = Math.min(out.progressRaw, def.target);
+    }
+    return out;
+  });
 
   // Sidequests concluídas entram como conquistas (tier 'quest'): aparecem nas
-  // "Metas" e ficam selecionáveis como subtítulo, igual às demais conquistas.
+  // "Metas" já resgatadas e ficam selecionáveis como subtítulo.
   const completedQuests = readSidequests().completed[userId] || [];
   for (const q of completedQuests) {
     achievements.push({
@@ -1020,6 +1197,9 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
       title: q.rewardTitleLabel,
       description: `Sidequest concluída: ${q.title}`,
       tier: q.rewardTitleTier || 'quest',
+      unlocked: true,
+      claimed: true,
+      claimable: false,
       earned: true,
       earnedAt: q.completedAt || null,
       sidequest: true,
@@ -1377,29 +1557,29 @@ function extractSupervisorNotes(evaluation) {
   return { clean, criteria: parseSupervisorPayload(payload) };
 }
 
-// Extrai o bloco [sidequest-resultado] (avaliador de progressão com sidequest
-// ativa): { sidequest_completed, justification }. O bloco vem ANTES do
-// [notas-supervisor], então rode esta extração no texto já limpo das notas.
+// Extrai um bloco de resultado de objetivo do texto do avaliador. Genérico para
+// [sidequest-resultado] ({sidequest_completed}) e [missao-diaria-resultado]
+// ({daily_completed}). O bloco vem ANTES do [notas-supervisor]; rode esta
+// extração no texto já limpo das notas (ou encadeie uma após a outra). Splice só
+// do próprio bloco → independe da ordem em que os blocos foram emitidos.
 // Retorna { clean, result } — result null quando não há bloco. Destinado a
 // supervisor/sistema; o aluno nunca vê o JSON.
-function extractSidequestResult(evaluation) {
+function extractResultBlock(evaluation, marker, completedKey) {
   const text = typeof evaluation === 'string' ? evaluation : '';
-  const markerMatch = text.match(/\[sidequest-resultado\]/i);
+  const markerRe = new RegExp('\\[' + marker + '\\]', 'i');
+  const markerMatch = text.match(markerRe);
   if (!markerMatch) return { clean: text, result: null };
   const markerIdx = markerMatch.index;
   const after = text.slice(markerIdx);
   const jsonMatch = after.match(/\{[\s\S]*?\}/);
   let result = null;
-  // Fim do bloco: até o fim do JSON (ou da linha do marcador, se não houver JSON).
-  // Splice só do próprio bloco — assim a extração independe da ordem em relação
-  // ao [notas-supervisor].
-  let blockEnd = markerIdx + (after.match(/\[sidequest-resultado\][^\n]*/i)[0].length);
+  let blockEnd = markerIdx + after.match(new RegExp('\\[' + marker + '\\][^\\n]*', 'i'))[0].length;
   if (jsonMatch) {
     blockEnd = markerIdx + jsonMatch.index + jsonMatch[0].length;
     try {
       const obj = JSON.parse(jsonMatch[0]);
       if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        const v = obj.sidequest_completed;
+        const v = obj[completedKey];
         result = {
           completed: v === true || String(v).toLowerCase() === 'true',
           justification: typeof obj.justification === 'string' ? obj.justification : '',
@@ -1407,12 +1587,17 @@ function extractSidequestResult(evaluation) {
       }
     } catch {}
   }
-  // Remove também um separador "---" imediatamente antes do marcador.
   const before = text.slice(0, markerIdx);
   const sep = before.match(/\n*-{3,}[^\S\n]*\n*$/);
   const start = sep ? before.length - sep[0].length : markerIdx;
   const clean = (text.slice(0, start) + text.slice(blockEnd)).replace(/\n{3,}/g, '\n\n').trim();
   return { clean, result };
+}
+function extractSidequestResult(evaluation) {
+  return extractResultBlock(evaluation, 'sidequest-resultado', 'sidequest_completed');
+}
+function extractDailyMissionResult(evaluation) {
+  return extractResultBlock(evaluation, 'missao-diaria-resultado', 'daily_completed');
 }
 
 app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
@@ -1448,7 +1633,8 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // qualquer posição), depois o [notas-supervisor] (até o fim). Assim a extração
   // independe da ordem em que o avaliador emitiu os dois blocos.
   const { clean: cleanAfterSq, result: sidequestResult } = extractSidequestResult(body.evaluation);
-  const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(cleanAfterSq);
+  const { clean: cleanAfterDaily, result: dailyResult } = extractDailyMissionResult(cleanAfterSq);
+  const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(cleanAfterDaily);
 
   // Nota final: calculada em CÓDIGO a partir das notas por critério do bloco
   // [notas-supervisor] (avaliadores v15/progressão). A IA não emite mais a nota
@@ -1509,6 +1695,11 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     mmr.characters[log.itemId] = character;
     writeMMR(mmr);
     mmrResult = result;
+    // Grava o MMR antes/depois desta partida no log (conquista "Consistente":
+    // MMR arredondado inalterado). Reescreve o log já persistido.
+    log.mmrBefore = Math.round(result.P_before);
+    log.mmrAfter = Math.round(result.P_after);
+    writeJSON('logs.json', logs);
   }
 
   // Sidequest: só no Treinamento (freeplay + mode 'training'). Se o aluno tinha
@@ -1538,12 +1729,43 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     }
   }
 
-  res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome });
+  // Missão diária (desafio do dia, rotacionado do banco): mesmo gate da sidequest
+  // — Treinamento, não-visitante. Independente da sidequest (uma não anula a outra).
+  let dailyMissionOutcome = null;
+  if (log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor') {
+    const activeDaily = getActiveDailyMission(req.user.id);
+    if (activeDaily && dailyResult) {
+      if (dailyResult.completed) {
+        const record = completeDailyMission(req.user.id, dailyResult.justification, {
+          characterId: log.itemId,
+          characterName: log.itemTitle,
+        });
+        if (record) {
+          dailyMissionOutcome = {
+            completed: true,
+            title: record.title,
+            rewardTitleId: record.rewardTitleId,
+            rewardTitleLabel: record.rewardTitleLabel,
+          };
+        }
+      } else {
+        dailyMissionOutcome = { completed: false, title: activeDaily.title };
+      }
+    }
+  }
+
+  // Streak de missões diárias (conquista "Bom garoto" = 7 dias seguidos). Conta
+  // com o novo log já incluído; visitante não acumula.
+  if (req.user.role !== 'visitor') {
+    updateDailyMissionStreak(req.user.id, logs.filter((l) => l.userId === req.user.id));
+  }
+
+  res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome });
 });
 
 // --- Ranking global de jogadores (por MMR competitivo) ---
 // O ranking ordena pelo MMR (P) do modo Competitivo. Só entra quem jogou ao
-// menos 1 partida competitiva. Nas 5 primeiras partidas o MMR fica oculto
+// menos 1 partida competitiva. Nas 3 primeiras partidas o MMR fica oculto
 // (calibrating=true, mmr=null) — o cliente mostra "faltam X partidas".
 //
 // Visitante não acessa nem pontua (id efêmero, sem registro de MMR).
@@ -2122,7 +2344,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
     const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
     const activeSq = getActiveSidequest(req.user.id);
-    if (prevLog || activeSq) {
+    const activeDaily = getActiveDailyMission(req.user.id);
+    if (prevLog || activeSq || activeDaily) {
       progressionMode = true;
       sidequestActive = !!activeSq;
       systemPrompt = loadProgressaoPrompt();
@@ -2154,6 +2377,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       }
       if (activeSq) {
         content += `[SIDEQUEST ATIVA]\nTÍTULO: ${activeSq.title}\nDescrição: ${activeSq.description}\n\nEsta sidequest é o objetivo principal deste atendimento. Avalie primariamente se o aluno a cumpriu e emita o bloco [sidequest-resultado] conforme a especificação.\n\n---\n\n`;
+      }
+      if (activeDaily) {
+        content += `[MISSÃO DIÁRIA]\nTÍTULO: ${activeDaily.title}\nDescrição: ${activeDaily.description}\n\nEste é o desafio do dia, um objetivo clínico ADICIONAL (independente da sidequest). Avalie se o aluno o cumpriu, com a mesma régua da sidequest, e emita o bloco [missao-diaria-resultado] conforme a especificação.\n\n---\n\n`;
       }
       content += `[ATENDIMENTO 2 — ${studentName} com ${characterName}] (objeto da avaliação)\n${atd2Content || '(sem mensagens)'}`;
 
@@ -2274,6 +2500,8 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
       model: 'whisper-1',
       language: 'pt'
     });
+    // Conta o uso do microfone (conquista "Papagaio"). Visitante não acumula.
+    if (req.user.role !== 'visitor') bumpMicUses(req.user.id);
     res.json({ text: transcription.text });
   } catch (err) {
     console.error('Transcription error:', err.message);
@@ -3170,6 +3398,66 @@ function completeSidequest(userId, justification, ctx = {}) {
   return record;
 }
 
+// --- Missão diária: rotação GLOBAL e determinística do banco de sidequests ---
+// Toda meia-noite UTC entra outra missão (bank[diasDesdeEpoca % tamanho]); é a
+// MESMA para todos. Avaliada e recompensada como uma sidequest (concede o
+// título de recompensa daquela entrada do banco). Coexiste com a sidequest
+// atribuída — uma não anula a outra.
+function dailyMissionIndex() {
+  // Dia de calendário no fuso de São Paulo (UTC−3): a missão diária vira à
+  // meia-noite LOCAL (0h), não à meia-noite UTC. Determinístico e global.
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  return Math.floor(Date.parse(ymd + 'T00:00:00Z') / 86400000);
+}
+function getDailyMission() {
+  const bank = readSidequests().bank;
+  if (!bank.length) return null;
+  return bank[dailyMissionIndex() % bank.length];
+}
+// O usuário já ganhou a recompensa desta missão (em qualquer ocasião)?
+function hasCompletedReward(userId, rewardTitleId) {
+  const list = readSidequests().completed[userId] || [];
+  return list.some((c) => c.rewardTitleId === rewardTitleId);
+}
+// Missão diária ATIVA para o usuário: a do dia, se ele ainda não a concluiu.
+function getActiveDailyMission(userId) {
+  const dm = getDailyMission();
+  if (!dm) return null;
+  if (hasCompletedReward(userId, dm.rewardTitleId)) return null;
+  return dm;
+}
+// Conclui a missão diária do dia: grava na lista de concluídas (concede o título
+// de recompensa, igual à sidequest) — dedup por recompensa (não dá pra farmar).
+function completeDailyMission(userId, justification, ctx = {}) {
+  const data = readSidequests();
+  if (!data.bank.length) return null;
+  const dm = data.bank[dailyMissionIndex() % data.bank.length];
+  if (!Array.isArray(data.completed[userId])) data.completed[userId] = [];
+  if (data.completed[userId].some((c) => c.rewardTitleId === dm.rewardTitleId)) return null;
+  const record = {
+    sidequestId: dm.id,
+    title: dm.title,
+    description: dm.description,
+    rewardTitleId: dm.rewardTitleId,
+    rewardTitleLabel: dm.rewardTitleLabel,
+    rewardTitleTier: dm.rewardTitleTier || 'quest',
+    justification: clampStr(justification, 1000),
+    completedAt: new Date().toISOString(),
+    characterId: ctx.characterId || null,
+    characterName: ctx.characterName || null,
+    daily: true,
+  };
+  data.completed[userId].push(record);
+  writeSidequests(data);
+  return record;
+}
+function publicDailyMission(dm) {
+  if (!dm) return null;
+  return { sidequestId: dm.id, title: dm.title, description: dm.description, rewardTitleLabel: dm.rewardTitleLabel };
+}
+
 const SQ_MAX_TITLE = 120;
 const SQ_MAX_DESC = 2000;
 
@@ -3291,6 +3579,15 @@ app.get('/api/me/sidequest', requireAuth, (req, res) => {
     completed: data.completed[req.user.id] || [],
   });
 });
+
+// Missão diária do usuário (Treinamento). Mostra a do dia + se ele já concluiu.
+app.get('/api/me/daily-mission', requireAuth, (req, res) => {
+  const dm = getDailyMission();
+  if (!dm) return res.json({ mission: null, completed: false });
+  const completed = req.user.role !== 'visitor' && hasCompletedReward(req.user.id, dm.rewardTitleId);
+  res.json({ mission: publicDailyMission(dm), completed });
+});
+
 
 // --- Notificações in-app ---
 app.get('/api/notifications', requireAuth, (req, res) => {
@@ -3540,6 +3837,12 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
   };
   writeDesafio(data);
 
+  // Histórico de titularidade (conquistas Vingança/Destronador). Reivindicação =
+  // posição estava vaga → fromUserId null. Visitante não entra no histórico.
+  if (!isVisitor) {
+    appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: null, toUserId: req.user.id, reason: 'reivindicar' });
+  }
+
   const titularPublic = publicTitular(data.titulares[char.id]);
 
   // Sem avaliador disponível (visitante com toggle off, ou sem chave OpenAI):
@@ -3768,6 +4071,11 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
     };
     writeDesafio(fresh);
     newTitular = fresh.titulares[char.id];
+    // Histórico de titularidade (Vingança/Destronador): desafiante tomou a
+    // posição do titular anterior. Visitante não entra no histórico.
+    if (!isVisitor) {
+      appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: titular.userId || null, toUserId: req.user.id, reason: 'desafio' });
+    }
   } else {
     // Titular permaneceu: só atualiza lastDefendedAt.
     const fresh = readDesafio();

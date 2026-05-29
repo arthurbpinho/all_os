@@ -5,7 +5,7 @@ import Typewriter from '../components/Typewriter';
 
 // Modo Competitivo: mesmos personagens da Simulação, mas cada partida finalizada
 // alimenta o MMR (rating competitivo). A dificuldade de cada personagem é aberta
-// e exibida no card. O MMR fica oculto até a 6ª partida (calibração).
+// e exibida no card. O MMR fica oculto até a 4ª partida (calibração de 3 partidas).
 export default function Competitive({ user }) {
   const [characters, setCharacters] = useState([]);
   const [mmr, setMmr] = useState(null);
@@ -31,7 +31,7 @@ export default function Competitive({ user }) {
         <p>
           Os mesmos pacientes da Simulação, agora valendo ranking. Cada atendimento finalizado
           atualiza o seu <strong>MMR</strong> — e a <strong>dificuldade</strong> de cada personagem se ajusta ao
-          desempenho coletivo. As 5 primeiras partidas são de calibração.
+          desempenho coletivo. As 3 primeiras partidas são de calibração.
         </p>
         <div className="ornament" />
       </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 
 // Sessão do modo Desafio (titular-desafiante). Vive dentro da aba Treinamento
 // como atalho clicando no canto inferior direito do card de um paciente:
@@ -63,10 +64,13 @@ export default function ChallengeSession({ user }) {
 
   useEffect(() => {
     if (sessionStarted && !sessionEnded) {
-      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+      timerRef.current = setInterval(() => setElapsed(nextActiveElapsed), 1000);
       return () => clearInterval(timerRef.current);
     }
   }, [sessionStarted, sessionEnded]);
+
+  // Limite de tempo ativo da sessão atingido (200 min "no chat").
+  const limitReached = elapsed >= SESSION_LIMIT_SECONDS;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -106,7 +110,7 @@ export default function ChallengeSession({ user }) {
 
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || !sessionStarted || sessionEnded) return;
+    if (!trimmed || isTyping || !sessionStarted || sessionEnded || limitReached) return;
     const userMsg = { role: 'user', content: trimmed, highlighted: false, comment: '' };
     const updated = [...messages, userMsg];
     setMessages(updated);
@@ -130,7 +134,7 @@ export default function ChallengeSession({ user }) {
   }
 
   function handleSkip() {
-    if (!sessionStarted || sessionEnded || isTyping || skipping) return;
+    if (!sessionStarted || sessionEnded || isTyping || skipping || limitReached) return;
     if (sessionNumber >= MAX_SESSIONS) { setShowSessionLimit(true); return; }
     setConfirmingSkip(true);
   }
@@ -365,7 +369,7 @@ export default function ChallengeSession({ user }) {
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {sessionStarted && (
-            <div className="timer-chip" title="Duração da sessão">
+            <div className={`timer-chip ${limitReached ? 'limit' : ''}`} title={limitReached ? `Limite de ${SESSION_LIMIT_MINUTES} min atingido` : 'Tempo no chat (pausa fora dele)'}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
               <span>{formatTime(elapsed)}</span>
             </div>
@@ -476,6 +480,11 @@ export default function ChallengeSession({ user }) {
               Iniciar atendimento
             </button>
           </div>
+        </div>
+      ) : limitReached ? (
+        <div className="chat-input-area session-limit-bar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+          <span>Limite de {SESSION_LIMIT_MINUTES} min de sessão atingido. Finalize a sessão para concluir.</span>
         </div>
       ) : (
         <div className="chat-input-area">

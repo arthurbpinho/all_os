@@ -126,7 +126,7 @@ export default function AdminExercises() {
           Nenhum exercício cadastrado ainda. Clique em "Novo Exercício" para começar.
         </div>
       ) : (
-        <div className="card tight" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="card tight" style={{ padding: 0, overflow: 'auto' }}>
           <table className="admin-table">
             <thead>
               <tr><th>Competência</th><th>Título</th><th>Dificuldade</th><th>Avaliador</th><th>Ações</th></tr>
