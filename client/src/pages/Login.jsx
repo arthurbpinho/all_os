@@ -158,11 +158,6 @@ export default function Login({ onLogin }) {
           Entrar como visitante
         </button>
 
-        <div className="credentials">
-          <div className="label">Acesso restrito</div>
-          <p>Plataforma interna da associação. Solicite seu login ao administrador, ou entre como visitante para experimentar (sem persistência).</p>
-        </div>
-
         {canShowInstall && (
           <div className="install-prompt">
             <button type="button" className="btn btn-outline btn-sm" onClick={handleInstall}>
@@ -176,6 +171,15 @@ export default function Login({ onLogin }) {
           </div>
         )}
       </div>
+
+      <a
+        className="login-join-link"
+        href="https://allos.org.br/processoseletivopsi"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        Quer sair do modo visitante e ter uma conta real na all<span className="accent">_OS</span>? Participe do processo seletivo!
+      </a>
 
       {showAndroidInstructions && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowAndroidInstructions(false); }}>

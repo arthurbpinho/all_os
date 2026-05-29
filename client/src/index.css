@@ -1368,6 +1368,7 @@ select option { background: var(--cream); color: var(--ink); }
 .login-container {
   min-height: 100vh;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   background: var(--cream);
@@ -1458,30 +1459,6 @@ select option { background: var(--cream); color: var(--ink); }
   padding: 10px 14px;
   border-radius: var(--radius);
 }
-.login-card .credentials {
-  margin-top: 28px;
-  padding: 16px 18px;
-  background: var(--sand-2);
-  border: 1px solid var(--sand);
-  border-radius: var(--radius);
-  font-size: 12.5px;
-  color: var(--ink-soft);
-}
-.login-card .credentials .label {
-  font-size: 10.5px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  font-weight: 500;
-  color: var(--marrs-dark);
-  margin-bottom: 6px;
-}
-.login-card .credentials p { margin: 3px 0; }
-.login-card .credentials code {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 12px;
-  color: var(--marrs-deep);
-}
-
 .login-card .install-prompt {
   margin-top: 16px;
   display: flex;
@@ -1516,21 +1493,27 @@ select option { background: var(--cream); color: var(--ink); }
   font-size: 14px;
 }
 
-/* ───────── Homepage (pós-login): slogan grande, missão diária, como jogar ───────── */
-.home-page { max-width: 760px; }
-.home-hero .home-slogan {
-  font-family: var(--serif);
-  font-size: 32px;
-  line-height: 1.25;
-  color: var(--marrs-deep);
-  max-width: 640px;
-  margin: 10px 0 0;
+/* Link "Participe do processo seletivo" (sai do modo visitante): texto laranja,
+   sem fundo, fora do card branco — fica logo abaixo dele. */
+.login-join-link {
+  position: relative;
+  z-index: 1;
+  max-width: 440px;
+  margin: 18px auto 0;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--terra);
+  text-decoration: none;
 }
-.home-hero .home-slogan .accent { color: var(--terra); font-family: var(--serif); font-weight: 400; }
-.home-cta { display: inline-flex; margin-top: 18px; padding: 11px 26px; }
+.login-join-link:hover { color: var(--terra-soft); text-decoration: underline; }
+.login-join-link .accent { font-weight: 700; }
+
+/* ───────── Homepage (pós-login): como jogar no topo + banners embaixo ───────── */
+.home-page { max-width: 760px; }
 
 /* "Como jogar" (FAQ dos modos) na homepage */
-.home-about { margin-top: 28px; max-width: 640px; }
+.home-about { margin-top: 4px; max-width: 640px; }
 .home-about-header { margin-bottom: 18px; }
 .home-about-eyebrow {
   text-transform: uppercase; letter-spacing: 0.28em; font-size: 10.5px;
@@ -1538,6 +1521,89 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .home-about-title { font-family: var(--serif); font-size: 25px; color: var(--marrs-deep); margin: 6px 0 0; }
 .home-about-intro { font-size: 13.5px; color: var(--muted); line-height: 1.55; margin: 6px 0 0; max-width: 520px; }
+
+/* Topo da homepage: link do YouTube alinhado à direita */
+.home-topbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 20px;
+}
+.home-youtube {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 6px 13px;
+  border: 1px solid var(--sand);
+  border-radius: 999px;
+  background: var(--cream);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.home-youtube svg { color: #FF0000; }
+.home-youtube:hover {
+  border-color: #FF0000;
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: var(--shadow);
+}
+
+/* Banners promocionais (processo seletivo / formação): botões-banners gigantes */
+.home-promos {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 32px;
+  max-width: 640px;
+}
+.home-promo {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 32px 72px 32px 32px;
+  border-radius: var(--radius-lg);
+  color: #fff;
+  text-decoration: none;
+  box-shadow: var(--shadow-md);
+  transition: transform 0.15s, box-shadow 0.15s, filter 0.15s;
+}
+.home-promo::after {
+  content: '→';
+  position: absolute;
+  right: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 30px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.92);
+  transition: transform 0.15s;
+}
+.home-promo:hover {
+  text-decoration: none;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  filter: brightness(1.05);
+}
+.home-promo:hover::after { transform: translateY(-50%) translateX(5px); }
+.home-promo--seletivo { background: linear-gradient(135deg, var(--terra), var(--terra-soft)); }
+.home-promo--formacao { background: linear-gradient(135deg, var(--marrs-dark), var(--marrs-soft)); }
+.home-promo-label {
+  text-transform: uppercase; letter-spacing: 0.2em; font-size: 11px;
+  font-weight: 700; color: rgba(255, 255, 255, 0.85);
+}
+.home-promo-title {
+  font-family: var(--serif); font-size: 24px; font-weight: 500; color: #fff; line-height: 1.25;
+}
+
+@media (max-width: 560px) {
+  .home-promo { padding: 24px 56px 24px 22px; }
+  .home-promo::after { right: 22px; font-size: 24px; }
+  .home-promo-title { font-size: 20px; }
+}
 
 .faq-item {
   border: 1px solid var(--sand);
@@ -1563,7 +1629,8 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .faq-item > summary::-webkit-details-marker { display: none; }
 .faq-item > summary:hover { background: var(--sand-2); }
-.faq-q-icon { font-size: 17px; line-height: 1; }
+.faq-q-icon { display: inline-flex; align-items: center; color: var(--marrs); }
+.faq-q-icon svg { display: block; }
 .faq-chevron {
   margin-left: auto;
   color: var(--muted);
