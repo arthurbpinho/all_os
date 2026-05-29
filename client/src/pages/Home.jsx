@@ -1,14 +1,14 @@
-import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { api } from '../api';
+import { ICONS } from '../icons';
 
-// Homepage (pós-login): slogan, missão diária e o "como jogar" de cada modo.
+// Homepage (pós-login): o "como jogar" de cada modo no topo, depois os banners
+// de processo seletivo e formação. A missão diária vive só no Treinamento
+// (FreePlay), não aqui. Os ícones dos modos são os mesmos do menu lateral.
 // A ordem dos modos segue a progressão natural do aluno (treina → disputa a
 // referência do caso → ranqueado → PvP). Trilha de Competências e
 // Neuroavaliação ficam de fora de propósito (ainda ocultas nesta versão).
 const FAQ_ITEMS = [
   {
-    icon: '💬',
+    icon: ICONS.freeplay,
     q: 'Treinamento',
     a: (
       <>
@@ -27,7 +27,7 @@ const FAQ_ITEMS = [
     ),
   },
   {
-    icon: '👑',
+    icon: ICONS.crown,
     q: 'Modo Desafio',
     a: (
       <>
@@ -55,7 +55,7 @@ const FAQ_ITEMS = [
     ),
   },
   {
-    icon: '🏆',
+    icon: ICONS.trophy,
     q: 'Competitivo',
     a: (
       <>
@@ -73,7 +73,7 @@ const FAQ_ITEMS = [
     ),
   },
   {
-    icon: '⚔️',
+    icon: ICONS.duel,
     q: 'Duelo',
     a: (
       <>
@@ -117,45 +117,23 @@ function Chevron() {
   );
 }
 
-export default function Home({ user }) {
-  const isVisitor = user?.role === 'visitor';
-  const [daily, setDaily] = useState(null); // { mission, completed }
-
-  useEffect(() => {
-    if (isVisitor) return; // visitante não tem recompensa de missão; mostra só os modos
-    let cancelled = false;
-    api.getMyDailyMission()
-      .then((d) => { if (!cancelled) setDaily(d && d.mission ? d : null); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [user?.id, isVisitor]);
-
+export default function Home() {
   return (
     <div className="home-page">
-      <div className="page-header home-hero">
-        <div className="eyebrow">Associação Allos</div>
-        <h2 className="home-slogan">
-          Aprenda e treine <span className="accent">competências clínicas reais</span> por
-          meio de Inteligência Artificial com o método Allos.
-        </h2>
-        <div className="ornament" />
-        <Link to="/freeplay" className="btn btn-primary home-cta">Começar a treinar</Link>
+      <div className="home-topbar">
+        <a
+          className="home-youtube"
+          href="https://www.youtube.com/@associacaoallos"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Canal da Allos no YouTube"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M23.5 6.2a3 3 0 0 0-2.1-2.1C19.5 3.5 12 3.5 12 3.5s-7.5 0-9.4.6A3 3 0 0 0 .5 6.2 31 31 0 0 0 0 12a31 31 0 0 0 .5 5.8 3 3 0 0 0 2.1 2.1c1.9.6 9.4.6 9.4.6s7.5 0 9.4-.6a3 3 0 0 0 2.1-2.1A31 31 0 0 0 24 12a31 31 0 0 0-.5-5.8zM9.6 15.6V8.4l6.3 3.6-6.3 3.6z" />
+          </svg>
+          <span>YouTube</span>
+        </a>
       </div>
-
-      {daily && (
-        <div className={`sidequest-banner daily-mission-banner ${daily.completed ? 'completed' : ''}`}>
-          <div className="sidequest-banner-label">
-            ◷ Missão diária{daily.completed ? ' · concluída hoje ✓' : ' · desafio do dia'}
-          </div>
-          <div className="sidequest-banner-title">{daily.mission.title}</div>
-          <div className="sidequest-banner-desc">{daily.mission.description}</div>
-          <div className="sidequest-banner-hint">
-            {daily.completed
-              ? 'Você já cumpriu o desafio de hoje. À meia-noite entra uma nova missão.'
-              : 'Desafio do dia (rotaciona à meia-noite). Cumpra durante um atendimento de Treinamento para ganhar a recompensa.'}
-          </div>
-        </div>
-      )}
 
       <section className="home-about" aria-label="Como jogar">
         <div className="home-about-header">
@@ -177,6 +155,27 @@ export default function Home({ user }) {
           </details>
         ))}
       </section>
+
+      <div className="home-promos">
+        <a
+          className="home-promo home-promo--seletivo"
+          href="https://allos.org.br/processoseletivopsi"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <div className="home-promo-label">Processo seletivo</div>
+          <div className="home-promo-title">Participe do nosso processo seletivo na Allos</div>
+        </a>
+        <a
+          className="home-promo home-promo--formacao"
+          href="https://allos.org.br/formacao"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <div className="home-promo-label">Formação</div>
+          <div className="home-promo-title">Conheça a formação gravada na nossa plataforma</div>
+        </a>
+      </div>
     </div>
   );
 }
