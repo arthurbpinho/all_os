@@ -821,33 +821,33 @@ app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin')
 // (POST /api/achievements/:id/claim, gravado em achievements.json).
 const ACHIEVEMENT_DEFS = [
   // ---------- BRONZE ----------
-  { id: 'first_session',  icon: '◐', title: 'Primeira Sessão',            description: 'Concluiu sua primeira sessão na plataforma.',                          tier: 'bronze' },
-  { id: 'first_ranked',   icon: '◔', title: 'Primeira sessão ranqueada',  description: 'Concluiu sua primeira sessão no modo Competitivo.',                     tier: 'bronze' },
-  { id: 'madrugador',     icon: '☾', title: 'Madrugador',                 description: 'Realizou uma sessão entre 1h e 5h da madrugada.',                       tier: 'bronze' },
-  { id: 'changed_photo',  icon: '☺', title: 'Não sou mais o Isaac',       description: 'Trocou a foto de perfil padrão pela sua.',                              tier: 'bronze' },
-  { id: 'invited_friend', icon: '✉', title: 'Chamei um amigo!',           description: 'Convidou um visitante para um duelo de treino (não ranqueado).',        tier: 'bronze' },
+  { id: 'first_session',  icon: '◐', title: 'Primeira Sessão',           description: 'Concluiu sua primeira sessão na plataforma.',                    tier: 'bronze' },
+  { id: 'first_ranked',   icon: '◔', title: 'Primeira sessão ranqueada', description: 'Concluiu sua primeira sessão no modo Competitivo.',              tier: 'bronze' },
+  { id: 'madrugador',     icon: '☾', title: 'Madrugador',                description: 'Realizou uma sessão entre 1h e 5h da madrugada.',                tier: 'bronze' },
+  { id: 'changed_photo',  icon: '☺', title: 'Não sou mais o Isaac',      description: 'Trocou a foto de perfil padrão pela sua.',                       tier: 'bronze' },
+  { id: 'invited_friend', icon: '✉', title: 'Chamei um amigo!',          description: 'Convidou um visitante para um duelo de treino (não ranqueado).', tier: 'bronze' },
+  { id: 'constancia',     icon: '●', title: 'Constância',                description: 'Manteve constância de 4 semanas consecutivas.',                  tier: 'bronze', target: 4 },
+  { id: 'papagaio',       icon: '◍', title: 'Papagaio',                  description: 'Usou o botão de microfone 100 vezes.',                           tier: 'bronze', target: 100 },
 
   // ---------- PRATA ----------
-  { id: 'constancia',     icon: '●', title: 'Constância',                 description: 'Manteve constância de 4 semanas consecutivas.',                         tier: 'silver', target: 4 },
-  { id: 'eficiencia',     icon: '↗', title: 'Eficiência',                 description: 'Concluiu uma sessão em menos de 5 min com pontuação acima de 60.',      tier: 'silver' },
-  { id: 'consistente',    icon: '≡', title: 'Consistente',                description: 'Jogou uma partida ranqueada sem alterar o seu MMR.',                    tier: 'silver' },
-  { id: 'papagaio',       icon: '◍', title: 'Papagaio',                   description: 'Usou o botão de microfone 100 vezes.',                                  tier: 'silver', target: 100 },
-  { id: 'destronador',    icon: '⇅', title: 'Destronador',                description: 'No Modo Desafio, retomou um paciente que acabou de perder.',            tier: 'silver' },
-  { id: 'bom_garoto',     icon: '✓', title: 'Bom garoto',                 description: 'Cumpriu todas as missões diárias por 7 dias seguidos.',                 tier: 'silver', target: 7 },
+  { id: 'eficiencia',   icon: '↗', title: 'Eficiência',   description: 'Concluiu uma sessão em menos de 5 min com pontuação acima de 60.',     tier: 'silver' },
+  { id: 'bom_garoto',   icon: '✓', title: 'Bom garoto',   description: 'Cumpriu todas as missões diárias por 7 dias seguidos.',                tier: 'silver', target: 7 },
+  { id: 'centena',      icon: '∞', title: 'Centena',      description: 'Concluiu 100 sessões em qualquer modo.',                               tier: 'silver', target: 100 },
+  { id: 'persistencia', icon: '❖', title: 'Persistência', description: 'Manteve constância por 20 semanas.',                                   tier: 'silver', target: 20 },
+  { id: 'duelista',     icon: '⚔', title: 'Duelista',     description: 'Venceu 10 duelos ranqueados.',                                         tier: 'silver', target: 10 },
+  { id: 'vinganca',     icon: '⚡', title: 'Vingança',     description: 'No Modo Desafio, roubou um paciente de quem já tinha roubado um seu.', tier: 'silver' },
 
   // ---------- OURO (valem título de perfil) ----------
-  { id: 'simulacao_complete', icon: '◇', title: 'Repertório Clínico',     description: 'Concluiu todos os personagens da Simulação.',                           tier: 'gold' },
-  { id: 'excelencia',         icon: '★', title: 'Excelência Técnica',     description: 'Atingiu pontuação maior ou igual a 90 em uma sessão.',                  tier: 'gold' },
-  { id: 'perfeicao',          icon: '✪', title: 'Perfeição',              description: 'Tirou nota 100 em uma sessão.',                                         tier: 'gold' },
-  { id: 'meteu_o_lacan',      icon: '⊛', title: 'Meteu o Lacan',          description: 'Tirou 80 ou mais em uma sessão com até 10 mensagens.',                  tier: 'gold' },
-  { id: 'estrelinha',         icon: '✶', title: 'Estrelinha',             description: 'Marcou 1000 mensagens como destaque.',                                  tier: 'gold', target: 1000 },
-  { id: 'centena',            icon: '∞', title: 'Centena',                description: 'Concluiu 100 sessões em qualquer modo.',                                tier: 'gold', target: 100 },
-  { id: 'persistencia',       icon: '❖', title: 'Persistência',           description: 'Manteve constância por 20 semanas.',                                    tier: 'gold', target: 20 },
-  { id: 'rei',                icon: '♛', title: 'Rei',                     description: 'Foi Titular de 7 pacientes ao mesmo tempo.',                            tier: 'gold', target: 7 },
-  { id: 'duelista',           icon: '⚔', title: 'Duelista',               description: 'Venceu 10 duelos ranqueados.',                                          tier: 'gold', target: 10 },
-  { id: 'invicto',            icon: '⚑', title: 'Invicto',                description: 'Venceu 5 duelos ranqueados consecutivos.',                              tier: 'gold', target: 5 },
-  { id: 'davi_golias',        icon: '◭', title: 'Davi e Golias',          description: 'Venceu um duelo ranqueado contra alguém com 30+ de MMR a mais que você.', tier: 'gold' },
-  { id: 'vinganca',           icon: '⚡', title: 'Vingança',               description: 'No Modo Desafio, roubou um paciente de quem já tinha roubado um seu.',  tier: 'gold' },
+  { id: 'consistente',        icon: '≡', title: 'Consistente',        description: 'Jogou uma partida ranqueada sem alterar o seu MMR.',                      tier: 'gold' },
+  { id: 'destronador',        icon: '⇅', title: 'Destronador',        description: 'No Modo Desafio, retomou um paciente que acabou de perder.',              tier: 'gold' },
+  { id: 'simulacao_complete', icon: '◇', title: 'Repertório Clínico', description: 'Concluiu todos os personagens da Simulação.',                             tier: 'gold' },
+  { id: 'excelencia',         icon: '★', title: 'Excelência Técnica', description: 'Atingiu pontuação maior ou igual a 90 em uma sessão.',                    tier: 'gold' },
+  { id: 'perfeicao',          icon: '✪', title: 'Perfeição',          description: 'Tirou nota 100 em uma sessão.',                                           tier: 'gold' },
+  { id: 'meteu_o_lacan',      icon: '⊛', title: 'Meteu o Lacan',      description: 'Tirou 80 ou mais em uma sessão com até 10 mensagens.',                    tier: 'gold' },
+  { id: 'estrelinha',         icon: '✶', title: 'Estrelinha',         description: 'Marcou 1000 mensagens como destaque.',                                    tier: 'gold', target: 1000 },
+  { id: 'rei',                icon: '♛', title: 'Rei',                description: 'Foi Titular de 7 pacientes ao mesmo tempo.',                              tier: 'gold', target: 7 },
+  { id: 'invicto',            icon: '⚑', title: 'Invicto',            description: 'Venceu 5 duelos ranqueados consecutivos.',                                tier: 'gold', target: 5 },
+  { id: 'davi_golias',        icon: '◭', title: 'Davi e Golias',      description: 'Venceu um duelo ranqueado contra alguém com 30+ de MMR a mais que você.', tier: 'gold' },
 ];
 
 // Foto de perfil padrão ("Isaac"): a conquista "Não sou mais o Isaac" dispara
