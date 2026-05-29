@@ -8,6 +8,29 @@
 
 export const CHANGELOG = [
   {
+    date: '2026-05-29',
+    title: 'Homepage, conquistas reformuladas, missão diária e mais',
+    body: `🔹 Nova tela inicial (Início):
+• Uma homepage com o slogan do all_OS, a sua missão diária e a seção "Quatro formas de praticar" (Treinamento, Modo Desafio, Competitivo e Duelo). A tela de login ficou limpa.
+
+🔹 Objetivos e Metas reformulados:
+• As conquistas agora são RESGATÁVEIS: quando você cumpre o requisito, aparece o botão "Resgatar". Conquistas com meta numérica ganharam barra de progresso, e elas estão separadas por dificuldade (bronze, prata e ouro).
+• Só conquistas de OURO podem virar título de perfil.
+• Várias conquistas novas (ranqueadas, duelos, coroas, foto de perfil, microfone…) e ajustes nas existentes.
+
+🔹 Missão diária:
+• Além da sidequest do seu supervisor, todo dia entra uma missão diária (rotaciona à meia-noite) que vale recompensa. As duas coexistem — uma não anula a outra.
+
+🔹 Competitivo — calibração mais curta:
+• A calibração caiu de 5 para 3 partidas. O seu MMR aparece a partir da 4ª partida competitiva; quem já fez 3+ partidas passa a ter o MMR visível.
+
+🔹 Limite de tempo nas sessões:
+• Toda sessão tem limite de 200 minutos. O cronômetro só corre enquanto você está no chat — sair do app, trocar de aba ou bloquear a tela pausa a contagem.
+
+🔹 Correções no celular:
+• O painel de Atualizações parou de vazar para fora da tela, e o botão de editar personagem no admin passou a funcionar no modo retrato.`,
+  },
+  {
     date: '2026-05-28',
     title: 'Avaliação de volta no Treinamento + correções',
     body: `Resumo do que entrou hoje:

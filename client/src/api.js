@@ -203,6 +203,8 @@ export const api = {
 
   // Indicadores (constância, objetivos diários, metas)
   getGamification: (userId) => request(`/gamification/${userId}`),
+  // Resgatar ("claim") uma conquista cumprida
+  claimAchievement: (id) => request(`/achievements/${id}/claim`, { method: 'POST' }),
 
   // Ranking global de jogadores (não disponível pra visitante)
   getRanking: () => request('/ranking'),
@@ -301,6 +303,8 @@ export const api = {
   // --- Sidequests (missões clínicas do Treinamento) ---
   // Aluno: sua sidequest ativa + concluídas.
   getMySidequest: () => request('/me/sidequest'),
+  // Missão diária (rotaciona do banco): a do usuário (com status de conclusão).
+  getMyDailyMission: () => request('/me/daily-mission'),
   // Supervisor/admin: banco de sidequests reutilizáveis.
   getSidequestBank: () => request('/sidequests/bank'),
   createSidequest: (data) => request('/sidequests/bank', { method: 'POST', body: data }),

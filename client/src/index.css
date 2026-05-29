@@ -982,6 +982,22 @@ select option { background: var(--cream); color: var(--ink); }
   color: var(--marrs-deep);
   border: 1px solid var(--sand);
 }
+/* Cronômetro no teto do limite de tempo de sessão (200 min de chat ativo). */
+.timer-chip.limit {
+  background: rgba(184, 58, 58, 0.1);
+  color: var(--danger);
+  border-color: rgba(184, 58, 58, 0.32);
+}
+
+/* Faixa de aviso que substitui o compositor quando o limite de tempo é atingido. */
+.session-limit-bar {
+  align-items: center;
+  gap: 10px;
+  color: var(--danger);
+  font-size: 13.5px;
+  font-weight: 500;
+}
+.session-limit-bar svg { flex-shrink: 0; }
 
 /* Separador visual entre sessões (time skip) */
 .session-break {
@@ -1499,6 +1515,73 @@ select option { background: var(--cream); color: var(--ink); }
   padding: 12px;
   font-size: 14px;
 }
+
+/* ───────── Homepage (pós-login): slogan grande, missão diária, como jogar ───────── */
+.home-page { max-width: 760px; }
+.home-hero .home-slogan {
+  font-family: var(--serif);
+  font-size: 32px;
+  line-height: 1.25;
+  color: var(--marrs-deep);
+  max-width: 640px;
+  margin: 10px 0 0;
+}
+.home-hero .home-slogan .accent { color: var(--terra); font-family: var(--serif); font-weight: 400; }
+.home-cta { display: inline-flex; margin-top: 18px; padding: 11px 26px; }
+
+/* "Como jogar" (FAQ dos modos) na homepage */
+.home-about { margin-top: 28px; max-width: 640px; }
+.home-about-header { margin-bottom: 18px; }
+.home-about-eyebrow {
+  text-transform: uppercase; letter-spacing: 0.28em; font-size: 10.5px;
+  color: var(--marrs-dark); font-weight: 500;
+}
+.home-about-title { font-family: var(--serif); font-size: 25px; color: var(--marrs-deep); margin: 6px 0 0; }
+.home-about-intro { font-size: 13.5px; color: var(--muted); line-height: 1.55; margin: 6px 0 0; max-width: 520px; }
+
+.faq-item {
+  border: 1px solid var(--sand);
+  border-radius: var(--radius);
+  background: var(--cream);
+  margin-bottom: 10px;
+  overflow: hidden;
+  transition: box-shadow 0.15s ease;
+}
+.faq-item[open] { box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.08)); }
+.faq-item > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 15px 18px;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--marrs-deep);
+  user-select: none;
+}
+.faq-item > summary::-webkit-details-marker { display: none; }
+.faq-item > summary:hover { background: var(--sand-2); }
+.faq-q-icon { font-size: 17px; line-height: 1; }
+.faq-chevron {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.faq-item[open] .faq-chevron { transform: rotate(180deg); }
+.faq-a {
+  padding: 2px 18px 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.faq-a p { margin: 0 0 9px; }
+.faq-a p:last-child { margin-bottom: 0; }
+.faq-a strong { color: var(--marrs-deep); font-weight: 600; }
+.faq-a em { font-style: italic; color: var(--ink); }
+.faq-a ul { margin: 0 0 9px; padding-left: 20px; }
+.faq-a li { margin: 4px 0; }
 
 /* ────────────────────────────────────────
    ADMIN
@@ -2551,6 +2634,41 @@ select option { background: var(--cream); color: var(--ink); }
 .achievement-card.earned.tier-platinum { border-top: 3px solid var(--marrs); box-shadow: 0 0 0 1px rgba(0, 143, 143, 0.18); }
 .achievement-card.earned.tier-quest    { border-top: 3px solid #8a5cc4; box-shadow: 0 0 0 1px rgba(138, 92, 196, 0.18); }
 
+/* Conquista RESGATÁVEL: critério cumprido, aguardando claim. Cor cheia + pulso. */
+.achievement-card.claimable { background: var(--cream); }
+.achievement-card.claimable.tier-bronze { border-top: 3px solid #B85A40; }
+.achievement-card.claimable.tier-silver { border-top: 3px solid #8a9097; }
+.achievement-card.claimable.tier-gold   { border-top: 3px solid #c8a04e; }
+.achievement-card.claimable { box-shadow: 0 0 0 2px rgba(0, 143, 143, 0.30); animation: claimPulse 2.2s ease-in-out infinite; }
+@keyframes claimPulse {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(0, 143, 143, 0.22); }
+  50%      { box-shadow: 0 0 0 3px rgba(0, 143, 143, 0.42); }
+}
+.achievement-claim-btn { margin-top: 8px; padding: 7px 20px; }
+
+/* Cartão bloqueado: dim, mas barra de progresso ainda legível. */
+.achievement-card.locked { opacity: 0.6; }
+
+/* Barra de progresso das conquistas com meta numérica. */
+.achievement-progress { width: 100%; margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+.achievement-progress-bar { flex: 1; height: 7px; background: var(--sand); border-radius: 999px; overflow: hidden; }
+.achievement-progress-fill { height: 100%; background: var(--marrs); border-radius: 999px; transition: width 0.4s ease; }
+.achievement-progress-text { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+
+/* Agrupamento por dificuldade (Ouro / Prata / Bronze / Recompensas). */
+.achievement-tier-group { margin-bottom: 26px; }
+.achievement-tier-header { display: flex; align-items: center; gap: 12px; margin: 6px 0 12px; flex-wrap: wrap; }
+.achievement-tier-badge {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 4px 12px; border-radius: 999px; border: 1px solid;
+}
+.achievement-tier-badge.tier-gold   { color: #97781f; border-color: #c8a04e; background: rgba(200, 160, 78, 0.12); }
+.achievement-tier-badge.tier-silver { color: #5b6068; border-color: #8a9097; background: rgba(138, 144, 151, 0.12); }
+.achievement-tier-badge.tier-bronze { color: #8f4631; border-color: #B85A40; background: rgba(184, 90, 64, 0.1); }
+.achievement-tier-badge.tier-quest  { color: #6b3fa0; border-color: #8a5cc4; background: rgba(138, 92, 196, 0.1); }
+.achievement-tier-hint { font-size: 12.5px; color: var(--muted); }
+.metas-claimable-pill { color: var(--marrs-deep); font-weight: 600; }
+
 /* ──── Títulos desbloqueáveis (subtítulos) ──── */
 /* Pill exibido sob o nome (perfil, sidebar, ranking). Cor segue o tier. */
 .player-title {
@@ -3038,6 +3156,57 @@ select option { background: var(--cream); color: var(--ink); }
 .notif-item-body { font-size: 13px; line-height: 1.45; }
 .notif-item-time { display: block; color: var(--muted); font-size: 11.5px; margin-top: 3px; }
 
+/* --- Atualizações do sistema (bloco de notas com exclamação) ---
+   Definido aqui (antes da media query mobile) de propósito: o painel divide a
+   regra mobile com .notif-panel. Se a base ficasse depois da @media, venceria
+   por ordem de cascata e o painel vazaria no celular. */
+.sys-updates-btn {
+  position: relative;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--sand);
+  background: var(--cream);
+  color: var(--marrs-deep);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: background 0.15s ease;
+}
+.sys-updates-btn:hover { background: var(--sand-2); }
+.sys-updates-dot {
+  position: absolute; top: -2px; right: -2px;
+  width: 11px; height: 11px; border-radius: 50%;
+  background: var(--terra); border: 2px solid var(--cream);
+}
+.sys-updates-panel {
+  position: absolute; top: 50px; right: 0;
+  width: 380px; max-width: calc(100vw - 32px);
+  background: var(--cream);
+  border: 1px solid var(--sand);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.sys-updates-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--sand);
+  font-weight: 600; font-size: 14px; color: var(--ink);
+}
+.sys-updates-list { max-height: min(70vh, 560px); overflow-y: auto; }
+.sys-update-item { padding: 14px 16px; border-bottom: 1px solid var(--sand-2); }
+.sys-update-item:last-child { border-bottom: none; }
+.sys-update-date {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px;
+}
+.sys-update-title { font-weight: 700; color: var(--marrs-deep); font-size: 14.5px; margin-bottom: 6px; }
+.sys-update-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-size: 13px; line-height: 1.55; color: var(--ink-soft);
+}
+
 /* --- Duelo: passos / seleção --- */
 .duel-steps {
   display: flex; align-items: center; gap: 10px;
@@ -3217,54 +3386,6 @@ select option { background: var(--cream); color: var(--ink); }
   display: flex; flex-direction: column; align-items: center; gap: 6px;
 }
 
-/* --- Atualizações do sistema (bloco de notas com exclamação) --- */
-.sys-updates-btn {
-  position: relative;
-  width: 42px; height: 42px;
-  border-radius: 50%;
-  border: 1px solid var(--sand);
-  background: var(--cream);
-  color: var(--marrs-deep);
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer;
-  box-shadow: var(--shadow-md);
-  transition: background 0.15s ease;
-}
-.sys-updates-btn:hover { background: var(--sand-2); }
-.sys-updates-dot {
-  position: absolute; top: -2px; right: -2px;
-  width: 11px; height: 11px; border-radius: 50%;
-  background: var(--terra); border: 2px solid var(--cream);
-}
-.sys-updates-panel {
-  position: absolute; top: 50px; right: 0;
-  width: 380px; max-width: calc(100vw - 32px);
-  background: var(--cream);
-  border: 1px solid var(--sand);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  overflow: hidden;
-}
-.sys-updates-header {
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--sand);
-  font-weight: 600; font-size: 14px; color: var(--ink);
-}
-.sys-updates-list { max-height: min(70vh, 560px); overflow-y: auto; }
-.sys-update-item { padding: 14px 16px; border-bottom: 1px solid var(--sand-2); }
-.sys-update-item:last-child { border-bottom: none; }
-.sys-update-date {
-  font-size: 11px; color: var(--muted);
-  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px;
-}
-.sys-update-title { font-weight: 700; color: var(--marrs-deep); font-size: 14.5px; margin-bottom: 6px; }
-.sys-update-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  font-size: 13px; line-height: 1.55; color: var(--ink-soft);
-}
-
 /* ─────────────────────── Sidequests ─────────────────────── */
 /* Banner do objetivo principal (Treinamento) — título em caixa alta + descrição */
 .sidequest-banner {
@@ -3285,6 +3406,20 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .sidequest-banner-desc { font-size: 14px; line-height: 1.5; color: var(--ink-soft); margin-top: 4px; }
 .sidequest-banner-hint { font-size: 12.5px; color: #6b3fa0; margin-top: 8px; font-style: italic; }
+
+/* Variante da missão diária (desafio do dia): teal, pra distinguir da sidequest (roxa). */
+.daily-mission-banner {
+  border-color: rgba(0, 143, 143, 0.32);
+  border-left-color: var(--marrs);
+  background: linear-gradient(135deg, rgba(0, 143, 143, 0.08), rgba(0, 143, 143, 0.02));
+}
+.daily-mission-banner .sidequest-banner-label,
+.daily-mission-banner .sidequest-banner-hint { color: var(--marrs-dark, #066); }
+.daily-mission-banner.completed { opacity: 0.8; }
+.sidequest-result.daily.completed {
+  border-color: rgba(0, 143, 143, 0.4);
+  background: linear-gradient(135deg, rgba(0, 143, 143, 0.1), rgba(0, 143, 143, 0.04));
+}
 
 /* Card de resultado pós-sessão (concluída / não concluída) */
 .sidequest-result {

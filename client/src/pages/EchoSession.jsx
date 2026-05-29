@@ -6,6 +6,7 @@ import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
+import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -80,6 +81,8 @@ export default function EchoSession({ user, sessionType }) {
   const [mmrResult, setMmrResult] = useState(null); // resultado MMR pós-partida competitiva
   const [sidequest, setSidequest] = useState(null); // sidequest ativa (objetivo principal do Treinamento)
   const [sidequestOutcome, setSidequestOutcome] = useState(null); // resultado pós-correção (concluída?)
+  const [dailyMission, setDailyMission] = useState(null); // missão diária ativa (desafio do dia)
+  const [dailyMissionOutcome, setDailyMissionOutcome] = useState(null); // resultado pós-correção
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -115,6 +118,17 @@ export default function EchoSession({ user, sessionType }) {
     api.getMySidequest()
       .then((d) => { if (!cancelled) setSidequest(d && d.active ? d.active : null); })
       .catch(() => { /* sem sidequest se falhar */ });
+    return () => { cancelled = true; };
+  }, [isFreeSim, isVisitor]);
+
+  // Missão diária (desafio do dia): objetivo adicional do Treinamento, mostrado
+  // durante o atendimento se ainda não foi cumprido hoje. Avaliada ao final.
+  useEffect(() => {
+    if (!isFreeSim || isVisitor) return;
+    let cancelled = false;
+    api.getMyDailyMission()
+      .then((d) => { if (!cancelled) setDailyMission(d && d.mission && !d.completed ? d.mission : null); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [isFreeSim, isVisitor]);
 
@@ -204,10 +218,13 @@ export default function EchoSession({ user, sessionType }) {
   // Cronômetro
   useEffect(() => {
     if (sessionStarted && !sessionEnded) {
-      timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+      timerRef.current = setInterval(() => setElapsed(nextActiveElapsed), 1000);
       return () => clearInterval(timerRef.current);
     }
   }, [sessionStarted, sessionEnded]);
+
+  // Limite de tempo ativo da sessão atingido (200 min "no chat").
+  const limitReached = elapsed >= SESSION_LIMIT_SECONDS;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -254,7 +271,7 @@ export default function EchoSession({ user, sessionType }) {
 
   async function sendMessage(text) {
     const trimmed = text.trim();
-    if (!trimmed || isTyping || !sessionStarted || sessionEnded) return;
+    if (!trimmed || isTyping || !sessionStarted || sessionEnded || limitReached) return;
 
     const userMsg = { role: 'user', content: trimmed, highlighted: false, comment: '' };
     const updated = [...messages, userMsg];
@@ -280,7 +297,7 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   function handleSkipSession() {
-    if (!sessionStarted || sessionEnded || isTyping || skipping) return;
+    if (!sessionStarted || sessionEnded || isTyping || skipping || limitReached) return;
     if (sessionType === 'freeplay' && sessionNumber >= MAX_FREEPLAY_SESSIONS) {
       setShowSessionLimit(true);
       return;
@@ -559,6 +576,8 @@ export default function EchoSession({ user, sessionType }) {
       if (saved && saved.mmr) setMmrResult(saved.mmr);
       // Resultado da sidequest (Treinamento): concluída → celebração + título.
       if (saved && saved.sidequest) setSidequestOutcome(saved.sidequest);
+      // Resultado da missão diária (desafio do dia): mesma celebração.
+      if (saved && saved.dailyMission) setDailyMissionOutcome(saved.dailyMission);
     } catch (err) {
       setSaveError(err.message || 'Erro ao salvar o log.');
     } finally {
@@ -750,6 +769,27 @@ export default function EchoSession({ user, sessionType }) {
             </div>
           )}
 
+          {dailyMissionOutcome && (
+            <div className={`sidequest-result daily ${dailyMissionOutcome.completed ? 'completed' : 'incomplete'}`}>
+              {dailyMissionOutcome.completed ? (
+                <>
+                  <div className="sidequest-result-badge">◷ Missão diária concluída</div>
+                  <h4>{dailyMissionOutcome.title}</h4>
+                  <p>
+                    Você cumpriu o desafio do dia e desbloqueou o título{' '}
+                    <strong>{dailyMissionOutcome.rewardTitleLabel}</strong>.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="sidequest-result-badge incomplete">Missão diária não concluída</div>
+                  <h4>{dailyMissionOutcome.title}</h4>
+                  <p>O desafio de hoje continua valendo. Tente de novo em outro atendimento ainda hoje.</p>
+                </>
+              )}
+            </div>
+          )}
+
           {isCompetitive && (
             <div className="mmr-result-card">
               {mmrResult ? (
@@ -757,7 +797,7 @@ export default function EchoSession({ user, sessionType }) {
                   <>
                     <span className="post-stat-label">MMR · Em calibração</span>
                     <p className="mmr-result-note">
-                      Partida {mmrResult.n} de 5 da calibração — seu MMR aparece após a 5ª.
+                      Partida {mmrResult.n} de 3 da calibração — seu MMR aparece após a 3ª.
                       {mmrResult.matchesRemaining > 0 && (
                         <> Faltam <strong>{mmrResult.matchesRemaining}</strong> {mmrResult.matchesRemaining === 1 ? 'partida' : 'partidas'}.</>
                       )}
@@ -802,8 +842,10 @@ export default function EchoSession({ user, sessionType }) {
                   .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
                   .replace(/\[NOTA:[^\]]+\]\s*/g, '')
                   .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
-                  // [sidequest-resultado] (JSON de conclusão) é só pro sistema/supervisor.
+                  // [sidequest-resultado] / [missao-diaria-resultado] (JSON de
+                  // conclusão) são só pro sistema/supervisor.
                   .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
+                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[missao-diaria-resultado\][\s\S]*$/i, '')
                   // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
                   // some da visão do aluno, mas continua salvo no log.
                   .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
@@ -864,7 +906,7 @@ export default function EchoSession({ user, sessionType }) {
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           {sessionStarted && (
-            <div className="timer-chip" title="Duração da sessão">
+            <div className={`timer-chip ${limitReached ? 'limit' : ''}`} title={limitReached ? `Limite de ${SESSION_LIMIT_MINUTES} min atingido` : 'Tempo no chat (pausa fora dele)'}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
               <span>{formatTime(elapsed)}</span>
             </div>
@@ -925,6 +967,14 @@ export default function EchoSession({ user, sessionType }) {
           <div className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</div>
           <div className="sidequest-banner-title">{sidequest.title}</div>
           <div className="sidequest-banner-desc">{sidequest.description}</div>
+        </div>
+      )}
+
+      {dailyMission && (
+        <div className="sidequest-banner daily-mission-banner">
+          <div className="sidequest-banner-label">◷ Missão diária · desafio do dia</div>
+          <div className="sidequest-banner-title">{dailyMission.title}</div>
+          <div className="sidequest-banner-desc">{dailyMission.description}</div>
         </div>
       )}
 
@@ -1036,6 +1086,11 @@ export default function EchoSession({ user, sessionType }) {
             <span className="spinner" />
             <span>Transcrevendo áudio…</span>
           </div>
+        </div>
+      ) : limitReached ? (
+        <div className="chat-input-area session-limit-bar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+          <span>Limite de {SESSION_LIMIT_MINUTES} min de sessão atingido. Finalize a sessão para concluir.</span>
         </div>
       ) : (
         <div className="chat-input-area">

@@ -13,12 +13,14 @@
 //     peso", "20× mais peso que a mais antiga"). Aqui o MAIS RECENTE recebe o
 //     maior peso, como o texto manda.
 //
-//  2. Fronteira da calibração. O texto (§5.1) fala em "5 primeiras partidas" de
-//     calibração e "após a 5ª partida ... influencia a dificuldade". O
-//     pseudocódigo usava `n <= 5` (MMR) e `n > 5` (dificuldade) — off-by-one
+//  2. Fronteira da calibração. O doc (§5.1) falava em "5 primeiras partidas" de
+//     calibração; em 2026-05-29 reduzimos para 3 (5 partidas desengajavam os
+//     jogadores antes de eles verem o MMR — ver CALIBRATION_MATCHES). O
+//     pseudocódigo usava `n <= N` (MMR) e `n > N` (dificuldade) — off-by-one
 //     entre si e contra o texto. Unificamos numa fronteira só: com n =
-//     partidas JÁ concluídas (0-indexed), calibração é n < 5 (partidas 1..5) e
-//     a fase madura (MMR por janela E ajuste de dificuldade) começa na 6ª.
+//     partidas JÁ concluídas (0-indexed), calibração é n < CALIBRATION_MATCHES
+//     (partidas 1..3) e a fase madura (MMR por janela E ajuste de dificuldade)
+//     começa na 4ª.
 //
 //  3. Histórico do personagem para a regressão. O pseudocódigo gravava o D já
 //     ajustado; gravamos o D CONTRA O QUAL a partida foi de fato jogada (D
@@ -30,7 +32,7 @@ const D0 = 50;                 // dificuldade inicial do personagem
 const D_MIN = 10;
 const D_MAX = 90;
 const WINDOW = 20;             // janela de partidas recentes do jogador
-const CALIBRATION_MATCHES = 5; // nº de partidas em fase de calibração
+const CALIBRATION_MATCHES = 3; // nº de partidas em fase de calibração (5→3 em 2026-05-29: 5 desengajavam antes de o MMR aparecer)
 const CHAR_MATURE_AT = 20;     // n_D a partir do qual liga a regressão do personagem
 const REGRESS_REFIT_EVERY = 5; // reajusta a regressão a cada N partidas válidas
 const HISTORY_CAP = 200;       // teto do histórico do personagem em disco
@@ -108,12 +110,12 @@ function updateMatch(playerIn, charIn, Sraw) {
 
   const S = clamp(Number(Sraw), 0, 100);
   const nBefore = player.n;                       // partidas já concluídas
-  const calibrating = nBefore < CALIBRATION_MATCHES; // partidas 1..5
+  const calibrating = nBefore < CALIBRATION_MATCHES; // partidas 1..3
 
   // Passo 1 — nota esperada
   const S_esp = expectedScore(player, character);
 
-  // Passo 2 — dificuldade (só quando o jogador NÃO está em calibração: 6ª+).
+  // Passo 2 — dificuldade (só quando o jogador NÃO está em calibração: 4ª+).
   // Durante a calibração o sinal do jogador é ruidoso demais para mexer no D.
   const D_before = character.D;
   if (!calibrating) {
@@ -180,8 +182,8 @@ const PVP_MIN_SCORE = 25;   // anti-smurf/win-trade: nota mínima pra ranquear
 // Decide se um duelo é rankeado e, em caso afirmativo, calcula os novos estados.
 // Pré-condições (todas obrigatórias): os dois jogadores PASSARAM da calibração
 // (n >= CALIBRATION_MATCHES) e NENHUM tirou nota < PVP_MIN_SCORE.
-// "n_partidas > 5" do doc = "fora da calibração" na fronteira já documentada
-// deste engine (calibração = 5 primeiras partidas; madura a partir daí).
+// "n_partidas > N" do doc = "fora da calibração" na fronteira já documentada
+// deste engine (calibração = 3 primeiras partidas; madura a partir daí).
 //
 // Não-rankeado → feedback acontece mesmo assim (no chamador), mas MMR, janela,
 // n e dificuldade D ficam INALTERADOS. Retorna { ranked:false, reason }.
@@ -240,7 +242,7 @@ function processDuel(playerAIn, playerBIn, charIn, S_A_raw, S_B_raw) {
 }
 
 // Visão pública do jogador para ranking/perfil. MMR fica OCULTO (null) durante a
-// calibração (n < 5), exibindo só quantas partidas faltam.
+// calibração (n < CALIBRATION_MATCHES), exibindo só quantas partidas faltam.
 function playerView(player) {
   const p = player || newPlayer();
   const calibrating = p.n < CALIBRATION_MATCHES;

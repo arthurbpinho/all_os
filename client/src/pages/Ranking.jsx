@@ -96,7 +96,7 @@ export default function Ranking({ user }) {
         </h2>
         <p>
           A classificação é pelo <strong>MMR</strong> do modo Competitivo — uma medida de habilidade que
-          sobe e desce conforme você joga contra a dificuldade real de cada caso. Nas 5 primeiras partidas
+          sobe e desce conforme você joga contra a dificuldade real de cada caso. Nas 3 primeiras partidas
           o MMR fica em calibração e não aparece.
         </p>
       </div>

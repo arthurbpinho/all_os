@@ -50,7 +50,7 @@ describe('processDuel — exemplos do doc (PvP)', () => {
 });
 
 describe('processDuel — pré-condições', () => {
-  it('bloqueia se algum jogador ainda está em calibração (n < 5)', () => {
+  it('bloqueia se algum jogador ainda está em calibração (n < 3)', () => {
     const r = mmr.processDuel(player(60, 2), player(60, 10), undefined, 70, 60);
     expect(r.ranked).toBe(false);
     expect(r.reason).toBe('calibrating');

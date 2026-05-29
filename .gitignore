@@ -15,7 +15,11 @@ server/data/mmr.json
 server/data/duels.json
 server/data/notifications.json
 server/data/desafio.json
+server/data/desafio-history.json
+server/data/counters.json
+server/data/daily-missions.json
 server/data/tmp_audio.webm
+server/data/tmp_audio_*.webm
 
 # Backups locais
 entrevistador/promptentrevistadoroldbackup.md

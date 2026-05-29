@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import Login from './pages/Login';
+import Home from './pages/Home';
 import SkillMap from './pages/SkillMap';
 import FreePlay from './pages/FreePlay';
 import Competitive from './pages/Competitive';
@@ -28,6 +29,13 @@ import SystemUpdates from './components/SystemUpdates';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 
 const ICONS = {
+  home: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M3 10.5 12 3l9 7.5" />
+      <path d="M5 9.5V21h14V9.5" />
+      <path d="M9.5 21v-6h5v6" />
+    </svg>
+  ),
   skill: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <circle cx="12" cy="12" r="3" />
@@ -265,6 +273,9 @@ export default function App() {
           {(isTherapist || isAdmin || isVisitor) && (
             <>
               <div className="nav-section">Prática</div>
+              <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''}>
+                {ICONS.home}<span>Início</span>
+              </Link>
               {/* Trilha de Competências oculta por enquanto — só admin acessa via menu.
                   Será reaberta pra alunos/professores em iteração futura. */}
               {isAdmin && (
@@ -425,6 +436,7 @@ export default function App() {
 
       <main className="main-content">
         <Routes>
+          <Route path="/inicio" element={<Home user={user} />} />
           <Route path="/skills" element={<SkillMap user={user} />} />
           <Route path="/chat/exercise/:id" element={<ChatSession user={user} />} />
           <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
@@ -462,6 +474,6 @@ export default function App() {
 function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
-  // Aluno e visitante: caem direto na Simulação (Trilha está oculta nesta versão).
-  return '/freeplay';
+  // Aluno e visitante: caem na homepage (Início) — slogan + missão diária + modos.
+  return '/inicio';
 }

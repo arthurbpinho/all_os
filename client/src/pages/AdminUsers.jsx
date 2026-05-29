@@ -302,7 +302,7 @@ export default function AdminUsers({ user: currentUser }) {
           Nenhuma conta nesta categoria.
         </div>
       ) : (
-        <div className="card tight" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="card tight" style={{ padding: 0, overflow: 'auto' }}>
           <table className="admin-table">
             <thead>
               <tr>

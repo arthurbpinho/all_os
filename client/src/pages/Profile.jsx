@@ -72,6 +72,8 @@ export default function Profile({ user, onUpdate }) {
   }, [user.id]);
 
   const earnedBadges = gamification?.achievements?.filter((a) => a.earned) || [];
+  // Só conquistas de OURO (ou recompensas de missão) podem virar título de perfil.
+  const titleEligible = earnedBadges.filter((a) => a.tier === 'gold' || a.sidequest);
   const streak = gamification?.streak;
 
   async function handleSave(e) {
@@ -186,11 +188,11 @@ export default function Profile({ user, onUpdate }) {
             </div>
           )}
 
-          {earnedBadges.length > 0 && (
+          {titleEligible.length > 0 && (
             <div style={{ marginTop: 22 }}>
               <h4 className="section-title" style={{ fontSize: 15 }}>Título exibido</h4>
               <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>
-                Escolha um título desbloqueado para exibir sob o seu nome no perfil e no ranking. Clique no ativo para remover.
+                Só conquistas de <strong>ouro</strong> (e recompensas de missão) viram título. Escolha um para exibir sob o seu nome no perfil e no ranking. Clique no ativo para remover.
               </p>
               {titleError && <div className="alert error" style={{ marginBottom: 10 }}>{titleError}</div>}
               <div className="title-chips">
@@ -202,7 +204,7 @@ export default function Profile({ user, onUpdate }) {
                 >
                   Nenhum
                 </button>
-                {earnedBadges.map((a) => (
+                {titleEligible.map((a) => (
                   <button
                     key={a.id}
                     type="button"

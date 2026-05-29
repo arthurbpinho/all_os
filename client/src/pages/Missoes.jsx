@@ -1,19 +1,46 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+
+// Ordem e rótulos das faixas de dificuldade. Sidequests (tier 'quest') entram
+// num grupo próprio no fim.
+const TIER_GROUPS = [
+  { tier: 'gold',   label: 'Ouro',  hint: 'Conquistas de ouro podem virar título de perfil.' },
+  { tier: 'silver', label: 'Prata', hint: '' },
+  { tier: 'bronze', label: 'Bronze', hint: '' },
+  { tier: 'quest',  label: 'Recompensas de missão', hint: '' },
+];
 
 export default function Missoes({ user }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [claimingId, setClaimingId] = useState(null);
+  const [claimError, setClaimError] = useState('');
+
+  const load = useCallback(() => {
+    return api.getGamification(user.id)
+      .then(setData)
+      .catch((err) => setError(err.message || 'Erro ao carregar indicadores'));
+  }, [user.id]);
 
   useEffect(() => {
     setLoading(true);
-    api.getGamification(user.id)
-      .then(setData)
-      .catch((err) => setError(err.message || 'Erro ao carregar indicadores'))
-      .finally(() => setLoading(false));
-  }, [user.id]);
+    load().finally(() => setLoading(false));
+  }, [load]);
+
+  async function handleClaim(id) {
+    setClaimError('');
+    setClaimingId(id);
+    try {
+      await api.claimAchievement(id);
+      await load();
+    } catch (err) {
+      setClaimError(err.message || 'Não foi possível resgatar a conquista.');
+    } finally {
+      setClaimingId(null);
+    }
+  }
 
   if (loading) {
     return (
@@ -27,7 +54,8 @@ export default function Missoes({ user }) {
   if (!data) return null;
 
   const { streak, dailyMissions, achievements, stats } = data;
-  const earnedCount = achievements.filter((a) => a.earned).length;
+  const claimedCount = achievements.filter((a) => a.claimed).length;
+  const claimableCount = achievements.filter((a) => a.claimable).length;
 
   return (
     <div>
@@ -37,7 +65,7 @@ export default function Missoes({ user }) {
           <Typewriter text="Objetivos e " />
           <span className="accent"><Typewriter text="metas" delayStart={300} /></span>
         </h2>
-        <p>Mantenha a constância, conclua os objetivos diários e registre marcos do seu aprimoramento técnico.</p>
+        <p>Mantenha a constância, conclua os objetivos diários e resgate marcos do seu aprimoramento técnico.</p>
         <div className="ornament" />
       </div>
 
@@ -116,25 +144,66 @@ export default function Missoes({ user }) {
       </div>
 
       <h3 className="section-heading">Metas</h3>
-      <p className="section-sub">{earnedCount} de {achievements.length} alcançadas</p>
-      <div className="achievement-grid">
-        {achievements.map((a) => (
-          <div
-            key={a.id}
-            className={`achievement-card tier-${a.tier} ${a.earned ? 'earned' : 'locked'}`}
-            title={a.earned && a.earnedAt ? `Alcançada em ${new Date(a.earnedAt).toLocaleDateString('pt-BR')}` : a.description}
-          >
-            <div className="achievement-icon" aria-hidden>{a.icon}</div>
-            <div className="achievement-title">{a.title}</div>
-            <div className="achievement-description">{a.description}</div>
-            {a.earned && a.earnedAt && (
-              <div className="achievement-date">
-                {new Date(a.earnedAt).toLocaleDateString('pt-BR')}
-              </div>
-            )}
+      <p className="section-sub">
+        {claimedCount} de {achievements.length} resgatadas
+        {claimableCount > 0 && <span className="metas-claimable-pill"> · {claimableCount} para resgatar</span>}
+      </p>
+      {claimError && <div className="alert error" style={{ marginBottom: 14 }}>{claimError}</div>}
+
+      {TIER_GROUPS.map(({ tier, label, hint }) => {
+        const items = achievements.filter((a) => a.tier === tier);
+        if (items.length === 0) return null;
+        return (
+          <div key={tier} className="achievement-tier-group">
+            <div className="achievement-tier-header">
+              <span className={`achievement-tier-badge tier-${tier}`}>{label}</span>
+              {hint && <span className="achievement-tier-hint">{hint}</span>}
+            </div>
+            <div className="achievement-grid">
+              {items.map((a) => {
+                const state = a.claimed ? 'earned' : a.claimable ? 'claimable' : 'locked';
+                const hasBar = Number.isFinite(a.target);
+                const pct = hasBar ? Math.min(100, (a.progress / a.target) * 100) : 0;
+                return (
+                  <div
+                    key={a.id}
+                    className={`achievement-card tier-${a.tier} ${state}`}
+                    title={a.claimed && a.earnedAt ? `Resgatada em ${new Date(a.earnedAt).toLocaleDateString('pt-BR')}` : a.description}
+                  >
+                    <div className="achievement-icon" aria-hidden>{a.icon}</div>
+                    <div className="achievement-title">{a.title}</div>
+                    <div className="achievement-description">{a.description}</div>
+
+                    {hasBar && !a.claimed && (
+                      <div className="achievement-progress">
+                        <div className="achievement-progress-bar">
+                          <div className="achievement-progress-fill" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="achievement-progress-text">{a.progress}/{a.target}</span>
+                      </div>
+                    )}
+
+                    {a.claimable && (
+                      <button
+                        className="btn btn-primary btn-sm achievement-claim-btn"
+                        onClick={() => handleClaim(a.id)}
+                        disabled={claimingId === a.id}
+                      >
+                        {claimingId === a.id ? 'Resgatando…' : 'Resgatar'}
+                      </button>
+                    )}
+                    {a.claimed && a.earnedAt && (
+                      <div className="achievement-date">
+                        ✓ {new Date(a.earnedAt).toLocaleDateString('pt-BR')}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
     </div>
   );
 }

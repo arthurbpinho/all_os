@@ -109,7 +109,7 @@ export default function AdminNeuro() {
           Nenhum personagem cadastrado ainda.
         </div>
       ) : (
-        <div className="card tight" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="card tight" style={{ padding: 0, overflow: 'auto' }}>
           <table className="admin-table">
             <thead>
               <tr><th>Nome</th><th>Idade</th><th>Diagnóstico (interno)</th><th>Descrição</th><th>Ações</th></tr>

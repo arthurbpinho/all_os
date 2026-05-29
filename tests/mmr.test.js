@@ -76,25 +76,25 @@ describe('MMR engine (server/mmr.js)', () => {
       expect(player.W.length).toBe(1);
     });
 
-    it('dificuldade só se move a partir da 6ª partida (jogador fora da calibração)', () => {
+    it('dificuldade só se move a partir da 4ª partida (jogador fora da calibração)', () => {
       let p, c;
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= 3; i++) {
         const r = mmr.updateMatch(p, c, 80);
         p = r.player; c = r.character;
-        expect(r.result.D_after).toBe(50);      // partidas 1..5: D fixo
+        expect(r.result.D_after).toBe(50);      // partidas 1..3: D fixo
         expect(c.n_D).toBe(0);
       }
-      const r6 = mmr.updateMatch(p, c, 80);
-      expect(r6.result.D_after).not.toBe(50);   // 6ª partida: D ajusta
-      expect(r6.character.n_D).toBe(1);
-      expect(r6.result.calibrating).toBe(false);
+      const r4 = mmr.updateMatch(p, c, 80);
+      expect(r4.result.D_after).not.toBe(50);   // 4ª partida: D ajusta
+      expect(r4.character.n_D).toBe(1);
+      expect(r4.result.calibrating).toBe(false);
     });
 
     it('jogador forte (S=80) puxa a dificuldade pra baixo quando supera o esperado', () => {
       let p, c;
-      for (let i = 1; i <= 5; i++) { const r = mmr.updateMatch(p, c, 80); p = r.player; c = r.character; }
-      const r6 = mmr.updateMatch(p, c, 80);
-      expect(r6.result.D_after).toBeLessThan(50); // overperformou → caso "mais fácil"
+      for (let i = 1; i <= 3; i++) { const r = mmr.updateMatch(p, c, 80); p = r.player; c = r.character; }
+      const r4 = mmr.updateMatch(p, c, 80);
+      expect(r4.result.D_after).toBeLessThan(50); // overperformou → caso "mais fácil"
     });
   });
 
@@ -115,8 +115,8 @@ describe('MMR engine (server/mmr.js)', () => {
 
   describe('playerView', () => {
     it('oculta o MMR (null) durante a calibração e mostra arredondado depois', () => {
-      expect(mmr.playerView({ P: 63.7, n: 3, W: [] })).toMatchObject({ calibrating: true, mmr: null, matchesRemaining: 2 });
-      expect(mmr.playerView({ P: 63.7, n: 5, W: [] })).toMatchObject({ calibrating: false, mmr: 64 });
+      expect(mmr.playerView({ P: 63.7, n: 2, W: [] })).toMatchObject({ calibrating: true, mmr: null, matchesRemaining: 1 });
+      expect(mmr.playerView({ P: 63.7, n: 3, W: [] })).toMatchObject({ calibrating: false, mmr: 64 });
       expect(mmr.playerView(null)).toMatchObject({ calibrating: true, mmr: null, n: 0 });
     });
   });
@@ -161,20 +161,20 @@ describe('MMR via API', () => {
     expect(rank.body.find((r) => r.userId === '3')).toBeUndefined();
   });
 
-  it('após 5 partidas o jogador aparece no ranking com MMR visível', async () => {
+  it('após 3 partidas o jogador aparece no ranking com MMR visível', async () => {
     const aluno = await loginAs('aluno');
-    for (let i = 0; i < 5; i++) await competitiveMatch(aluno, 70);
+    for (let i = 0; i < 3; i++) await competitiveMatch(aluno, 70);
     const rank = await request(app).get('/api/ranking').set(authHeader(aluno));
     const me = rank.body.find((r) => r.userId === '3');
     expect(me).toBeTruthy();
     expect(me.calibrating).toBe(false);
     expect(typeof me.mmr).toBe('number');
-    expect(me.matches).toBe(5);
+    expect(me.matches).toBe(3);
   });
 
-  it('nas 4 primeiras partidas o ranking mostra calibrating=true e mmr=null', async () => {
+  it('antes de completar a calibração (n<3) o ranking mostra calibrating=true e mmr=null', async () => {
     const aluno = await loginAs('aluno');
-    for (let i = 0; i < 4; i++) await competitiveMatch(aluno, 70);
+    for (let i = 0; i < 2; i++) await competitiveMatch(aluno, 70);
     const rank = await request(app).get('/api/ranking').set(authHeader(aluno));
     const me = rank.body.find((r) => r.userId === '3');
     expect(me.calibrating).toBe(true);
