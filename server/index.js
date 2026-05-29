@@ -1724,7 +1724,9 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
           };
         }
       } else {
-        sidequestOutcome = { completed: false, title: active.title };
+        // Repassa o "por que não passou" (justification do avaliador) pra tela
+        // pós-sessão mostrar ao aluno o que faltou. Pode vir vazio.
+        sidequestOutcome = { completed: false, title: active.title, reason: sidequestResult.justification || '' };
       }
     }
   }
@@ -1749,7 +1751,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
           };
         }
       } else {
-        dailyMissionOutcome = { completed: false, title: activeDaily.title };
+        dailyMissionOutcome = { completed: false, title: activeDaily.title, reason: dailyResult.justification || '' };
       }
     }
   }

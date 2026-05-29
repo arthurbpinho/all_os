@@ -13,6 +13,7 @@ import LogActions from '../components/LogActions';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { makeLogItems, evalSection as evalSectionTxt, downloadText } from '../logFiles';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
+import { useWakeLock } from '../useWakeLock';
 
 const PHASE_SIMULATION = 'simulation';
 const PHASE_EVALUATING = 'evaluating';
@@ -43,6 +44,9 @@ export default function ChatSession({ user }) {
   const [evaluationText, setEvaluationText] = useState('');
   const [score, setScore] = useState(null);
   const [elapsed, setElapsed] = useState(0);
+
+  // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
+  useWakeLock(phase === PHASE_EVALUATING);
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);

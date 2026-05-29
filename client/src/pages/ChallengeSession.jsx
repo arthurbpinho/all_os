@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
+import { useWakeLock } from '../useWakeLock';
 
 // Sessão do modo Desafio (titular-desafiante). Vive dentro da aba Treinamento
 // como atalho clicando no canto inferior direito do card de um paciente:
@@ -49,6 +50,9 @@ export default function ChallengeSession({ user }) {
   const [streamingText, setStreamingText] = useState('');
   const [newTitular, setNewTitular] = useState(null);
   const [submitError, setSubmitError] = useState('');
+
+  // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
+  useWakeLock(submitting);
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);

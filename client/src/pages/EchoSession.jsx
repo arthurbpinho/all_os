@@ -7,6 +7,7 @@ import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
+import { useWakeLock } from '../useWakeLock';
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -83,6 +84,9 @@ export default function EchoSession({ user, sessionType }) {
   const [sidequestOutcome, setSidequestOutcome] = useState(null); // resultado pós-correção (concluída?)
   const [dailyMission, setDailyMission] = useState(null); // missão diária ativa (desafio do dia)
   const [dailyMissionOutcome, setDailyMissionOutcome] = useState(null); // resultado pós-correção
+
+  // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
+  useWakeLock(evaluating);
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -763,6 +767,9 @@ export default function EchoSession({ user, sessionType }) {
                 <>
                   <div className="sidequest-result-badge incomplete">Sidequest ainda não concluída</div>
                   <h4>{sidequestOutcome.title}</h4>
+                  {sidequestOutcome.reason && (
+                    <p className="sidequest-result-reason">{sidequestOutcome.reason}</p>
+                  )}
                   <p>A missão continua ativa. Releia o objetivo e tente novamente no próximo atendimento.</p>
                 </>
               )}
@@ -784,6 +791,9 @@ export default function EchoSession({ user, sessionType }) {
                 <>
                   <div className="sidequest-result-badge incomplete">Missão diária não concluída</div>
                   <h4>{dailyMissionOutcome.title}</h4>
+                  {dailyMissionOutcome.reason && (
+                    <p className="sidequest-result-reason">{dailyMissionOutcome.reason}</p>
+                  )}
                   <p>O desafio de hoje continua valendo. Tente de novo em outro atendimento ainda hoje.</p>
                 </>
               )}
