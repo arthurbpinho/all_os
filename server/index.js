@@ -1187,6 +1187,13 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
     return out;
   });
 
+  // Conquistas desbloqueadas FORA de sessão (trocar foto, convidar amigo) só são
+  // detectadas quando o próprio dono abre suas Metas — notifica aqui (com som no
+  // sino). Idempotente via achievement-unlocks.json; só pro próprio usuário.
+  if (req.params.userId === req.user.id && req.user.role !== 'visitor') {
+    try { notifyNewAchievements(userId, unlocked, claimedMap); } catch {}
+  }
+
   // Sidequests concluídas entram como conquistas (tier 'quest'): aparecem nas
   // "Metas" já resgatadas e ficam selecionáveis como subtítulo.
   const completedQuests = readSidequests().completed[userId] || [];
@@ -1722,6 +1729,14 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
             rewardTitleId: record.rewardTitleId,
             rewardTitleLabel: record.rewardTitleLabel,
           };
+          // Avisa no sino (com som): ganhou a sidequest e o título de recompensa.
+          pushNotification(req.user.id, {
+            type: 'sidequest_completed',
+            sidequestId: record.sidequestId,
+            title: record.title,
+            rewardTitleId: record.rewardTitleId,
+            rewardTitleLabel: record.rewardTitleLabel,
+          });
         }
       } else {
         // Repassa o "por que não passou" (justification do avaliador) pra tela
@@ -1760,6 +1775,20 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // com o novo log já incluído; visitante não acumula.
   if (req.user.role !== 'visitor') {
     updateDailyMissionStreak(req.user.id, logs.filter((l) => l.userId === req.user.id));
+  }
+
+  // Conquistas que esta sessão acabou de desbloquear → notifica no sino (com som).
+  // Best-effort: nada aqui pode derrubar a submissão da sessão.
+  if (req.user.role !== 'visitor') {
+    try {
+      const myLogs = logs.filter((l) => l.userId === req.user.id);
+      const stk = computeStreak(myLogs);
+      const { unlocked } = achievementsForUser(req.user.id, myLogs, stk, readJSON('freeplay-characters.json'));
+      const claimedMap = readJSON('achievements.json', {})[req.user.id] || {};
+      notifyNewAchievements(req.user.id, unlocked, claimedMap);
+    } catch (err) {
+      console.error('notifyNewAchievements (pós-sessão) falhou:', err.message);
+    }
   }
 
   res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome });
@@ -2562,6 +2591,40 @@ function pushNotification(userId, notif) {
   // Cap de 50 notificações por usuário pra não inchar o arquivo.
   if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
   writeNotifications(all);
+}
+
+// Detecta conquistas recém-desbloqueadas (ainda não notificadas) e dispara uma
+// notificação in-app para cada uma. Mantém em achievement-unlocks.json o
+// registro das já notificadas (por usuário). Na PRIMEIRA vez que vê um usuário,
+// só grava a baseline SEM notificar — evita uma enxurrada retroativa de tudo que
+// ele já tinha desbloqueado. Idempotente: chamar duas vezes não duplica avisos.
+function notifyNewAchievements(userId, unlockedSet, claimedMap = {}) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  const store = readJSON('achievement-unlocks.json', {});
+  const current = [...unlockedSet];
+  const prev = store[userId];
+  if (!Array.isArray(prev)) {
+    store[userId] = current; // baseline silenciosa na 1ª vez
+    writeJSON('achievement-unlocks.json', store);
+    return;
+  }
+  const seen = new Set(prev);
+  const fresh = current.filter((id) => !seen.has(id));
+  if (!fresh.length) return;
+  for (const id of fresh) {
+    if (claimedMap[id]) continue; // já resgatada — não há o que avisar
+    const def = ACHIEVEMENT_DEFS.find((d) => d.id === id);
+    if (!def) continue;
+    pushNotification(userId, {
+      type: 'achievement_unlocked',
+      achievementId: id,
+      title: def.title,
+      tier: def.tier,
+      icon: def.icon,
+    });
+  }
+  store[userId] = current; // tudo que está desbloqueado agora vira "visto"
+  writeJSON('achievement-unlocks.json', store);
 }
 
 // Sanitiza mensagens enviadas pelo cliente ao submeter uma sessão de duelo.
@@ -3555,6 +3618,15 @@ app.post('/api/sidequests/assign', requireAuth, (req, res) => {
     assignedAt: new Date().toISOString(),
   };
   writeSidequests(data);
+  // Avisa o aluno no sino (com som) que recebeu uma nova sidequest. A missão
+  // diária NÃO passa por aqui (é rotação global), então só a atribuída notifica.
+  pushNotification(userId, {
+    type: 'sidequest_assigned',
+    sidequestId: def.id,
+    title: def.title,
+    rewardTitleLabel: def.rewardTitleLabel,
+    assignedByName: req.user.name || req.user.username,
+  });
   res.json({ active: publicSidequest(data.active[userId]) });
 });
 
@@ -4099,6 +4171,34 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
     character: { id: char.id, name: char.name },
   })}\n\n`);
   res.end();
+});
+
+// Digital Asset Links — vincula o app Android (TWA) a esta origem pra que o
+// WebView abra em tela cheia, sem a barra do navegador. Dirigido por env vars
+// (preenchidas só depois de gerar/assinar o APK): enquanto não configurado,
+// responde [] — JSON válido, apenas "nenhum app vinculado ainda".
+//   TWA_PACKAGE_NAME              ex: br.org.allos.twa
+//   TWA_SHA256_CERT_FINGERPRINTS  fingerprint(s) SHA-256 do certificado de
+//                                 assinatura, separados por vírgula (chave de
+//                                 upload + a do Play App Signing, se usar Play).
+// Precisa vir ANTES do catch-all do SPA (senão devolveria o index.html).
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  const pkg = process.env.TWA_PACKAGE_NAME;
+  const fingerprints = (process.env.TWA_SHA256_CERT_FINGERPRINTS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!pkg || !fingerprints.length) return res.json([]);
+  res.json([
+    {
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: {
+        namespace: 'android_app',
+        package_name: pkg,
+        sha256_cert_fingerprints: fingerprints,
+      },
+    },
+  ]);
 });
 
 // Serve static files in production
