@@ -1,4 +1,5 @@
 import { ICONS } from '../icons';
+import InstallAppBanner from '../components/InstallAppBanner';
 
 // Homepage (pós-login): o "como jogar" de cada modo no topo, depois os banners
 // de processo seletivo e formação. A missão diária vive só no Treinamento
@@ -120,6 +121,7 @@ function Chevron() {
 export default function Home() {
   return (
     <div className="home-page">
+      <InstallAppBanner />
       <div className="home-topbar">
         <a
           className="home-youtube"

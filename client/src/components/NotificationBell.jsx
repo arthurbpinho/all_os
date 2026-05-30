@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { playNotificationChime } from '../sound';
 
 // Sino de notificações no canto superior direito. Faz polling das notificações
-// (convite de duelo / resultado de duelo) e abre um painel ao clicar.
-// Visitante não recebe notificações — o componente nem é renderizado pra ele.
+// (duelo, conquista desbloqueada, sidequest atribuída/concluída) e abre um painel
+// ao clicar. Quando uma notificação NOVA não-lida chega entre dois polls, toca um
+// chime suave. Visitante não recebe notificações — o componente nem é renderizado.
 const POLL_MS = 20000;
 
 function timeAgo(iso) {
@@ -20,18 +22,91 @@ function timeAgo(iso) {
   return `${d}d`;
 }
 
+// Ícone por tipo de notificação.
+function iconFor(n) {
+  switch (n.type) {
+    case 'duel_invite': return '⚔';
+    case 'duel_result': return n.outcome === 'win' ? '★' : n.outcome === 'loss' ? '◇' : '=';
+    case 'achievement_unlocked': return n.icon || '🏆';
+    case 'sidequest_assigned': return '🗺';
+    case 'sidequest_completed': return '✦';
+    default: return '•';
+  }
+}
+
+// Corpo (texto) por tipo de notificação.
+function bodyFor(n) {
+  switch (n.type) {
+    case 'duel_invite':
+      return (
+        <>
+          <strong>{n.fromName}</strong> te desafiou para um duelo
+          {n.characterName ? <> · atender <em>{n.characterName}</em></> : null}
+        </>
+      );
+    case 'duel_result':
+      return (
+        <>
+          Duelo com <strong>{n.opponentName}</strong> finalizado —{' '}
+          {n.outcome === 'win' ? 'você venceu!' : n.outcome === 'loss' ? 'você perdeu' : 'empate'}
+          {Number.isFinite(n.yourScore) && Number.isFinite(n.theirScore) && (
+            <> ({n.yourScore} × {n.theirScore})</>
+          )}
+          {Number.isFinite(n.mmrDelta) && (
+            <> · MMR {n.mmrDelta >= 0 ? '+' : ''}{n.mmrDelta}</>
+          )}
+        </>
+      );
+    case 'achievement_unlocked':
+      return (
+        <>
+          Conquista liberada: <strong>{n.title}</strong> · resgate em Metas
+        </>
+      );
+    case 'sidequest_assigned':
+      return (
+        <>
+          Nova sidequest: <strong>{n.title}</strong>
+          {n.assignedByName ? <> · de {n.assignedByName}</> : null}
+        </>
+      );
+    case 'sidequest_completed':
+      return (
+        <>
+          Sidequest concluída: <strong>{n.title}</strong>
+          {n.rewardTitleLabel ? <> · título <em>{n.rewardTitleLabel}</em></> : null}
+        </>
+      );
+    default:
+      return n.title || 'Notificação';
+  }
+}
+
 export default function NotificationBell({ user }) {
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
   const panelRef = useRef(null);
+  // IDs vistos no último poll. null = ainda não carregou (1ª vez não toca som,
+  // senão tocaria pra cada notificação não-lida pré-existente).
+  const seenIds = useRef(null);
 
   async function load() {
     try {
       const data = await api.getNotifications();
-      setItems(data.items || []);
+      const list = data.items || [];
+      setItems(list);
       setUnread(data.unread || 0);
+      // Toca o chime se surgiu alguma notificação não-lida que não existia no
+      // poll anterior. Na primeira carga só registra a baseline (sem som).
+      if (seenIds.current === null) {
+        seenIds.current = new Set(list.map((n) => n.id));
+      } else {
+        const hasNew = list.some((n) => !n.read && !seenIds.current.has(n.id));
+        seenIds.current = new Set(list.map((n) => n.id));
+        if (hasNew) playNotificationChime();
+      }
     } catch {
       // silêncio — sino é best-effort
     }
@@ -61,6 +136,10 @@ export default function NotificationBell({ user }) {
       navigate(`/duelo/aceitar/${n.duelId}`);
     } else if (n.type === 'duel_result') {
       navigate(`/duelo/sessao/${n.duelId}`);
+    } else if (n.type === 'achievement_unlocked' || n.type === 'sidequest_completed') {
+      navigate('/missoes');
+    } else if (n.type === 'sidequest_assigned') {
+      navigate('/freeplay');
     }
   }
 
@@ -102,27 +181,9 @@ export default function NotificationBell({ user }) {
                   className={`notif-item ${n.read ? '' : 'unread'}`}
                   onClick={() => handleClick(n)}
                 >
-                  <span className="notif-item-icon">
-                    {n.type === 'duel_invite' ? '⚔' : n.outcome === 'win' ? '★' : n.outcome === 'loss' ? '◇' : '=' }
-                  </span>
+                  <span className="notif-item-icon">{iconFor(n)}</span>
                   <span className="notif-item-body">
-                    {n.type === 'duel_invite' ? (
-                      <>
-                        <strong>{n.fromName}</strong> te desafiou para um duelo
-                        {n.characterName ? <> · atender <em>{n.characterName}</em></> : null}
-                      </>
-                    ) : (
-                      <>
-                        Duelo com <strong>{n.opponentName}</strong> finalizado —{' '}
-                        {n.outcome === 'win' ? 'você venceu!' : n.outcome === 'loss' ? 'você perdeu' : 'empate'}
-                        {Number.isFinite(n.yourScore) && Number.isFinite(n.theirScore) && (
-                          <> ({n.yourScore} × {n.theirScore})</>
-                        )}
-                        {Number.isFinite(n.mmrDelta) && (
-                          <> · MMR {n.mmrDelta >= 0 ? '+' : ''}{n.mmrDelta}</>
-                        )}
-                      </>
-                    )}
+                    {bodyFor(n)}
                     <span className="notif-item-time">{timeAgo(n.createdAt)}</span>
                   </span>
                 </button>
