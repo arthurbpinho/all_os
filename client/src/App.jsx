@@ -26,6 +26,7 @@ import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
 import NotificationBell from './components/NotificationBell';
 import SystemUpdates from './components/SystemUpdates';
+import ThemeToggle from './components/ThemeToggle';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 import { ICONS } from './icons';
 
@@ -117,6 +118,7 @@ export default function App() {
   return (
     <div className="app-layout">
       <div className="topbar-actions">
+        <ThemeToggle />
         <SystemUpdates />
         {!isVisitor && <NotificationBell user={user} />}
       </div>

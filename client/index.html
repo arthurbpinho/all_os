@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>all_OS · Plataforma de Simulação Clínica</title>
 
+  <!-- Tema: aplica o modo escuro salvo ANTES do paint pra não piscar claro. -->
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem('allos_theme') === 'dark') {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      } catch (e) { /* localStorage indisponível */ }
+    })();
+  </script>
+
   <!-- PWA -->
   <link rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#14564E" />

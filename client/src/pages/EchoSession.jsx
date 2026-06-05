@@ -84,6 +84,10 @@ export default function EchoSession({ user, sessionType }) {
   const [sidequestOutcome, setSidequestOutcome] = useState(null); // resultado pós-correção (concluída?)
   const [dailyMission, setDailyMission] = useState(null); // missão diária ativa (desafio do dia)
   const [dailyMissionOutcome, setDailyMissionOutcome] = useState(null); // resultado pós-correção
+  // Banners de objetivo: recolhidos por padrão pra não taparem o chat — a setinha
+  // à esquerda expande/recolhe a descrição completa.
+  const [sidequestOpen, setSidequestOpen] = useState(false);
+  const [dailyOpen, setDailyOpen] = useState(false);
 
   // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
   useWakeLock(evaluating);
@@ -973,18 +977,40 @@ export default function EchoSession({ user, sessionType }) {
       )}
 
       {sidequest && (
-        <div className="sidequest-banner">
-          <div className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</div>
-          <div className="sidequest-banner-title">{sidequest.title}</div>
-          <div className="sidequest-banner-desc">{sidequest.description}</div>
+        <div className={`sidequest-banner ${sidequestOpen ? 'open' : 'collapsed'}`}>
+          <button
+            type="button"
+            className="sidequest-banner-head"
+            onClick={() => setSidequestOpen((o) => !o)}
+            aria-expanded={sidequestOpen}
+            title={sidequestOpen ? 'Recolher objetivo' : 'Ver objetivo completo'}
+          >
+            <svg className="sidequest-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 6 15 12 9 18" /></svg>
+            <span className="sidequest-banner-headtext">
+              <span className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</span>
+              <span className="sidequest-banner-title">{sidequest.title}</span>
+            </span>
+          </button>
+          {sidequestOpen && <div className="sidequest-banner-desc">{sidequest.description}</div>}
         </div>
       )}
 
       {dailyMission && (
-        <div className="sidequest-banner daily-mission-banner">
-          <div className="sidequest-banner-label">◷ Missão diária · desafio do dia</div>
-          <div className="sidequest-banner-title">{dailyMission.title}</div>
-          <div className="sidequest-banner-desc">{dailyMission.description}</div>
+        <div className={`sidequest-banner daily-mission-banner ${dailyOpen ? 'open' : 'collapsed'}`}>
+          <button
+            type="button"
+            className="sidequest-banner-head"
+            onClick={() => setDailyOpen((o) => !o)}
+            aria-expanded={dailyOpen}
+            title={dailyOpen ? 'Recolher missão' : 'Ver missão completa'}
+          >
+            <svg className="sidequest-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 6 15 12 9 18" /></svg>
+            <span className="sidequest-banner-headtext">
+              <span className="sidequest-banner-label">◷ Missão diária · desafio do dia</span>
+              <span className="sidequest-banner-title">{dailyMission.title}</span>
+            </span>
+          </button>
+          {dailyOpen && <div className="sidequest-banner-desc">{dailyMission.description}</div>}
         </div>
       )}
 
