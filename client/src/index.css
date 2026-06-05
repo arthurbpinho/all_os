@@ -18,6 +18,11 @@
   --ink-soft: #5C5C5C;
   --muted:    #a89e8c;
 
+  /* Texto claro SOBRE botões/badges coloridos (marrs/terra/danger…). Token
+     estável: permanece claro nos dois temas, então NÃO é redefinido no escuro.
+     Antes isto usava --cream, que no modo escuro vira superfície escura. */
+  --on-accent: #FDFBF7;
+
   /* Marrs Green — cor primária obrigatória */
   --marrs:        #008f8f;
   --marrs-soft:   #2E9E8F;
@@ -51,6 +56,100 @@
   --shadow-lg: 0 12px 40px rgba(45, 45, 45, 0.12);
   --shadow-marrs: 0 8px 28px rgba(0, 143, 143, 0.18);
 }
+
+/* ============================================================
+   MODO ESCURO
+   Estratégia: redefinir o MESMO conjunto de variáveis (só os valores
+   mudam), então quase todo o app adapta automaticamente. Os poucos casos
+   em que uma cor "de texto" também era usada como "fundo" (ou vice-versa)
+   são corrigidos por overrides pontuais mais abaixo neste bloco.
+   Acentos (marrs/terra/danger/success) ficam iguais para preservar o
+   contraste já validado entre eles e o texto claro (--on-accent).
+   ============================================================ */
+[data-theme="dark"] {
+  /* Neutros — superfícies escuras (tom levemente quente) + texto claro.
+     Mesmos nomes de variável do tema claro, só o valor muda. */
+  --cream:    #15181b;   /* fundo da página / app-layout / inputs */
+  --cream-2:  #1b1f23;   /* sidebar, hover de itens, fundos sutis */
+  --sand:     #2b3036;   /* bordas + bolha do assistente + cards "sand" */
+  --sand-2:   #20252a;   /* fundo de card padrão */
+  --line:     #3b424a;   /* bordas visíveis (inputs, outline, divisórias) */
+  --ink:      #e9e7e1;   /* texto principal */
+  --ink-soft: #b4b1a9;   /* texto secundário */
+  --muted:    #80807a;   /* labels / texto apagado */
+
+  /* Teais "tipo tinta" (marrs-deep/dark): ~80 usos são TEXTO/títulos, então
+     clareamos para legibilidade. Os ~5 usos como FUNDO são corrigidos logo
+     abaixo. --marrs-50 (fundo claro de pills) vira tint escuro pra casar com
+     o texto agora claro. */
+  --marrs-deep: #57ccbc;
+  --marrs-dark: #3cbbab;
+  --marrs-50:   #133230;
+
+  /* Tints translúcidos: levemente mais fortes pra renderem sobre o escuro. */
+  --marrs-tint: rgba(0, 175, 168, 0.16);
+  --marrs-glow: rgba(0, 175, 168, 0.30);
+  --terra-tint: rgba(224, 122, 95, 0.14);
+
+  /* Sombras reais no escuro vêm de preto translúcido. */
+  --shadow:       0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-md:    0 4px 16px rgba(0, 0, 0, 0.50);
+  --shadow-lg:    0 12px 40px rgba(0, 0, 0, 0.60);
+  --shadow-marrs: 0 8px 28px rgba(0, 143, 143, 0.32);
+
+  /* Superfície "papel" (badge de quebra de sessão) — no claro caía em #fff. */
+  --paper: #20252a;
+
+  color-scheme: dark;
+}
+
+/* ── Correções pontuais: lugares onde marrs-deep/marrs-dark eram usados como
+   FUNDO (agora claros). Forçamos um teal sólido com texto claro por cima. ── */
+[data-theme="dark"] .btn-primary:hover:not(:disabled),
+[data-theme="dark"] .icon-btn.primary:hover:not(:disabled) { background: var(--marrs-soft); }
+[data-theme="dark"] .install-banner-icon,
+[data-theme="dark"] .install-banner-btn,
+[data-theme="dark"] .duel-mode-toggle button.active { background: var(--marrs); }
+[data-theme="dark"] .install-banner-btn:hover { background: var(--marrs-soft); }
+[data-theme="dark"] .home-promo--formacao { background: linear-gradient(135deg, var(--marrs), var(--marrs-soft)); }
+
+/* Badge "missão não concluída": fundo vinha de --ink-soft (agora claro). */
+[data-theme="dark"] .sidequest-result-badge.incomplete { background: var(--muted); }
+
+/* Modal levemente elevado em relação ao fundo da página. */
+[data-theme="dark"] .modal { background: var(--sand-2); }
+
+/* Tons de texto que eram hex escuros fixos (roxo da sidequest, tiers das metas):
+   clareamos só no escuro pra manterem contraste sobre superfícies escuras. */
+[data-theme="dark"] .sidequest-banner-label,
+[data-theme="dark"] .sidequest-banner-hint,
+[data-theme="dark"] .sidequest-bank-reward,
+[data-theme="dark"] .progression-tag { color: #bda2ec; }
+[data-theme="dark"] .achievement-tier-badge.tier-quest,
+[data-theme="dark"] .player-title.tier-quest   { color: #c7afef; }
+[data-theme="dark"] .achievement-tier-badge.tier-gold,
+[data-theme="dark"] .player-title.tier-gold     { color: #e3c574; }
+[data-theme="dark"] .achievement-tier-badge.tier-silver,
+[data-theme="dark"] .player-title.tier-silver   { color: #c2c8d1; }
+[data-theme="dark"] .achievement-tier-badge.tier-bronze,
+[data-theme="dark"] .player-title.tier-bronze   { color: #e0a07f; }
+/* Borda do pill de título (era rgba preto, some no escuro). */
+[data-theme="dark"] .player-title { border-color: rgba(255, 255, 255, 0.14); }
+
+/* Pills de conteúdo (nota e dificuldade): o texto era o tom ESCURO de cada cor
+   sobre fundo translúcido — pouco contraste no escuro. Usamos o tom CLARO. */
+[data-theme="dark"] .score-pill.score-f1,
+[data-theme="dark"] .difficulty-pill.difficulty-avancado { color: #e57373; }
+[data-theme="dark"] .score-pill.score-f2,
+[data-theme="dark"] .difficulty-pill.difficulty-intermediario { color: #e89070; }
+[data-theme="dark"] .score-pill.score-f3 { color: #e3b669; }
+[data-theme="dark"] .score-pill.score-f4,
+[data-theme="dark"] .difficulty-pill.difficulty-iniciante { color: #67c98a; }
+[data-theme="dark"] .score-pill.score-f5 { color: #4ac6ba; }
+
+/* Botão "WhatsApp" do duelo: verde escuro + hover verde-claro viravam mancha. */
+[data-theme="dark"] .duel-whats-btn { color: #57c98c; border-color: rgba(87, 201, 140, 0.4); }
+[data-theme="dark"] .duel-whats-btn:hover { background: rgba(87, 201, 140, 0.14); }
 
 html, body {
   margin: 0;
@@ -121,7 +220,7 @@ button {
 
 .btn-primary {
   background: var(--marrs);
-  color: var(--cream);
+  color: var(--on-accent);
   box-shadow: var(--shadow-marrs);
 }
 .btn-primary:hover:not(:disabled) {
@@ -132,7 +231,7 @@ button {
 
 .btn-secondary {
   background: var(--terra);
-  color: var(--cream);
+  color: var(--on-accent);
 }
 .btn-secondary:hover:not(:disabled) {
   background: var(--terra-soft);
@@ -163,7 +262,7 @@ button {
   border: 1px solid var(--danger);
   color: var(--danger);
 }
-.btn-danger:hover { background: var(--danger); color: var(--cream); }
+.btn-danger:hover { background: var(--danger); color: var(--on-accent); }
 
 .btn-sm { padding: 6px 14px; font-size: 12.5px; }
 .btn-lg { padding: 13px 28px; font-size: 15px; }
@@ -822,7 +921,7 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .chat-message.user {
   background: var(--marrs);
-  color: var(--cream);
+  color: var(--on-accent);
   border-bottom-right-radius: 4px;
 }
 .chat-message.assistant {
@@ -857,7 +956,11 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .chat-input-area textarea {
   flex: 1;
-  min-height: 46px;
+  /* min-width:0 é essencial: sem ele o textarea (item flex) não encolhe abaixo
+     da largura intrínseca e empurra os botões (mic/enviar) para fora da tela no
+     celular — era a causa do "microfone só aparece no PC". */
+  min-width: 0;
+  min-height: 48px;
   max-height: 140px;
   padding: 12px 16px;
   resize: none;
@@ -902,7 +1005,7 @@ select option { background: var(--cream); color: var(--ink); }
 .icon-btn.primary {
   background: var(--marrs);
   border-color: var(--marrs);
-  color: var(--cream);
+  color: var(--on-accent);
 }
 .icon-btn.primary:hover:not(:disabled) {
   background: var(--marrs-dark);
@@ -911,7 +1014,7 @@ select option { background: var(--cream); color: var(--ink); }
 .icon-btn.recording {
   background: var(--danger);
   border-color: var(--danger);
-  color: var(--cream);
+  color: var(--on-accent);
   animation: pulse 1.2s ease-in-out infinite;
 }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -1534,7 +1637,7 @@ select option { background: var(--cream); color: var(--ink); }
   flex-shrink: 0;
   border-radius: 10px;
   background: var(--marrs-deep);
-  color: var(--cream);
+  color: var(--on-accent);
 }
 .install-banner-text {
   display: flex;
@@ -1552,7 +1655,7 @@ select option { background: var(--cream); color: var(--ink); }
   border: none;
   border-radius: 999px;
   background: var(--marrs-deep);
-  color: var(--cream);
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -2397,7 +2500,7 @@ select option { background: var(--cream); color: var(--ink); }
 .gender-option.active {
   background: var(--marrs);
   border-color: var(--marrs);
-  color: var(--cream);
+  color: var(--on-accent);
   font-weight: 500;
 }
 
@@ -2664,7 +2767,7 @@ select option { background: var(--cream); color: var(--ink); }
   height: 22px;
   border-radius: 50%;
   background: var(--marrs);
-  color: var(--cream);
+  color: var(--on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3126,9 +3229,15 @@ select option { background: var(--cream); color: var(--ink); }
 
   .chat-message-row { max-width: 92%; }
   .chat-message { font-size: 14px; padding: 11px 14px; }
-  .chat-input-area { padding: 10px 0; gap: 6px; }
-  .chat-input-area textarea { font-size: 16px; /* evita zoom iOS */ }
-  .icon-btn { width: 42px; height: 42px; }
+  /* Input do chat no mobile: textarea mais alto e botões maiores, fáceis de tocar.
+     flex-wrap: nowrap + min-width:0 garantem que mic e enviar fiquem sempre na tela. */
+  .chat-input-area { padding: 10px 0; gap: 8px; flex-wrap: nowrap; }
+  .chat-input-area textarea {
+    font-size: 16px; /* evita zoom iOS */
+    min-height: 54px;
+    padding: 15px 16px;
+  }
+  .icon-btn { width: 48px; height: 48px; }
 
   /* Start session card */
   .start-session-area { padding: 12px 0; }
@@ -3197,7 +3306,12 @@ select option { background: var(--cream); color: var(--ink); }
   .chat-header h3 { font-size: 16px; }
   .chat-message-row { max-width: 96%; }
   .chat-message { font-size: 13.5px; padding: 10px 12px; }
-  .icon-btn { width: 40px; height: 40px; }
+  /* 44px = alvo de toque mínimo recomendado (iOS) — mantém mic/enviar tocáveis. */
+  .icon-btn { width: 44px; height: 44px; }
+  /* Em telas bem estreitas, encolhe um pouco as ações do topo pra os 3 botões
+     caberem ao lado do logo sem sobrepor. */
+  .topbar-actions { right: 54px; gap: 5px; }
+  .notif-bell-btn, .sys-updates-btn, .theme-toggle-btn { width: 36px; height: 36px; }
   .session-chip { font-size: 11px; padding: 4px 10px; }
   .timer-chip { font-size: 11px; padding: 4px 8px; }
   .btn-sm { padding: 5px 10px; font-size: 12px; }
@@ -3215,11 +3329,26 @@ select option { background: var(--cream); color: var(--ink); }
 /* DUELO + NOTIFICAÇÕES                                          */
 /* ============================================================ */
 
-/* --- Ações do topo (canto superior direito): atualizações + notificações --- */
+/* --- Ações do topo (canto superior direito): tema + atualizações + notificações --- */
 .topbar-actions {
   position: fixed; top: 16px; right: 22px; z-index: 85;
   display: flex; align-items: center; gap: 10px;
 }
+
+/* --- Alternador claro/escuro (mesmo formato do sino/atualizações) --- */
+.theme-toggle-btn {
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--sand);
+  background: var(--cream);
+  color: var(--marrs-deep);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.theme-toggle-btn:hover { background: var(--sand-2); }
+.theme-toggle-btn:active { transform: scale(0.94); }
 
 /* --- Sino de notificações + painel de atualizações (botões iguais) --- */
 .notif-bell, .sys-updates { position: relative; }
@@ -3470,9 +3599,10 @@ select option { background: var(--cream); color: var(--ink); }
 
 @media (max-width: 768px) {
   /* Topbar mobile: hamburger (esq) · logo (centro) · ações + avatar (dir).
-     Posiciona as ações à esquerda do avatar do topbar. */
-  .topbar-actions { top: calc(9px + env(safe-area-inset-top, 0px)); right: 62px; gap: 8px; }
-  .notif-bell-btn, .sys-updates-btn { width: 38px; height: 38px; box-shadow: none; }
+     Posiciona as ações à esquerda do avatar do topbar. gap/right ajustados pra
+     caberem 3 botões (tema + atualizações + sino) sem cobrir o logo. */
+  .topbar-actions { top: calc(9px + env(safe-area-inset-top, 0px)); right: 58px; gap: 6px; }
+  .notif-bell-btn, .sys-updates-btn, .theme-toggle-btn { width: 38px; height: 38px; box-shadow: none; }
 
   /* Os painéis são ancorados ao botão (right:0), mas no celular o botão fica
      ~62px da borda → o painel largo vazava pra fora da tela. Solta do botão e
@@ -3536,6 +3666,22 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .sidequest-banner-desc { font-size: 14px; line-height: 1.5; color: var(--ink-soft); margin-top: 4px; }
 .sidequest-banner-hint { font-size: 12.5px; color: #6b3fa0; margin-top: 8px; font-style: italic; }
+
+/* Cabeçalho recolhível: setinha (esquerda) + rótulo/título sempre visíveis.
+   A descrição só aparece expandida — recolhida por padrão pra não tapar o chat. */
+.sidequest-banner-head {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 0; margin: 0;
+  background: none; border: none; text-align: left;
+  cursor: pointer; color: inherit; font: inherit;
+}
+.sidequest-banner-head .sidequest-banner-label { margin-bottom: 0; }
+.sidequest-banner-headtext { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.sidequest-chevron { flex-shrink: 0; color: #8a5cc4; transition: transform 0.2s ease; }
+.sidequest-banner.open .sidequest-chevron { transform: rotate(90deg); }
+.daily-mission-banner .sidequest-chevron { color: var(--marrs); }
+/* Descrição alinhada sob o texto do cabeçalho (após a setinha + gap). */
+.sidequest-banner .sidequest-banner-desc { margin-top: 8px; padding-left: 26px; }
 
 /* Variante da missão diária (desafio do dia): teal, pra distinguir da sidequest (roxa). */
 .daily-mission-banner {
@@ -3628,6 +3774,6 @@ select option { background: var(--cream); color: var(--ink); }
   background: rgba(138, 92, 196, 0.06);
 }
 .sidequest-assign-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-.sidequest-assign-row select { flex: 1; min-width: 200px; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
+.sidequest-assign-row select { flex: 1; min-width: 200px; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--cream); color: var(--ink); }
 .sidequest-completed-list { display: flex; flex-direction: column; gap: 8px; }
 .sidequest-completed-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--cream-2, #f3efe6); }
