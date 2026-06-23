@@ -7,7 +7,6 @@ import PhotoCropper from '../components/PhotoCropper';
 export default function Profile({ user, onUpdate }) {
   const navigate = useNavigate();
   const [name, setName] = useState(user.name || '');
-  const [gender, setGender] = useState(user.gender || '');
   const [email, setEmail] = useState(user.email || '');
   const [profilePhoto, setProfilePhoto] = useState(user.profilePhoto || '');
   const [updateAllOS, setUpdateAllOS] = useState(!!user.updateAllOS);
@@ -83,7 +82,6 @@ export default function Profile({ user, onUpdate }) {
     try {
       const updated = await api.updateUser(user.id, {
         name: name.trim(),
-        gender,
         email: email.trim(),
         profilePhoto,
         updateAllOS,
@@ -256,28 +254,9 @@ export default function Profile({ user, onUpdate }) {
         <section className="profile-section">
           <h3 className="section-title">Identidade</h3>
           <div className="profile-row">
-            <div style={{ flex: 2 }}>
+            <div style={{ flex: 1 }}>
               <label htmlFor="name">Nome de exibição</label>
               <input id="name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Como deseja ser chamado(a)" />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label>Gênero</label>
-              <div className="gender-toggle">
-                <button
-                  type="button"
-                  className={`gender-option ${gender === 'masculino' ? 'active' : ''}`}
-                  onClick={() => setGender('masculino')}
-                >
-                  Masculino
-                </button>
-                <button
-                  type="button"
-                  className={`gender-option ${gender === 'feminino' ? 'active' : ''}`}
-                  onClick={() => setGender('feminino')}
-                >
-                  Feminino
-                </button>
-              </div>
             </div>
           </div>
         </section>

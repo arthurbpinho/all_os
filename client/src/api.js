@@ -102,6 +102,9 @@ export const api = {
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
   getLogsPolicy: () => request('/logs/policy'),
 
+  // Feedback (coletado do visitante ao fim da sessão: estrelas 0–5 + mensagem)
+  submitFeedback: (data) => request('/feedback', { method: 'POST', body: data }),
+
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
   // context: { type, itemId } — NUNCA mande systemPrompt do cliente
   // (o backend rejeita com 400). maxTokens só é honrado em mode 'entrevistador'.

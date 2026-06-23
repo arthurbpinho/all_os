@@ -173,8 +173,36 @@ function readJSON(file, fallback = []) {
   return JSON.parse(fs.readFileSync(p, 'utf-8'));
 }
 
+// Escrita atômica: grava num .tmp e faz rename (operação atômica no SO). Se o
+// processo cair no meio da escrita, o arquivo original permanece íntegro — nunca
+// fica um JSON pela metade.
 function writeJSON(file, data) {
-  fs.writeFileSync(path.join(DATA_DIR, file), JSON.stringify(data, null, 2));
+  const dest = path.join(DATA_DIR, file);
+  const tmp = `${dest}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, dest);
+}
+
+// Mutex em memória por arquivo (fila de promises). Serializa o ciclo
+// ler→modificar→gravar de um mesmo arquivo entre requests concorrentes, evitando
+// "lost update" quando há um await (ex.: chamada de IA) no meio do handler.
+// Válido enquanto o servidor roda em UM processo (caso atual no Railway). IMPORTANTE:
+// mantenha awaits longos (IA) FORA do lock — pegue o lock só pro trecho curto
+// "re-lê → aplica → grava".
+const fileLocks = new Map();
+async function withFileLock(file, fn) {
+  const prev = fileLocks.get(file) || Promise.resolve();
+  let release;
+  const next = new Promise((r) => (release = r));
+  fileLocks.set(file, prev.then(() => next));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Limpa a entrada se ninguém mais está na fila, pra não vazar memória.
+    if (fileLocks.get(file) === next) fileLocks.delete(file);
+  }
 }
 
 // --- Initialize default data ---
@@ -328,6 +356,12 @@ if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
 // podem ser Titular, mas ficam como "Um visitante" (sem persistência de ID).
 if (!fs.existsSync(path.join(DATA_DIR, 'desafio.json'))) {
   writeJSON('desafio.json', { titulares: {} });
+}
+
+// Feedback de visitantes: coletado num popup ao fim de uma sessão em modo
+// visitante (estrelas 0–5 + mensagem livre). Lista append-only.
+if (!fs.existsSync(path.join(DATA_DIR, 'feedback.json'))) {
+  writeJSON('feedback.json', []);
 }
 
 function readMMR() {
@@ -1794,6 +1828,39 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome });
 });
 
+// --- Feedback (popup ao fim da sessão, principalmente do visitante) ---
+// Coleta uma nota de 0 a 5 estrelas + mensagem livre. Lista append-only em
+// feedback.json. Qualquer usuário autenticado (inclusive visitante) pode enviar.
+app.post('/api/feedback', requireAuth, writeLimiter, (req, res) => {
+  const body = req.body || {};
+  const stars = Number.isFinite(body.stars)
+    ? Math.min(5, Math.max(0, Math.round(body.stars)))
+    : 0;
+  const message = clampStr(body.message, 2000);
+  if (!stars && !message) {
+    return res.status(400).json({ error: 'Envie ao menos uma nota ou uma mensagem.' });
+  }
+  const entry = {
+    id: 'fb' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    timestamp: new Date().toISOString(),
+    userId: req.user.id,
+    userName: req.user.name || '',
+    role: req.user.role || '',
+    stars,
+    message,
+  };
+  const all = readJSON('feedback.json', []);
+  all.push(entry);
+  writeJSON('feedback.json', all);
+  res.json({ ok: true });
+});
+
+// Admin: lista todo o feedback coletado (mais recente primeiro).
+app.get('/api/admin/feedback', requireAuth, requireRole('admin'), (req, res) => {
+  const all = readJSON('feedback.json', []);
+  res.json([...all].reverse());
+});
+
 // --- Ranking global de jogadores (por MMR competitivo) ---
 // O ranking ordena pelo MMR (P) do modo Competitivo. Só entra quem jogou ao
 // menos 1 partida competitiva. Nas 3 primeiras partidas o MMR fica oculto
@@ -3195,38 +3262,44 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
 
   try {
     const { evaluationClean, comp } = await runComparativeEvaluation(duel);
-    // Relê e remapeia (o arquivo pode ter mudado durante a chamada à IA).
-    const fresh = readDuels();
-    const target = fresh.find((d) => d.id === duel.id) || duel;
-    if (comp) {
-      target.result = {
-        winner: comp.winner === 'A' ? 'challenger' : comp.winner === 'B' ? 'opponent' : 'draw',
-        scoreChallenger: comp.scoreA,
-        scoreOpponent: comp.scoreB,
-        criteriaChallenger: comp.criteriaChallenger,
-        criteriaOpponent: comp.criteriaOpponent,
-        evaluation: evaluationClean,
-        evaluatedAt: new Date().toISOString(),
-      };
-      target.status = 'completed';
-      // MMR PvP (só duelo competitivo entre dois usuários cadastrados).
-      applyDuelMmr(target, comp);
-    } else {
-      target.result = { winner: null, scoreChallenger: null, scoreOpponent: null, evaluation: evaluationClean, evaluatedAt: new Date().toISOString(), error: 'Não foi possível extrair as notas da avaliação.' };
-      target.status = 'completed';
-    }
-    target.updatedAt = new Date().toISOString();
-    writeDuels(fresh);
+    // Relê e remapeia sob lock (o arquivo pode ter mudado durante a chamada à
+    // IA). A IA ficou FORA do lock; aqui só o trecho rápido re-lê→aplica→grava.
+    const target = await withFileLock('duels.json', () => {
+      const fresh = readDuels();
+      const t = fresh.find((d) => d.id === duel.id) || duel;
+      if (comp) {
+        t.result = {
+          winner: comp.winner === 'A' ? 'challenger' : comp.winner === 'B' ? 'opponent' : 'draw',
+          scoreChallenger: comp.scoreA,
+          scoreOpponent: comp.scoreB,
+          criteriaChallenger: comp.criteriaChallenger,
+          criteriaOpponent: comp.criteriaOpponent,
+          evaluation: evaluationClean,
+          evaluatedAt: new Date().toISOString(),
+        };
+        t.status = 'completed';
+        // MMR PvP (só duelo competitivo entre dois usuários cadastrados).
+        applyDuelMmr(t, comp);
+      } else {
+        t.result = { winner: null, scoreChallenger: null, scoreOpponent: null, evaluation: evaluationClean, evaluatedAt: new Date().toISOString(), error: 'Não foi possível extrair as notas da avaliação.' };
+        t.status = 'completed';
+      }
+      t.updatedAt = new Date().toISOString();
+      writeDuels(fresh);
+      return t;
+    });
 
     // Notifica os dois lados reais com o resultado (visitantes ficam de fora).
     notifyDuelResult(target);
     return res.json(sanitizeDuelForUser(target, req.user));
   } catch (err) {
     console.error('Duel evaluation error:', err.message);
-    const fresh = readDuels();
-    const target = fresh.find((d) => d.id === duel.id) || duel;
-    target.status = 'pending'; // volta a pendente pra permitir retry
-    writeDuels(fresh);
+    await withFileLock('duels.json', () => {
+      const fresh = readDuels();
+      const t = fresh.find((d) => d.id === duel.id) || duel;
+      t.status = 'pending'; // volta a pendente pra permitir retry
+      writeDuels(fresh);
+    });
     return res.status(500).json({ error: 'Erro ao avaliar o duelo: ' + err.message });
   }
 });
@@ -3881,14 +3954,6 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
   const char = characters.find((c) => String(c.id) === String(body.characterId));
   if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
 
-  const data = readDesafio();
-  if (data.titulares[char.id]) {
-    return res.status(409).json({
-      error: 'Alguém já reivindicou este Titular enquanto você atendia. Vá pra desafiar.',
-      titular: publicTitular(data.titulares[char.id]),
-    });
-  }
-
   const messages = cleanDesafioMessages(body.messages);
   if (!messages.length) {
     return res.status(400).json({ error: 'A sessão precisa ter ao menos uma mensagem.' });
@@ -3896,28 +3961,42 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
 
   const isVisitor = req.user.role === 'visitor';
 
-  // Reivindica imediatamente (vira Titular independente da avaliação).
-  const now = new Date().toISOString();
-  data.titulares[char.id] = {
-    characterName: char.name,
-    isVisitor,
-    userId: isVisitor ? null : req.user.id,
-    userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
-    userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
-    logMessages: messages,
-    durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
-    claimedAt: now,
-    lastDefendedAt: now,
-  };
-  writeDesafio(data);
+  // Reivindica sob lock: read-check-write serializado (vira Titular se a posição
+  // estiver vaga). Sem await dentro do lock — a avaliação demorada roda depois.
+  const claim = await withFileLock('desafio.json', () => {
+    const data = readDesafio();
+    if (data.titulares[char.id]) {
+      return { conflict: true, titular: publicTitular(data.titulares[char.id]) };
+    }
+    const now = new Date().toISOString();
+    data.titulares[char.id] = {
+      characterName: char.name,
+      isVisitor,
+      userId: isVisitor ? null : req.user.id,
+      userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
+      userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
+      logMessages: messages,
+      durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
+      claimedAt: now,
+      lastDefendedAt: now,
+    };
+    writeDesafio(data);
+    // Histórico de titularidade (conquistas Vingança/Destronador). Reivindicação =
+    // posição estava vaga → fromUserId null. Visitante não entra no histórico.
+    if (!isVisitor) {
+      appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: null, toUserId: req.user.id, reason: 'reivindicar' });
+    }
+    return { conflict: false, titular: publicTitular(data.titulares[char.id]) };
+  });
 
-  // Histórico de titularidade (conquistas Vingança/Destronador). Reivindicação =
-  // posição estava vaga → fromUserId null. Visitante não entra no histórico.
-  if (!isVisitor) {
-    appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: null, toUserId: req.user.id, reason: 'reivindicar' });
+  if (claim.conflict) {
+    return res.status(409).json({
+      error: 'Alguém já reivindicou este Titular enquanto você atendia. Vá pra desafiar.',
+      titular: claim.titular,
+    });
   }
 
-  const titularPublic = publicTitular(data.titulares[char.id]);
+  const titularPublic = claim.titular;
 
   // Sem avaliador disponível (visitante com toggle off, ou sem chave OpenAI):
   // reivindica sem avaliação e devolve JSON (o cliente trata os dois formatos).
@@ -4127,38 +4206,42 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
   const { clean, result } = extractTitularDesafianteResult(fullText);
   let outcome = 'titular-permanece';
   let newTitular = titular;
-  if (result && result.desafianteAssume) {
-    outcome = 'desafiante-assume';
-    const fresh = readDesafio();
-    const isVisitor = req.user.role === 'visitor';
-    const now = new Date().toISOString();
-    fresh.titulares[char.id] = {
-      characterName: char.name,
-      isVisitor,
-      userId: isVisitor ? null : req.user.id,
-      userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
-      userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
-      logMessages: desafianteMessages,
-      durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
-      claimedAt: now,
-      lastDefendedAt: now,
-    };
-    writeDesafio(fresh);
-    newTitular = fresh.titulares[char.id];
-    // Histórico de titularidade (Vingança/Destronador): desafiante tomou a
-    // posição do titular anterior. Visitante não entra no histórico.
-    if (!isVisitor) {
-      appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: titular.userId || null, toUserId: req.user.id, reason: 'desafio' });
+  // Atualização de estado sob lock: a IA (demorada) já rodou FORA do lock; aqui
+  // só o trecho rápido re-lê→aplica→grava o desafio.json.
+  newTitular = await withFileLock('desafio.json', () => {
+    if (result && result.desafianteAssume) {
+      outcome = 'desafiante-assume';
+      const fresh = readDesafio();
+      const isVisitor = req.user.role === 'visitor';
+      const now = new Date().toISOString();
+      fresh.titulares[char.id] = {
+        characterName: char.name,
+        isVisitor,
+        userId: isVisitor ? null : req.user.id,
+        userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
+        userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
+        logMessages: desafianteMessages,
+        durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
+        claimedAt: now,
+        lastDefendedAt: now,
+      };
+      writeDesafio(fresh);
+      // Histórico de titularidade (Vingança/Destronador): desafiante tomou a
+      // posição do titular anterior. Visitante não entra no histórico.
+      if (!isVisitor) {
+        appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: titular.userId || null, toUserId: req.user.id, reason: 'desafio' });
+      }
+      return fresh.titulares[char.id];
     }
-  } else {
     // Titular permaneceu: só atualiza lastDefendedAt.
     const fresh = readDesafio();
     if (fresh.titulares[char.id]) {
       fresh.titulares[char.id].lastDefendedAt = new Date().toISOString();
       writeDesafio(fresh);
-      newTitular = fresh.titulares[char.id];
+      return fresh.titulares[char.id];
     }
-  }
+    return titular;
+  });
 
   // Sinaliza fim com payload final (cliente já remontou a prosa via deltas).
   // Mandamos `clean` também porque o cliente exibe o texto sem o bloco JSON.

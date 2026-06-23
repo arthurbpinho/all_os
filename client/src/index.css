@@ -2095,6 +2095,38 @@ select option { background: var(--cream); color: var(--ink); }
 }
 
 /* ────────────────────────────────────────
+   FEEDBACK (popup do visitante)
+   ──────────────────────────────────────── */
+.feedback-stars {
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+.feedback-star {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  cursor: pointer;
+  font-size: 34px;
+  line-height: 1;
+  color: var(--sand-deep, #c9bda6);
+  transition: color 0.12s ease, transform 0.12s ease;
+}
+.feedback-star:hover {
+  transform: scale(1.12);
+}
+.feedback-star.on {
+  color: #e0a500;
+}
+.feedback-message {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--sans);
+  font-size: 14px;
+}
+
+/* ────────────────────────────────────────
    TABS
    ──────────────────────────────────────── */
 .tabs {
