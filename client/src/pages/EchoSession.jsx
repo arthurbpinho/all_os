@@ -89,8 +89,37 @@ export default function EchoSession({ user, sessionType }) {
   const [sidequestOpen, setSidequestOpen] = useState(false);
   const [dailyOpen, setDailyOpen] = useState(false);
 
+  // Feedback do visitante: popup ao encerrar a sessão (estrelas 0–5 + mensagem).
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedbackStars, setFeedbackStars] = useState(0);
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackSending, setFeedbackSending] = useState(false);
+  const [feedbackDone, setFeedbackDone] = useState(false);
+
   // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
   useWakeLock(evaluating);
+
+  // Visitante: ao encerrar a sessão, abre o popup de feedback (uma única vez).
+  useEffect(() => {
+    if (sessionEnded && isVisitor && !feedbackDone) setShowFeedback(true);
+  }, [sessionEnded, isVisitor, feedbackDone]);
+
+  async function submitFeedback() {
+    if (feedbackSending) return;
+    setFeedbackSending(true);
+    try {
+      await api.submitFeedback({ stars: feedbackStars, message: feedbackMessage.trim() });
+      setFeedbackDone(true);
+      setShowFeedback(false);
+    } catch (err) {
+      // Não bloqueia o visitante: se falhar, apenas fecha o popup.
+      console.error('Falha ao enviar feedback:', err.message);
+      setFeedbackDone(true);
+      setShowFeedback(false);
+    } finally {
+      setFeedbackSending(false);
+    }
+  }
 
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -890,6 +919,60 @@ export default function EchoSession({ user, sessionType }) {
             </button>
           </div>
         </div>
+
+        {showFeedback && (
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setFeedbackDone(true); setShowFeedback(false); } }}>
+            <div className="modal" style={{ maxWidth: 460 }}>
+              <h3>Gostou da plataforma?</h3>
+              <p style={{ color: 'var(--ink-soft)', marginTop: -8, marginBottom: 18 }}>
+                Gostou da plataforma e quer continuar tendo acesso? Deixe seu comentário!
+              </p>
+
+              <div className="feedback-stars" role="group" aria-label="Avaliação de 0 a 5 estrelas">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    className={`feedback-star ${n <= feedbackStars ? 'on' : ''}`}
+                    aria-label={`${n} ${n === 1 ? 'estrela' : 'estrelas'}`}
+                    aria-pressed={n <= feedbackStars}
+                    onClick={() => setFeedbackStars(n === feedbackStars ? 0 : n)}
+                  >
+                    {n <= feedbackStars ? '★' : '☆'}
+                  </button>
+                ))}
+              </div>
+
+              <textarea
+                className="feedback-message"
+                rows={4}
+                value={feedbackMessage}
+                onChange={(e) => setFeedbackMessage(e.target.value)}
+                placeholder="Deixe sua mensagem (opcional)…"
+                maxLength={2000}
+              />
+
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => { setFeedbackDone(true); setShowFeedback(false); }}
+                  disabled={feedbackSending}
+                >
+                  Agora não
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={submitFeedback}
+                  disabled={feedbackSending || (!feedbackStars && !feedbackMessage.trim())}
+                >
+                  {feedbackSending ? 'Enviando…' : 'Enviar feedback'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
