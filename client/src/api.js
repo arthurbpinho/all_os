@@ -165,7 +165,9 @@ export const api = {
   submitFeedback: (data) => request('/feedback', { method: 'POST', body: data }),
   getAdminFeedback: () => request('/admin/feedback'),
   // Avaliação Independente v25 (Opus 4.8, 14 nós): { log, casoId } → 14 partes + nota 0–100.
-  avaliacaoIndependente: (log, casoId) => request('/avaliacao-independente', { method: 'POST', body: { log, casoId } }),
+  // payload: { log, casoId, evaluator, model, effort, batch }. batch:true → { queued, jobId }.
+  avaliacaoIndependente: (payload) => request('/avaliacao-independente', { method: 'POST', body: payload }),
+  avaliacaoFila: () => request('/avaliacao-independente/fila'),
   // Admin: dispara um aviso (notificação) pra todos + publica atualização.
   adminSendNotification: (data) => request('/admin/notifications', { method: 'POST', body: data }),
   adminSendUpdate: (data) => request('/admin/updates', { method: 'POST', body: data }),

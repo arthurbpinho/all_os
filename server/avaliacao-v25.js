@@ -47,9 +47,38 @@ const V25_SYNTH_MAX_TOKENS = Number(process.env.AVALIACAO_V25_SYNTH_MAX_TOKENS |
 // sobe pra $10/$45, mas cada chamada aqui fica muito abaixo desse limite).
 // O dono cicla modelos — se trocar, ou adicione o prefixo aqui, ou sobreponha
 // por env (AVALIACAO_V25_PRICE_INPUT/_CACHED/_OUTPUT, em USD por MTok).
+// Preços (docs OpenAI, jul/2026). resolvePrices casa pelo prefixo mais LONGO,
+// então 'gpt-5.4-mini' vence 'gpt-5.4' para os ids do mini.
 const V25_PRICES = {
   'gpt-5.5': { input: 5, cached: 0.5, output: 30 },
+  'gpt-5.4-mini': { input: 0.75, cached: 0.075, output: 4.5 },
+  'gpt-5.4': { input: 2.5, cached: 0.25, output: 15 },
+  // GLM-5.2 (z.ai) — docs.z.ai, jul/2026. Reasoning cobrado como output (sem
+  // surcharge). Só na Avaliação Independente (teste de pricing).
+  'glm-5.2': { input: 1.4, cached: 0.26, output: 4.4 },
 };
+
+// Monta o corpo /chat/completions de acordo com o PROVEDOR. GPT (OpenAI) usa
+// `reasoning_effort` (low/medium/high) + `max_completion_tokens`. GLM (z.ai) usa
+// `thinking:{type:enabled|disabled}` (+ `reasoning_effort` high/max quando ligado)
+// e `max_tokens`. Os prompts/mensagens são os MESMOS — só os campos de controle
+// mudam. Assim o caching por prefixo continua valendo nos dois.
+function buildChatBody({ provider, model, messages, maxTokens, effort }) {
+  const body = { model, messages };
+  if (provider === 'glm') {
+    body.max_tokens = maxTokens;
+    if (effort === 'disabled') {
+      body.thinking = { type: 'disabled' };
+    } else {
+      body.thinking = { type: 'enabled' };
+      body.reasoning_effort = effort; // 'high' | 'max'
+    }
+  } else {
+    body.max_completion_tokens = maxTokens;
+    body.reasoning_effort = effort; // 'low' | 'medium' | 'high'
+  }
+  return body;
+}
 
 // Resolve os preços para o modelo em uso. Env override vence a tabela (os três
 // têm de estar setados). Senão, casa por prefixo mais longo. `null` = sem preço
@@ -163,19 +192,38 @@ function fill(str, slot, value) {
   return str.replace(slot, () => value);
 }
 
+// Concorrência do fan-out dos nós no GLM (z.ai). Conta nova tem rate limit
+// apertado; 14 requisições de uma vez estouram 429. Roda em lotes pequenos.
+const GLM_V25_CONCURRENCY = Number(process.env.GLM_V25_CONCURRENCY || 3);
+
+// Map com concorrência limitada (mantém a ordem no array de saída).
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let idx = 0;
+  const n = Math.max(1, Math.min(limit, items.length || 1));
+  await Promise.all(Array.from({ length: n }, async () => {
+    while (idx < items.length) {
+      const i = idx++;
+      out[i] = await fn(items[i], i);
+    }
+  }));
+  return out;
+}
+
 // Chamada não-streaming ao GPT (reasoning model). `developer` = prefixo
 // estático/do-caso (cacheado automaticamente pela OpenAI); `user` = a parte que
 // varia. Sem cache_control manual — não existe na OpenAI.
-async function gptComplete(openai, developer, user, maxTokens) {
-  const resp = await openai.chat.completions.create({
-    model: V25_MODEL,
-    reasoning_effort: V25_EFFORT,
-    max_completion_tokens: maxTokens,
+async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
+  const resp = await openai.chat.completions.create(buildChatBody({
+    provider,
+    model,
+    maxTokens,
+    effort,
     messages: [
       { role: 'developer', content: developer },
       { role: 'user', content: user },
     ],
-  });
+  }));
   return { text: resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content || '' : '', usage: resp.usage || null };
 }
 
@@ -199,12 +247,12 @@ function parseNodeOutput(text) {
   return { nota, confianca, analise };
 }
 
-async function runNode(openai, assets, bloco1, log, criterio) {
+async function runNode(openai, assets, bloco1, log, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   // developer = A (estático) + B (Bloco 1 + log) → idêntico nos 14 nós deste caso
   // (logo, cacheado). user = C com o critério → o que varia por nó.
   const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const { text, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS);
+  const { text, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider);
   const parsed = parseNodeOutput(text);
   return {
     num: criterio.num,
@@ -245,9 +293,9 @@ function buildAnalises(results) {
 
 // Sintetizador: 1 chamada. developer = bloco estático (cacheável entre
 // avaliações); user = log + análises. Devolve só o corpo (sem nota, sem saudação).
-async function runSynthesizer(openai, assets, log, analises) {
+async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   const user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
-  const { text, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS);
+  const { text, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider);
   return { corpo: (text || '').trim(), usage };
 }
 
@@ -265,53 +313,81 @@ function montarFeedback(notaFinal, corpo) {
 // reasoning), completion_tokens_details.reasoning_tokens. A OpenAI cobra TODO o
 // completion_tokens no rate de saída (o reasoning é subconjunto, cobrado igual);
 // o split saída-visível/reasoning abaixo é só informativo.
-function buildInstrumentacao(model, nodeResults, synthUsage) {
-  const totais = { input: 0, cached: 0, output: 0, reasoning: 0 };
-  const add = (u) => {
-    const promptTotal = (u && u.prompt_tokens) || 0;
-    const cached = (u && u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
-    totais.input += Math.max(0, promptTotal - cached);
-    totais.cached += cached;
-    totais.output += (u && u.completion_tokens) || 0;
-    totais.reasoning += (u && u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0;
-  };
-  nodeResults.forEach((r) => add(r.usage));
-  if (synthUsage) add(synthUsage);
+// Soma os campos de uma lista de `usage` da OpenAI em {input(fresco), cached, output, reasoning}.
+function sumUsages(usages) {
+  const t = { input: 0, cached: 0, output: 0, reasoning: 0 };
+  for (const u of usages || []) {
+    if (!u) continue;
+    const promptTotal = u.prompt_tokens || 0;
+    const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
+    t.input += Math.max(0, promptTotal - cached);
+    t.cached += cached;
+    t.output += u.completion_tokens || 0;
+    t.reasoning += (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0;
+  }
+  return t;
+}
 
-  // Custo exato = input-fresco + cache + saída (tudo por MTok). `null` se o modelo
-  // não tiver preço conhecido — aí a UI mostra só os tokens.
+// Custo (USD) de um `totais` pelos preços do modelo × fator (0,5 = batch). `null`
+// se o modelo não tiver preço conhecido.
+function custoFromTotais(totais, prices, factor) {
+  if (!prices) return null;
+  const f = factor == null ? 1 : factor;
+  const usd = ((totais.input * prices.input + totais.cached * prices.cached + totais.output * prices.output) / 1e6) * f;
+  return {
+    usd,
+    componentes: {
+      input: (totais.input * prices.input / 1e6) * f,
+      cached: (totais.cached * prices.cached / 1e6) * f,
+      output: (totais.output * prices.output / 1e6) * f,
+    },
+  };
+}
+
+// Resumo de uso + CUSTO EXATO da run. `batch` aplica o desconto de 50% da Batch
+// API — nos 14 NÓS (que rodam em lote); o sintetizador roda síncrono no coletor,
+// então é cobrado full, e o custo abaixo soma nós(×0,5) + synth(×1) corretamente.
+function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT, batch = false) {
+  const totaisNodes = sumUsages(nodeResults.map((r) => r && r.usage));
+  const totaisSynth = sumUsages(synthUsage ? [synthUsage] : []);
+  const totais = {
+    input: totaisNodes.input + totaisSynth.input,
+    cached: totaisNodes.cached + totaisSynth.cached,
+    output: totaisNodes.output + totaisSynth.output,
+    reasoning: totaisNodes.reasoning + totaisSynth.reasoning,
+  };
+
   const prices = resolvePrices(model);
   let custo = null;
   if (prices) {
-    const usd =
-      (totais.input * prices.input +
-        totais.cached * prices.cached +
-        totais.output * prices.output) / 1e6;
-    // Decomposição por componente, útil pra ver onde o dinheiro vai.
-    const comp = {
-      input: (totais.input * prices.input) / 1e6,
-      cached: (totais.cached * prices.cached) / 1e6,
-      output: (totais.output * prices.output) / 1e6,
+    const cNodes = custoFromTotais(totaisNodes, prices, batch ? 0.5 : 1);
+    const cSynth = custoFromTotais(totaisSynth, prices, 1); // synth sempre síncrono
+    const usd = cNodes.usd + cSynth.usd;
+    const componentes = {
+      input: cNodes.componentes.input + cSynth.componentes.input,
+      cached: cNodes.componentes.cached + cSynth.componentes.cached,
+      output: cNodes.componentes.output + cSynth.componentes.output,
     };
-    custo = { usd, moeda: 'USD', precosPorMTok: prices, componentes: comp };
+    custo = { usd, moeda: 'USD', precosPorMTok: prices, componentes, batch: !!batch };
   }
 
-  return { model, effort: V25_EFFORT, totais, custo };
+  return { model, effort, totais, custo, batch: !!batch };
 }
 
 // Executa o pipeline completo: 14 nós → agregador → sintetizador → montagem.
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
 // os outros 13 em paralelo — assim o prefixo A+B (com o log) é cobrado cheio uma
 // vez e lido barato pelos demais. O sintetizador roda por último.
-async function runAvaliacaoIndependente({ openai, bloco1, log }) {
+async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai' }) {
   const assets = loadAssets();
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
 
-  const first = await runNode(openai, assets, bloco1, log, criteria[0]);
-  const rest = await Promise.all(
-    criteria.slice(1).map((c) => runNode(openai, assets, bloco1, log, c)),
-  );
+  const first = await runNode(openai, assets, bloco1, log, criteria[0], model, effort, provider);
+  // GLM (z.ai) tem rate limit apertado em conta nova → limita a concorrência do
+  // fan-out; OpenAI aguenta os 13 restantes de uma vez.
+  const conc = provider === 'glm' ? GLM_V25_CONCURRENCY : criteria.length;
+  const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, bloco1, log, c, model, effort, provider));
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
   const { notaFinal, considerados } = aggregate(results, weights);
@@ -335,19 +411,80 @@ async function runAvaliacaoIndependente({ openai, bloco1, log }) {
   let feedbackAluno = null;
   let synthUsage = null;
   if (notaFinal != null && analises) {
-    const synth = await runSynthesizer(openai, assets, log, analises);
+    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider);
     corpoSintetizador = synth.corpo;
     synthUsage = synth.usage;
     feedbackAluno = montarFeedback(notaFinal, corpoSintetizador);
   }
 
-  const instrumentacao = buildInstrumentacao(V25_MODEL, results, synthUsage);
+  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, false);
 
-  return { notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+  return { evaluator: 'v25', notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+}
+
+// --- Suporte a BATCH API (14 nós num lote; sintetizador roda síncrono no coletor) ---
+
+// Corpos /v1/chat/completions dos 14 nós (mesmo developer cacheável + user do
+// critério). O caller monta o custom_id (ex.: `${jobId}::${num}`) e o JSONL.
+function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai' }) {
+  const assets = loadAssets();
+  const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
+  return assets.criteria.map((criterio) => ({
+    num: criterio.num,
+    body: buildChatBody({
+      provider,
+      model,
+      maxTokens: V25_MAX_TOKENS,
+      effort,
+      messages: [
+        { role: 'developer', content: developer },
+        { role: 'user', content: fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao) },
+      ],
+    }),
+  }));
+}
+
+// Finaliza a partir das saídas dos nós do batch. `nodeOutputs` = [{ num, text, usage }].
+// Roda o agregador, o sintetizador (síncrono, 1 chamada) e a instrumentação.
+async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', nodeOutputs, batch = false }) {
+  const assets = loadAssets();
+  const weights = assets.criteria.map(() => 1);
+  const byNum = new Map((nodeOutputs || []).map((o) => [o.num, o]));
+  const results = assets.criteria
+    .map((c) => {
+      const o = byNum.get(c.num) || { text: '', usage: null };
+      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseNodeOutput(o.text), usage: o.usage };
+    })
+    .sort((a, b) => a.num - b.num);
+
+  const { notaFinal, considerados } = aggregate(results, weights);
+  const partes = results.map((r) => ({
+    num: r.num, nome: r.nome, linhaCurta: r.linhaCurta, analise: r.analise,
+    nota: r.nota, confianca: r.confianca,
+    incluido: r.confianca !== 'baixa' && Number.isFinite(r.nota),
+  }));
+
+  const analises = buildAnalises(results);
+  let corpoSintetizador = null;
+  let feedbackAluno = null;
+  let synthUsage = null;
+  if (notaFinal != null && analises) {
+    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider);
+    corpoSintetizador = synth.corpo;
+    synthUsage = synth.usage;
+    feedbackAluno = montarFeedback(notaFinal, corpoSintetizador);
+  }
+
+  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);
+  return { evaluator: 'v25', notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
 }
 
 module.exports = {
   runAvaliacaoIndependente,
+  buildChatBody,
+  // Batch API (Avaliação Independente):
+  buildV25NodeRequests,
+  finalizeV25,
   // exportados para teste:
   loadAssets,
   parseCriteria,
