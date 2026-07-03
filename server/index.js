@@ -3246,11 +3246,13 @@ let selectionEvalRunning = false;
 // Avalia UM log do seletivo, SÍNCRONO, em background: GLM 5.2/high; FALLBACK
 // gpt-5.4/medium se o GLM falhar (rate limit/instabilidade). z.ai não tem Batch
 // API, então roda direto (1 requisição por candidato). Grava status/score/
-// criteriaScores/evaluation no log + append no selection-stats.json. NUNCA volta
-// ao candidato (o /finish já respondeu só o agradecimento).
+// criteriaScores/evaluation (+ o raciocínio, pro avaliador ler) no log + append
+// no selection-stats.json. NUNCA volta ao candidato — nem nota, nem raciocínio
+// (o /finish já respondeu só o agradecimento).
 async function evaluateSelectionSync(log) {
   const { prompt, inputTurns } = selectionEvalParts(log);
   let content = '';
+  let reasoning = ''; // raciocínio do avaliador — visível só ao avaliador/admin (de graça: o GLM devolve em reasoning_content)
   try {
     const sProvider = providerForModel(SELECAO_EVAL_MODEL);
     const sClient = getClientForProvider(sProvider);
@@ -3260,18 +3262,22 @@ async function evaluateSelectionSync(log) {
       maxTokens: 64000, messages: buildOpenAIMessages(prompt, inputTurns),
     });
     const resp = await sClient.chat.completions.create(body);
-    content = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+    const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
+    content = msg.content || '';
+    reasoning = aiIndependente.extractReasoning(msg); // GLM (z.ai) devolve o thinking aqui, sem custo extra
     if (!content.trim()) throw new Error('resposta vazia');
   } catch (glmErr) {
     console.error(`[selecao] ${SELECAO_EVAL_MODEL} falhou → fallback ${OPENAI_SIM_MODEL}/${OPENAI_SIM_EFFORT}:`, glmErr.message);
     try {
       const openai = getOpenAI();
       if (!openai) throw new Error('OpenAI indisponível');
+      // summary:'auto' pede o RESUMO do raciocínio (gpt-5.4 emite; o "mini" não).
       const resp = await openai.responses.create({
-        model: OPENAI_SIM_MODEL, reasoning: { effort: OPENAI_SIM_EFFORT },
+        model: OPENAI_SIM_MODEL, reasoning: { effort: OPENAI_SIM_EFFORT, summary: 'auto' },
         max_output_tokens: 64000, instructions: prompt, input: inputTurns,
       });
       content = resp.output_text || '';
+      reasoning = aiIndependente.extractResponsesReasoning(resp);
     } catch (fbErr) {
       console.error('[selecao] fallback também falhou:', fbErr.message);
     }
@@ -3286,6 +3292,7 @@ async function evaluateSelectionSync(log) {
     arr[i] = {
       ...arr[i], status: st, score, criteriaScores,
       evaluation: clampStr(evaluation, LOG_MAX_EVAL_LEN),
+      reasoning: clampStr(reasoning, LOG_MAX_EVAL_LEN),
     };
     if (score != null) appended = { timestamp: arr[i].timestamp, score, status: st };
     writeJSON('selection-logs.json', arr);

@@ -54,12 +54,14 @@ function buildStrings(log) {
   ].join('\n');
 
   const hasEval = (log.status === 'ativo' || log.status === 'rejeitado') || log.score != null;
+  const reasoning = (log.reasoning || '').trim();
   const evalBody = hasEval
     ? [
         `Nota final: ${log.score == null ? '—' : `${log.score}/100`}`,
         `Status: ${STATUS_LABEL[log.status] || log.status}`,
         '',
         (log.evaluation || '').trim() || '(sem texto de avaliação)',
+        ...(reasoning ? ['', '─── RACIOCÍNIO DO AVALIADOR ───', '', reasoning] : []),
       ].join('\n')
     : '';
 
@@ -109,6 +111,7 @@ export default function SelecaoLogs() {
       ) : (
         logs.map((log) => {
           const c = log.candidate || {};
+          const reasoning = (log.reasoning || '').trim();
           const { logStr, evalBody, hasEval } = buildStrings(log);
           const items = makeLogItems({
             baseName: c.nome || 'candidato',
@@ -155,6 +158,9 @@ export default function SelecaoLogs() {
                     {hasEval && (
                       <button className={`btn btn-sm ${tab === 'eval' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setTab('eval')}>Avaliação</button>
                     )}
+                    {reasoning && (
+                      <button className={`btn btn-sm ${tab === 'reasoning' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setTab('reasoning')}>Raciocínio</button>
+                    )}
                   </div>
                   <div className="selecao-transcript">
                     {tab === 'log'
@@ -178,6 +184,13 @@ export default function SelecaoLogs() {
                           });
                           return out;
                         })()
+                      : tab === 'reasoning'
+                      ? (
+                        <div>
+                          <div className="aval-reasoning-head" style={{ marginBottom: 10 }}>Raciocínio do avaliador</div>
+                          <div className="aval-reasoning-text">{reasoning}</div>
+                        </div>
+                      )
                       : (
                         <div>
                           <div style={{ marginBottom: 10, fontWeight: 700, color: 'var(--marrs-deep)' }}>
