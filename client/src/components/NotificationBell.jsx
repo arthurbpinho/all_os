@@ -30,6 +30,7 @@ function iconFor(n) {
     case 'achievement_unlocked': return n.icon || '🏆';
     case 'sidequest_assigned': return '🗺';
     case 'sidequest_completed': return '✦';
+    case 'admin_notice': return '📢';
     default: return '•';
   }
 }
@@ -75,6 +76,13 @@ function bodyFor(n) {
         <>
           Sidequest concluída: <strong>{n.title}</strong>
           {n.rewardTitleLabel ? <> · título <em>{n.rewardTitleLabel}</em></> : null}
+        </>
+      );
+    case 'admin_notice':
+      return (
+        <>
+          {n.title && n.title !== 'Aviso' ? <strong>{n.title}</strong> : <strong>Aviso</strong>}
+          {' · '}{n.message}
         </>
       );
     default:

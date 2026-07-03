@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
+import { PatientAvatar } from '../components/PatientAvatar';
 
 export default function NeuroEval({ user }) {
   const [characters, setCharacters] = useState([]);
@@ -57,13 +58,18 @@ export default function NeuroEval({ user }) {
                 className="character-card diagnosis-card"
                 onClick={() => navigate(`/chat/neuro/${char.id}`)}
               >
-                <div className="character-card-header">
-                  <h3>{char.name}</h3>
-                  {charScore !== undefined && charScore !== null && (
-                    <ScoreBadge score={charScore} />
-                  )}
+                <div className="character-card-top">
+                  <PatientAvatar name={char.name} iconUrl={char.photoIcon} size={72} className="character-card-photo" />
+                  <div className="character-card-meta">
+                    <div className="character-card-header">
+                      <h3>{char.name}</h3>
+                      {charScore !== undefined && charScore !== null && (
+                        <ScoreBadge score={charScore} />
+                      )}
+                    </div>
+                    <div className="age">{char.age} anos</div>
+                  </div>
                 </div>
-                <div className="age">{char.age} anos</div>
                 <p>{char.description}</p>
                 <span className="tag">Diagnóstico oculto</span>
               </div>

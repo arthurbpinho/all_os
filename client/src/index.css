@@ -140,8 +140,8 @@
    sobre fundo translúcido — pouco contraste no escuro. Usamos o tom CLARO. */
 [data-theme="dark"] .score-pill.score-f1,
 [data-theme="dark"] .difficulty-pill.difficulty-avancado { color: #e57373; }
-[data-theme="dark"] .score-pill.score-f2,
-[data-theme="dark"] .difficulty-pill.difficulty-intermediario { color: #e89070; }
+[data-theme="dark"] .score-pill.score-f2 { color: #e89070; }
+[data-theme="dark"] .difficulty-pill.difficulty-intermediario { color: #eca85a; }
 [data-theme="dark"] .score-pill.score-f3 { color: #e3b669; }
 [data-theme="dark"] .score-pill.score-f4,
 [data-theme="dark"] .difficulty-pill.difficulty-iniciante { color: #67c98a; }
@@ -1816,6 +1816,23 @@ select option { background: var(--cream); color: var(--ink); }
 .faq-a ul { margin: 0 0 9px; padding-left: 20px; }
 .faq-a li { margin: 4px 0; }
 
+/* Botão "Jogar" no cabeçalho do card + "jogar esse modo" na descrição. */
+.faq-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
+.faq-actions .faq-chevron { margin-left: 0; }
+.faq-play-btn {
+  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--on-accent); background: var(--marrs); border: none; cursor: pointer;
+  padding: 5px 14px; border-radius: 999px; line-height: 1.4;
+  transition: background 0.15s ease, transform 0.12s ease, box-shadow 0.15s ease;
+}
+.faq-play-btn:hover { background: var(--marrs-soft); transform: translateY(-1px); box-shadow: var(--shadow-marrs); }
+.faq-play-btn:active { transform: translateY(0); }
+.faq-play-inline { margin-top: 12px; }
+
+/* Abas Sessões / Duelos dentro de "Minhas Sessões". */
+.logs-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.logs-tabs .btn { padding: 6px 16px; font-size: 13.5px; }
+
 /* ────────────────────────────────────────
    ADMIN
    ──────────────────────────────────────── */
@@ -1894,9 +1911,9 @@ select option { background: var(--cream); color: var(--ink); }
   border-color: rgba(108, 192, 121, 0.4);
 }
 .difficulty-pill.difficulty-intermediario {
-  background: rgba(184, 90, 64, 0.12);
-  color: var(--terra);
-  border-color: rgba(184, 90, 64, 0.35);
+  background: rgba(224, 138, 60, 0.14);
+  color: #C2761C;
+  border-color: rgba(224, 138, 60, 0.42);
 }
 .difficulty-pill.difficulty-avancado {
   background: rgba(184, 58, 58, 0.1);
@@ -3809,3 +3826,571 @@ select option { background: var(--cream); color: var(--ink); }
 .sidequest-assign-row select { flex: 1; min-width: 200px; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--cream); color: var(--ink); }
 .sidequest-completed-list { display: flex; flex-direction: column; gap: 8px; }
 .sidequest-completed-item { padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--cream-2, #f3efe6); }
+
+/* ════════════════════════════════════════════════════════════
+   TRILHA — barra superior, tela conversacional e trilha linear
+   (estilo assistido / Duolingo, mantendo a identidade Allos)
+   ════════════════════════════════════════════════════════════ */
+.trilha-screen { animation: fade-in 0.3s ease; }
+
+/* ── Barra superior (sempre visível) ── */
+.trilha-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
+  background: var(--cream-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
+  margin-bottom: 22px;
+  box-shadow: var(--shadow);
+}
+.trilha-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.trilha-avatar {
+  width: 46px; height: 46px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--sand); color: var(--marrs-deep);
+  border: 2px solid var(--line);
+}
+.trilha-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.trilha-avatar.with-streak { border-color: #E08A3C; box-shadow: 0 0 0 2px rgba(224,138,60,0.25); }
+.trilha-hello { font-family: var(--serif); font-size: 20px; color: var(--marrs-deep); line-height: 1.1; }
+.trilha-id-sub { font-size: 12px; color: var(--ink-soft); letter-spacing: 0.02em; margin-top: 2px; }
+
+.trilha-stats { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; }
+.trilha-stat {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 78px; padding: 8px 12px;
+  background: var(--cream); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.trilha-stat.constancia { flex-direction: row; gap: 7px; }
+.trilha-stat-icon { color: var(--muted); display: inline-flex; }
+.trilha-stat.constancia.alive .trilha-stat-icon { color: #E8862F; filter: drop-shadow(0 0 4px rgba(232,134,47,0.45)); }
+.trilha-stat-num { font-family: var(--serif); font-size: 22px; color: var(--marrs-deep); line-height: 1; }
+.trilha-stat.constancia .trilha-stat-num { font-size: 20px; }
+.trilha-stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-top: 3px; }
+.trilha-stat.constancia .trilha-stat-label { margin-top: 0; align-self: center; }
+
+.trilha-stat.level { min-width: 120px; align-items: stretch; gap: 5px; }
+.trilha-level-head { display: flex; align-items: center; gap: 7px; justify-content: center; }
+.trilha-level-badge {
+  font-size: 12px; font-weight: 700; color: var(--on-accent);
+  background: var(--marrs); border-radius: 999px; padding: 2px 9px; letter-spacing: 0.02em;
+}
+.trilha-stat.level .trilha-stat-label { margin-top: 0; }
+.trilha-level-bar { height: 6px; border-radius: 999px; background: var(--sand); overflow: hidden; }
+.trilha-level-bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--marrs), var(--marrs-soft)); border-radius: 999px; transition: width 0.5s ease; }
+
+/* ── Tela conversacional (if/else) ── */
+.trilha-convo { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 24px; }
+.trilha-convo-avatar {
+  width: 66px; height: 66px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--cream-2); color: var(--marrs-deep);
+  border: 2px solid var(--line); box-shadow: var(--shadow-md);
+  animation: trilha-convo-float 4s ease-in-out infinite;
+}
+.trilha-convo-avatar img { width: 100%; height: 100%; object-fit: cover; }
+@keyframes trilha-convo-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-5px); } }
+.trilha-convo-bubble {
+  position: relative; background: var(--cream-2); border: 1px solid var(--line);
+  border-radius: 4px 16px 16px 16px; padding: 16px 20px; max-width: 560px;
+  box-shadow: var(--shadow); animation: bubble-in 0.35s ease;
+}
+.trilha-convo-bubble p { margin: 0; color: var(--ink); line-height: 1.5; }
+.trilha-convo-bubble p + p { margin-top: 8px; }
+.trilha-convo-greet { font-family: var(--serif); font-size: 22px; color: var(--marrs-deep); }
+@keyframes bubble-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+.trilha-choices { display: flex; flex-direction: column; gap: 13px; max-width: 640px; }
+.trilha-choice {
+  display: flex; align-items: center; gap: 16px; text-align: left; position: relative;
+  background: var(--cream); border: 1px solid var(--line); border-radius: 16px;
+  padding: 15px 18px; cursor: pointer; font: inherit; color: inherit; overflow: hidden;
+  box-shadow: var(--shadow);
+  opacity: 0; transform: translateY(12px);
+  animation: trilha-choice-in 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) forwards;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+@keyframes trilha-choice-in { to { opacity: 1; transform: none; } }
+/* Faixa de cor à esquerda que acende no hover. */
+.trilha-choice::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--skill-color, var(--marrs)); opacity: 0; transition: opacity 0.18s ease, width 0.18s ease;
+}
+.trilha-choice:hover, .trilha-choice:focus-visible {
+  transform: translateY(-3px); border-color: var(--skill-color, var(--marrs));
+  box-shadow: 0 12px 28px -12px var(--skill-color, rgba(0,0,0,0.25)); outline: none;
+}
+.trilha-choice:hover::before, .trilha-choice:focus-visible::before { opacity: 0.9; width: 6px; }
+.trilha-choice:active { transform: translateY(-1px) scale(0.99); }
+
+.trilha-choice-badge {
+  width: 52px; height: 52px; border-radius: 50%; flex-shrink: 0; position: relative;
+  display: flex; align-items: center; justify-content: center; color: #fff;
+  box-shadow: 0 6px 16px -4px var(--skill-color, rgba(0,0,0,0.3));
+  transition: transform 0.22s cubic-bezier(0.34, 1.5, 0.64, 1);
+}
+.trilha-choice-badge::after {
+  content: ''; position: absolute; inset: 6px; border-radius: 50%;
+  border: 1.5px dashed rgba(255, 255, 255, 0.5);
+}
+.trilha-choice:hover .trilha-choice-badge { transform: scale(1.08) rotate(-5deg); }
+.trilha-choice-num { font-family: var(--serif); font-size: 22px; line-height: 1; position: relative; }
+
+.trilha-choice-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.trilha-choice-name { font-family: var(--serif); font-size: 19px; color: var(--marrs-deep); }
+.trilha-choice-meta { font-size: 12.5px; color: var(--ink-soft); }
+.trilha-choice-bar { height: 6px; border-radius: 999px; background: var(--sand); overflow: hidden; max-width: 240px; }
+.trilha-choice-bar > span { display: block; height: 100%; border-radius: 999px; transition: width 0.6s ease; }
+.trilha-choice-go { color: var(--muted); display: inline-flex; flex-shrink: 0; transition: transform 0.18s ease, color 0.18s ease; }
+.trilha-choice:hover .trilha-choice-go { color: var(--skill-color, var(--marrs)); transform: translateX(4px); }
+
+/* ── Trilha de uma competência ── */
+.trilha-view { position: relative; }
+.trilha-back {
+  position: absolute; top: -2px; left: 0; z-index: 5;
+  width: 38px; height: 38px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--cream); border: 1px solid var(--line); color: var(--marrs-deep);
+  cursor: pointer; box-shadow: var(--shadow); transition: background 0.15s ease, transform 0.15s ease;
+}
+.trilha-back:hover { background: var(--cream-2); transform: translateX(-2px); }
+
+.trilha-unit-band {
+  color: #fff; border-radius: var(--radius-lg); padding: 18px 22px 18px 56px;
+  margin-bottom: 8px; box-shadow: var(--shadow-md);
+}
+.trilha-unit-eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; opacity: 0.85; }
+.trilha-unit-band h3 { font-family: var(--serif); font-size: 24px; margin: 2px 0 4px; color: #fff; }
+.trilha-unit-band p { margin: 0; font-size: 13px; opacity: 0.92; }
+
+.trilha-path-wrap { display: flex; justify-content: center; padding: 8px 0 24px; overflow-x: hidden; }
+.trilha-path { position: relative; }
+.trilha-connectors { position: absolute; inset: 0; pointer-events: none; }
+
+.trilha-node-wrap { position: absolute; transform: translate(-50%, -50%); }
+.trilha-node {
+  width: 66px; height: 66px; border-radius: 50%; cursor: pointer; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; border: 3px solid; position: relative;
+  transition: transform 0.12s ease, filter 0.15s ease;
+}
+.trilha-node:hover:not(:disabled) { transform: translateY(-2px); filter: brightness(1.04); }
+.trilha-node:active:not(:disabled) { transform: translateY(1px) scale(0.97); }
+.trilha-node.locked {
+  background: var(--sand); border-color: var(--line); color: var(--muted);
+  cursor: not-allowed; box-shadow: inset 0 -3px 0 rgba(0,0,0,0.06);
+}
+.trilha-node.active { animation: trilha-bob 2.6s ease-in-out infinite; }
+
+.trilha-node-label {
+  position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+  width: 148px; text-align: center; font-size: 12px; line-height: 1.25;
+  color: var(--ink); font-weight: 500;
+}
+.trilha-node-label.locked { color: var(--muted); font-weight: 400; }
+
+.trilha-grade {
+  position: absolute; bottom: calc(100% + 9px); left: 50%; transform: translateX(-50%);
+  z-index: 3; font-size: 12px; font-weight: 700; white-space: nowrap;
+  background: var(--cream); border: 1.5px solid var(--line); border-radius: 999px; padding: 2px 9px;
+  box-shadow: var(--shadow);
+}
+.trilha-grade.fail { color: var(--ink-soft); }
+
+.trilha-bubble {
+  position: absolute; bottom: calc(100% + 11px); left: 50%; transform: translateX(-50%);
+  z-index: 3; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  white-space: nowrap; border-radius: 999px; padding: 6px 13px; box-shadow: var(--shadow-md);
+  animation: trilha-bob 2.6s ease-in-out infinite;
+}
+.trilha-bubble::after {
+  content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 6px solid transparent; border-top-color: var(--bubble-bg, currentColor);
+}
+
+.trilha-node-wrap.shake { animation: trilha-shake 0.45s ease; }
+@keyframes trilha-shake {
+  0%, 100% { transform: translate(-50%, -50%); }
+  20% { transform: translate(calc(-50% - 6px), -50%); }
+  40% { transform: translate(calc(-50% + 6px), -50%); }
+  60% { transform: translate(calc(-50% - 4px), -50%); }
+  80% { transform: translate(calc(-50% + 4px), -50%); }
+}
+@keyframes trilha-bob { 0%, 100% { translate: 0 0; } 50% { translate: 0 -4px; } }
+
+/* ── Banner de resultado (aprovado / não atingiu) na tela pós-sessão ── */
+.trilha-result-flag {
+  border-radius: var(--radius-lg); padding: 13px 18px; margin-bottom: 16px;
+  font-size: 14px; font-weight: 600; border: 1px solid;
+}
+.trilha-result-flag.pass { background: rgba(63,164,94,0.12); color: #2D8F4E; border-color: rgba(63,164,94,0.4); }
+.trilha-result-flag.fail { background: rgba(224,138,60,0.12); color: #C2761C; border-color: rgba(224,138,60,0.4); }
+[data-theme="dark"] .trilha-result-flag.pass { color: #67c98a; }
+[data-theme="dark"] .trilha-result-flag.fail { color: #eca85a; }
+
+@media (max-width: 640px) {
+  .trilha-topbar { gap: 12px; }
+  .trilha-stats { width: 100%; justify-content: space-between; gap: 8px; }
+  .trilha-stat { flex: 1; min-width: 0; }
+  .trilha-stat.level { flex: 1.4; }
+  .trilha-hello { font-size: 18px; }
+}
+
+/* ── Perfil: descrição visual da aparência (campo read-only, gerado por IA) ── */
+.visual-consent { margin-top: 16px; }
+.visual-desc { margin-top: 14px; max-width: 560px; }
+.visual-desc-label {
+  display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink-soft); margin-bottom: 6px; font-weight: 600;
+}
+.visual-desc-box {
+  min-height: 98px; padding: 12px 14px; border: 1px dashed var(--line);
+  border-radius: var(--radius); background: var(--cream-2); color: var(--ink);
+  font-size: 14px; line-height: 1.6; cursor: default; white-space: pre-wrap;
+  outline: none;
+}
+.visual-desc-box.empty { color: var(--muted); font-style: italic; user-select: none; }
+.visual-desc-loading { display: inline-flex; align-items: center; gap: 8px; color: var(--ink-soft); font-style: italic; }
+
+/* ════════════════════════════════════════════════════════════
+   AVALIAÇÃO INDEPENDENTE v25 — visão fragmentada (14 critérios + nota final)
+   ════════════════════════════════════════════════════════════ */
+.v25-final {
+  display: flex; align-items: center; gap: 22px; margin-bottom: 22px;
+  background: linear-gradient(135deg, var(--cream-2), var(--cream));
+}
+.v25-final-score { display: flex; align-items: baseline; gap: 2px; flex-shrink: 0; }
+.v25-final-num { font-family: var(--serif); font-size: 56px; line-height: 1; color: var(--marrs-deep); }
+.v25-final-max { font-size: 20px; color: var(--muted); }
+.v25-final-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--muted); }
+.v25-final-sub { font-size: 14px; color: var(--ink-soft); margin-top: 4px; line-height: 1.5; }
+
+.v25-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+.v25-card {
+  border: 1px solid var(--line); border-left: 4px solid var(--line);
+  border-radius: var(--radius-lg); background: var(--cream); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.v25-card.conf-alta  { border-left-color: #3FA45E; }
+.v25-card.conf-media { border-left-color: #E08A3C; }
+.v25-card.conf-baixa { border-left-color: var(--line); }
+.v25-card.excluded { opacity: 0.62; background: var(--cream-2); }
+
+.v25-card-head { display: flex; align-items: center; gap: 10px; }
+.v25-card-num {
+  width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--marrs); color: var(--on-accent); font-size: 12px; font-weight: 700;
+}
+.v25-card-name { font-family: var(--serif); font-size: 17px; color: var(--marrs-deep); flex: 1; min-width: 0; }
+.v25-card-nota { font-weight: 700; font-size: 16px; color: var(--marrs-deep); flex-shrink: 0; }
+.v25-card-short { font-size: 12.5px; color: var(--muted); font-style: italic; line-height: 1.45; }
+.v25-card-analise { font-size: 13.5px; color: var(--ink); line-height: 1.6; white-space: pre-wrap; }
+.v25-card-foot { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+
+.v25-conf-chip {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 2px 9px; border-radius: 999px; border: 1px solid;
+}
+.v25-conf-chip.conf-alta  { color: #2D8F4E; background: rgba(63,164,94,0.12); border-color: rgba(63,164,94,0.4); }
+.v25-conf-chip.conf-media { color: #C2761C; background: rgba(224,138,60,0.13); border-color: rgba(224,138,60,0.4); }
+.v25-conf-chip.conf-baixa,
+.v25-conf-chip.conf-na    { color: var(--muted); background: var(--sand); border-color: var(--line); }
+.v25-excluded-tag { font-size: 11px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+
+[data-theme="dark"] .v25-conf-chip.conf-alta  { color: #67c98a; }
+[data-theme="dark"] .v25-conf-chip.conf-media { color: #eca85a; }
+
+/* Modelo usado (só informativo — o billing real é conferido na OpenAI) */
+.v25-modelbar { font-size: 12.5px; color: var(--muted); margin-bottom: 16px; letter-spacing: 0.02em; }
+.v25-modelbar strong { color: var(--marrs-deep); }
+.v25-modelbar-tok { opacity: 0.7; }
+
+/* Alternador de visão */
+.v25-viewtabs { display: inline-flex; gap: 4px; padding: 4px; background: var(--sand); border-radius: 999px; margin-bottom: 18px; }
+.v25-viewtab {
+  border: none; background: transparent; cursor: pointer; padding: 7px 16px; border-radius: 999px;
+  font-size: 13px; font-weight: 600; color: var(--ink-soft); letter-spacing: 0.02em;
+}
+.v25-viewtab.active { background: var(--marrs); color: var(--on-accent); }
+
+/* Feedback do aluno (texto montado) */
+.v25-feedback { background: linear-gradient(135deg, var(--cream-2), var(--cream)); }
+.v25-feedback-text {
+  font-family: var(--serif); font-size: 16px; line-height: 1.7; color: var(--ink);
+  white-space: pre-wrap; max-width: 70ch;
+}
+.v25-feedback-empty { font-size: 14px; color: var(--muted); line-height: 1.6; }
+
+/* ════════════════════════════════════════════════════════════
+   FOTO DO PACIENTE — avatar quadrado (seletor) + popup (chat)
+   ════════════════════════════════════════════════════════════ */
+.patient-avatar {
+  object-fit: cover;
+  border-radius: 12px;
+  border: 1px solid var(--sand);
+  background: var(--cream-2);
+  display: block;
+  flex-shrink: 0;
+}
+.patient-avatar-fallback {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--serif); font-weight: 700; letter-spacing: 0.02em;
+  color: var(--on-accent); background: var(--marrs);
+}
+
+/* Topo do card de paciente: foto quadrada + nome/idade ao lado */
+.character-card-top { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+.character-card-meta { flex: 1; min-width: 0; }
+.character-card-top .age { margin-bottom: 0; }
+.character-card-photo { box-shadow: var(--shadow-md); }
+
+/* Avatar clicável no cabeçalho do chat (fotinha → popup) */
+.patient-avatar-btn {
+  padding: 0; border: none; background: none; cursor: pointer; line-height: 0;
+  flex-shrink: 0; border-radius: 50%; transition: transform 0.15s ease;
+}
+.patient-avatar-btn:hover { transform: scale(1.06); }
+.patient-avatar-btn:focus-visible { outline: 2px solid var(--marrs); outline-offset: 2px; }
+.chat-header-avatar .patient-avatar { border-radius: 50%; box-shadow: var(--shadow-md); }
+
+/* Popup com a imagem inteira */
+.patient-photo-overlay {
+  position: fixed; inset: 0; z-index: 1200;
+  background: rgba(0, 0, 0, 0.78);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  animation: fadeIn 0.15s ease;
+}
+.patient-photo-modal {
+  position: relative; display: flex; flex-direction: column;
+  max-width: min(92vw, 720px); max-height: 88vh;
+}
+.patient-photo-modal img {
+  max-width: 100%; max-height: 82vh; object-fit: contain;
+  border-radius: 12px; box-shadow: var(--shadow-lg);
+}
+.patient-photo-noimg {
+  color: #fff; padding: 60px 40px; text-align: center; font-size: 15px;
+  background: rgba(255, 255, 255, 0.06); border-radius: 12px;
+}
+.patient-photo-caption {
+  text-align: center; color: #fff; margin-top: 12px;
+  font-family: var(--serif); font-size: 18px; letter-spacing: 0.02em;
+}
+.patient-photo-close {
+  position: absolute; top: -14px; right: -14px;
+  width: 36px; height: 36px; border-radius: 50%; border: none;
+  background: var(--cream); color: var(--ink); font-size: 24px; line-height: 1;
+  cursor: pointer; box-shadow: var(--shadow-md);
+  display: flex; align-items: center; justify-content: center;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* Recortador de foto do paciente (admin) */
+.ppc-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.ppc-view {
+  position: relative; overflow: hidden; border-radius: 14px;
+  border: 1px solid var(--line); background: var(--cream-2); flex-shrink: 0;
+  touch-action: none; cursor: grab; user-select: none;
+}
+.ppc-view:active { cursor: grabbing; }
+.ppc-img { position: absolute; max-width: none; pointer-events: none; }
+.ppc-frame {
+  position: absolute; inset: 0; pointer-events: none; border-radius: 14px;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55);
+}
+.ppc-current { cursor: default; }
+.ppc-current img { width: 100%; height: 100%; object-fit: cover; }
+.ppc-empty {
+  display: flex; align-items: center; justify-content: center; cursor: default;
+  color: var(--muted); font-size: 13px; letter-spacing: 0.04em;
+}
+.ppc-controls { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.ppc-zoom { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); width: 100%; max-width: 240px; }
+.ppc-zoom input[type="range"] { width: 100%; }
+.ppc-hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.ppc-remove {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--danger, var(--terra)); font-size: 13px; text-decoration: underline;
+}
+
+/* ============================================================
+   Neuroavaliação — testes neuropsicológicos (seleção + comparação)
+   ============================================================ */
+
+/* --- Selector reutilizável (admin + aluno) --- */
+.neuro-test-selector { display: flex; flex-direction: column; gap: 10px; }
+.neuro-test-search {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--cream); padding: 8px 12px; color: var(--muted);
+}
+.neuro-test-search input {
+  flex: 1; border: none; background: none; outline: none;
+  color: var(--ink); font-size: 14px; padding: 0;
+}
+.neuro-test-search-clear {
+  border: none; background: none; cursor: pointer; color: var(--muted);
+  font-size: 20px; line-height: 1; padding: 0 2px;
+}
+.neuro-test-count { font-size: 12.5px; color: var(--marrs-deep); font-weight: 600; }
+.neuro-test-groups {
+  max-height: 46vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px; background: var(--cream-2);
+}
+.neuro-test-empty { color: var(--muted); font-size: 13.5px; font-style: italic; padding: 6px 0; }
+.neuro-test-group-title {
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--marrs-deep); margin-bottom: 6px;
+}
+.neuro-test-list { display: flex; flex-direction: column; gap: 4px; }
+.neuro-test-item { border-radius: var(--radius); }
+.neuro-test-item.checked { background: var(--marrs-tint); }
+/* Blindagem: dentro do formulário do admin (.admin-form) os estilos globais de
+   label (uppercase, display:block, margin) e input (width:100%, padding, borda)
+   vazam pra cá — o checkbox virava uma caixa full-width e escondia o nome do
+   teste. Aqui reencaixamos label e checkbox no layout do seletor. */
+.neuro-test-row {
+  display: flex; align-items: center; gap: 9px; padding: 6px 8px;
+  cursor: pointer; font-size: 14px; margin: 0;
+  text-transform: none; letter-spacing: normal; font-weight: 400;
+}
+.neuro-test-selector input[type="checkbox"] {
+  appearance: auto; -webkit-appearance: checkbox;
+  width: 16px; height: 16px; min-width: 16px; flex-shrink: 0;
+  margin: 0; padding: 0; border-radius: 3px; box-shadow: none;
+  accent-color: var(--marrs);
+}
+.neuro-test-abbr { font-weight: 600; color: var(--ink); white-space: nowrap; }
+.neuro-test-name { color: var(--ink-soft); font-size: 13px; flex: 1; min-width: 0; }
+.neuro-test-result-slot { padding: 0 8px 8px 30px; }
+.neuro-test-result-slot input {
+  width: 100%; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--cream); color: var(--ink); font-size: 13px; padding: 6px 10px;
+}
+.neuro-tests-admin { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 4px; }
+
+/* --- Botão do header + banners --- */
+.neuro-tests-btn {
+  background: var(--marrs); color: var(--on-accent); border-color: var(--marrs);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.neuro-tests-btn:hover:not(:disabled) { background: var(--marrs-dark); border-color: var(--marrs-dark); }
+.neuro-test-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--marrs-tint); border: 1px solid var(--marrs); border-radius: var(--radius);
+  padding: 10px 14px; margin: 0 0 10px;
+}
+.neuro-test-banner-info { display: flex; flex-direction: column; gap: 2px; }
+.neuro-test-banner-label { font-weight: 700; color: var(--marrs-deep); font-size: 13px; }
+.neuro-test-banner-detail { font-size: 12.5px; color: var(--ink-soft); }
+
+.neuro-post-tests {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--marrs-tint); border: 1px solid var(--marrs); border-radius: var(--radius);
+  padding: 12px 16px; margin-bottom: 16px;
+}
+.neuro-post-tests-info { display: flex; flex-direction: column; gap: 3px; }
+.neuro-post-tests-label { font-weight: 700; color: var(--marrs-deep); }
+.neuro-post-tests-detail { font-size: 13px; color: var(--ink-soft); }
+
+/* --- Modal do selector --- */
+.neuro-test-modal { max-width: 700px; }
+.neuro-test-modal-sub, .neuro-comparison-sub {
+  color: var(--ink-soft); font-size: 13.5px; line-height: 1.55; margin: -4px 0 16px;
+}
+
+/* --- Modal de comparação --- */
+.neuro-comparison-modal { max-width: 720px; }
+.neuro-comparison-top {
+  display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
+  padding: 4px 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 16px;
+}
+.neuro-accuracy-ring {
+  --ring: var(--marrs); --acc: 0;
+  width: 108px; height: 108px; border-radius: 50%; flex-shrink: 0;
+  background: conic-gradient(var(--ring) calc(var(--acc) * 1%), var(--sand) 0);
+  display: grid; place-items: center;
+}
+.neuro-accuracy-ring.good { --ring: var(--success); }
+.neuro-accuracy-ring.mid  { --ring: #d99100; }
+.neuro-accuracy-ring.low  { --ring: var(--danger); }
+.neuro-accuracy-ring.na   { --ring: var(--muted); }
+.neuro-accuracy-inner {
+  width: 80px; height: 80px; border-radius: 50%; background: var(--cream);
+  display: grid; place-items: center; text-align: center;
+}
+[data-theme="dark"] .neuro-accuracy-inner { background: var(--sand-2); }
+.neuro-accuracy-value { font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1; }
+.neuro-accuracy-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.neuro-comparison-counts { display: flex; gap: 20px; }
+.ncc-item { display: flex; flex-direction: column; align-items: center; }
+.ncc-num { font-size: 24px; font-weight: 700; line-height: 1; }
+.ncc-lbl { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
+.ncc-item.ok .ncc-num { color: var(--success); }
+.ncc-item.miss .ncc-num { color: var(--danger); }
+.ncc-item.extra .ncc-num { color: #d99100; }
+
+.neuro-comparison-cols { display: flex; gap: 16px; flex-wrap: wrap; }
+.neuro-comparison-col { flex: 1; min-width: 220px; }
+.neuro-col-title { font-size: 12px; font-weight: 700; color: var(--marrs-deep); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+.neuro-col-empty { color: var(--muted); font-size: 13px; font-style: italic; }
+.neuro-chip-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.neuro-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600;
+  padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line);
+}
+.neuro-chip.ok    { background: rgba(26, 122, 109, 0.12); border-color: var(--success); color: var(--success); }
+.neuro-chip.miss  { background: rgba(184, 58, 58, 0.10); border-color: var(--danger); color: var(--danger); }
+.neuro-chip.extra { background: rgba(217, 145, 0, 0.12); border-color: #d99100; color: #a06b00; }
+.neuro-chip-mark { font-weight: 800; }
+
+.neuro-comparison-note {
+  font-size: 13px; line-height: 1.5; padding: 9px 12px; border-radius: var(--radius); margin-top: 12px;
+}
+.neuro-comparison-note.miss  { background: rgba(184, 58, 58, 0.08); border-left: 3px solid var(--danger); }
+.neuro-comparison-note.extra { background: rgba(217, 145, 0, 0.10); border-left: 3px solid #d99100; }
+
+.neuro-results-section { margin-top: 18px; }
+.neuro-results { border: 1px solid var(--marrs); border-radius: var(--radius); padding: 14px 16px; background: var(--marrs-tint); }
+.neuro-results-title { font-weight: 700; color: var(--marrs-deep); margin-bottom: 10px; }
+.neuro-results-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.neuro-result-row { padding: 8px 10px; background: var(--cream); border-radius: var(--radius); border: 1px solid var(--line); }
+.neuro-result-row.was-missing { border-left: 3px solid var(--danger); }
+.neuro-result-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.neuro-result-abbr { font-weight: 700; color: var(--ink); }
+.neuro-result-name { font-size: 12.5px; color: var(--ink-soft); }
+.neuro-result-tag { font-size: 11px; color: var(--danger); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.neuro-result-value { margin-top: 4px; font-size: 14px; color: var(--ink); white-space: pre-wrap; }
+.neuro-results-hint { font-size: 12.5px; color: var(--ink-soft); font-style: italic; margin: 12px 0 0; }
+
+/* --- Resumo no log (professor) --- */
+.neuro-log-summary {
+  border: 1px solid var(--marrs); border-radius: var(--radius); background: var(--marrs-tint);
+  padding: 12px 14px; margin-bottom: 14px; font-size: 13.5px;
+}
+.neuro-log-summary-head { font-weight: 600; color: var(--marrs-deep); margin-bottom: 8px; }
+.neuro-log-summary-row { color: var(--ink-soft); line-height: 1.5; }
+.neuro-log-summary-row span { color: var(--muted); font-weight: 600; }
+.neuro-log-summary-row.miss { color: var(--danger); }
+.neuro-log-summary-row.extra { color: #a06b00; }
+.neuro-log-summary-results { margin-top: 8px; }
+.neuro-log-summary-results-title { font-weight: 600; color: var(--marrs-deep); margin-bottom: 4px; }
+.neuro-log-summary-results ul { margin: 0; padding-left: 18px; color: var(--ink-soft); line-height: 1.55; }
+
+/* Neuroavaliação — justificativa por teste + comparação inline (tela de resultado) */
+.neuro-justif-input {
+  width: 100%; min-height: 46px; resize: vertical;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--cream); color: var(--ink);
+  font-size: 13px; padding: 6px 10px; line-height: 1.45;
+}
+.neuro-comparison-embedded { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 4px; }
+.neuro-comparison-embedded h3 { font-size: 18px; color: var(--marrs-deep); margin: 0 0 4px; }
+.neuro-justif-review { margin-top: 14px; }
+.neuro-justif-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.neuro-justif-list li { display: flex; gap: 10px; font-size: 13px; line-height: 1.5; align-items: baseline; }
+.neuro-justif-list .neuro-chip-abbr { flex-shrink: 0; font-weight: 700; color: var(--marrs-deep); min-width: 88px; }
+.neuro-justif-text { color: var(--ink-soft); }

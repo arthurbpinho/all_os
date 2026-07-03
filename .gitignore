@@ -23,3 +23,6 @@ server/data/tmp_audio_*.webm
 
 # Backups locais
 entrevistador/promptentrevistadoroldbackup.md
+
+# Fotos de paciente enviadas em runtime (ficam no volume DATA_DIR, não no repo)
+server/data/patient-photos/

@@ -9,6 +9,13 @@ export default function Profile({ user, onUpdate }) {
   const [name, setName] = useState(user.name || '');
   const [email, setEmail] = useState(user.email || '');
   const [profilePhoto, setProfilePhoto] = useState(user.profilePhoto || '');
+  // Aparência: consentimento de mostrar aos pacientes simulados + descrição
+  // visual gerada por IA (gpt-5.4-mini). Por ora só vive no perfil.
+  const [shareAppearance, setShareAppearance] = useState(!!user.shareAppearance);
+  const [visualDescription, setVisualDescription] = useState(user.visualDescription || '');
+  const [generatingDesc, setGeneratingDesc] = useState(false);
+  const [descError, setDescError] = useState('');
+  const [showConsentModal, setShowConsentModal] = useState(false);
   const [updateAllOS, setUpdateAllOS] = useState(!!user.updateAllOS);
   const [updateAllos, setUpdateAllos] = useState(!!user.updateAllos);
   const [showCropper, setShowCropper] = useState(false);
@@ -84,6 +91,8 @@ export default function Profile({ user, onUpdate }) {
         name: name.trim(),
         email: email.trim(),
         profilePhoto,
+        shareAppearance,
+        visualDescription,
         updateAllOS,
         updateAllos,
       });
@@ -100,11 +109,63 @@ export default function Profile({ user, onUpdate }) {
   function handleCropDone(dataUrl) {
     setProfilePhoto(dataUrl);
     setShowCropper(false);
+    // Nova foto → re-perguntar o consentimento e descartar a descrição antiga.
+    setShareAppearance(false);
+    setVisualDescription('');
+    setDescError('');
   }
 
   function handleRemovePhoto() {
     if (!window.confirm('Remover a foto de perfil?')) return;
     setProfilePhoto('');
+    setShareAppearance(false);
+    setVisualDescription('');
+    setDescError('');
+  }
+
+  async function generateVisualDescription(photo) {
+    if (!photo) {
+      setDescError('Adicione uma foto de perfil primeiro.');
+      setShareAppearance(false);
+      return;
+    }
+    setDescError('');
+    setGeneratingDesc(true);
+    try {
+      const { description } = await api.describeAppearance(photo);
+      setVisualDescription(description || '');
+    } catch (err) {
+      setDescError(err.message || 'Erro ao gerar a descrição visual.');
+      setShareAppearance(false);
+    } finally {
+      setGeneratingDesc(false);
+    }
+  }
+
+  // Marcar o consentimento abre o aviso de LGPD antes de gerar — a geração só
+  // acontece se a pessoa confirmar (Sim). Desmarcar limpa a descrição (ela só
+  // existe com o "sim").
+  function handleToggleAppearance(checked) {
+    setDescError('');
+    if (checked) {
+      setShowConsentModal(true);
+    } else {
+      setShareAppearance(false);
+      setVisualDescription('');
+    }
+  }
+
+  // Confirmou o aviso (Sim) → consente e gera a descrição.
+  function confirmConsent() {
+    setShowConsentModal(false);
+    setShareAppearance(true);
+    generateVisualDescription(profilePhoto);
+  }
+
+  // Recusou (Não) → fecha o aviso e deixa tudo como estava (sem consentir,
+  // sem gerar, campo inalterado).
+  function cancelConsent() {
+    setShowConsentModal(false);
   }
 
   return (
@@ -248,6 +309,33 @@ export default function Profile({ user, onUpdate }) {
               </div>
             </div>
           </div>
+
+          {/* Consentimento de aparência + descrição visual gerada por IA. */}
+          {profilePhoto && (
+            <label className="checkbox-row visual-consent">
+              <input
+                type="checkbox"
+                checked={shareAppearance}
+                onChange={(e) => handleToggleAppearance(e.target.checked)}
+                disabled={generatingDesc}
+              />
+              <span>Você gostaria que seus pacientes simulados conheçam sua aparência?</span>
+            </label>
+          )}
+
+          <div className="visual-desc">
+            <label className="visual-desc-label">Descrição visual</label>
+            <div className={`visual-desc-box ${visualDescription && !generatingDesc ? '' : 'empty'}`} aria-readonly="true" tabIndex={-1}>
+              {generatingDesc ? (
+                <span className="visual-desc-loading"><span className="spinner" /> Gerando descrição visual…</span>
+              ) : visualDescription ? (
+                visualDescription
+              ) : (
+                'Adicione uma foto de perfil para obter uma descrição visual para utilizar como aparência nos casos com seu paciente'
+              )}
+            </div>
+            {descError && <div className="alert error" style={{ marginTop: 8 }}>{descError}</div>}
+          </div>
         </section>
 
         {/* Identidade */}
@@ -339,6 +427,22 @@ export default function Profile({ user, onUpdate }) {
           </div>
         </form>
       </section>
+
+      {showConsentModal && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) cancelConsent(); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <h3>Gerar descrição visual</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, lineHeight: 1.6, marginTop: -2, marginBottom: 18 }}>
+              <strong>Atenção:</strong> Ao confirmar você aceita que seus dados sejam processados pela OpenAI
+              e pelo aplicativo para criação da descrição visual. Você deseja continuar?
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={cancelConsent}>Não</button>
+              <button type="button" className="btn btn-primary" onClick={confirmConsent}>Sim</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCropper && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowCropper(false); }}>

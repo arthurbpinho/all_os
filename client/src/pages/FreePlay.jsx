@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
+import { PatientAvatar } from '../components/PatientAvatar';
 
 export default function FreePlay({ user }) {
   const [characters, setCharacters] = useState([]);
@@ -123,15 +124,20 @@ export default function FreePlay({ user }) {
                 className="character-card"
                 onClick={() => navigate(`/chat/freeplay/${char.id}`)}
               >
-                <div className="character-card-header">
-                  <h3>{char.name}</h3>
-                  {Number.isFinite(charBest) && (
-                    <span title="Sua maior nota com este paciente">
-                      <ScoreBadge score={charBest} />
-                    </span>
-                  )}
+                <div className="character-card-top">
+                  <PatientAvatar name={char.name} iconUrl={char.photoIcon} size={72} className="character-card-photo" />
+                  <div className="character-card-meta">
+                    <div className="character-card-header">
+                      <h3>{char.name}</h3>
+                      {Number.isFinite(charBest) && (
+                        <span title="Sua maior nota com este paciente">
+                          <ScoreBadge score={charBest} />
+                        </span>
+                      )}
+                    </div>
+                    <div className="age">{char.age} anos</div>
+                  </div>
                 </div>
-                <div className="age">{char.age} anos</div>
                 <p>{char.description}</p>
                 {isReturn && (
                   <div className="progression-tag" title="Você já atendeu este paciente — reatender avalia sua evolução">

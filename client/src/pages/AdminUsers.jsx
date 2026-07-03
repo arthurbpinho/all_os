@@ -6,7 +6,18 @@ const ROLE_LABELS = {
   admin: 'Administrador',
   supervisor: 'Professor',
   therapist: 'Aluno',
+  visitor: 'Visitante',
 };
+
+function fbDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function stars(n) {
+  const s = Math.max(0, Math.min(5, Math.round(Number(n) || 0)));
+  return '★'.repeat(s) + '☆'.repeat(5 - s);
+}
 
 const EMPTY_FORM = {
   username: '',
@@ -37,6 +48,21 @@ export default function AdminUsers({ user: currentUser }) {
   const [visitorEval, setVisitorEval] = useState(false);
   const [visitorEvalSaving, setVisitorEvalSaving] = useState(false);
   const [visitorEvalError, setVisitorEvalError] = useState('');
+  // Feedback dos usuários (estrelas + mensagem coletadas ao fim das sessões).
+  const [feedback, setFeedback] = useState([]);
+  const [feedbackLoading, setFeedbackLoading] = useState(true);
+  const [feedbackError, setFeedbackError] = useState('');
+  // Enviar aviso (notificação) e publicar atualização do sistema.
+  const [noticeTitle, setNoticeTitle] = useState('');
+  const [noticeMsg, setNoticeMsg] = useState('');
+  const [noticeSending, setNoticeSending] = useState(false);
+  const [noticeResult, setNoticeResult] = useState('');
+  const [noticeError, setNoticeError] = useState('');
+  const [updTitle, setUpdTitle] = useState('');
+  const [updBody, setUpdBody] = useState('');
+  const [updSending, setUpdSending] = useState(false);
+  const [updResult, setUpdResult] = useState('');
+  const [updError, setUpdError] = useState('');
 
   useEffect(() => {
     api.getSettings()
@@ -56,6 +82,45 @@ export default function AdminUsers({ user: currentUser }) {
       setVisitorEvalError(err.message || 'Erro ao salvar configuração.');
     } finally {
       setVisitorEvalSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    api.getAdminFeedback()
+      .then((list) => setFeedback(Array.isArray(list) ? list : []))
+      .catch((err) => setFeedbackError(err.message || 'Erro ao carregar o feedback.'))
+      .finally(() => setFeedbackLoading(false));
+  }, []);
+
+  async function sendNotice(e) {
+    e.preventDefault();
+    if (!noticeMsg.trim()) { setNoticeError('Escreva a mensagem do aviso.'); return; }
+    setNoticeSending(true); setNoticeError(''); setNoticeResult('');
+    try {
+      const r = await api.adminSendNotification({ title: noticeTitle.trim(), message: noticeMsg.trim() });
+      setNoticeResult(`Aviso enviado para ${r.count} usuário(s).`);
+      setNoticeTitle(''); setNoticeMsg('');
+      setTimeout(() => setNoticeResult(''), 5000);
+    } catch (err) {
+      setNoticeError(err.message || 'Erro ao enviar o aviso.');
+    } finally {
+      setNoticeSending(false);
+    }
+  }
+
+  async function sendUpdate(e) {
+    e.preventDefault();
+    if (!updBody.trim()) { setUpdError('Escreva o conteúdo da atualização.'); return; }
+    setUpdSending(true); setUpdError(''); setUpdResult('');
+    try {
+      await api.adminSendUpdate({ title: updTitle.trim(), body: updBody.trim() });
+      setUpdResult('Atualização publicada no painel de Atualizações.');
+      setUpdTitle(''); setUpdBody('');
+      setTimeout(() => setUpdResult(''), 5000);
+    } catch (err) {
+      setUpdError(err.message || 'Erro ao publicar a atualização.');
+    } finally {
+      setUpdSending(false);
     }
   }
 
@@ -274,6 +339,83 @@ export default function AdminUsers({ user: currentUser }) {
         >
           {visitorEvalSaving ? 'Salvando…' : (visitorEval ? 'Desligar' : 'Ligar')}
         </button>
+      </div>
+
+      {/* Feedback dos usuários — avaliações que os usuários/visitantes deixam ao
+          fim da sessão (estrelas + mensagem). É outra coisa que o toggle acima. */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+          Feedback dos usuários
+          <span style={{ fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 999, background: 'var(--sand)', color: 'var(--ink-soft)' }}>
+            {feedback.length}
+          </span>
+        </div>
+        <p style={{ margin: '0 0 12px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          Notas (0–5) e mensagens enviadas pelos usuários e visitantes ao final das sessões.
+        </p>
+        {feedbackError && <div className="alert error" style={{ marginBottom: 0 }}>{feedbackError}</div>}
+        {feedbackLoading ? (
+          <div style={{ color: 'var(--ink-soft)', fontSize: 14 }}><span className="spinner" /> <span style={{ marginLeft: 10 }}>Carregando…</span></div>
+        ) : feedback.length === 0 ? (
+          <div style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>Nenhum feedback recebido ainda.</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 380, overflowY: 'auto' }}>
+            {feedback.map((f) => (
+              <div key={f.id} className="card tight" style={{ padding: '10px 14px', background: 'var(--cream-2)' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+                    {f.stars > 0 && <span style={{ color: '#E8A33C', letterSpacing: 1 }} title={`${f.stars}/5`}>{stars(f.stars)}</span>}
+                    <strong style={{ color: 'var(--marrs-deep)' }}>{f.userName || 'Anônimo'}</strong>
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>{ROLE_LABELS[f.role] || f.role || '—'}</span>
+                  </span>
+                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>{fbDate(f.timestamp)}</span>
+                </div>
+                {f.message && <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{f.message}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Enviar aviso (notificação) ou publicar atualização do sistema — os dois
+          ícones do topo direito da tela (sino e bloco de notas). */}
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>Enviar aviso ou atualização</div>
+        <p style={{ margin: '0 0 14px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+          O <strong>aviso</strong> cai no sino de notificações de todos os usuários. A <strong>atualização</strong> entra
+          no painel "Atualizações do sistema" (o bloco de notas ao lado do sino).
+        </p>
+        <div style={{ display: 'grid', gap: 18, gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
+          <form className="admin-form" onSubmit={sendNotice}>
+            <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--marrs-deep)' }}>📢 Aviso (notificação)</div>
+            <div>
+              <label htmlFor="noticeTitle">Título <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
+              <input id="noticeTitle" type="text" value={noticeTitle} onChange={(e) => setNoticeTitle(e.target.value)} placeholder="Ex: Manutenção programada" maxLength={120} />
+            </div>
+            <div>
+              <label htmlFor="noticeMsg">Mensagem</label>
+              <textarea id="noticeMsg" value={noticeMsg} onChange={(e) => setNoticeMsg(e.target.value)} placeholder="Texto do aviso que aparece na notificação…" maxLength={500} style={{ minHeight: 90 }} />
+            </div>
+            {noticeError && <div className="alert error">{noticeError}</div>}
+            {noticeResult && <div className="alert" style={{ background: 'var(--olive-tint, #eef6ee)', color: 'var(--success, #1A7A6D)' }}>{noticeResult}</div>}
+            <div><button type="submit" className="btn btn-primary" disabled={noticeSending}>{noticeSending ? 'Enviando…' : 'Enviar aviso'}</button></div>
+          </form>
+
+          <form className="admin-form" onSubmit={sendUpdate}>
+            <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--marrs-deep)' }}>📝 Atualização do sistema</div>
+            <div>
+              <label htmlFor="updTitle">Título <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
+              <input id="updTitle" type="text" value={updTitle} onChange={(e) => setUpdTitle(e.target.value)} placeholder="Ex: Novidades da semana" maxLength={120} />
+            </div>
+            <div>
+              <label htmlFor="updBody">Conteúdo</label>
+              <textarea id="updBody" value={updBody} onChange={(e) => setUpdBody(e.target.value)} placeholder="Descreva a atualização… (quebras de linha são preservadas)" maxLength={4000} style={{ minHeight: 90 }} />
+            </div>
+            {updError && <div className="alert error">{updError}</div>}
+            {updResult && <div className="alert" style={{ background: 'var(--olive-tint, #eef6ee)', color: 'var(--success, #1A7A6D)' }}>{updResult}</div>}
+            <div><button type="submit" className="btn btn-primary" disabled={updSending}>{updSending ? 'Publicando…' : 'Publicar atualização'}</button></div>
+          </form>
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>

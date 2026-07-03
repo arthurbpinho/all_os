@@ -50,10 +50,26 @@ async function request(path, options = {}) {
     throw new Error(err.error || 'Sessão expirada');
   }
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Erro desconhecido' }));
-    throw new Error(err.error || 'Erro na requisição');
+    // Quando o corpo não é JSON (404 de rota não registrada, 500/502/504 em
+    // HTML de proxy etc.), inclui o status pra não virar um "Erro desconhecido"
+    // opaco — facilita diagnosticar (ex.: 404 = servidor não reiniciado).
+    const err = await res.json().catch(() => null);
+    throw new Error((err && err.error) || `Erro ${res.status}${res.statusText ? ' ' + res.statusText : ''} na requisição`);
   }
   return res.json();
+}
+
+// Catálogo de testes neuropsicológicos: fixo no servidor, então cacheamos a
+// promessa (uma requisição por sessão, compartilhada por admin + TestSelector).
+let neuroTestsPromise = null;
+function getNeuroTestsCached() {
+  if (!neuroTestsPromise) {
+    neuroTestsPromise = request('/neuro/tests').catch((err) => {
+      neuroTestsPromise = null; // permite re-tentar depois de uma falha
+      throw err;
+    });
+  }
+  return neuroTestsPromise;
 }
 
 export const api = {
@@ -74,6 +90,9 @@ export const api = {
     request('/me/password', { method: 'POST', body: { currentPassword, newPassword } }),
   // Título (subtítulo) ativo exibido no perfil/ranking. titleId vazio limpa.
   setMyTitle: (titleId) => request('/me/title', { method: 'POST', body: { titleId } }),
+  // Gera (via gpt-5.4-mini) a descrição visual da aparência a partir da foto
+  // (data URI). Não persiste — o perfil salva junto com a foto.
+  describeAppearance: (photo) => request('/me/visual-description', { method: 'POST', body: { photo } }),
 
   // Exercises
   getExercises: () => request('/exercises'),
@@ -86,16 +105,26 @@ export const api = {
   createFreeplay: (data) => request('/freeplay', { method: 'POST', body: data }),
   updateFreeplay: (id, data) => request(`/freeplay/${id}`, { method: 'PUT', body: data }),
   deleteFreeplay: (id) => request(`/freeplay/${id}`, { method: 'DELETE' }),
+  // Foto do paciente: { icon, full } (data URLs) ou { clear: true }.
+  setFreeplayPhoto: (id, data) => request(`/freeplay/${id}/photo`, { method: 'PUT', body: data }),
 
   // Neuro
   getNeuro: () => request('/neuro'),
   createNeuro: (data) => request('/neuro', { method: 'POST', body: data }),
   updateNeuro: (id, data) => request(`/neuro/${id}`, { method: 'PUT', body: data }),
   deleteNeuro: (id) => request(`/neuro/${id}`, { method: 'DELETE' }),
+  // Catálogo de testes neuropsicológicos (grupos [{category, tests:[{id,abbr,name}]}]).
+  // Fixo — cacheado em memória depois do primeiro fetch.
+  getNeuroTests: () => getNeuroTestsCached(),
+  // Compara a seleção do aluno com o gabarito e revela os resultados do paciente.
+  compareNeuroTests: (id, selectedTests) =>
+    request(`/neuro/${id}/compare-tests`, { method: 'POST', body: { selectedTests } }),
 
   // Progress
   getProgress: (userId) => request(`/progress/${userId}`),
   saveProgress: (userId, data) => request(`/progress/${userId}`, { method: 'POST', body: data }),
+  // Trilha — estatísticas da barra superior (concluídos, nível, constância)
+  getTrilhaStats: (userId) => request(`/trilha/${userId}`),
 
   // Logs
   getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
@@ -104,6 +133,14 @@ export const api = {
 
   // Feedback (coletado do visitante ao fim da sessão: estrelas 0–5 + mensagem)
   submitFeedback: (data) => request('/feedback', { method: 'POST', body: data }),
+  getAdminFeedback: () => request('/admin/feedback'),
+  // Avaliação Independente v25 (Opus 4.8, 14 nós): { log, casoId } → 14 partes + nota 0–100.
+  avaliacaoIndependente: (log, casoId) => request('/avaliacao-independente', { method: 'POST', body: { log, casoId } }),
+  // Admin: dispara um aviso (notificação) pra todos + publica atualização.
+  adminSendNotification: (data) => request('/admin/notifications', { method: 'POST', body: data }),
+  adminSendUpdate: (data) => request('/admin/updates', { method: 'POST', body: data }),
+  // Atualizações do sistema criadas pelo admin (mescladas com o changelog).
+  getUpdates: () => request('/updates'),
 
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
   // context: { type, itemId } — NUNCA mande systemPrompt do cliente

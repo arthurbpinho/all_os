@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
-import { CHANGELOG, LATEST_UPDATE } from '../changelog';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { CHANGELOG } from '../changelog';
+import { api } from '../api';
 
 // Painel "Atualizações do sistema" — ícone de bloco de notas com exclamação, à
 // esquerda do sino de notificações. Mostra as notas de versão (uma por dia).
+// As atualizações vêm de duas fontes mescladas: o changelog ESTÁTICO (changelog.js)
+// e as criadas pelo ADMIN em tempo real (GET /api/updates), estas primeiro.
 // Um ponto de "novidade" aparece até o usuário abrir a atualização mais recente
-// (rastreado em localStorage, por dispositivo — conteúdo é público/estático).
+// (rastreado em localStorage, por dispositivo).
 const SEEN_KEY = 'allos_updates_seen';
 
 function formatDate(iso) {
@@ -19,12 +22,34 @@ function formatDate(iso) {
 
 export default function SystemUpdates() {
   const [open, setOpen] = useState(false);
+  const [serverUpdates, setServerUpdates] = useState([]);
   const [seen, setSeen] = useState(() => {
     try { return localStorage.getItem(SEEN_KEY); } catch { return null; }
   });
   const panelRef = useRef(null);
 
-  const hasNew = LATEST_UPDATE && seen !== LATEST_UPDATE;
+  useEffect(() => {
+    let cancelled = false;
+    api.getUpdates()
+      .then((list) => { if (!cancelled) setServerUpdates(Array.isArray(list) ? list : []); })
+      .catch(() => { /* best-effort: cai só no changelog estático */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Mescla as atualizações do admin com o changelog estático, mais recente
+  // primeiro. Em empate de data, as do admin (serverUpdates) vêm antes.
+  const entries = useMemo(() => {
+    const combined = [
+      ...serverUpdates.map((u) => ({ ...u, key: u.id || u.date })),
+      ...CHANGELOG.map((c) => ({ ...c, key: c.date })),
+    ];
+    combined.sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+    return combined;
+  }, [serverUpdates]);
+
+  // Marcador da atualização mais recente (id quando houver, senão a data).
+  const latestKey = entries.length ? (entries[0].id || entries[0].date) : null;
+  const hasNew = latestKey && seen !== latestKey;
 
   useEffect(() => {
     if (!open) return;
@@ -38,9 +63,9 @@ export default function SystemUpdates() {
   function toggle() {
     setOpen((v) => {
       const next = !v;
-      if (next && LATEST_UPDATE) {
-        try { localStorage.setItem(SEEN_KEY, LATEST_UPDATE); } catch {}
-        setSeen(LATEST_UPDATE);
+      if (next && latestKey) {
+        try { localStorage.setItem(SEEN_KEY, latestKey); } catch {}
+        setSeen(latestKey);
       }
       return next;
     });
@@ -67,8 +92,8 @@ export default function SystemUpdates() {
         <div className="sys-updates-panel">
           <div className="sys-updates-header">Atualizações do sistema</div>
           <div className="sys-updates-list">
-            {CHANGELOG.map((entry) => (
-              <div key={entry.date} className="sys-update-item">
+            {entries.map((entry) => (
+              <div key={entry.key} className="sys-update-item">
                 <div className="sys-update-date">{formatDate(entry.date)}</div>
                 {entry.title && <div className="sys-update-title">{entry.title}</div>}
                 <div className="sys-update-body">{entry.body}</div>

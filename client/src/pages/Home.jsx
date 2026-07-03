@@ -1,67 +1,36 @@
+import { useNavigate } from 'react-router-dom';
 import { ICONS } from '../icons';
 import InstallAppBanner from '../components/InstallAppBanner';
 
 // Homepage (pós-login): o "como jogar" de cada modo no topo, depois os banners
 // de processo seletivo e formação. A missão diária vive só no Treinamento
 // (FreePlay), não aqui. Os ícones dos modos são os mesmos do menu lateral.
-// A ordem dos modos segue a progressão natural do aluno (treina → disputa a
-// referência do caso → ranqueado → PvP). Trilha de Competências e
-// Neuroavaliação ficam de fora de propósito (ainda ocultas nesta versão).
+// A ordem coloca o Competitivo primeiro (é o modo base, em torno do qual o app
+// foi desenhado), depois Duelo, Treinamento (modo de treino, sem ranking) e
+// Modo Desafio. Trilha de Competências e Neuroavaliação ficam de fora de
+// propósito (ainda ocultas nesta versão).
+//
+// Estes cards são, agora, a porta de entrada dos modos: Treinamento, Competitivo
+// e Duelo saíram do menu lateral. Cada card tem um botão "Jogar" (no cabeçalho,
+// ao lado da setinha) e um "jogar esse modo" dentro da descrição. `route` é o
+// destino e `canPlay(user)` decide se o botão aparece (respeita o que cada papel
+// acessa — visitante não joga Competitivo nem inicia Duelo).
 const FAQ_ITEMS = [
-  {
-    icon: ICONS.freeplay,
-    q: 'Treinamento',
-    a: (
-      <>
-        <p>
-          O modo base. Escolha um paciente simulado e conduza o atendimento por
-          mensagens, como numa sessão real — praticando escuta, manejo do vínculo
-          e ritmo de sessão. Ao encerrar, uma <strong>IA avaliadora</strong> analisa o
-          atendimento e devolve um feedback, e o log fica salvo no seu histórico.
-        </p>
-        <p>
-          Reatender um paciente que você já viu faz a avaliação comparar a sua{' '}
-          <strong>evolução</strong> com a sessão anterior. E quando você tem um{' '}
-          <strong>objetivo</strong> ativo, ele vira o foco do próximo treino.
-        </p>
-      </>
-    ),
-  },
-  {
-    icon: ICONS.crown,
-    q: 'Modo Desafio',
-    a: (
-      <>
-        <p>
-          Cada paciente tem uma posição de <strong>Titular</strong> 👑 — o terapeuta
-          que detém a referência daquele caso. No card do paciente, dentro do
-          Treinamento:
-        </p>
-        <ul>
-          <li>
-            Se <strong>ninguém</strong> reivindicou ainda, toque na coroa para atender e
-            garantir o título — você vira Titular ao final, independente da nota.
-          </li>
-          <li>
-            Se <strong>já existe um Titular</strong>, tocar na coroa abre um desafio: você
-            atende o mesmo paciente e a IA compara o seu atendimento com o dele,
-            decidindo se você assume a posição.
-          </li>
-        </ul>
-        <p>
-          O resultado é apenas posicional — <em>você assume</em> ou <em>o Titular
-          permanece</em>, com uma justificativa clínica. Não aparece nota numérica.
-        </p>
-      </>
-    ),
-  },
   {
     icon: ICONS.trophy,
     q: 'Competitivo',
+    route: '/competitivo',
+    inlineCta: 'Jogar esse modo',
+    canPlay: (u) => u?.role !== 'visitor',
     a: (
       <>
         <p>
-          Os mesmos pacientes do Treinamento, mas valendo rating. Cada atendimento
+          É o <strong>modo base</strong> — aquele em torno do qual o aplicativo foi
+          desenhado para girar, o principal. Aqui você atende valendo rating: é a
+          forma de praticar a sério, medindo sua evolução contra a comunidade.
+        </p>
+        <p>
+          São os mesmos pacientes do Treinamento, mas valendo nota. Cada atendimento
           finalizado gera uma nota que alimenta o seu <strong>MMR</strong>, e a{' '}
           <strong>dificuldade</strong> de cada paciente se ajusta ao desempenho coletivo
           de todos os jogadores.
@@ -76,6 +45,9 @@ const FAQ_ITEMS = [
   {
     icon: ICONS.duel,
     q: 'Duelo',
+    route: '/duelo',
+    inlineCta: 'Jogar esse modo',
+    canPlay: (u) => u?.role === 'therapist' || u?.role === 'admin',
     a: (
       <>
         <p>
@@ -108,6 +80,66 @@ const FAQ_ITEMS = [
       </>
     ),
   },
+  {
+    icon: ICONS.freeplay,
+    q: 'Treinamento',
+    route: '/freeplay',
+    inlineCta: 'Jogar esse modo',
+    canPlay: () => true,
+    a: (
+      <>
+        <p>
+          O modo de <strong>treino</strong> — recomendado para experimentar à vontade,
+          sem se preocupar com pontuação nem ranking. Escolha um paciente simulado e
+          conduza o atendimento por mensagens, como numa sessão real — praticando
+          escuta, manejo do vínculo e ritmo de sessão. Ao encerrar, uma{' '}
+          <strong>IA avaliadora</strong> analisa o atendimento e devolve um feedback, e o
+          log fica salvo no seu histórico.
+        </p>
+        <p>
+          Reatender um paciente que você já viu faz a avaliação comparar a sua{' '}
+          <strong>evolução</strong> com a sessão anterior. E quando você tem um{' '}
+          <strong>objetivo</strong> ativo, ele vira o foco do próximo treino.
+        </p>
+      </>
+    ),
+  },
+  {
+    icon: ICONS.crown,
+    q: 'Modo Desafio',
+    route: '/freeplay',
+    inlineCta: 'Ir para o Treinamento',
+    canPlay: () => true,
+    a: (
+      <>
+        <p>
+          O Modo Desafio <strong>não é um modo separado</strong>: ele vive dentro do
+          Treinamento. Por isso o botão "Jogar" leva você direto ao Treinamento,
+          onde os desafios acontecem no card de cada paciente.
+        </p>
+        <p>
+          Cada paciente tem uma posição de <strong>Titular</strong> 👑 — o terapeuta
+          que detém a referência daquele caso. No card do paciente, dentro do
+          Treinamento:
+        </p>
+        <ul>
+          <li>
+            Se <strong>ninguém</strong> reivindicou ainda, toque na coroa para atender e
+            garantir o título — você vira Titular ao final, independente da nota.
+          </li>
+          <li>
+            Se <strong>já existe um Titular</strong>, tocar na coroa abre um desafio: você
+            atende o mesmo paciente e a IA compara o seu atendimento com o dele,
+            decidindo se você assume a posição.
+          </li>
+        </ul>
+        <p>
+          O resultado é apenas posicional — <em>você assume</em> ou <em>o Titular
+          permanece</em>, com uma justificativa clínica. Não aparece nota numérica.
+        </p>
+      </>
+    ),
+  },
 ];
 
 function Chevron() {
@@ -118,7 +150,15 @@ function Chevron() {
   );
 }
 
-export default function Home() {
+export default function Home({ user }) {
+  const navigate = useNavigate();
+  // Botão "Jogar": dentro de um <summary>, clicar num botão alternaria o
+  // <details>. preventDefault + stopPropagation impedem isso — o clique navega
+  // em vez de abrir/fechar a descrição.
+  function play(route, e) {
+    if (e) { e.preventDefault(); e.stopPropagation(); }
+    navigate(route);
+  }
   return (
     <div className="home-page">
       <InstallAppBanner />
@@ -146,16 +186,33 @@ export default function Home() {
             Cada modo coloca esse atendimento sob uma luz diferente.
           </p>
         </div>
-        {FAQ_ITEMS.map((item) => (
-          <details key={item.q} className="faq-item">
-            <summary>
-              <span className="faq-q-icon" aria-hidden="true">{item.icon}</span>
-              <span>{item.q}</span>
-              <Chevron />
-            </summary>
-            <div className="faq-a">{item.a}</div>
-          </details>
-        ))}
+        {FAQ_ITEMS.map((item) => {
+          const canPlay = item.canPlay ? item.canPlay(user) : true;
+          return (
+            <details key={item.q} className="faq-item">
+              <summary>
+                <span className="faq-q-icon" aria-hidden="true">{item.icon}</span>
+                <span>{item.q}</span>
+                <span className="faq-actions">
+                  {canPlay && item.route && (
+                    <button type="button" className="faq-play-btn" onClick={(e) => play(item.route, e)}>
+                      Jogar
+                    </button>
+                  )}
+                  <Chevron />
+                </span>
+              </summary>
+              <div className="faq-a">
+                {item.a}
+                {canPlay && item.route && (
+                  <button type="button" className="btn btn-primary faq-play-inline" onClick={(e) => play(item.route, e)}>
+                    {item.inlineCta || 'Jogar esse modo'} →
+                  </button>
+                )}
+              </div>
+            </details>
+          );
+        })}
       </section>
 
       <div className="home-promos">

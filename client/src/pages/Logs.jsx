@@ -3,8 +3,9 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
-import CriteriaTable, { V15_CRITERIA } from '../components/CriteriaTable';
+import CriteriaTable, { V15_CRITERIA, NEURO_CRITERIA } from '../components/CriteriaTable';
 import { makeLogItems, downloadText } from '../logFiles';
+import LogsSociais from './LogsSociais';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
@@ -106,10 +107,11 @@ function buildLogStrings(log) {
   // recebe criteriaScores do servidor).
   let criteriaPart = '';
   if (log.criteriaScores && typeof log.criteriaScores === 'object') {
+    const critLabels = log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA;
     const rows = Object.entries(log.criteriaScores)
       .filter(([, v]) => Number.isFinite(Number(v)))
       .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([k, v]) => `${V15_CRITERIA[k] || `Critério ${k}`}: ${Number(v)}/10`);
+      .map(([k, v]) => `${critLabels[k] || `Critério ${k}`}: ${Number(v)}/10`);
     if (rows.length) {
       criteriaPart = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
     }
@@ -138,6 +140,50 @@ function logItemsFor(log) {
 function downloadLogAsText(log) {
   const stamp = (log.timestamp || log.createdAt || new Date().toISOString()).slice(0, 10);
   downloadText(`log-${sanitizeFilename(log.userName)}-${sanitizeFilename(log.itemTitle)}-${stamp}.txt`, buildLogStrings(log).bothStr);
+}
+
+// Resumo (Neuroavaliação) da bateria de testes que o aluno escolheu, recomputado
+// server-side vs. o gabarito. Mostrado no log para o supervisor/admin/aluno.
+function NeuroTestsLogSummary({ data }) {
+  if (!data) return null;
+  const abbrs = (list) => (list || []).map((t) => t.abbr).join(', ') || '—';
+  const just = data.justifications || {};
+  const justEntries = (data.selected || []).filter((t) => (just[t.id] || '').trim());
+  return (
+    <div className="neuro-log-summary">
+      <div className="neuro-log-summary-head">
+        🧪 Bateria de testes indicada pelo aluno · nota dos testes <strong>{typeof data.accuracy === 'number' ? `${data.accuracy}%` : 'N/A'}</strong>
+      </div>
+      <div className="neuro-log-summary-row"><span>Indicados:</span> {abbrs(data.selected)}</div>
+      <div className="neuro-log-summary-row"><span>Recomendados:</span> {abbrs(data.recommended)}</div>
+      {data.missing && data.missing.length > 0 && (
+        <div className="neuro-log-summary-row miss"><span>Não aplicados:</span> {abbrs(data.missing)}</div>
+      )}
+      {data.extra && data.extra.length > 0 && (
+        <div className="neuro-log-summary-row extra"><span>Extras:</span> {abbrs(data.extra)}</div>
+      )}
+      {justEntries.length > 0 && (
+        <div className="neuro-log-summary-results">
+          <div className="neuro-log-summary-results-title">Justificativas do aluno</div>
+          <ul>
+            {justEntries.map((t) => (
+              <li key={t.id}><strong>{t.abbr}</strong>: {just[t.id].trim()}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {data.results && data.results.length > 0 && (
+        <div className="neuro-log-summary-results">
+          <div className="neuro-log-summary-results-title">Resultados do paciente</div>
+          <ul>
+            {data.results.map((r) => (
+              <li key={r.id}><strong>{r.abbr}</strong>: {r.result}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LogCard({ log, showDownload }) {
@@ -210,10 +256,12 @@ function LogCard({ log, showDownload }) {
             </div>
           )}
 
+          {tab === 'log' && log.neuroTests && <NeuroTestsLogSummary data={log.neuroTests} />}
+
           {tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
               <div>
-                <CriteriaTable criteriaScores={log.criteriaScores} />
+                <CriteriaTable criteriaScores={log.criteriaScores} labels={log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                     {evaluation}
@@ -583,7 +631,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div className="card tight">
           {evaluation || log.criteriaScores ? (
             <div>
-              <CriteriaTable criteriaScores={log.criteriaScores} />
+              <CriteriaTable criteriaScores={log.criteriaScores} labels={log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                   {evaluation}
@@ -606,6 +654,9 @@ export default function Logs({ user, userId }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [ttlDays, setTtlDays] = useState(LOG_TTL_DAYS_FALLBACK);
+  // Aba dentro de "Minhas Sessões": sessões (Trilha/Simulação/Neuro) ou duelos.
+  // "Logs de Duelo" deixou de ser item de menu próprio e virou esta aba.
+  const [view, setView] = useState('sessions');
 
   const isSupervisorView = !userId;
 
@@ -664,18 +715,42 @@ export default function Logs({ user, userId }) {
 
       {error && <div className="alert error">{error}</div>}
 
-      <div className="log-expiry-banner">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
-          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-          <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-        </svg>
-        <span>
-          Os logs expiram automaticamente após <strong>{ttlDays} dias</strong> e são removidos para manter o desempenho da plataforma.
-          A data de expiração aparece em cada sessão — <strong>baixe os logs que quiser guardar</strong> antes disso.
-        </span>
-      </div>
+      {/* Aba Sessões / Duelos — só na visão do aluno ("Minhas Sessões"). */}
+      {!isSupervisorView && (
+        <div className="logs-tabs">
+          <button
+            type="button"
+            className={`btn ${view === 'sessions' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setView('sessions')}
+          >
+            Minhas sessões
+          </button>
+          <button
+            type="button"
+            className={`btn ${view === 'duels' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setView('duels')}
+          >
+            Duelos
+          </button>
+        </div>
+      )}
 
-      {loading ? (
+      {(isSupervisorView || view === 'sessions') && (
+        <div className="log-expiry-banner">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span>
+            Os logs expiram automaticamente após <strong>{ttlDays} dias</strong> e são removidos para manter o desempenho da plataforma.
+            A data de expiração aparece em cada sessão — <strong>baixe os logs que quiser guardar</strong> antes disso.
+          </span>
+        </div>
+      )}
+
+      {!isSupervisorView && view === 'duels' ? (
+        <LogsSociais user={user} embedded />
+      ) : loading ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>
           <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando sessões…</span>
         </div>

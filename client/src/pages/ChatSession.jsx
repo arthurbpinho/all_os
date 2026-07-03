@@ -3,8 +3,6 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import {
   buildDirectEvaluationPrompt,
-  parseCriteriaScores,
-  calculateScores,
   stripSupervisorBlock,
   SKILL_NAMES,
 } from '../prompts';
@@ -39,6 +37,7 @@ export default function ChatSession({ user }) {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
+  const [showSaveLoad, setShowSaveLoad] = useState(false);
   const [error, setError] = useState('');
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
@@ -268,33 +267,21 @@ export default function ChatSession({ user }) {
 
     let evalContent = '';
     let totalScore = null;
-    let parsedCriteria = null;
 
     try {
       const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
       evalContent = typeof reply === 'string' ? reply : reply.content || '';
 
-      // Ordem de parsing:
-      //  1. [CRITERIOS:...] — formato Allos legado (10 critérios), ainda usado
-      //     se algum exercício antigo tiver evaluatorPrompt customizado pedindo isso.
-      //  2. **Nota: X/100** — formato do avaliador v9 (saída padrão atual).
-      //  3. [NOTA:X] — wrapper genérico para evaluatorPrompt customizado.
-      parsedCriteria = parseCriteriaScores(evalContent);
-      if (parsedCriteria) {
-        totalScore = calculateScores(parsedCriteria).totalScore;
-      } else {
-        const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
-        if (v9) {
-          totalScore = Number(v9[1]);
-        } else {
-          const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
-          if (m) totalScore = Number(m[1].replace(',', '.'));
-        }
-      }
-      if (totalScore !== null && Number.isFinite(totalScore)) {
-        totalScore = Math.round(totalScore);
-      } else {
-        totalScore = null;
+      // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador (padrão ou
+      // customizado) emite [NOTA:X] com X de 0 a 100. Aceita também
+      // "**Nota: X/100**" e variações "Nota final: X/100" / "X%".
+      const m =
+        evalContent.match(/\[NOTA:\s*(\d{1,3})\s*\]/i) ||
+        evalContent.match(/\*\*\s*Nota:?\s*(\d{1,3})\s*\/\s*100\s*\*\*/i) ||
+        evalContent.match(/\bNota\s*(?:final)?\s*[:=]?\s*(\d{1,3})\s*(?:\/\s*100|%)/i);
+      if (m) {
+        const v = Number(m[1]);
+        if (Number.isFinite(v)) totalScore = Math.max(0, Math.min(100, Math.round(v)));
       }
 
       setEvaluationText(evalContent);
@@ -318,7 +305,7 @@ export default function ChatSession({ user }) {
         messages: messages.filter((m) => !m.isSystem),
         durationSeconds: elapsed,
         score: totalScore,
-        criteriaScores: parsedCriteria,
+        criteriaScores: null,
         evaluation: evalContent,
       });
     } catch (err) {
@@ -337,8 +324,7 @@ export default function ChatSession({ user }) {
             [id]: {
               score: totalScore,
               skillId: item.skillId,
-              skillScores: parsedCriteria ? calculateScores(parsedCriteria).skillScores : null,
-              criteriaScores: parsedCriteria,
+              passed: totalScore >= 75,
               difficulty: item.difficulty,
               completedAt: new Date().toISOString(),
             },
@@ -408,7 +394,7 @@ export default function ChatSession({ user }) {
   }
   function chatEvaluationBody() {
     const clean = stripSupervisorBlock(evaluationText);
-    const line = score !== null ? `Nota final: ${score > 0 ? '+' : ''}${score}\n\n` : '';
+    const line = score !== null ? `Nota final: ${score}%\n\n` : '';
     return `${line}${clean}`;
   }
   const logText = () => `${chatLogHeader()}\n\n---\n\n${chatTranscript()}`;
@@ -535,6 +521,14 @@ export default function ChatSession({ user }) {
 
         {evalError && <div className="alert error">Falha ao avaliar: {evalError}</div>}
 
+        {score !== null && (
+          <div className={`trilha-result-flag ${score >= 75 ? 'pass' : 'fail'}`}>
+            {score >= 75
+              ? '✓ Aprovado — a próxima fase da trilha foi liberada.'
+              : `Você atingiu ${score}%. São necessários 75% para liberar a próxima fase — refaça quando quiser.`}
+          </div>
+        )}
+
         <div className="card">
           <div className="post-session-stats">
             <div>
@@ -551,8 +545,11 @@ export default function ChatSession({ user }) {
             </div>
             {score !== null && (
               <div>
-                <span className="post-stat-label">Nota final</span>
-                <ScoreBadge score={score} size="xl" />
+                <span className="post-stat-label">Nota</span>
+                <span className="post-stat-value" style={{ display: 'inline-flex', alignItems: 'baseline', gap: 3 }}>
+                  <ScoreBadge score={score} size="xl" />
+                  <span style={{ fontSize: 15, color: 'var(--ink-soft)', fontWeight: 600 }}>%</span>
+                </span>
               </div>
             )}
           </div>
@@ -591,7 +588,7 @@ export default function ChatSession({ user }) {
 
           <div className="post-session-actions">
             <button className="btn btn-primary" onClick={() => navigate('/skills')}>
-              Voltar ao mapa
+              Voltar à trilha
             </button>
           </div>
         </div>
@@ -627,10 +624,10 @@ export default function ChatSession({ user }) {
               Log
             </button>
           )}
-          {sessionStarted && messages.filter((m) => !m.isSystem).length > 0 && (
-            <button onClick={downloadSave} className="btn btn-outline btn-sm" title="Baixar save desta sessão (.json) para retomar depois">
+          {sessionStarted && (
+            <button onClick={() => setShowSaveLoad(true)} className="btn btn-outline btn-sm" title="Guardar ou carregar o progresso desta sessão">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
-              Save
+              Save/Load
             </button>
           )}
           {sessionStarted && (
@@ -708,7 +705,6 @@ export default function ChatSession({ user }) {
                 Carregar save
               </button>
             </div>
-            <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
           </div>
         </div>
       ) : isTranscribing ? (
@@ -762,6 +758,44 @@ export default function ChatSession({ user }) {
           </button>
         </div>
       )}
+
+      {/* Input de arquivo (oculto) usado pelo "Carregar" — fica no topo do
+          chat para estar disponível tanto na tela inicial quanto durante a sessão. */}
+      <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
+
+      {/* Modal Guardar / Carregar progresso */}
+      {showSaveLoad && (() => {
+        const visibleCount = messages.filter((m) => !m.isSystem).length;
+        return (
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowSaveLoad(false); }}>
+            <div className="modal" style={{ maxWidth: 460 }}>
+              <h3>Progresso da sessão</h3>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
+                Você quer <strong>guardar</strong> o progresso atual num arquivo (.json) para retomar depois,
+                ou <strong>carregar</strong> um progresso salvo? Carregar substitui a conversa atual.
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => { setShowSaveLoad(false); fileInputRef.current?.click(); }}
+                >
+                  Carregar o progresso
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => { setShowSaveLoad(false); downloadSave(); }}
+                  disabled={visibleCount === 0}
+                  title={visibleCount === 0 ? 'A sessão ainda não tem mensagens para guardar' : 'Baixar o save desta sessão'}
+                >
+                  Guardar o progresso
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Modal de confirmação de finalização */}
       {confirmingFinalize && (() => {
