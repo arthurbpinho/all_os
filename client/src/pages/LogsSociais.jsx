@@ -39,7 +39,7 @@ function statusChip(d) {
   return <span className="duel-outcome-chip waiting">aguardando aceite</span>;
 }
 
-export default function LogsSociais({ user }) {
+export default function LogsSociais({ user, embedded = false }) {
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -112,12 +112,16 @@ export default function LogsSociais({ user }) {
 
   return (
     <div>
-      <div className="page-header">
-        <div className="eyebrow">Duelo · Histórico</div>
-        <h2>Logs <span className="accent"><Typewriter text="de Duelo" /></span></h2>
-        <p>Seus duelos agrupados por adversário, do mais frequente ao menos. Toque em um duelo para ver o resultado e a análise comparativa.</p>
-        <div className="ornament" />
-      </div>
+      {/* Quando embutido em "Minhas Sessões" (aba Duelos), não repete o
+          page-header — a página externa já tem o seu. */}
+      {!embedded && (
+        <div className="page-header">
+          <div className="eyebrow">Duelo · Histórico</div>
+          <h2>Logs <span className="accent"><Typewriter text="de Duelo" /></span></h2>
+          <p>Seus duelos agrupados por adversário, do mais frequente ao menos. Toque em um duelo para ver o resultado e a análise comparativa.</p>
+          <div className="ornament" />
+        </div>
+      )}
 
       <div className="social-retention-note">
         Convites ainda não aceitos podem ser cancelados. Duelos em andamento ou concluídos não podem ser excluídos — baixe o log (avaliação cruzada, notas e as duas sessões) enquanto quiser: tudo é apagado automaticamente 30 dias após a criação do duelo.

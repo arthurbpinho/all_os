@@ -202,7 +202,7 @@ export default function AdminExercises() {
                 </label>
                 <textarea id="evaluatorPrompt" name="evaluatorPrompt" value={form.evaluatorPrompt} onChange={handleChange} placeholder="Como a IA deve avaliar o desempenho neste exercício específico? Defina critérios, escala de notas, o que olhar e o que ignorar. O sistema acrescenta automaticamente a exigência de [NOTA:X] no final." style={{ minHeight: 200 }} />
                 <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>
-                  Se vazio, usa o avaliador global Allos (10 critérios da prática deliberada). A nota numérica é parseada automaticamente do formato <code style={{ color: 'var(--marrs-deep)' }}>[NOTA:X]</code> que o avaliador deve emitir.
+                  Se vazio, usa o avaliador padrão da Trilha. A nota é uma <strong>porcentagem de 0 a 100</strong> (o aluno passa de fase com <strong>75%</strong>) e é lida automaticamente do formato <code style={{ color: 'var(--marrs-deep)' }}>[NOTA:X]</code> que o avaliador emite no fim — o sistema acrescenta essa exigência mesmo em avaliadores customizados.
                 </small>
               </div>
               {formError && <div className="alert error">{formError}</div>}

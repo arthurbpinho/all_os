@@ -4,10 +4,38 @@ import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import { PatientAvatarButton } from '../components/PatientAvatar';
 import LogActions from '../components/LogActions';
+import NeuroTestSelector from '../components/NeuroTestSelector';
+import NeuroTestComparison from '../components/NeuroTestComparison';
 import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
+
+// Bloco de texto (Neuroavaliação) que descreve a seleção de testes do aluno para
+// o avaliador — vai no fim da transcrição enviada à correção. O gabarito (bateria
+// recomendada + resultados) é injetado server-side; aqui só entra o que o aluno
+// escolheu + o resumo da comparação, que ele já viu.
+// Bloco (Neuroavaliação) enviado ao avaliador com os testes que o aluno indicou
+// e a JUSTIFICATIVA de cada escolha. O gabarito (bateria recomendada) é injetado
+// server-side; o avaliador julga a adequação da bateria e do raciocínio. Não
+// inclui acurácia (é calculada server-side e mostrada só no fim).
+function buildNeuroTestChoiceText(ids, justifications, catalog) {
+  const byId = {};
+  (catalog || []).forEach((g) => (g.tests || []).forEach((t) => { byId[t.id] = t; }));
+  const lines = (ids || []).map((id) => {
+    const t = byId[id];
+    const label = t ? `${t.abbr} — ${t.name}` : id;
+    const j = ((justifications && justifications[id]) || '').trim();
+    return `- ${label}\n  Justificativa do aluno: ${j || '(não justificou)'}`;
+  });
+  return [
+    'TESTES NEUROPSICOLÓGICOS INDICADOS PELO ALUNO (com a justificativa de cada escolha):',
+    ...(lines.length ? lines : ['- (o aluno não indicou nenhum teste)']),
+    '',
+    'Avalie a adequação desta bateria e a qualidade das justificativas frente à bateria recomendada (gabarito) e ao quadro do paciente.',
+  ].join('\n');
+}
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
@@ -40,6 +68,7 @@ export default function EchoSession({ user, sessionType }) {
   // a do Competitivo. Não pula mais o avaliador; isFreeSim só dirige a copy/aviso.
   const isFreeSim = sessionType === 'freeplay' && !isCompetitive;
   const isVisitor = user?.role === 'visitor';
+  const isNeuro = sessionType === 'neuro';
   // Avaliação para VISITANTE é controlada pelo admin (toggle p/ palestras/eventos),
   // default off. Quando off, o visitante encerra a sessão sem avaliação. Usuário
   // real (aluno/prof/admin) sempre avalia. Carregado do servidor no mount.
@@ -64,6 +93,7 @@ export default function EchoSession({ user, sessionType }) {
   const [highlightDraft, setHighlightDraft] = useState('');
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
+  const [showSaveLoad, setShowSaveLoad] = useState(false);
 
   // "Time skip" entre sessões — efeito visual (não muda o lado da IA além de
   // uma mensagem invisível de contexto).
@@ -88,6 +118,15 @@ export default function EchoSession({ user, sessionType }) {
   // à esquerda expande/recolhe a descrição completa.
   const [sidequestOpen, setSidequestOpen] = useState(false);
   const [dailyOpen, setDailyOpen] = useState(false);
+
+  // Testes neuropsicológicos (só Neuroavaliação). Fluxo de sessão única:
+  // finalizar a sessão → escolher testes e JUSTIFICAR cada um → enviar tudo pra
+  // correção. A nota e a comparação com o gabarito só aparecem no fim.
+  const [testCatalog, setTestCatalog] = useState([]);
+  const [choosingTests, setChoosingTests] = useState(false);       // tela de seleção de testes
+  const [draftTestIds, setDraftTestIds] = useState([]);            // testes indicados
+  const [testJustifications, setTestJustifications] = useState({}); // { testId: justificativa }
+  const [neuroTestResult, setNeuroTestResult] = useState(null);    // comparação devolvida pela correção (fim)
 
   // Feedback do visitante: popup ao encerrar a sessão (estrelas 0–5 + mensagem).
   const [showFeedback, setShowFeedback] = useState(false);
@@ -169,6 +208,29 @@ export default function EchoSession({ user, sessionType }) {
     return () => { cancelled = true; };
   }, [isFreeSim, isVisitor]);
 
+  // Catálogo de testes neuropsicológicos (só neuro). Cacheado no client.
+  useEffect(() => {
+    if (!isNeuro) return;
+    let cancelled = false;
+    api.getNeuroTests()
+      .then((cat) => { if (!cancelled) setTestCatalog(Array.isArray(cat) ? cat : []); })
+      .catch(() => { /* selector fica indisponível se falhar */ });
+    return () => { cancelled = true; };
+  }, [isNeuro]);
+
+  // Neuro: "Finalizar sessão e escolher testes" — encerra o atendimento (pausa o
+  // cronômetro) e abre a tela de seleção de testes. Ainda NÃO vai pra correção.
+  function startChoosingTests() {
+    if (!sessionStarted || sessionEnded || isTyping || choosingTests) return;
+    setChoosingTests(true);
+  }
+  function cancelChoosingTests() {
+    setChoosingTests(false); // volta ao atendimento (cronômetro retoma pelo efeito)
+  }
+  function setJustification(testId, text) {
+    setTestJustifications((prev) => ({ ...prev, [testId]: text }));
+  }
+
   // Carrega item + tenta restaurar sessão ativa (F5 / sair e voltar)
   useEffect(() => {
     let cancelled = false;
@@ -193,6 +255,13 @@ export default function EchoSession({ user, sessionType }) {
             if (Number.isFinite(saved.sessionNumber) && saved.sessionNumber >= 1) {
               setSessionNumber(saved.sessionNumber);
             }
+            if (saved.neuroTests && typeof saved.neuroTests === 'object') {
+              if (Array.isArray(saved.neuroTests.draftTestIds)) setDraftTestIds(saved.neuroTests.draftTestIds);
+              if (saved.neuroTests.testJustifications && typeof saved.neuroTests.testJustifications === 'object') {
+                setTestJustifications(saved.neuroTests.testJustifications);
+              }
+              if (saved.neuroTests.choosingTests) setChoosingTests(true);
+            }
             setSessionStarted(true);
           }
         }
@@ -213,7 +282,10 @@ export default function EchoSession({ user, sessionType }) {
     if (finishedRef.current) return;
     if (user.role === 'visitor') return;
 
-    const data = { messages, elapsedSeconds: elapsed, itemTitle: item.name, sessionNumber };
+    const data = {
+      messages, elapsedSeconds: elapsed, itemTitle: item.name, sessionNumber,
+      ...(isNeuro ? { neuroTests: { draftTestIds, testJustifications, choosingTests } } : {}),
+    };
     sessionDataRef.current = data;
     saveLocal(user.id, sessionType, autoItemId, data);
 
@@ -226,7 +298,7 @@ export default function EchoSession({ user, sessionType }) {
       api.saveActiveSession(sessionType, autoItemId, data).catch(() => {});
     }, 1500);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
-  }, [messages, elapsed, sessionStarted, sessionEnded, item, sessionNumber, user?.id, autoItemId, sessionType]);
+  }, [messages, elapsed, sessionStarted, sessionEnded, item, sessionNumber, isNeuro, draftTestIds, testJustifications, choosingTests, user?.id, autoItemId, sessionType]);
 
   // Flush: ao trocar de rota, fechar a aba, ou ir pra background.
   // localStorage sempre, servidor best-effort. Visitantes não persistem.
@@ -252,13 +324,13 @@ export default function EchoSession({ user, sessionType }) {
     };
   }, [sessionStarted, sessionEnded, user?.id, autoItemId, sessionType]);
 
-  // Cronômetro
+  // Cronômetro (pausa também durante a escolha de testes na neuro)
   useEffect(() => {
-    if (sessionStarted && !sessionEnded) {
+    if (sessionStarted && !sessionEnded && !choosingTests) {
       timerRef.current = setInterval(() => setElapsed(nextActiveElapsed), 1000);
       return () => clearInterval(timerRef.current);
     }
-  }, [sessionStarted, sessionEnded]);
+  }, [sessionStarted, sessionEnded, choosingTests]);
 
   // Limite de tempo ativo da sessão atingido (200 min "no chat").
   const limitReached = elapsed >= SESSION_LIMIT_SECONDS;
@@ -418,6 +490,10 @@ export default function EchoSession({ user, sessionType }) {
     setSessionNumber(1);
     setSessionStarted(false);
     setError('');
+    setChoosingTests(false);
+    setDraftTestIds([]);
+    setTestJustifications({});
+    setNeuroTestResult(null);
     setTimeout(() => { finishedRef.current = false; }, 0);
   }
 
@@ -432,6 +508,7 @@ export default function EchoSession({ user, sessionType }) {
       messages,
       elapsedSeconds: elapsed,
       sessionNumber,
+      ...(isNeuro ? { neuroTests: { draftTestIds, testJustifications, choosingTests } } : {}),
       savedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(save, null, 2)], { type: 'application/json' });
@@ -469,6 +546,15 @@ export default function EchoSession({ user, sessionType }) {
         setElapsed(Number.isFinite(save.elapsedSeconds) ? save.elapsedSeconds : 0);
         if (Number.isFinite(save.sessionNumber) && save.sessionNumber >= 1) {
           setSessionNumber(save.sessionNumber);
+        }
+        if (save.neuroTests && typeof save.neuroTests === 'object') {
+          setDraftTestIds(Array.isArray(save.neuroTests.draftTestIds) ? save.neuroTests.draftTestIds : []);
+          setTestJustifications(save.neuroTests.testJustifications && typeof save.neuroTests.testJustifications === 'object' ? save.neuroTests.testJustifications : {});
+          setChoosingTests(!!save.neuroTests.choosingTests);
+        } else {
+          setDraftTestIds([]);
+          setTestJustifications({});
+          setChoosingTests(false);
         }
         setSessionStarted(true);
         setError('');
@@ -553,10 +639,17 @@ export default function EchoSession({ user, sessionType }) {
         return `[${author}${star}]\n${m.content}${comment}`;
       }).join('\n\n---\n\n');
       const sessionLabel = sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação';
+      // Neuroavaliação: acrescenta ao fim da transcrição os testes que o aluno
+      // indicou e a justificativa de cada um. O gabarito (Bloco 1 + Apêndice +
+      // bateria) é injetado server-side (resolveBloco1); a nota pesa a adequação.
+      let evalTranscript = transcriptText;
+      if (isNeuro) {
+        evalTranscript = `${transcriptText}\n\n---\n\n${buildNeuroTestChoiceText(draftTestIds, testJustifications, testCatalog)}`;
+      }
       try {
         const evalMsg = {
           role: 'user',
-          content: buildDirectEvaluationPrompt(sessionLabel, item?.name || '—', transcriptText),
+          content: buildDirectEvaluationPrompt(sessionLabel, item?.name || '—', evalTranscript),
         };
         // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
         // antes do log, server-side — sem expor o gabarito ao cliente.
@@ -606,11 +699,19 @@ export default function EchoSession({ user, sessionType }) {
         durationSeconds: elapsed,
         score: totalScore,
         evaluation: evalContent,
+        // Neuro: ids indicados + justificativas — o servidor recomputa a
+        // comparação a partir do gabarito e grava em log.neuroTests (à prova de
+        // adulteração), anexando as justificativas.
+        neuroSelectedTests: isNeuro ? draftTestIds : undefined,
+        neuroTestJustifications: isNeuro ? testJustifications : undefined,
       });
       // A nota exibida é a calculada em código no backend (saved.score), não a
       // parseada do texto. Só faz override se o backend devolveu nota numérica.
       if (saved && Number.isFinite(saved.score)) setEvalScore(saved.score);
       if (saved && saved.mmr) setMmrResult(saved.mmr);
+      // Neuro: comparação da bateria (nota dos testes + resultados) devolvida
+      // pela correção — só aparece agora, no fim.
+      if (saved && saved.neuroTests) setNeuroTestResult(saved.neuroTests);
       // Resultado da sidequest (Treinamento): concluída → celebração + título.
       if (saved && saved.sidequest) setSidequestOutcome(saved.sidequest);
       // Resultado da missão diária (desafio do dia): mesma celebração.
@@ -783,6 +884,15 @@ export default function EchoSession({ user, sessionType }) {
                 <ScoreBadge score={evalScore} size="xl" />
               </div>
             )}
+            {isNeuro && neuroTestResult && typeof neuroTestResult.accuracy === 'number' && (
+              <div>
+                <span className="post-stat-label">Nota dos testes</span>
+                <span className="post-stat-value" style={{ display: 'inline-flex', alignItems: 'baseline', gap: 3 }}>
+                  <ScoreBadge score={neuroTestResult.accuracy} size="xl" />
+                  <span style={{ fontSize: 15, color: 'var(--ink-soft)', fontWeight: 600 }}>%</span>
+                </span>
+              </div>
+            )}
           </div>
 
           {sidequestOutcome && (
@@ -874,6 +984,16 @@ export default function EchoSession({ user, sessionType }) {
               reatender o mesmo paciente, a avaliação compara sua evolução com o
               atendimento anterior. A nota de um primeiro atendimento isolado é menos
               precisa que a do modo <strong>Competitivo</strong>.
+            </div>
+          )}
+
+          {isNeuro && neuroTestResult && (
+            <div style={{ marginBottom: 16 }}>
+              <NeuroTestComparison
+                result={neuroTestResult}
+                justifications={neuroTestResult.justifications}
+                embedded
+              />
             </div>
           )}
 
@@ -977,6 +1097,64 @@ export default function EchoSession({ user, sessionType }) {
     );
   }
 
+  // -------- TELA DE SELEÇÃO DE TESTES (Neuroavaliação, sessão única) --------
+  // Depois de "Finalizar sessão e escolher testes": o aluno indica a bateria e
+  // justifica cada teste. Ao enviar, atendimento + testes + justificativas vão
+  // pra correção — a nota e a comparação só aparecem no fim.
+  if (isNeuro && choosingTests && !sessionEnded) {
+    return (
+      <div className="post-session">
+        <div className="page-header">
+          <div className="eyebrow">Sessão encerrada · indicação de testes</div>
+          <h2>Escolha os <span className="accent">testes neuropsicológicos</span></h2>
+          <p>
+            Indique a bateria que você aplicaria neste caso e <strong>justifique cada escolha</strong>. Ao enviar,
+            o atendimento, os testes e as justificativas vão juntos para a correção — sua nota e a análise
+            qualitativa aparecem só no final.
+          </p>
+          <div className="ornament" />
+        </div>
+
+        {error && <div className="alert error">{error}</div>}
+
+        <div className="card">
+          {testCatalog.length === 0 ? (
+            <div className="alert">Catálogo de testes indisponível no momento. Recarregue a página e tente de novo.</div>
+          ) : (
+            <NeuroTestSelector
+              catalog={testCatalog}
+              selected={draftTestIds}
+              onChange={setDraftTestIds}
+              renderResult={(t) => (
+                <textarea
+                  className="neuro-justif-input"
+                  value={testJustifications[t.id] || ''}
+                  onChange={(e) => setJustification(t.id, e.target.value)}
+                  placeholder={`Por que indicar ${t.abbr}? Justifique com base no que você observou no atendimento…`}
+                  rows={2}
+                />
+              )}
+            />
+          )}
+
+          <div className="post-session-actions" style={{ justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <button className="btn btn-outline" onClick={cancelChoosingTests} disabled={savingLog || evaluating}>
+              ← Voltar ao atendimento
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={doFinalize}
+              disabled={savingLog || evaluating}
+              title={draftTestIds.length === 0 ? 'Você pode enviar sem indicar testes, mas isso pesa no critério de indicação de testes.' : 'Enviar atendimento + testes + justificativas para correção'}
+            >
+              Enviar para correção
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // -------- TELA DE CHAT --------
   const sessionLabel = isCompetitive
     ? 'Competitivo'
@@ -992,6 +1170,8 @@ export default function EchoSession({ user, sessionType }) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
           Voltar
         </button>
+
+        {item?.name && <PatientAvatarButton name={item.name} iconUrl={item.photoIcon} fullUrl={item.photoFull} size={42} className="chat-header-avatar" />}
 
         <div className="chat-title">
           <h3>Sessão com {item?.name || '...'}</h3>
@@ -1014,17 +1194,15 @@ export default function EchoSession({ user, sessionType }) {
           </div>
           {sessionStarted && (
             <>
-              {messages.filter((m) => !m.isSystem).length > 0 && (
-                <button
-                  className="btn btn-outline btn-sm"
-                  onClick={downloadSave}
-                  disabled={isTyping || skipping}
-                  title="Baixar save desta sessão (.json) para retomar depois"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
-                  Save
-                </button>
-              )}
+              <button
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowSaveLoad(true)}
+                disabled={isTyping || skipping}
+                title="Guardar ou carregar o progresso desta sessão"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
+                Save/Load
+              </button>
               <button
                 className="btn btn-outline btn-sm"
                 onClick={() => setConfirmingReset(true)}
@@ -1035,18 +1213,33 @@ export default function EchoSession({ user, sessionType }) {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.7 3" /><polyline points="3 3 3 8 8 8" /></svg>
                 Reiniciar
               </button>
-              <button
-                className="btn btn-sm"
-                onClick={handleSkipSession}
-                disabled={isTyping || skipping}
-                title="Avançar para a próxima sessão (time skip)"
-                style={{ background: 'var(--success)', color: '#fff', borderColor: 'var(--success)' }}
-              >
-                Próxima sessão →
-              </button>
-              <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
-                {skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção'}
-              </button>
+              {/* "Próxima sessão" só faz sentido no Treinamento/Competitivo. A
+                  Neuroavaliação é sessão única — não tem time skip. */}
+              {!isNeuro && (
+                <button
+                  className="btn btn-sm"
+                  onClick={handleSkipSession}
+                  disabled={isTyping || skipping}
+                  title="Avançar para a próxima sessão (time skip)"
+                  style={{ background: 'var(--success)', color: '#fff', borderColor: 'var(--success)' }}
+                >
+                  Próxima sessão →
+                </button>
+              )}
+              {isNeuro ? (
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={startChoosingTests}
+                  disabled={isTyping}
+                  title="Encerrar o atendimento e indicar os testes neuropsicológicos"
+                >
+                  Finalizar sessão e escolher testes
+                </button>
+              ) : (
+                <button className="btn btn-secondary btn-sm" onClick={handleFinalize}>
+                  {skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção'}
+                </button>
+              )}
             </>
           )}
         </div>
@@ -1196,7 +1389,6 @@ export default function EchoSession({ user, sessionType }) {
                 Carregar save
               </button>
             </div>
-            <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
           </div>
         </div>
       ) : isTranscribing ? (
@@ -1250,6 +1442,44 @@ export default function EchoSession({ user, sessionType }) {
           </button>
         </div>
       )}
+
+      {/* Input de arquivo (oculto) usado pelo "Carregar" — no topo do chat para
+          estar disponível tanto na tela inicial quanto durante a sessão. */}
+      <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleLoadSaveFile} style={{ display: 'none' }} />
+
+      {/* Modal Guardar / Carregar progresso */}
+      {showSaveLoad && (() => {
+        const visibleCount = messages.filter((m) => !m.isSystem).length;
+        return (
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowSaveLoad(false); }}>
+            <div className="modal" style={{ maxWidth: 460 }}>
+              <h3>Progresso da sessão</h3>
+              <p style={{ color: 'var(--ink-soft)', fontSize: 14, marginTop: -4, marginBottom: 18, lineHeight: 1.55 }}>
+                Você quer <strong>guardar</strong> o progresso atual num arquivo (.json) para retomar depois,
+                ou <strong>carregar</strong> um progresso salvo? Carregar substitui a conversa atual.
+              </p>
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => { setShowSaveLoad(false); fileInputRef.current?.click(); }}
+                >
+                  Carregar o progresso
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => { setShowSaveLoad(false); downloadSave(); }}
+                  disabled={visibleCount === 0}
+                  title={visibleCount === 0 ? 'A sessão ainda não tem mensagens para guardar' : 'Baixar o save desta sessão'}
+                >
+                  Guardar o progresso
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Modal de confirmação de finalização */}
       {confirmingFinalize && (() => {

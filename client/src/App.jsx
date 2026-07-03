@@ -169,40 +169,26 @@ export default function App() {
               <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''}>
                 {ICONS.home}<span>Início</span>
               </Link>
-              {/* Trilha de Competências oculta por enquanto — só admin acessa via menu.
-                  Será reaberta pra alunos/professores em iteração futura. */}
+              {/* Trilha continua oculta — só admin acessa via menu. Os modos de
+                  prática (Treinamento, Competitivo, Duelo) saíram do menu: agora
+                  são abertos pelos cards de "como jogar" na tela de Início. */}
               {isAdmin && (
                 <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
-                  {ICONS.skill}<span>Trilha de Competências</span>
+                  {ICONS.skill}<span>Trilha</span>
                 </Link>
               )}
-              <Link to="/freeplay" className={isActive('/freeplay') ? 'active' : ''}>
-                {ICONS.freeplay}<span>Treinamento</span>
+            </>
+          )}
+
+          {/* Comunidade ACIMA de Histórico. Objetivos veio da Prática (mesma
+              audiência: aluno/admin — não visitante, não supervisor). */}
+          {!isVisitor && (
+            <>
+              <div className="nav-section">Comunidade</div>
+              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''}>
+                {ICONS.supervisor}<span>Ranking</span>
               </Link>
-              {/* Competitivo: mesmos personagens da Simulação, mas ranqueado (MMR).
-                  Visitante não pontua (id efêmero), então não vê a aba. */}
-              {!isVisitor && (
-                <Link to="/competitivo" className={isActive('/competitivo') ? 'active' : ''}>
-                  {ICONS.trophy}<span>Competitivo</span>
-                </Link>
-              )}
-              {/* Duelo: avaliação comparada entre dois alunos (mesmo paciente).
-                  Visitante não inicia duelos (recebe só via link). */}
               {(isTherapist || isAdmin) && (
-                <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''}>
-                  {ICONS.duel}<span>Duelo</span>
-                </Link>
-              )}
-              {/* Progressão deixou de ser aba separada: agora acontece dentro do
-                  Treinamento (reatender um paciente compara a evolução). */}
-              {/* Neuroavaliação oculta nesta versão — só admin acessa via menu.
-                  Será reaberta pra alunos/professores quando estiver pronta. */}
-              {isAdmin && (
-                <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
-                  {ICONS.neuro}<span>Neuroavaliação</span>
-                </Link>
-              )}
-              {!isVisitor && (
                 <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
                   {ICONS.flame}<span>Objetivos</span>
                 </Link>
@@ -213,14 +199,11 @@ export default function App() {
           {(isTherapist || isSupervisor || isVisitor || isAdmin) && (
             <>
               <div className="nav-section">Histórico</div>
+              {/* "Logs de Duelo" deixou de ser item próprio — agora é uma aba
+                  dentro de "Minhas Sessões". A rota /duelo/logs segue existindo. */}
               {(isTherapist || isVisitor) && (
                 <Link to="/logs" className={isActive('/logs') ? 'active' : ''}>
                   {ICONS.log}<span>Minhas Sessões</span>
-                </Link>
-              )}
-              {(isTherapist || isAdmin) && (
-                <Link to="/duelo/logs" className={isActive('/duelo/logs') ? 'active' : ''}>
-                  {ICONS.social}<span>Logs de Duelo</span>
                 </Link>
               )}
               {isSupervisor && (
@@ -236,20 +219,26 @@ export default function App() {
             </>
           )}
 
-          {!isVisitor && (
-            <>
-              <div className="nav-section">Comunidade</div>
-              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''}>
-                {ICONS.supervisor}<span>Ranking</span>
-              </Link>
-            </>
-          )}
-
           {(isSupervisor || isAdmin) && (
             <>
               <div className="nav-section">Avaliação</div>
               <Link to="/avaliacao" className={isActive('/avaliacao') ? 'active' : ''}>
                 {ICONS.evaluate}<span>Avaliar Sessão</span>
+              </Link>
+            </>
+          )}
+
+          {/* Neuroavaliação (personagens + simulação): visível a professor e admin
+              por enquanto — oculta de alunos. O servidor também restringe a esses
+              perfis (canUseNeuro). */}
+          {(isSupervisor || isAdmin) && (
+            <>
+              <div className="nav-section">Neuroavaliação</div>
+              <Link to="/admin/neuro" className={isActive('/admin/neuro') ? 'active' : ''}>
+                {ICONS.characters}<span>Personagens Neuro</span>
+              </Link>
+              <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
+                {ICONS.neuro}<span>Neuroavaliação</span>
               </Link>
             </>
           )}
@@ -265,9 +254,6 @@ export default function App() {
               </Link>
               <Link to="/admin/freeplay" className={isActive('/admin/freeplay') ? 'active' : ''}>
                 {ICONS.characters}<span>Personagens da Simulação</span>
-              </Link>
-              <Link to="/admin/neuro" className={isActive('/admin/neuro') ? 'active' : ''}>
-                {ICONS.characters}<span>Personagens Neuro</span>
               </Link>
               <Link to="/admin/entrevistador" className={isActive('/admin/entrevistador') ? 'active' : ''}>
                 {ICONS.supervisor}<span>Entrevistador</span>

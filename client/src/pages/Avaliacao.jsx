@@ -1,41 +1,53 @@
 import { useState, useRef, useEffect } from 'react';
 import { api } from '../api';
-import { stripSupervisorBlock, parseSupervisorCriteria } from '../prompts';
 import Typewriter from '../components/Typewriter';
-import LogActions from '../components/LogActions';
-import CriteriaTable from '../components/CriteriaTable';
-import { makeLogItems } from '../logFiles';
 import { useWakeLock } from '../useWakeLock';
 
+// Avaliação Independente v25 (AvaliAllos) — TESTE. O supervisor joga um log,
+// seleciona o caso (que dá o Bloco 1) e recebe o pipeline completo: 14 nós (um
+// por critério, ANÁLISE / NOTA / CONFIANÇA) + agregador (nota 0–100) +
+// sintetizador (corpo do feedback do aluno). Duas visões: a do supervisor (as
+// partes e a nota) e o feedback do aluno (texto montado). Mostra o modelo usado
+// e o CUSTO EXATO da run (calculado dos tokens que as 15 chamadas devolveram ×
+// preço do modelo — é sobre esses tokens que a OpenAI cobra). Isolado do v16.2.
+
+function confLabel(c) {
+  if (c === 'alta') return 'confiança alta';
+  if (c === 'média' || c === 'media') return 'confiança média';
+  if (c === 'baixa') return 'confiança baixa';
+  return 'sem confiança';
+}
+
+// Custo em dólar: valores pequenos (centavos de centavo), então 4 casas e sem
+// arredondar pra zero.
+function fmtUSD(usd) {
+  if (usd == null || !Number.isFinite(usd)) return '—';
+  return '$' + usd.toFixed(4);
+}
+
+// Tokens compactos: 12.3k, 950, etc.
+function fmtTok(n) {
+  const v = Number(n) || 0;
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return String(v);
+}
+
+
 export default function Avaliacao({ user }) {
-  // As notas por critério (bloco [notas-supervisor]) só aparecem pra
-  // supervisor/admin — aqui o texto chega cru com o bloco, então o gate é por
-  // role no cliente (o servidor não esconde o bloco do stream). Aluno nunca vê.
-  const canSeeCriteria = user?.role === 'supervisor' || user?.role === 'admin';
   const [transcript, setTranscript] = useState('');
-  const [started, setStarted] = useState(false);
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
-  // Resumo do raciocínio do avaliador (GPT-5.4) chegando ao vivo durante a
-  // análise. Só supervisor/admin recebe (gate por role no servidor).
-  const [liveReasoning, setLiveReasoning] = useState('');
-  const messagesEndRef = useRef(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [result, setResult] = useState(null);
+  const [view, setView] = useState('supervisor'); // 'supervisor' | 'aluno'
   const fileInputRef = useRef(null);
 
-  // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
+  // Mantém a tela ativa enquanto roda (14 nós GPT + sintetizador levam alguns segundos).
   useWakeLock(loading);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  // Carrega lista de personagens FreePlay pra dropdown de critério de correção.
-  // O `evaluationCriteria` (Bloco 1) não vem ao cliente — é resolvido server-side
-  // em /api/evaluate a partir do context.itemId. Aqui só precisamos de id+nome.
+  // Casos disponíveis (personagens FreePlay). Só precisamos de id+nome; o Bloco 1
+  // (evaluationCriteria) é resolvido server-side a partir do casoId.
   useEffect(() => {
     let cancelled = false;
     api.getFreeplay()
@@ -46,310 +58,215 @@ export default function Avaliacao({ user }) {
           .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
         setCharacters(sorted);
       })
-      .catch(() => { /* sem dropdown se falhar; fluxo genérico continua */ });
+      .catch(() => { /* dropdown vazio se falhar */ });
     return () => { cancelled = true; };
   }, []);
-
-  const evaluateContext = selectedCharacterId
-    ? { type: 'freeplay', itemId: selectedCharacterId }
-    : undefined;
 
   function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
-    if (!file.name.endsWith('.txt')) {
-      setError('Apenas arquivos .txt são aceitos.');
-      return;
-    }
-    // Limite de tamanho — transcrições reais ficam abaixo de 500KB. Acima
-    // disso é provavelmente um arquivo errado e travaria a aba lendo tudo
-    // em memória + o servidor rejeitaria por exceder express.json limit.
-    const MAX_TRANSCRIPT_BYTES = 2 * 1024 * 1024; // 2 MB
-    if (file.size > MAX_TRANSCRIPT_BYTES) {
-      setError(`Arquivo muito grande (${(file.size / 1024 / 1024).toFixed(1)} MB). Máximo: 2 MB.`);
-      return;
-    }
+    if (!file.name.endsWith('.txt')) { setError('Apenas arquivos .txt são aceitos.'); return; }
+    const MAX = 2 * 1024 * 1024;
+    if (file.size > MAX) { setError(`Arquivo muito grande (${(file.size / 1024 / 1024).toFixed(1)} MB). Máximo: 2 MB.`); return; }
     setError('');
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setTranscript(ev.target.result);
-    };
+    reader.onload = (ev) => setTranscript(ev.target.result);
     reader.readAsText(file);
   }
 
   async function handleStart() {
-    if (!transcript.trim()) {
-      setError('Cole ou envie uma transcrição antes de iniciar a avaliação.');
-      return;
-    }
+    if (!selectedCharacterId) { setError('Selecione o caso correspondente (necessário para o Bloco 1).'); return; }
+    if (!transcript.trim()) { setError('Cole ou envie a transcrição da sessão.'); return; }
     setError('');
-    setStarted(true);
     setLoading(true);
-    setLiveReasoning('');
-
-    const initialMessage = {
-      role: 'user',
-      content: `Aqui está a transcrição da sessão para avaliação:\n\n${transcript}`,
-    };
-
+    setResult(null);
     try {
-      const reply = await api.evaluate(
-        [initialMessage],
-        evaluateContext,
-        undefined,
-        (_d, full) => setLiveReasoning(full),
-      );
-      setMessages([initialMessage, reply]);
+      const data = await api.avaliacaoIndependente(transcript, selectedCharacterId);
+      setResult(data);
     } catch (err) {
-      setError(err.message || 'Erro ao iniciar avaliação');
-      setStarted(false);
+      setError(err.message || 'Erro ao rodar a avaliação.');
     } finally {
       setLoading(false);
     }
-  }
-
-  async function handleSend() {
-    if (!input.trim() || loading) return;
-    const userMsg = { role: 'user', content: input.trim() };
-    const updated = [...messages, userMsg];
-    setMessages(updated);
-    setInput('');
-    setLoading(true);
-    setError('');
-    setLiveReasoning('');
-
-    try {
-      const reply = await api.evaluate(
-        updated.map((m) => ({ role: m.role, content: m.content })),
-        evaluateContext,
-        undefined,
-        (_d, full) => setLiveReasoning(full),
-      );
-      setMessages([...updated, reply]);
-    } catch (err) {
-      setError(err.message || 'Erro ao comunicar com a IA');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  }
-
-  // Texto da conversa de avaliação (transcrição enviada + diálogo com a IA).
-  function buildEvalDialog() {
-    return messages
-      .map((m, i) => {
-        const name = m.role === 'user' ? user?.name || 'Usuário' : 'all_OS';
-        if (i === 0) return `[${name}]\n[Transcrição enviada · ${transcript.length} caracteres]`;
-        const body = m.role === 'assistant' ? stripSupervisorBlock(m.content) : m.content;
-        return `[${name}]\n${body}`;
-      })
-      .join('\n\n---\n\n');
   }
 
   function handleReset() {
     setTranscript('');
-    setStarted(false);
-    setMessages([]);
-    setInput('');
+    setSelectedCharacterId('');
+    setResult(null);
+    setView('supervisor');
     setError('');
     setLoading(false);
-    setSelectedCharacterId('');
-    setLiveReasoning('');
   }
 
-  if (!started) {
+  // ── Tela de carregamento (rodando os 14 nós) ──
+  if (loading) {
     return (
-      <div>
+      <div className="post-session">
         <div className="page-header">
-          <div className="eyebrow">Avaliação Independente</div>
-          <h2><Typewriter text="Avaliar uma " /><span className="accent"><Typewriter text="Sessão" delayStart={520} /></span></h2>
-          <p>
-            Envie a transcrição completa de uma sessão terapêutica e receba uma análise densa seguindo
-            os 6 critérios da Allos (avaliador v9). A análise vem em um único turno; você pode contestar
-            e dialogar com a IA depois.
-          </p>
+          <div className="eyebrow">Avaliação Independente · v25</div>
+          <h2>Avaliando os <span className="accent">14 critérios</span></h2>
+          <p>Cada critério é avaliado por um nó independente, em paralelo. Pode levar alguns segundos.</p>
           <div className="ornament" />
         </div>
-
-        <div className="avaliacao-intro">
-          <div>
-            <label htmlFor="character-select">Critério de correção (personagem FreePlay)</label>
-            <select
-              id="character-select"
-              value={selectedCharacterId}
-              onChange={(e) => setSelectedCharacterId(e.target.value)}
-              style={{ width: '100%' }}
-            >
-              <option value="">Sem critério específico — avaliação genérica</option>
-              {characters.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}{c.age ? `, ${c.age}` : ''}
-                </option>
-              ))}
-            </select>
-            <small style={{ display: 'block', marginTop: 6, color: 'var(--marrs-dark)', fontSize: 12 }}>
-              Quando selecionado, o avaliador recebe o Bloco 1 (gabarito) do caso como referência. O aluno não vê esse conteúdo.
-            </small>
+        <div className="card evaluating-card">
+          <div className="evaluating-orb">
+            <div className="orb-pulse" /><div className="orb-pulse delay-1" /><div className="orb-pulse delay-2" /><div className="orb-core" />
           </div>
-
-          <div>
-            <label htmlFor="transcript">Transcrição da sessão</label>
-            <textarea
-              id="transcript"
-              value={transcript}
-              onChange={(e) => setTranscript(e.target.value)}
-              placeholder="Cole aqui a transcrição completa da sessão terapêutica…"
-              style={{ minHeight: 280, width: '100%' }}
-            />
+          <div className="evaluating-status">
+            <div className="evaluating-line"><span className="dot active" /> Lendo o Bloco 1 do caso e o log</div>
+            <div className="evaluating-line"><span className="dot active" /> 14 nós avaliando, um por critério</div>
+            <div className="evaluating-line"><span className="dot active" /> Agregando a nota final</div>
+            <div className="evaluating-line"><span className="dot pulse" /> Sintetizando o feedback do aluno</div>
           </div>
-
-          <div className="avaliacao-row">
-            <span className="avaliacao-divider">ou</span>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              Enviar arquivo .txt
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt"
-              onChange={handleFileUpload}
-              style={{ display: 'none' }}
-            />
-            {transcript && (
-              <span style={{ fontSize: 12, color: 'var(--marrs-dark)', letterSpacing: '0.08em' }}>
-                {transcript.length.toLocaleString('pt-BR')} caracteres carregados
-              </span>
-            )}
-          </div>
-
-          {error && <div className="alert error">{error}</div>}
-
-          <button className="btn btn-primary btn-lg" onClick={handleStart}>
-            Iniciar Avaliação
-          </button>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="chat-container">
-      <div className="chat-header">
-        <div className="chat-title" style={{ textAlign: 'left' }}>
-          <h3>Avaliação de Sessão</h3>
-          <div className="chat-status">
-            {(() => {
-              const sel = characters.find((c) => c.id === selectedCharacterId);
-              return sel
-                ? `conversa com a IA · critério: ${sel.name}`
-                : 'conversa com a IA · diálogo socrático';
-            })()}
+  // ── Tela de resultado (as partes, o todo e o feedback do aluno) ──
+  if (result) {
+    const incluidos = result.partes.filter((p) => p.incluido).length;
+    const inst = result.instrumentacao;
+    return (
+      <div>
+        <div className="page-header with-action">
+          <div>
+            <div className="eyebrow">Avaliação Independente · v25</div>
+            <h2>Resultado da <span className="accent">avaliação</span></h2>
+            <p>{result.casoNome ? `Caso: ${result.casoNome} · ` : ''}pipeline completo: as 14 partes, a nota final e o feedback redigido do aluno.</p>
           </div>
+          <button className="btn btn-outline" onClick={handleReset}>Nova avaliação</button>
         </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          {messages.length > 0 && (
-            <LogActions
-              inline
-              items={makeLogItems({ baseName: 'avaliacao', getLog: buildEvalDialog })}
-            />
-          )}
-          <button className="btn btn-outline btn-sm" onClick={handleReset}>
-            Nova Avaliação
-          </button>
-        </div>
-      </div>
 
-      <div className="chat-messages">
-        {messages.map((msg, i) => {
-          const isAssistant = msg.role === 'assistant';
-          const body = i === 0
-            ? `Transcrição enviada · ${transcript.length.toLocaleString('pt-BR')} caracteres`
-            : (isAssistant ? stripSupervisorBlock(msg.content) : msg.content);
-          return (
-            <div key={i} className={`chat-message-row ${msg.role}`}>
-              <div className="chat-message-author">
-                {msg.role === 'user' ? user?.name || 'Usuário' : 'all_OS · Avaliador'}
-              </div>
-              {isAssistant && msg.reasoning ? (
-                <details style={{ marginBottom: 8, fontSize: 12, opacity: 0.85 }}>
-                  <summary style={{ cursor: 'pointer', letterSpacing: '0.04em' }}>
-                    🧠 Raciocínio do avaliador (resumo)
-                  </summary>
-                  <div style={{ whiteSpace: 'pre-wrap', marginTop: 6, paddingLeft: 10, borderLeft: '2px solid var(--marrs-gold, #c9a227)' }}>
-                    {msg.reasoning}
-                  </div>
-                </details>
-              ) : null}
-              <div
-                className={`chat-message ${msg.role}`}
-                style={i === 0 ? { fontStyle: 'italic', opacity: 0.85 } : undefined}
-              >
-                {body}
-              </div>
-              {isAssistant && i > 0 && canSeeCriteria && (
-                <div style={{ marginTop: 8 }}>
-                  <CriteriaTable criteriaScores={parseSupervisorCriteria(msg.content)} />
-                </div>
-              )}
-            </div>
-          );
-        })}
-        {loading && (
-          <div className="chat-message-row assistant">
-            <div className="chat-message-author">all_OS</div>
-            {liveReasoning ? (
-              <div style={{ marginBottom: 8, fontSize: 12, opacity: 0.78, whiteSpace: 'pre-wrap', paddingLeft: 10, borderLeft: '2px solid var(--marrs-gold, #c9a227)' }}>
-                <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4, opacity: 0.7 }}>
-                  🧠 Pensando…
-                </div>
-                {liveReasoning}
-              </div>
-            ) : null}
-            <div className="chat-message assistant" style={{ fontStyle: 'italic', opacity: 0.7 }}>
-              <span className="loading-dots">{liveReasoning ? 'Escrevendo avaliação' : 'Analisando'}</span>
-            </div>
+        {/* Modelo + custo EXATO da run (dos tokens que as 15 chamadas devolveram) */}
+        {inst && inst.model && (
+          <div className="v25-modelbar">
+            Modelo: <strong>{inst.model}</strong>
+            {inst.effort ? <> · effort: <strong>{inst.effort}</strong></> : null}
+            {inst.custo
+              ? <> · custo: <strong>{fmtUSD(inst.custo.usd)}</strong></>
+              : (inst.totais ? <> · custo: <strong title="Modelo sem preço na tabela — mostrando só tokens">n/d</strong></> : null)}
+            {inst.totais && (
+              <span className="v25-modelbar-tok">
+                {' '}· {fmtTok(inst.totais.input)} in · {fmtTok(inst.totais.cached)} cache · {fmtTok(inst.totais.output)} out
+                {inst.totais.reasoning ? ` (${fmtTok(inst.totais.reasoning)} reasoning)` : ''}
+              </span>
+            )}
           </div>
         )}
-        <div ref={messagesEndRef} />
+
+        {/* Alternador de visão */}
+        <div className="v25-viewtabs">
+          <button className={`v25-viewtab ${view === 'supervisor' ? 'active' : ''}`} onClick={() => setView('supervisor')}>Visão do supervisor</button>
+          <button className={`v25-viewtab ${view === 'aluno' ? 'active' : ''}`} onClick={() => setView('aluno')}>Feedback do aluno</button>
+        </div>
+
+        {view === 'supervisor' ? (
+          <>
+            <div className="card v25-final">
+              <div className="v25-final-score">
+                <span className="v25-final-num">{result.notaFinal != null ? result.notaFinal : '—'}</span>
+                <span className="v25-final-max">/100</span>
+              </div>
+              <div className="v25-final-meta">
+                <div className="v25-final-label">Nota final</div>
+                <div className="v25-final-sub">
+                  {result.notaFinal != null
+                    ? `Agregada de ${incluidos} de 14 critérios (os de confiança baixa ficaram fora).`
+                    : 'Não avaliável: sem critérios com confiança suficiente para uma nota.'}
+                </div>
+              </div>
+            </div>
+
+            <div className="v25-grid">
+              {result.partes.map((p) => (
+                <div key={p.num} className={`v25-card conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')} ${p.incluido ? '' : 'excluded'}`}>
+                  <div className="v25-card-head">
+                    <span className="v25-card-num">{p.num}</span>
+                    <span className="v25-card-name">{p.nome}</span>
+                    <span className="v25-card-nota">{Number.isFinite(p.nota) ? `${p.nota}/10` : '—'}</span>
+                  </div>
+                  <div className="v25-card-short">{p.linhaCurta}</div>
+                  <div className="v25-card-analise">{p.analise}</div>
+                  <div className="v25-card-foot">
+                    <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>
+                    {!p.incluido && <span className="v25-excluded-tag">fora da nota</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="card v25-feedback">
+            {result.feedbackAluno
+              ? <div className="v25-feedback-text">{result.feedbackAluno}</div>
+              : <div className="v25-feedback-empty">Caso não avaliável: nenhum critério teve confiança suficiente, então não há feedback de aluno a montar. Veja as partes na visão do supervisor.</div>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Tela inicial (entrada) ──
+  return (
+    <div>
+      <div className="page-header">
+        <div className="eyebrow">Avaliação Independente · v25</div>
+        <h2><Typewriter text="Avaliar uma " /><span className="accent"><Typewriter text="Sessão" delayStart={520} /></span></h2>
+        <p>
+          Selecione o caso, cole a transcrição completa da sessão e receba o pipeline completo: os{' '}
+          <strong>14 critérios</strong> (cada um com análise, nota e confiança, avaliados por nós independentes),
+          a <strong>nota final de 0 a 100</strong> e o <strong>feedback redigido do aluno</strong>. É um teste —
+          roda em paralelo ao avaliador atual.
+        </p>
+        <div className="ornament" />
       </div>
 
-      {error && (
-        <div className="alert error">
-          {error}
-          <button onClick={() => setError('')} className="close">×</button>
+      <div className="avaliacao-intro">
+        <div>
+          <label htmlFor="character-select">Caso correspondente <em style={{ color: 'var(--danger)', fontStyle: 'normal' }}>*</em></label>
+          <select
+            id="character-select"
+            value={selectedCharacterId}
+            onChange={(e) => setSelectedCharacterId(e.target.value)}
+            style={{ width: '100%' }}
+          >
+            <option value="">— selecione o caso —</option>
+            {characters.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}{c.age ? `, ${c.age}` : ''}</option>
+            ))}
+          </select>
+          <small style={{ display: 'block', marginTop: 6, color: 'var(--marrs-dark)', fontSize: 12 }}>
+            Obrigatório: o avaliador v25 usa o Bloco 1 (gabarito) do caso como referência. O caso precisa ter o Bloco 1 configurado.
+          </small>
         </div>
-      )}
 
-      <div className="chat-input-area">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Responda ou questione a avaliação…"
-          disabled={loading}
-        />
-        <button
-          type="button"
-          className="icon-btn primary"
-          onClick={handleSend}
-          disabled={loading || !input.trim()}
-          title="Enviar"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="22" y1="2" x2="11" y2="13" />
-            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
-        </button>
+        <div>
+          <label htmlFor="transcript">Transcrição da sessão</label>
+          <textarea
+            id="transcript"
+            value={transcript}
+            onChange={(e) => setTranscript(e.target.value)}
+            placeholder="Cole aqui a transcrição completa da sessão terapêutica…"
+            style={{ minHeight: 280, width: '100%' }}
+          />
+        </div>
+
+        <div className="avaliacao-row">
+          <span className="avaliacao-divider">ou</span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => fileInputRef.current?.click()}>Enviar arquivo .txt</button>
+          <input ref={fileInputRef} type="file" accept=".txt" onChange={handleFileUpload} style={{ display: 'none' }} />
+          {transcript && (
+            <span style={{ fontSize: 12, color: 'var(--marrs-dark)', letterSpacing: '0.08em' }}>
+              {transcript.length.toLocaleString('pt-BR')} caracteres carregados
+            </span>
+          )}
+        </div>
+
+        {error && <div className="alert error">{error}</div>}
+
+        <button className="btn btn-primary btn-lg" onClick={handleStart}>Iniciar Avaliação</button>
       </div>
     </div>
   );

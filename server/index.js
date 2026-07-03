@@ -11,10 +11,19 @@ const {
   buildExercisePrompt,
   buildFreeplayPrompt,
   buildNeuroPrompt,
+  buildTrilhaEvaluatorPrompt,
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
+const { runAvaliacaoIndependente } = require('./avaliacao-v25');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
+const {
+  NEURO_TEST_CATALOG,
+  isValidTestId,
+  testMeta: neuroTestMeta,
+  normalizeTestIds: normalizeNeuroTestIds,
+  compareNeuroTests,
+} = require('./neuro-tests');
 
 const app = express();
 
@@ -83,12 +92,21 @@ const DATA_DIR = process.env.DATA_DIR
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
   for (const f of fs.readdirSync(SEED_DATA_DIR)) {
+    const src = path.join(SEED_DATA_DIR, f);
+    // Só semeia ARQUIVOS de dados (.json etc). Pula subpastas — ex.: patient-photos
+    // (fotos enviadas em runtime) não é seed e copyFileSync quebraria com EISDIR.
+    if (!fs.statSync(src).isFile()) continue;
     const dst = path.join(DATA_DIR, f);
-    if (!fs.existsSync(dst)) {
-      fs.copyFileSync(path.join(SEED_DATA_DIR, f), dst);
-    }
+    if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
   }
 }
+
+// Fotos de paciente enviadas pelo admin ficam no volume persistente (DATA_DIR),
+// não no repo — assim sobrevivem a redeploys do Railway. Servidas em
+// /patient-photos. (As 6 fotos "de fábrica" continuam vindo de /profiles_icon.)
+const PATIENT_PHOTOS_DIR = path.join(DATA_DIR, 'patient-photos');
+if (!fs.existsSync(PATIENT_PHOTOS_DIR)) fs.mkdirSync(PATIENT_PHOTOS_DIR, { recursive: true });
+app.use('/patient-photos', express.static(PATIENT_PHOTOS_DIR, { maxAge: '7d' }));
 
 // JWT secret — obrigatório em todos os ambientes. Fail-closed: se ausente ou
 // curto demais, encerramos o processo em vez de continuar com fallback inseguro
@@ -579,6 +597,70 @@ app.post('/api/me/title', requireAuth, (req, res) => {
   res.json(publicUser(users[idx]));
 });
 
+// Descrição visual da aparência (perfil). Um agente gpt-5.4-mini descreve a
+// aparência da pessoa a partir da foto de perfil (data URI), em um parágrafo de
+// até ~6 linhas. POR ORA o texto vive SÓ no perfil — NÃO é injetado nos
+// pacientes ainda. Esta rota NÃO persiste: devolve a descrição e o cliente
+// salva via PUT /api/users/:id junto com a foto e o consentimento.
+app.post('/api/me/visual-description', requireAuth, aiLimiter, async (req, res) => {
+  // Tudo dentro do try/catch: qualquer erro (leitura de arquivo, SDK, rede)
+  // volta como JSON — nunca um 500 em HTML que vira "Erro desconhecido" no cliente.
+  try {
+    if (req.user.role === 'visitor') {
+      return res.status(403).json({ error: 'Visitante não gera descrição visual.' });
+    }
+    const { photo } = req.body || {};
+    // Aceita tanto uma foto recém-enviada (data URI) quanto uma já salva no
+    // perfil (caminho /profiles_icon/<arquivo>) — neste caso lemos do disco e
+    // convertemos em data URI. Assim funciona mesmo sem um upload novo.
+    let imageUrl = null;
+    if (typeof photo === 'string' && /^data:image\/[a-z0-9.+-]+;base64,/i.test(photo)) {
+      imageUrl = photo;
+    } else if (typeof photo === 'string' && photo.startsWith('/profiles_icon/')) {
+      const fname = path.basename(photo); // basename evita path traversal
+      const fpath = path.join(PROFILES_DIR, fname);
+      if (fpath.startsWith(PROFILES_DIR) && fs.existsSync(fpath)) {
+        const ext = path.extname(fname).slice(1).toLowerCase();
+        const mime = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        imageUrl = `data:${mime};base64,` + fs.readFileSync(fpath).toString('base64');
+      }
+    }
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'Adicione uma foto de perfil válida para gerar a descrição visual.' });
+    }
+    const openai = getOpenAI();
+    if (!openai) {
+      return res.status(503).json({ error: 'Descrição visual indisponível: OPENAI_API_KEY não configurada.' });
+    }
+    const visionModel = process.env.OPENAI_VISION_MODEL || 'gpt-5.4-mini-2026-03-17';
+    const system = `Você descreve, de forma objetiva e respeitosa, a APARÊNCIA VISUAL de uma pessoa a partir de uma foto, para uso como "aparência do terapeuta" em simulações clínicas. Escreva INTEIRAMENTE em português do Brasil (sem usar outros idiomas ou alfabetos), em UM único parágrafo de no máximo 6 linhas (sem títulos, sem listas, sem preâmbulo e sem comentar a qualidade da foto). Descreva apenas o que é visível: faixa etária aparente, tom de pele, cabelo (cor/comprimento/estilo), traços e expressão do rosto, barba/óculos/acessórios e vestuário/estilo geral. Não invente nome, profissão, emoções internas, etnia ou estado de saúde, e não faça julgamentos. Se não houver uma pessoa claramente visível, responda apenas: "Não foi possível identificar uma aparência na imagem."`;
+    const resp = await openai.chat.completions.create({
+      model: visionModel,
+      reasoning_effort: 'none',
+      max_completion_tokens: 500,
+      messages: [
+        { role: 'developer', content: system },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Descreva a aparência visual desta pessoa em um único parágrafo de no máximo 6 linhas.' },
+            { type: 'image_url', image_url: { url: imageUrl } },
+          ],
+        },
+      ],
+    });
+    const description = (resp.choices?.[0]?.message?.content || '').trim();
+    logOpenAIUsage('Descrição visual', visionModel, resp.usage);
+    if (!description) return res.status(502).json({ error: 'Não foi possível gerar a descrição.' });
+    return res.json({ description });
+  } catch (err) {
+    console.error('Visual description error:', err && err.stack ? err.stack : err);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: 'Erro ao gerar a descrição: ' + ((err && err.message) || 'desconhecido') });
+    }
+  }
+});
+
 // Resgatar ("claim") uma conquista. Só grava se o critério estiver de fato
 // cumprido (revalidado server-side via achievementsForUser). Visitante não resgata.
 app.post('/api/achievements/:id/claim', requireAuth, (req, res) => {
@@ -629,8 +711,11 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
   const users = readJSON('users.json');
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
-  // Apenas campos de perfil podem ser alterados aqui
-  const allowed = ['name', 'gender', 'email', 'profilePhoto', 'updateAllOS', 'updateAllos'];
+  // Apenas campos de perfil podem ser alterados aqui. visualDescription é
+  // gerado por IA (POST /api/me/visual-description) e shareAppearance é o
+  // consentimento de mostrar a aparência aos pacientes simulados (ainda não
+  // usado nos prompts — só guardado no perfil por enquanto).
+  const allowed = ['name', 'gender', 'email', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance'];
   const patch = {};
   for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
   users[idx] = { ...users[idx], ...patch };
@@ -973,6 +1058,47 @@ function computeStreak(userLogs) {
   };
 }
 
+// Streak em DIAS consecutivos — a "Constância" da Trilha. Mesma ideia da
+// ofensiva semanal (computeStreak), mas por dia: um dia é "ativo" quando há ao
+// menos um log nele. Carência de 1 dia (você não perde a constância no instante
+// em que vira meia-noite — tem o dia de hoje para manter). Como os logs têm TTL
+// de 30 dias, a constância contabiliza no máximo a janela recente — suficiente
+// para o uso diário.
+function computeDailyStreak(userLogs) {
+  if (!userLogs.length) {
+    return { current: 0, longest: 0, isAlive: false, lastActiveDate: null };
+  }
+  const days = new Set(userLogs.map((l) => dayKey(l.timestamp || l.createdAt || Date.now())));
+  const today = dayKey(Date.now());
+  const yesterday = dayKey(Date.now() - 86400000);
+
+  // Cursor: começa hoje (se tem log) ou ontem (carência de 1 dia).
+  let cursor = days.has(today) ? today : (days.has(yesterday) ? yesterday : null);
+  let current = 0;
+  if (cursor) {
+    const d = new Date(cursor + 'T00:00:00Z');
+    while (days.has(d.toISOString().slice(0, 10))) {
+      current++;
+      d.setUTCDate(d.getUTCDate() - 1);
+    }
+  }
+
+  const sorted = [...days].sort();
+  let longest = 0;
+  let run = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (i === 0) { run = 1; continue; }
+    const prev = new Date(sorted[i - 1] + 'T00:00:00Z');
+    const cur = new Date(sorted[i] + 'T00:00:00Z');
+    const diff = Math.round((cur - prev) / 86400000);
+    if (diff === 1) run++;
+    else { longest = Math.max(longest, run); run = 1; }
+  }
+  longest = Math.max(longest, run);
+
+  return { current, longest, isAlive: current > 0, lastActiveDate: sorted[sorted.length - 1] || null };
+}
+
 function computeDailyMissions(userLogs) {
   const today = dayKey(Date.now());
   const todayLogs = userLogs.filter((l) => dayKey(l.timestamp) === today);
@@ -1301,6 +1427,13 @@ function isAdmin(user) {
   return !!(user && user.role === 'admin');
 }
 
+// Neuroavaliação está restrita a professor (supervisor) e admin por enquanto —
+// oculta de alunos e visitantes. Gate único usado no chat, na comparação de
+// testes e na listagem/CRUD dos personagens.
+function canUseNeuro(user) {
+  return !!(user && (user.role === 'admin' || user.role === 'supervisor'));
+}
+
 function publicExercise(e) {
   const { specificInstruction, evaluatorPrompt, ...safe } = e;
   // Cliente precisa saber SE existe avaliador customizado para escolher fluxo,
@@ -1315,9 +1448,46 @@ function publicFreeplayChar(c) {
   return safe;
 }
 function publicNeuroChar(c) {
-  // diagnosis e evaluationCriteria são gabaritos — NUNCA vão pra cliente não-admin
-  const { specificInstruction, diagnosis, evaluationCriteria, ...safe } = c;
+  // diagnosis, evaluationCriteria, evaluationAppendix, recommendedTests e
+  // testResults são gabaritos — NUNCA vão pra cliente não-admin (o aluno só vê os
+  // testes recomendados e os resultados DEPOIS de comitar a própria seleção, via
+  // /compare-tests). specificInstruction também sai (contém o apêndice/gabarito).
+  const { specificInstruction, diagnosis, evaluationCriteria, evaluationAppendix, recommendedTests, testResults, ...safe } = c;
   return safe;
+}
+
+// Sanitiza os campos de gabarito de testes (Neuroavaliação) vindos do admin:
+// recommendedTests (ids válidos, deduplicados) e testResults (id válido -> texto
+// limitado). Só mantém resultados de testes que existem no catálogo.
+const NEURO_TEST_RESULT_MAX = 2000;
+function sanitizeNeuroTestFields(body) {
+  const out = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'recommendedTests')) {
+    out.recommendedTests = normalizeNeuroTestIds(body.recommendedTests);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'testResults')) {
+    const raw = body.testResults;
+    const clean = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw)) {
+        const id = String(k == null ? '' : k).trim();
+        if (isValidTestId(id)) {
+          const val = clampStr(v, NEURO_TEST_RESULT_MAX).trim();
+          if (val) clean[id] = val;
+        }
+      }
+    }
+    out.testResults = clean;
+  }
+  // Quando o payload traz os dois campos juntos (fluxo normal do admin), descarta
+  // resultados de testes que não estão na bateria recomendada — evita órfãos.
+  if (out.recommendedTests && out.testResults) {
+    const keep = new Set(out.recommendedTests);
+    for (const k of Object.keys(out.testResults)) {
+      if (!keep.has(k)) delete out.testResults[k];
+    }
+  }
+  return out;
 }
 
 // --- Exercises (System 1) ---
@@ -1405,35 +1575,124 @@ app.delete('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) =>
   let chars = readJSON('freeplay-characters.json');
   chars = chars.filter(c => c.id !== req.params.id);
   writeJSON('freeplay-characters.json', chars);
+  removePatientPhotoFiles(req.params.id); // limpa a foto do volume junto
   res.json({ ok: true });
+});
+
+// data:image/jpeg;base64,XXXX → Buffer. Aceita só imagem; null se inválido.
+function decodeImageDataUrl(s) {
+  if (typeof s !== 'string') return null;
+  const m = s.match(/^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+  if (!m) return null;
+  try { return Buffer.from(m[1], 'base64'); } catch { return null; }
+}
+function removePatientPhotoFiles(id) {
+  for (const suf of ['-icon.jpg', '-full.jpg']) {
+    try {
+      const p = path.join(PATIENT_PHOTOS_DIR, id + suf);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch { /* ignora */ }
+  }
+}
+
+// Foto do paciente: o cliente manda o ícone (quadrado) + a imagem inteira já
+// processados (canvas → JPEG data URL). O servidor não tem lib de imagem — só
+// grava os bytes no volume e guarda a URL no personagem. `clear:true` remove.
+app.put('/api/freeplay/:id/photo', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
+  const chars = readJSON('freeplay-characters.json');
+  const idx = chars.findIndex((c) => c.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
+
+  if (req.body && req.body.clear) {
+    removePatientPhotoFiles(req.params.id);
+    delete chars[idx].photoIcon;
+    delete chars[idx].photoFull;
+    writeJSON('freeplay-characters.json', chars);
+    return res.json(chars[idx]);
+  }
+
+  const icon = decodeImageDataUrl(req.body && req.body.icon);
+  const full = decodeImageDataUrl(req.body && req.body.full);
+  if (!icon || !full) return res.status(400).json({ error: 'Envie a foto (icon e full) como data URL de imagem.' });
+  const MAX = 6 * 1024 * 1024; // bytes por arquivo
+  if (icon.length > MAX || full.length > MAX) return res.status(413).json({ error: 'Imagem muito grande.' });
+
+  try {
+    fs.writeFileSync(path.join(PATIENT_PHOTOS_DIR, `${req.params.id}-icon.jpg`), icon);
+    fs.writeFileSync(path.join(PATIENT_PHOTOS_DIR, `${req.params.id}-full.jpg`), full);
+  } catch (err) {
+    return res.status(500).json({ error: 'Erro ao gravar a foto: ' + err.message });
+  }
+  // ?v=<ts> quebra o cache do navegador quando a foto muda.
+  const v = Date.now();
+  chars[idx].photoIcon = `/patient-photos/${req.params.id}-icon.jpg?v=${v}`;
+  chars[idx].photoFull = `/patient-photos/${req.params.id}-full.jpg?v=${v}`;
+  writeJSON('freeplay-characters.json', chars);
+  res.json(chars[idx]);
 });
 
 // --- Neuro Characters (System 3) ---
 app.get('/api/neuro', requireAuth, (req, res) => {
+  // Restrito a professor + admin (oculto de alunos por enquanto). Ambos gerenciam
+  // os personagens, então recebem os dados completos; publicNeuroChar segue como
+  // a projeção "de aluno" para o dia em que o neuro reabrir a esse perfil.
+  if (!canUseNeuro(req.user)) {
+    return res.status(403).json({ error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' });
+  }
   const list = readJSON('neuro-characters.json');
-  res.json(isAdmin(req.user) ? list : list.map(publicNeuroChar));
+  res.json(canUseNeuro(req.user) ? list : list.map(publicNeuroChar));
 });
 
-app.post('/api/neuro', requireAuth, requireRole('admin'), (req, res) => {
+const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction', 'evaluationCriteria', 'evaluationAppendix', 'recommendedTests', 'testResults'];
+
+app.post('/api/neuro', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
-  const c = { id: 'nr' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...sanitizeCharacterPayload(req.body) };
+  const base = sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS));
+  const c = {
+    id: 'nr' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    ...base,
+    ...sanitizeNeuroTestFields(req.body),
+  };
   chars.push(c);
   writeJSON('neuro-characters.json', chars);
   res.json(c);
 });
 
-const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction', 'evaluationCriteria'];
+// Catálogo de testes neuropsicológicos (fonte única — server/neuro-tests.js).
+// Não é gabarito: é a lista pública usada pelo TestSelector do aluno e pelo
+// formulário do admin. Requer só autenticação.
+app.get('/api/neuro/tests', requireAuth, (req, res) => {
+  res.json(NEURO_TEST_CATALOG);
+});
 
-app.put('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
+// Compara a seleção de testes do aluno com o gabarito do personagem e REVELA os
+// resultados da bateria recomendada (só depois de o aluno comitar a seleção).
+app.post('/api/neuro/:id/compare-tests', requireAuth, (req, res) => {
+  // Neuroavaliação restrita a professor + admin por enquanto.
+  if (!canUseNeuro(req.user)) {
+    return res.status(403).json({ error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' });
+  }
+  const char = readJSON('neuro-characters.json').find((c) => String(c.id) === String(req.params.id));
+  if (!char) return res.status(404).json({ error: 'Paciente não encontrado' });
+  const selected = Array.isArray(req.body && req.body.selectedTests) ? req.body.selectedTests : [];
+  const comparison = compareNeuroTests(char.recommendedTests, char.testResults, selected);
+  res.json(comparison);
+});
+
+app.put('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
   const chars = readJSON('neuro-characters.json');
   const idx = chars.findIndex(c => c.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS)) };
+  chars[idx] = {
+    ...chars[idx],
+    ...sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS)),
+    ...sanitizeNeuroTestFields(req.body),
+  };
   writeJSON('neuro-characters.json', chars);
   res.json(chars[idx]);
 });
 
-app.delete('/api/neuro/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.delete('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
   let chars = readJSON('neuro-characters.json');
   chars = chars.filter(c => c.id !== req.params.id);
   writeJSON('neuro-characters.json', chars);
@@ -1458,6 +1717,38 @@ app.post('/api/progress/:userId', requireAuth, (req, res) => {
   progress[req.params.userId] = { ...progress[req.params.userId], ...req.body };
   writeJSON('progress.json', progress);
   res.json(progress[req.params.userId]);
+});
+
+// Estatísticas da Trilha (barra superior): exercícios concluídos (distintos,
+// aprovados com nota ≥ 75), nível derivado dessa contagem e Constância (streak
+// diário). Fonte: progress.json (aprovações, persistente) + logs.json (dias
+// ativos para a constância).
+const TRILHA_PASS = 75;
+const TRILHA_LEVEL_THRESHOLDS = [3, 10, 30, 100]; // nível 2,3,4,5
+function trilhaLevel(completed) {
+  let level = 1;
+  for (const t of TRILHA_LEVEL_THRESHOLDS) if (completed >= t) level++;
+  return level; // 1..5
+}
+app.get('/api/trilha/:userId', requireAuth, (req, res) => {
+  if (!canAccessUserResource(req.user, req.params.userId)) {
+    return res.status(403).json({ error: 'Acesso negado' });
+  }
+  const progressAll = readJSON('progress.json', {});
+  const userProgress = progressAll[req.params.userId] || {};
+  let completed = 0;
+  for (const k of Object.keys(userProgress)) {
+    const p = userProgress[k];
+    if (p && typeof p === 'object' && Number.isFinite(p.score) && p.score >= TRILHA_PASS) completed++;
+  }
+  const level = trilhaLevel(completed);
+  const nextThreshold = level < 5 ? TRILHA_LEVEL_THRESHOLDS[level - 1] : null;
+
+  const exerciseLogs = readJSON('logs.json', [])
+    .filter((l) => l && String(l.userId) === String(req.params.userId) && l.type === 'exercise');
+  const constancia = computeDailyStreak(exerciseLogs);
+
+  res.json({ completed, level, nextThreshold, pass: TRILHA_PASS, constancia });
 });
 
 // --- Logs ---
@@ -1691,6 +1982,30 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     if (computed !== null) finalScore = computed;
   }
 
+  // Neuroavaliação: registra a bateria de testes escolhida pelo aluno. Recomputa
+  // a comparação server-side a partir do gabarito do personagem (à prova de
+  // adulteração) — o cliente só manda os ids selecionados. Só para type 'neuro'.
+  let neuroTests = null;
+  if (body.type === 'neuro' && Array.isArray(body.neuroSelectedTests)) {
+    const nchar = readJSON('neuro-characters.json').find((c) => String(c.id) === String(body.itemId));
+    if (nchar) {
+      neuroTests = compareNeuroTests(nchar.recommendedTests, nchar.testResults, body.neuroSelectedTests);
+      // Justificativas do aluno por teste (só ids válidos, texto limitado).
+      const just = {};
+      const rawJ = body.neuroTestJustifications;
+      if (rawJ && typeof rawJ === 'object' && !Array.isArray(rawJ)) {
+        for (const [k, v] of Object.entries(rawJ)) {
+          const tid = String(k == null ? '' : k).trim();
+          if (isValidTestId(tid)) {
+            const txt = clampStr(v, 2000).trim();
+            if (txt) just[tid] = txt;
+          }
+        }
+      }
+      neuroTests.justifications = just;
+    }
+  }
+
   const log = {
     id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
@@ -1705,6 +2020,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     criteriaScores: explicitCriteria || supervisorCriteria || null,
     evaluation: clampStr(cleanEvaluation, LOG_MAX_EVAL_LEN),
     messages: cleanMessages,
+    neuroTests,
     userId: req.user.id,
     userName: req.user.name,
   };
@@ -1859,6 +2175,61 @@ app.post('/api/feedback', requireAuth, writeLimiter, (req, res) => {
 app.get('/api/admin/feedback', requireAuth, requireRole('admin'), (req, res) => {
   const all = readJSON('feedback.json', []);
   res.json([...all].reverse());
+});
+
+// Admin: dispara um aviso (notificação in-app) para TODOS os usuários reais.
+// Cai no sino de notificações (type 'admin_notice'). Visitantes não recebem.
+app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, res) => {
+  const message = clampStr(req.body && req.body.message, 500).trim();
+  const title = clampStr(req.body && req.body.title, 120).trim();
+  if (!message) return res.status(400).json({ error: 'A mensagem do aviso é obrigatória.' });
+  const users = readJSON('users.json');
+  let count = 0;
+  for (const u of users) {
+    if (!u || u.role === 'visitor') continue;
+    pushNotification(u.id, {
+      type: 'admin_notice',
+      title: title || 'Aviso',
+      message,
+      fromName: req.user.name || 'Administração',
+    });
+    count++;
+  }
+  console.log(`[admin] aviso enviado por ${req.user.username} para ${count} usuário(s)`);
+  res.json({ ok: true, count });
+});
+
+// Atualizações do sistema criadas pelo admin (painel "Atualizações"). Ficam em
+// updates.json e são mescladas no cliente com o changelog estático. GET é pra
+// qualquer logado (inclusive visitante — o painel aparece pra todos).
+app.get('/api/updates', requireAuth, (req, res) => {
+  const list = readJSON('updates.json', []);
+  const sorted = [...list].sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || '')) ||
+    String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  res.json(sorted);
+});
+
+app.post('/api/admin/updates', requireAuth, requireRole('admin'), (req, res) => {
+  const title = clampStr(req.body && req.body.title, 120).trim();
+  const body = clampStr(req.body && req.body.body, 4000).trim();
+  if (!body) return res.status(400).json({ error: 'O conteúdo da atualização é obrigatório.' });
+  const reqDate = req.body && req.body.date;
+  const date = (typeof reqDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(reqDate))
+    ? reqDate
+    : new Date().toISOString().slice(0, 10);
+  const entry = {
+    id: 'upd-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    date,
+    title,
+    body,
+    createdAt: new Date().toISOString(),
+  };
+  const list = readJSON('updates.json', []);
+  list.push(entry);
+  writeJSON('updates.json', list);
+  console.log(`[admin] atualização publicada por ${req.user.username}: ${title || date}`);
+  res.json(entry);
 });
 
 // --- Ranking global de jogadores (por MMR competitivo) ---
@@ -2030,6 +2401,9 @@ app.put('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
     elapsedSeconds: Number.isFinite(body.elapsedSeconds) ? Math.max(0, Math.floor(body.elapsedSeconds)) : 0,
     threadId: body.threadId || null,
     itemTitle: body.itemTitle || '',
+    // Rascunho da escolha de testes (só Neuroavaliação): preserva os testes
+    // indicados + justificativas se o aluno recarregar durante a etapa de testes.
+    neuroTests: (type === 'neuro' && body.neuroTests && typeof body.neuroTests === 'object') ? body.neuroTests : null,
     lastSavedAt: new Date().toISOString(),
   };
   writeJSON('active-sessions.json', all);
@@ -2087,6 +2461,17 @@ const OPENAI_HEAVY_EFFORT = process.env.OPENAI_HEAVY_EFFORT || 'medium';
 // /api/evaluate quando context.mode === 'training' e type === 'freeplay'.
 const OPENAI_SIM_MODEL = process.env.OPENAI_SIM_MODEL || 'gpt-5.4-2026-03-05';
 const OPENAI_SIM_EFFORT = process.env.OPENAI_SIM_EFFORT || 'medium';
+// Avaliador da Trilha (exercícios). Por decisão do dono roda no mini da família
+// 5.4 — alto volume, feedback ao aluno, nota 0–100 (porcentagem). Não há Bloco 1
+// nos exercícios, então o raciocínio leve ('low') basta e não há risco de vazar
+// gabarito. O mini não aceita 'minimal'; usa none/low/medium/high/xhigh.
+const OPENAI_EXERCISE_MODEL = process.env.OPENAI_EXERCISE_MODEL || 'gpt-5.4-mini-2026-03-17';
+const OPENAI_EXERCISE_EFFORT = process.env.OPENAI_EXERCISE_EFFORT || 'low';
+// Avaliador da Neuroavaliação. Por decisão do dono roda no 5.4 com effort 'low'
+// (não no 5.5/EVAL) — exercício de sessão única, mais delimitado que o processo
+// clínico completo. Selecionado em /api/evaluate quando context.type === 'neuro'.
+const OPENAI_NEURO_MODEL = process.env.OPENAI_NEURO_MODEL || 'gpt-5.4-2026-03-05';
+const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -2193,10 +2578,10 @@ function resolveChatSystemPrompt({ context, mode, user }) {
     return { systemPrompt: buildFreeplayPrompt(c.specificInstruction) };
   }
   if (type === 'neuro') {
-    // Neuroavaliação não é acessível a visitor (deve revelar o diagnóstico
-    // só na sessão completa, perfil destinado a alunos cadastrados).
-    if (user.role === 'visitor') {
-      return { status: 403, error: 'Neuroavaliação não está disponível em modo visitante.' };
+    // Neuroavaliação restrita a professor + admin por enquanto (oculta de alunos
+    // e visitantes).
+    if (!canUseNeuro(user)) {
+      return { status: 403, error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' };
     }
     const c = readJSON('neuro-characters.json').find((c) => String(c.id) === String(itemId));
     if (!c) return { status: 404, error: 'Paciente não encontrado' };
@@ -2321,6 +2706,15 @@ function loadAvaliacaoPrompt() {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
+// Avaliador dedicado da Neuroavaliação: sessão única, foco em acolhimento,
+// entrevista, hipótese diagnóstica e adequação da bateria de testes. Se o arquivo
+// não existir, cai no avaliador global (v16.2) — neuro nunca fica sem avaliador.
+function loadNeuroEvaluatorPrompt() {
+  const promptFile = path.join(AVALIACAO_DIR, 'neuro', 'avaliador-neuro-v1.md');
+  if (!fs.existsSync(promptFile)) return loadAvaliacaoPrompt();
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
 // Avaliador comparativo (Duelo): recebe os dois logs do mesmo caso e devolve a
 // análise comparativa + JSON [notas-supervisor] com A1..A6 / B1..B6.
 function loadComparativoPrompt() {
@@ -2352,14 +2746,43 @@ function resolveEvaluatorSystemPrompt({ context }) {
     if (ex.evaluatorPrompt && String(ex.evaluatorPrompt).trim()) {
       return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt) };
     }
+    // Exercício sem avaliador customizado → avaliador PADRÃO da Trilha (nota
+    // 0–100). Não cai mais no avaliador global v16 (que é dos casos clínicos
+    // com Bloco 1 e emite notas por critério/saldo ±, incompatível com a régua
+    // de 75% por porcentagem da Trilha).
+    return { systemPrompt: buildTrilhaEvaluatorPrompt() };
   }
-  // freeplay, neuro, avaliação manual (sem context) → avaliador global
+  // Neuroavaliação → avaliador dedicado (sessão única, diagnóstico + testes).
+  if (context && typeof context === 'object' && context.type === 'neuro') {
+    return { systemPrompt: loadNeuroEvaluatorPrompt() };
+  }
+  // freeplay, avaliação manual (sem context) → avaliador global
   return { systemPrompt: loadAvaliacaoPrompt() };
 }
 
 // Resolve o Bloco 1 (gabarito/critério de correção) do personagem, server-side.
 // O texto fica fora do cliente — o aluno não pode ver a "resposta" do caso.
 // Retorna string vazia quando o caso não tem evaluationCriteria configurado.
+// Monta o trecho de gabarito da BATERIA de testes neuropsicológicos (recomendados
+// + resultados) e orienta o avaliador a pesar a adequação da seleção do aluno.
+// Vai junto do Bloco 1, server-side — nunca sai pro cliente por essa via.
+function buildNeuroBatteryGabarito(char) {
+  const recommended = normalizeNeuroTestIds(char && char.recommendedTests);
+  if (!recommended.length) return '';
+  const lines = recommended.map((id) => {
+    const meta = neuroTestMeta(id);
+    const result = char.testResults && char.testResults[id];
+    const label = `- ${meta.abbr} — ${meta.name}`;
+    return result ? `${label}\n  Resultado: ${String(result)}` : label;
+  });
+  return [
+    'BATERIA DE TESTES NEUROPSICOLÓGICOS RECOMENDADA (GABARITO):',
+    ...lines,
+    '',
+    'Ao avaliar, pese a ADEQUAÇÃO da bateria de testes que o aluno escolheu (informada na transcrição da sessão): testes recomendados que ele deixou de aplicar e testes desnecessários/extras que ele pediu devem influenciar a nota, junto com a qualidade da devolutiva.',
+  ].join('\n');
+}
+
 function resolveBloco1({ context }) {
   if (!context || typeof context !== 'object' || !context.itemId) return '';
   let char = null;
@@ -2368,8 +2791,28 @@ function resolveBloco1({ context }) {
   } else if (context.type === 'neuro') {
     char = readJSON('neuro-characters.json').find((c) => String(c.id) === String(context.itemId));
   }
-  const criteria = char && char.evaluationCriteria;
-  return criteria && String(criteria).trim() ? String(criteria).trim() : '';
+  if (!char) return '';
+  let bloco = char.evaluationCriteria && String(char.evaluationCriteria).trim()
+    ? String(char.evaluationCriteria).trim()
+    : '';
+  if (context.type === 'neuro') {
+    // Gabarito de neuro = BLOCO 1 (estrutura do caso: quem é, camadas, voz) +
+    // APÊNDICE (hipótese diagnóstica esperada, diferenciais, bateria sugerida,
+    // racional) + diagnóstico curto + bateria estruturada. Tudo server-side, fora
+    // do alcance do aluno e do próprio paciente simulado.
+    const sections = [];
+    if (char.diagnosis && String(char.diagnosis).trim()) {
+      sections.push(`DIAGNÓSTICO CORRETO DO CASO (gabarito — oculto do aluno): ${String(char.diagnosis).trim()}`);
+    }
+    if (bloco) sections.push(`BLOCO 1 — ESTRUTURA DO CASO:\n${bloco}`);
+    if (char.evaluationAppendix && String(char.evaluationAppendix).trim()) {
+      sections.push(`APÊNDICE — GABARITO NEUROPSICOLÓGICO (fora do personagem; hipótese diagnóstica esperada, diferenciais, bateria sugerida e racional clínico):\n${String(char.evaluationAppendix).trim()}`);
+    }
+    const battery = buildNeuroBatteryGabarito(char);
+    if (battery) sections.push(battery);
+    bloco = sections.join('\n\n');
+  }
+  return bloco;
 }
 
 // Quando há Bloco 1 disponível, prepende ao conteúdo da PRIMEIRA mensagem do
@@ -2421,13 +2864,19 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
   // Split de modelo: Treinamento simples (1º atendimento, sem sidequest) roda no
-  // avaliador barato (SIM/5.4). Competitivo, Neuro, Duelo e Trilha ficam no
-  // melhor (EVAL/5.5). O cliente sinaliza via context.mode; sem mode (aba Avaliar
-  // Sessão) cai no EVAL.
+  // avaliador barato (SIM/5.4). Competitivo, Duelo e (avaliação manual) ficam no
+  // melhor (EVAL/5.5); Neuro tem régua própria (5.4/low, ver isNeuroEval); Trilha
+  // usa o mini. O cliente sinaliza via context.mode; sem mode (aba Avaliar Sessão)
+  // cai no EVAL.
   const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
+  // Trilha (exercícios): avaliador barato no mini, nota 0–100. Não entra no
+  // progressionMode (que é exclusivo do freeplay/treinamento).
+  const isExercise = !!(context && context.type === 'exercise');
+  // Neuro roda no 5.4/low (dedicado), fora da régua EVAL/SIM.
+  const isNeuroEval = !!(context && context.type === 'neuro');
   let systemPrompt = resolved.systemPrompt;
-  let evalModel = isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL;
-  let evalEffort = isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT;
+  let evalModel = isExercise ? OPENAI_EXERCISE_MODEL : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
+  let evalEffort = isExercise ? OPENAI_EXERCISE_EFFORT : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
   let inputTurns;
   let progressionMode = false;
   let sidequestActive = false;
@@ -2537,7 +2986,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     try {
       const stream = await openai.responses.create({
         model: evalModel,
-        reasoning: { effort: evalEffort, summary: 'auto' },
+        // Exercício (mini): só effort, sem summary — o resumo de raciocínio nunca
+        // vai pro aluno e evita qualquer incompatibilidade do mini com summary.
+        reasoning: isExercise ? { effort: evalEffort } : { effort: evalEffort, summary: 'auto' },
         max_output_tokens: 64000,
         instructions: systemPrompt,
         input: inputTurns,
@@ -2557,7 +3008,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     }
     if (usage) {
       console.log(
-        `Evaluate (${evalModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isFreeSim ? ' · treino' : '')}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
+        `Evaluate (${evalModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : (isFreeSim ? ' · treino' : ''))}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
       );
     }
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
@@ -2570,6 +3021,85 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       res.end();
     } else {
       res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    }
+  }
+});
+
+// --- Avaliação Independente v25 (TESTE) ---
+// Roda SÓ na aba "Avaliar Sessão" (supervisor/admin). 14 nós Opus 4.8 (um por
+// critério) + agregador determinístico → nota 0–100. Isolado: o avaliador atual
+// (GPT-5.x) segue intocado em todo o resto. Persiste em avaliacao-v25.json.
+app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
+  try {
+    const log = clampStr(req.body && req.body.log, 200000).trim();
+    const casoId = req.body && req.body.casoId;
+    if (!log) return res.status(400).json({ error: 'Cole ou envie a transcrição da sessão.' });
+    if (!casoId) return res.status(400).json({ error: 'Selecione um caso (necessário para o Bloco 1).' });
+
+    const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: casoId } });
+    if (!bloco1) return res.status(400).json({ error: 'O caso selecionado não tem Bloco 1 (critério de correção) configurado.' });
+
+    const openai = getOpenAI();
+    if (!openai) return res.status(503).json({ error: 'Avaliação independente indisponível: OPENAI_API_KEY não configurada.' });
+
+    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const t0 = Date.now();
+    const result = await runAvaliacaoIndependente({ openai, bloco1, log });
+    const inst = result.instrumentacao || {};
+    console.log(
+      `Avaliação independente v25 (${freeChar ? freeChar.name : casoId}): nota=${result.notaFinal} ` +
+      `considerados=${result.considerados}/14 em ${Date.now() - t0}ms · ` +
+      `saída=${(inst.totais && inst.totais.output) || 0}tok cache=${(inst.totais && inst.totais.cached) || 0} ` +
+      `custo=${inst.custo ? '$' + inst.custo.usd.toFixed(4) : 'n/d'} (${inst.model}, effort=${inst.effort})`,
+    );
+    // Atribuição de custo por componente (% do gasto). Usa o ratio da família
+    // GPT-5.x ($5 in / $0,50 cache / $30 out por M) — a % independe do preço
+    // absoluto do modelo (só do ratio), então vale pra 5.4/5.5/mini.
+    {
+      const tt = inst.totais || { input: 0, cached: 0, output: 0, reasoning: 0 };
+      const visivel = Math.max(0, tt.output - tt.reasoning);
+      const U = { in: tt.input * 5, cache: tt.cached * 0.5, vis: visivel * 30, reas: tt.reasoning * 30 };
+      const tot = U.in + U.cache + U.vis + U.reas || 1;
+      const pct = (x) => Math.round((x / tot) * 100);
+      console.log(
+        `  custo-share v25 (ratio GPT-5.x): reasoning ${pct(U.reas)}% · saída-visível ${pct(U.vis)}% · ` +
+        `input-fresco ${pct(U.in)}% · input-cache ${pct(U.cache)}% | ` +
+        `tokens: in-fresco=${tt.input} cache=${tt.cached} saída=${tt.output}(reasoning=${tt.reasoning})`,
+      );
+    }
+
+    const entry = {
+      id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+      createdAt: new Date().toISOString(),
+      userId: req.user.id,
+      userName: req.user.name || '',
+      casoId,
+      casoNome: freeChar ? freeChar.name : '',
+      notaFinal: result.notaFinal,
+      considerados: result.considerados,
+      partes: result.partes,
+      corpoSintetizador: result.corpoSintetizador,
+      feedbackAluno: result.feedbackAluno,
+      instrumentacao: result.instrumentacao,
+    };
+    const store = readJSON('avaliacao-v25.json', []);
+    store.push(entry);
+    writeJSON('avaliacao-v25.json', store);
+
+    res.json({
+      id: entry.id,
+      casoNome: entry.casoNome,
+      notaFinal: result.notaFinal,
+      considerados: result.considerados,
+      partes: result.partes,
+      corpoSintetizador: result.corpoSintetizador,
+      feedbackAluno: result.feedbackAluno,
+      instrumentacao: result.instrumentacao,
+    });
+  } catch (err) {
+    console.error('Avaliação independente v25 error:', err && err.stack ? err.stack : err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Erro na avaliação: ' + ((err && err.message) || 'desconhecido') });
     }
   }
 });

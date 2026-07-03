@@ -12,7 +12,15 @@ export const V15_CRITERIA = {
   '6': 'Flexibilidade e Criatividade',
 };
 
-export default function CriteriaTable({ criteriaScores }) {
+// Critérios do avaliador de Neuroavaliação (chaves "1".."4").
+export const NEURO_CRITERIA = {
+  '1': 'Acolhimento e vínculo',
+  '2': 'Entrevista e investigação',
+  '3': 'Raciocínio diagnóstico',
+  '4': 'Indicação de testes',
+};
+
+export default function CriteriaTable({ criteriaScores, labels = V15_CRITERIA }) {
   if (!criteriaScores || typeof criteriaScores !== 'object') return null;
   const entries = Object.entries(criteriaScores)
     .filter(([, v]) => Number.isFinite(Number(v)))
@@ -28,7 +36,7 @@ export default function CriteriaTable({ criteriaScores }) {
           {entries.map(([k, v]) => (
             <tr key={k} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
               <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>
-                {V15_CRITERIA[k] || `Critério ${k}`}
+                {labels[k] || `Critério ${k}`}
               </td>
               <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: 'var(--marrs-deep)', whiteSpace: 'nowrap' }}>
                 {Number(v)}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>

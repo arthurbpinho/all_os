@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import { PatientAvatar } from '../components/PatientAvatar';
 
 // Modo Competitivo: mesmos personagens da Simulação, mas cada partida finalizada
 // alimenta o MMR (rating competitivo). A dificuldade de cada personagem é aberta
@@ -70,10 +71,15 @@ export default function Competitive({ user }) {
               className="character-card"
               onClick={() => navigate(`/chat/freeplay/${char.id}?mode=competitive`)}
             >
-              <div className="character-card-header">
-                <h3>{char.name}</h3>
+              <div className="character-card-top">
+                <PatientAvatar name={char.name} iconUrl={char.photoIcon} size={72} className="character-card-photo" />
+                <div className="character-card-meta">
+                  <div className="character-card-header">
+                    <h3>{char.name}</h3>
+                  </div>
+                  <div className="age">{char.age} anos</div>
+                </div>
               </div>
-              <div className="age">{char.age} anos</div>
               <p>{char.description}</p>
               <div className="difficulty-tag" title="Dificuldade atual deste personagem (1–100), ajustada pelo desempenho coletivo">
                 DIFICULDADE: <strong>{Number.isFinite(char.difficulty) ? char.difficulty : '—'}</strong>

@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { extractBloco1 } from '../utils/bloco1';
+import PatientPhotoCropper from '../components/PatientPhotoCropper';
+import { patientIconUrl } from '../components/PatientAvatar';
 
 const EMPTY_FORM = { name: '', age: '', description: '', assistantId: '', specificInstruction: '', evaluationCriteria: '' };
 
@@ -16,6 +18,12 @@ export default function AdminFreeplay() {
   const [formError, setFormError] = useState('');
   // Feedback transitório do botão "Copiar Bloco 1" (some sozinho em 1.6s).
   const [copyStatus, setCopyStatus] = useState(''); // '' | 'ok' | 'fail'
+  // Foto do paciente (vai pra arquivo no volume, não pro JSON do personagem):
+  // photoData = { iconDataUrl, fullDataUrl } pendente; photoCleared = remover;
+  // currentPhotoUrl = foto atual mostrada ao abrir a edição.
+  const [photoData, setPhotoData] = useState(null);
+  const [photoCleared, setPhotoCleared] = useState(false);
+  const [currentPhotoUrl, setCurrentPhotoUrl] = useState(null);
 
   function load() {
     setLoading(true);
@@ -27,7 +35,9 @@ export default function AdminFreeplay() {
 
   useEffect(() => { load(); }, []);
 
-  function openCreate() { setForm(EMPTY_FORM); setEditingId(null); setFormError(''); setShowModal(true); }
+  function resetPhoto() { setPhotoData(null); setPhotoCleared(false); setCurrentPhotoUrl(null); }
+
+  function openCreate() { setForm(EMPTY_FORM); setEditingId(null); setFormError(''); resetPhoto(); setShowModal(true); }
 
   function openEdit(c) {
     setForm({
@@ -39,9 +49,12 @@ export default function AdminFreeplay() {
       evaluationCriteria: c.evaluationCriteria || '',
     });
     setEditingId(c.id); setFormError(''); setShowModal(true);
+    // Foto atual: a enviada pelo admin (photoIcon) ou a "de fábrica" pelo nome.
+    setPhotoData(null); setPhotoCleared(false);
+    setCurrentPhotoUrl(c.photoIcon || patientIconUrl(c.name));
   }
 
-  function closeModal() { setShowModal(false); setEditingId(null); setForm(EMPTY_FORM); setFormError(''); }
+  function closeModal() { setShowModal(false); setEditingId(null); setForm(EMPTY_FORM); setFormError(''); resetPhoto(); }
 
   function handleChange(e) {
     const { name, value } = e.target;
@@ -94,8 +107,12 @@ export default function AdminFreeplay() {
     setSaving(true); setFormError('');
     try {
       const payload = { ...form, age: form.age !== '' ? Number(form.age) : null };
+      let charId = editingId;
       if (editingId) await api.updateFreeplay(editingId, payload);
-      else await api.createFreeplay(payload);
+      else { const created = await api.createFreeplay(payload); charId = created.id; }
+      // Foto vai separada (arquivo no volume), depois que o personagem tem id.
+      if (photoData) await api.setFreeplayPhoto(charId, { icon: photoData.iconDataUrl, full: photoData.fullDataUrl });
+      else if (photoCleared) await api.setFreeplayPhoto(charId, { clear: true });
       closeModal();
       load();
     } catch (err) {
@@ -180,6 +197,14 @@ export default function AdminFreeplay() {
                   <label htmlFor="age">Idade</label>
                   <input id="age" name="age" type="number" min="1" max="120" value={form.age} onChange={handleChange} placeholder="34" />
                 </div>
+              </div>
+              <div>
+                <label>Foto do paciente <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
+                <PatientPhotoCropper
+                  currentUrl={photoCleared ? null : currentPhotoUrl}
+                  onChange={(d) => { setPhotoData(d); setPhotoCleared(false); }}
+                  onClear={() => { setPhotoData(null); setPhotoCleared(true); }}
+                />
               </div>
               <div>
                 <label htmlFor="description">Descrição visível</label>
