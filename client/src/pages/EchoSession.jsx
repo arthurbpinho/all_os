@@ -614,6 +614,30 @@ export default function EchoSession({ user, sessionType }) {
       return;
     }
 
+    // COMPETITIVO: avaliação ASSÍNCRONA (nota + MMR em até 24h, nos logs). Não
+    // avalia agora nem mostra a tela "avaliando" — salva a sessão como pendente
+    // (server-side) e vai direto pro agradecimento.
+    if (isCompetitive) {
+      if (timerRef.current) clearInterval(timerRef.current);
+      setSessionEnded(true);
+      setSavingLog(true);
+      setSaveError('');
+      try {
+        await api.competitiveFinish({
+          itemId: id,
+          itemTitle: item?.name || '',
+          messages: visibleMessages.map((m) => ({ role: m.role, content: m.content, highlighted: m.highlighted || false, comment: m.comment || '' })),
+          durationSeconds: elapsed,
+        });
+      } catch (err) {
+        setSaveError(err.message || 'Erro ao enviar a sessão para avaliação.');
+      } finally {
+        setSavingLog(false);
+      }
+      clearActiveSession(user.id, sessionType, autoItemId);
+      return;
+    }
+
     if (timerRef.current) clearInterval(timerRef.current);
     setSessionEnded(true);
     setSavingLog(true);
@@ -945,36 +969,11 @@ export default function EchoSession({ user, sessionType }) {
 
           {isCompetitive && (
             <div className="mmr-result-card">
-              {mmrResult ? (
-                mmrResult.calibrating ? (
-                  <>
-                    <span className="post-stat-label">MMR · Em calibração</span>
-                    <p className="mmr-result-note">
-                      Partida {mmrResult.n} de 3 da calibração — seu MMR aparece após a 3ª.
-                      {mmrResult.matchesRemaining > 0 && (
-                        <> Faltam <strong>{mmrResult.matchesRemaining}</strong> {mmrResult.matchesRemaining === 1 ? 'partida' : 'partidas'}.</>
-                      )}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <span className="post-stat-label">Seu MMR</span>
-                    <div className="mmr-result-value">
-                      {Math.round(mmrResult.P_after)}
-                      <span className={`mmr-delta ${mmrResult.delta >= 0 ? 'up' : 'down'}`}>
-                        {mmrResult.delta >= 0 ? '▲' : '▼'} {Math.abs(mmrResult.delta).toFixed(1)}
-                      </span>
-                    </div>
-                    <p className="mmr-result-note">
-                      Dificuldade de {item?.name} agora: <strong>{Math.round(mmrResult.D_after)}</strong>
-                    </p>
-                  </>
-                )
-              ) : (
-                <p className="mmr-result-note">
-                  O MMR não foi atualizado — a sessão não recebeu uma nota numérica do avaliador.
-                </p>
-              )}
+              <span className="post-stat-label">Sessão enviada para avaliação</span>
+              <p className="mmr-result-note">
+                Obrigado por completar esta partida! Sua <strong>nota</strong> e o seu <strong>MMR</strong> serão
+                calculados em até <strong>24 horas</strong> — você poderá conferir em <strong>Minhas Sessões</strong>.
+              </p>
             </div>
           )}
 
@@ -1294,7 +1293,7 @@ export default function EchoSession({ user, sessionType }) {
         {messages.filter((m) => !m.isSystem).length === 0 && !sessionStarted && (
           <div className="empty-chat" style={{ marginTop: 100 }}>
             {isCompetitive
-              ? 'Modo competitivo — esta sessão é avaliada e vale ranking (MMR) ao final.'
+              ? 'Modo competitivo — vale ranking (MMR). Ao finalizar, sua nota e o MMR são calculados em até 24h e aparecem em Minhas Sessões.'
               : (sessionType === 'freeplay'
                 ? (isVisitor
                     ? (skipEvaluator
@@ -1494,7 +1493,7 @@ export default function EchoSession({ user, sessionType }) {
             ? (sidequest
                 ? 'Tem certeza? Esta é uma sessão de Treinamento com sidequest ativa — a avaliação vai verificar se você cumpriu a missão. O log será salvo e você não poderá continuar este atendimento depois.'
                 : 'Tem certeza? Esta é uma sessão de Treinamento: ela recebe avaliação e nota, e ao reatender o mesmo paciente sua evolução será comparada. O log será salvo no seu histórico e você não poderá continuar este atendimento depois.')
-            : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA A CORREÇÃO.');
+            : 'VOCÊ TEM CERTEZA QUE DESEJA ENVIAR PARA CORREÇÃO? VOCÊ NUNCA MAIS CONSEGUIRÁ FAZER MAIS SESSÕES NESSE ATENDIMENTO. O PACIENTE SERÁ RESETADO E AS SESSÕES ATUAIS ENVIADAS PARA AVALIAÇÃO — sua nota e o MMR serão calculados em até 24 horas e aparecerão em Minhas Sessões.');
         const confirmLabel = empty
           ? (skipEvaluator ? 'Encerrar mesmo assim' : 'Enviar mesmo assim')
           : (skipEvaluator ? 'Encerrar sessão' : 'Enviar para correção');

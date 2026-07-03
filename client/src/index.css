@@ -4551,3 +4551,17 @@ select option { background: var(--cream); color: var(--ink); }
 .aval-job-status.processing, .aval-job-status.queued { background: var(--sand); color: var(--ink-soft); }
 .aval-job-status.completed { background: var(--marrs-tint); color: var(--success); }
 .aval-job-status.error { background: var(--terra-tint); color: var(--terra); }
+
+/* Raciocínio (visível ao supervisor) — v16-2/v18-25 */
+.aval-reasoning { margin-top: 16px; }
+.aval-reasoning-head { font-weight: 700; color: var(--marrs-deep); font-size: 14px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.aval-reasoning-text { white-space: pre-wrap; font-size: 13.5px; line-height: 1.65; color: var(--ink); max-height: 520px; overflow-y: auto; padding-right: 6px; }
+.aval-reasoning-empty { font-size: 13.5px; line-height: 1.6; color: var(--ink-soft); font-style: italic; }
+.aval-reasoning-empty code { font-style: normal; background: var(--cream-2); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+
+/* Selo de avaliação pendente (competitivo assíncrono, nota em até 24h) */
+.log-pending-chip {
+  display: inline-block; font-size: 12px; font-weight: 600; white-space: nowrap;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--sand); color: var(--ink-soft);
+}

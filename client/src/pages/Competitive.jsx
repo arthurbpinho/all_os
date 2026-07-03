@@ -30,8 +30,9 @@ export default function Competitive({ user }) {
         <div className="eyebrow">Sistema 2 · Modo Competitivo</div>
         <h2><Typewriter text="Compe" /><span className="accent"><Typewriter text="titivo" delayStart={180} /></span></h2>
         <p>
-          Os mesmos pacientes da Simulação, agora valendo ranking. Cada atendimento finalizado
-          atualiza o seu <strong>MMR</strong> — e a <strong>dificuldade</strong> de cada personagem se ajusta ao
+          Os mesmos pacientes da Simulação, agora valendo ranking. Ao finalizar, a partida é enviada
+          para avaliação e sua <strong>nota</strong> + <strong>MMR</strong> são calculados em até <strong>24 horas</strong> —
+          você confere em <strong>Minhas Sessões</strong>. A dificuldade de cada personagem se ajusta ao
           desempenho coletivo. As 3 primeiras partidas são de calibração.
         </p>
         <div className="ornament" />

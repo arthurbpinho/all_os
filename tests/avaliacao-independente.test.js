@@ -42,6 +42,42 @@ describe('Avaliação Independente — parsers e pricing', () => {
     expect(resolvePrices('glm-5.2')).toMatchObject({ input: 1.4, cached: 0.26, output: 4.4 });
   });
 
+  it('extractReasoning: GLM reasoning_content; fallback reasoning e <think>', () => {
+    expect(ai.extractReasoning({ reasoning_content: 'pensei nisso' })).toBe('pensei nisso');
+    expect(ai.extractReasoning({ reasoning: 'r' })).toBe('r');
+    expect(ai.extractReasoning({ content: 'a <think>oculto</think> b' })).toBe('oculto');
+    expect(ai.extractReasoning({ content: 'só o texto visível' })).toBe('');
+  });
+
+  it('finalizeSingle: carrega reasoning e tira <think> do texto visível', () => {
+    const text = '<think>não deveria aparecer</think>[notas]\n1: 8\n2: 6\n3: 7\n4: 5\n5: 6\n6: 7\n[feedback]\nOk.';
+    const r = ai.finalizeSingle({ evaluatorId: 'v18-25', text, reasoning: 'raciocínio do GLM', usage: null, model: 'glm-5.2', effort: 'max', batch: false });
+    expect(r.reasoning).toBe('raciocínio do GLM');
+    expect(r.feedbackAluno).toBe('Ok.');
+    expect(r.feedbackAluno).not.toMatch(/não deveria/);
+  });
+
+  it('Responses args (GPT): summary só fora do mini; extractResponsesReasoning', () => {
+    const big = ai.buildSingleEvalResponsesArgs({ evaluatorId: 'v18-25', bloco1: 'b', log: 'l', model: 'gpt-5.4-2026-03-05', effort: 'medium' });
+    expect(big.reasoning).toEqual({ effort: 'medium', summary: 'auto' });
+    expect(big.max_output_tokens).toBeGreaterThan(0);
+    expect(String(big.instructions)).toMatch(/AVALIADOR/i);
+    const mini = ai.buildSingleEvalResponsesArgs({ evaluatorId: 'v18-25', bloco1: 'b', log: 'l', model: 'gpt-5.4-mini-2026-03-17', effort: 'low' });
+    expect(mini.reasoning).toEqual({ effort: 'low' }); // sem summary
+    const reasoning = ai.extractResponsesReasoning({ output: [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'pensei A' }, { type: 'summary_text', text: 'pensei B' }] },
+      { type: 'message', content: [{ type: 'output_text', text: 'ignora' }] },
+    ] });
+    expect(reasoning).toBe('pensei A\n\npensei B');
+  });
+
+  it('buildSingleInstrumentacao aceita usage da Responses API', () => {
+    const usage = { input_tokens: 40000, input_tokens_details: { cached_tokens: 30000 }, output_tokens: 5000, output_tokens_details: { reasoning_tokens: 3500 } };
+    const inst = ai.buildSingleInstrumentacao('gpt-5.4-2026-03-05', 'medium', usage, false);
+    expect(inst.totais).toEqual({ input: 10000, cached: 30000, output: 5000, reasoning: 3500 });
+    expect(inst.custo.usd).toBeCloseTo(0.1075, 6);
+  });
+
   it('buildChatBody: GPT usa reasoning_effort/max_completion_tokens; GLM usa thinking/max_tokens', () => {
     const msgs = [{ role: 'developer', content: 's' }, { role: 'user', content: 'u' }];
     const gpt = buildChatBody({ provider: 'openai', model: 'gpt-5.4', messages: msgs, maxTokens: 16000, effort: 'medium' });

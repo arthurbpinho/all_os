@@ -15,7 +15,7 @@ const {
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
-const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25 } = require('./avaliacao-v25');
+const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
 const {
@@ -2496,6 +2496,22 @@ const OPENAI_EXERCISE_EFFORT = process.env.OPENAI_EXERCISE_EFFORT || 'low';
 const OPENAI_NEURO_MODEL = process.env.OPENAI_NEURO_MODEL || 'gpt-5.4-2026-03-05';
 const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 
+// --- Avaliadores de PRODUÇÃO trocados por decisão do dono (2026-07) ---
+// TREINAMENTO (freeplay training): GLM 5.2 / high; FALLBACK pra gpt-5.4/medium (o
+// SIM acima) se o GLM falhar. SELETIVO: mesmo par (GLM 5.2 high, fallback 5.4
+// medium), síncrono. COMPETITIVO: gpt-5.5 / high, rodado em BATCH (assíncrono).
+// O 5.5 high é EXCLUSIVO do Competitivo. Env-overridáveis (trocar p/ 'gpt-*'
+// reverte pro OpenAI). Provider é derivado do prefixo do modelo.
+const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || 'glm-5.2';
+const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || 'high';
+const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || 'glm-5.2';
+const SELECAO_EVAL_EFFORT = process.env.SELECAO_EVAL_EFFORT || 'high';
+const OPENAI_COMP_MODEL = process.env.OPENAI_COMP_MODEL || 'gpt-5.5-2026-04-23';
+const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || 'high';
+function providerForModel(m) {
+  return String(m || '').startsWith('glm') ? 'glm' : 'openai';
+}
+
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
@@ -3019,23 +3035,53 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
 
     let usage = null;
     try {
-      const stream = await openai.responses.create({
-        model: evalModel,
-        // Exercício (mini): só effort, sem summary — o resumo de raciocínio nunca
-        // vai pro aluno e evita qualquer incompatibilidade do mini com summary.
-        reasoning: isExercise ? { effort: evalEffort } : { effort: evalEffort, summary: 'auto' },
-        max_output_tokens: 64000,
-        instructions: systemPrompt,
-        input: inputTurns,
-        stream: true,
-      });
-      for await (const ev of stream) {
-        if (ev.type === 'response.output_text.delta') {
-          if (ev.delta) res.write(`data: ${JSON.stringify({ delta: ev.delta })}\n\n`);
-        } else if (streamReasoning && ev.type === 'response.reasoning_summary_text.delta') {
-          if (ev.delta) res.write(`data: ${JSON.stringify({ reasoning: ev.delta })}\n\n`);
-        } else if (ev.type === 'response.completed') {
-          usage = ev.response?.usage || null;
+      if (isFreeSim) {
+        // TREINAMENTO → GLM 5.2 (buffered: a UI já mostra a tela "avaliando", não
+        // streama token a token; o heartbeat acima segura a conexão). FALLBACK:
+        // se o GLM falhar (rate limit/instabilidade), refaz no gpt-5.4/medium
+        // (evalModel/evalEffort do SIM). O aluno sempre recebe nota+feedback.
+        let full = '';
+        const tProvider = providerForModel(TRAINING_EVAL_MODEL);
+        const tClient = getClientForProvider(tProvider);
+        try {
+          if (!tClient) throw new Error(`${tProvider} indisponível`);
+          const body = buildChatBody({
+            provider: tProvider, model: TRAINING_EVAL_MODEL, effort: TRAINING_EVAL_EFFORT,
+            maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
+          });
+          const resp = await tClient.chat.completions.create(body);
+          full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+          if (!full.trim()) throw new Error('resposta vazia');
+          console.log(`Evaluate (${TRAINING_EVAL_MODEL} · treino${progressionMode ? '+progressão' : ''})`);
+        } catch (glmErr) {
+          console.error(`[evaluate treino] ${TRAINING_EVAL_MODEL} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
+          const resp = await openai.responses.create({
+            model: evalModel, reasoning: { effort: evalEffort },
+            max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
+          });
+          full = resp.output_text || '';
+          usage = resp.usage || null;
+        }
+        if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
+      } else {
+        const stream = await openai.responses.create({
+          model: evalModel,
+          // Exercício (mini): só effort, sem summary — o resumo de raciocínio nunca
+          // vai pro aluno e evita qualquer incompatibilidade do mini com summary.
+          reasoning: isExercise ? { effort: evalEffort } : { effort: evalEffort, summary: 'auto' },
+          max_output_tokens: 64000,
+          instructions: systemPrompt,
+          input: inputTurns,
+          stream: true,
+        });
+        for await (const ev of stream) {
+          if (ev.type === 'response.output_text.delta') {
+            if (ev.delta) res.write(`data: ${JSON.stringify({ delta: ev.delta })}\n\n`);
+          } else if (streamReasoning && ev.type === 'response.reasoning_summary_text.delta') {
+            if (ev.delta) res.write(`data: ${JSON.stringify({ reasoning: ev.delta })}\n\n`);
+          } else if (ev.type === 'response.completed') {
+            usage = ev.response?.usage || null;
+          }
         }
       }
     } finally {
@@ -3160,7 +3206,10 @@ function buildSelectionTranscript(messages, patientName) {
   return rows.join('\n\n---\n\n');
 }
 
-function buildSelectionEvalChatBody(log) {
+// Partes do input da avaliação do seletivo: o prompt enxuto + o turno do usuário
+// (Bloco 1 + transcrição). Usado tanto pelo GLM (chat.completions) quanto pelo
+// fallback OpenAI (responses).
+function selectionEvalParts(log) {
   const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.characterId))
     || { id: log.characterId, name: log.characterName || 'Paciente' };
   const transcript = buildSelectionTranscript(log.messages, char.name || 'Paciente');
@@ -3170,12 +3219,7 @@ function buildSelectionEvalChatBody(log) {
   };
   const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: char.id } });
   const inputTurns = withBloco1([evalUser], bloco1);
-  return {
-    model: OPENAI_SELECAO_MODEL,
-    reasoning_effort: OPENAI_SELECAO_EFFORT, // effort preservado (não baixa)
-    max_completion_tokens: 64000, // TETO (só paga o gerado); saída é curta
-    messages: buildOpenAIMessages(loadSelecaoEvaluatorPrompt(), inputTurns),
-  };
+  return { prompt: loadSelecaoEvaluatorPrompt(), inputTurns };
 }
 
 // Extrai nota + avaliação limpa do texto do avaliador (mesma régua do resto):
@@ -3197,53 +3241,139 @@ function toBatchFile(jsonl) {
   return toFile(Buffer.from(jsonl, 'utf-8'), 'selecao-batch.jsonl', { type: 'application/jsonl' });
 }
 
-let selectionSweepRunning = false;
+let selectionEvalRunning = false;
 
-// Submete todos os logs 'pending' que ainda não têm batchId, num único batch.
-async function submitSelectionBatches(openai) {
-  const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.batchId);
+// Avalia UM log do seletivo, SÍNCRONO, em background: GLM 5.2/high; FALLBACK
+// gpt-5.4/medium se o GLM falhar (rate limit/instabilidade). z.ai não tem Batch
+// API, então roda direto (1 requisição por candidato). Grava status/score/
+// criteriaScores/evaluation no log + append no selection-stats.json. NUNCA volta
+// ao candidato (o /finish já respondeu só o agradecimento).
+async function evaluateSelectionSync(log) {
+  const { prompt, inputTurns } = selectionEvalParts(log);
+  let content = '';
+  try {
+    const sProvider = providerForModel(SELECAO_EVAL_MODEL);
+    const sClient = getClientForProvider(sProvider);
+    if (!sClient) throw new Error(`${sProvider} indisponível`);
+    const body = buildChatBody({
+      provider: sProvider, model: SELECAO_EVAL_MODEL, effort: SELECAO_EVAL_EFFORT,
+      maxTokens: 64000, messages: buildOpenAIMessages(prompt, inputTurns),
+    });
+    const resp = await sClient.chat.completions.create(body);
+    content = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+    if (!content.trim()) throw new Error('resposta vazia');
+  } catch (glmErr) {
+    console.error(`[selecao] ${SELECAO_EVAL_MODEL} falhou → fallback ${OPENAI_SIM_MODEL}/${OPENAI_SIM_EFFORT}:`, glmErr.message);
+    try {
+      const openai = getOpenAI();
+      if (!openai) throw new Error('OpenAI indisponível');
+      const resp = await openai.responses.create({
+        model: OPENAI_SIM_MODEL, reasoning: { effort: OPENAI_SIM_EFFORT },
+        max_output_tokens: 64000, instructions: prompt, input: inputTurns,
+      });
+      content = resp.output_text || '';
+    } catch (fbErr) {
+      console.error('[selecao] fallback também falhou:', fbErr.message);
+    }
+  }
+  const { evaluation, criteriaScores, score } = parseSelectionEval(content);
+  const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
+  let appended = null;
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    const i = arr.findIndex((l) => l && l.id === log.id);
+    if (i === -1) return;
+    arr[i] = {
+      ...arr[i], status: st, score, criteriaScores,
+      evaluation: clampStr(evaluation, LOG_MAX_EVAL_LEN),
+    };
+    if (score != null) appended = { timestamp: arr[i].timestamp, score, status: st };
+    writeJSON('selection-logs.json', arr);
+  });
+  if (appended) {
+    await withFileLock('selection-stats.json', async () => {
+      const stats = readJSON('selection-stats.json');
+      stats.push(appended);
+      writeJSON('selection-stats.json', stats);
+    });
+  }
+  console.log(`[selecao] avaliado ${log.id}: nota=${score} status=${st}`);
+}
+
+// Reprocessa logs 'pending' que sobraram (ex.: restart no meio de uma avaliação).
+// Roda no boot + a cada intervalo. Guard reentrante.
+async function processPendingSelectionLogs() {
+  if (selectionEvalRunning) return;
+  selectionEvalRunning = true;
+  try {
+    const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending');
+    for (const log of pending) {
+      try { await evaluateSelectionSync(log); } catch (e) { console.error('[selecao] pendente falhou:', e.message); }
+    }
+  } finally {
+    selectionEvalRunning = false;
+  }
+}
+
+// ============================================================================
+// COMPETITIVO — avaliação ASSÍNCRONA via OpenAI Batch API (GPT 5.5 high)
+// O aluno finaliza e recebe só um agradecimento; a nota + feedback + MMR entram no
+// log dele em até 24h. O log aparece JÁ como 'pendente' em Minhas Sessões (fica em
+// logs.json com evaluationPending:true) e é o próprio "job" do batch.
+// ============================================================================
+function buildCompetitiveEvalBody(log) {
+  const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.itemId));
+  const patientName = log.itemTitle || (char && char.name) || 'Paciente';
+  const transcript = transcriptFromMessages(log.messages || [], log.userName || 'Aluno', patientName);
+  const evalUser = { role: 'user', content: `[LOG DO ATENDIMENTO]\nSessão: Competitivo\nPersonagem: ${patientName}\n\n${transcript}` };
+  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: log.itemId } });
+  const inputTurns = withBloco1([evalUser], bloco1);
+  return {
+    model: OPENAI_COMP_MODEL,
+    reasoning_effort: OPENAI_COMP_EFFORT,
+    max_completion_tokens: 64000,
+    messages: buildOpenAIMessages(loadAvaliacaoPrompt(), inputTurns),
+  };
+}
+
+let competitiveSweepRunning = false;
+
+// Submete os logs competitivos pendentes (evaluationPending && !evalBatchId).
+async function submitCompetitiveBatches(openai) {
+  const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
   if (!pending.length) return;
   const lines = [];
   const ids = [];
   for (const log of pending) {
     let body;
-    try { body = buildSelectionEvalChatBody(log); } catch (e) { console.error('[selecao-batch] corpo:', e.message); continue; }
+    try { body = buildCompetitiveEvalBody(log); } catch (e) { console.error('[comp-batch] corpo:', e.message); continue; }
     lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
     ids.push(log.id);
   }
   if (!lines.length) return;
   const file = await openai.files.create({ file: await toBatchFile(lines.join('\n') + '\n'), purpose: 'batch' });
-  const batch = await openai.batches.create({
-    input_file_id: file.id,
-    endpoint: '/v1/chat/completions',
-    completion_window: '24h',
-  });
-  await withFileLock('selection-logs.json', async () => {
-    const arr = readJSON('selection-logs.json');
+  const batch = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+  await withFileLock('logs.json', async () => {
+    const arr = readJSON('logs.json');
     for (const l of arr) {
-      if (ids.includes(l.id) && l.status === 'pending' && !l.batchId) {
-        l.batchId = batch.id;
-        l.batchSubmittedAt = new Date().toISOString();
-      }
+      if (ids.includes(l.id) && l.evaluationPending && !l.evalBatchId) { l.evalBatchId = batch.id; l.evalBatchAt = new Date().toISOString(); }
     }
-    writeJSON('selection-logs.json', arr);
+    writeJSON('logs.json', arr);
   });
-  console.log(`[selecao-batch] submetidos ${ids.length} candidato(s) no batch ${batch.id}`);
+  console.log(`[comp-batch] submetidos ${ids.length} competitivo(s) no batch ${batch.id}`);
 }
 
-// Coleta os batches já submetidos: aplica os resultados dos que completaram e
-// marca 'erro' os que falharam/expiraram.
-async function collectSelectionBatches(openai) {
-  const withBatch = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && l.batchId);
+// Coleta os batches prontos: grava nota/feedback no log, zera o pending e aplica o MMR.
+async function collectCompetitiveBatches(openai) {
+  const withBatch = readJSON('logs.json').filter((l) => l && l.evaluationPending && l.evalBatchId);
   if (!withBatch.length) return;
-  const batchIds = [...new Set(withBatch.map((l) => l.batchId))];
+  const batchIds = [...new Set(withBatch.map((l) => l.evalBatchId))];
   for (const bid of batchIds) {
     let batch;
-    try { batch = await openai.batches.retrieve(bid); } catch (e) { console.error('[selecao-batch] retrieve:', e.message); continue; }
+    try { batch = await openai.batches.retrieve(bid); } catch (e) { console.error('[comp-batch] retrieve:', e.message); continue; }
 
     if (batch.status === 'completed') {
-      const results = new Map();  // custom_id → texto de saída
-      const errored = new Set();  // custom_id com erro
+      const results = new Map();
       if (batch.output_file_id) {
         const text = await (await openai.files.content(batch.output_file_id)).text();
         for (const line of text.split('\n')) {
@@ -3255,70 +3385,99 @@ async function collectSelectionBatches(openai) {
           } catch {}
         }
       }
-      if (batch.error_file_id) {
-        try {
-          const etext = await (await openai.files.content(batch.error_file_id)).text();
-          for (const line of etext.split('\n')) {
-            if (!line.trim()) continue;
-            try { const o = JSON.parse(line); if (o.custom_id) errored.add(o.custom_id); } catch {}
-          }
-        } catch {}
-      }
-      const statsToAppend = [];
-      await withFileLock('selection-logs.json', async () => {
-        const arr = readJSON('selection-logs.json');
+      await withFileLock('logs.json', async () => {
+        const arr = readJSON('logs.json');
+        let mmr = null; let mmrChanged = false;
         for (const l of arr) {
-          if (l.batchId !== bid || l.status !== 'pending') continue;
+          if (l.evalBatchId !== bid || !l.evaluationPending) continue;
           if (results.has(l.id) && results.get(l.id)) {
             const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
-            const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
-            l.status = st;
-            l.score = score;
-            l.criteriaScores = criteriaScores;
             l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
-            if (score != null) statsToAppend.push({ timestamp: l.timestamp, score, status: st });
+            l.criteriaScores = criteriaScores;
+            l.score = score;
+            l.evaluationPending = false;
+            // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
+            if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
+              if (!mmr) mmr = readMMR();
+              const { player, character, result } = mmrEngine.updateMatch(mmr.players[l.userId], mmr.characters[l.itemId], score);
+              mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
+              l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
+            }
           } else {
-            l.status = 'erro'; // sem resultado ou erro explícito no batch
+            l.evaluationPending = false; l.evalError = 'sem resultado no batch';
           }
         }
-        writeJSON('selection-logs.json', arr);
+        writeJSON('logs.json', arr);
+        if (mmrChanged) writeMMR(mmr);
       });
-      if (statsToAppend.length) {
-        await withFileLock('selection-stats.json', async () => {
-          const stats = readJSON('selection-stats.json');
-          for (const s of statsToAppend) stats.push(s);
-          writeJSON('selection-stats.json', stats);
-        });
-      }
-      console.log(`[selecao-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
+      console.log(`[comp-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
-      await withFileLock('selection-logs.json', async () => {
-        const arr = readJSON('selection-logs.json');
-        for (const l of arr) { if (l.batchId === bid && l.status === 'pending') l.status = 'erro'; }
-        writeJSON('selection-logs.json', arr);
+      await withFileLock('logs.json', async () => {
+        const arr = readJSON('logs.json');
+        for (const l of arr) { if (l.evalBatchId === bid && l.evaluationPending) { l.evaluationPending = false; l.evalError = `batch ${batch.status}`; } }
+        writeJSON('logs.json', arr);
       });
-      console.log(`[selecao-batch] batch ${bid} ${batch.status} — candidato(s) marcados como erro`);
+      console.log(`[comp-batch] batch ${bid} ${batch.status} — competitivo(s) marcados com erro`);
     }
-    // validating/in_progress/finalizing → deixa pending, checa na próxima varredura.
   }
 }
 
-// Varredura única (coleta os prontos, depois submete os novos). Guard reentrante
-// pra não submeter o mesmo pendente duas vezes. Sem OpenAI, é no-op (dev/teste).
-async function sweepSelectionBatches() {
-  if (selectionSweepRunning) return;
+async function sweepCompetitiveBatches() {
+  if (competitiveSweepRunning) return;
   const openai = getOpenAI();
   if (!openai) return;
-  selectionSweepRunning = true;
+  competitiveSweepRunning = true;
   try {
-    await collectSelectionBatches(openai);
-    await submitSelectionBatches(openai);
+    await collectCompetitiveBatches(openai);
+    await submitCompetitiveBatches(openai);
   } catch (e) {
-    console.error('[selecao-batch] sweep erro:', e.message);
+    console.error('[comp-batch] sweep erro:', e.message);
   } finally {
-    selectionSweepRunning = false;
+    competitiveSweepRunning = false;
   }
 }
+
+// POST /api/competitive/finish — salva o log competitivo PENDENTE em logs.json e
+// dispara o batch. Responde na hora (o aluno vê só o agradecimento; nota em 24h).
+app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) => {
+  if (req.user.role === 'visitor') return res.status(403).json({ error: 'Competitivo não disponível para visitantes.' });
+  const b = req.body || {};
+  const itemId = b.itemId;
+  if (!itemId) return res.status(400).json({ error: 'itemId é obrigatório.' });
+  const rawMessages = Array.isArray(b.messages) ? b.messages : [];
+  if (!rawMessages.length) return res.status(400).json({ error: 'Sessão sem mensagens.' });
+  const cleanMessages = rawMessages
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .slice(0, LOG_MAX_MESSAGES)
+    .map((m) => ({ role: m.role, content: clampStr(m.content, LOG_MAX_MESSAGE_LEN), highlighted: !!m.highlighted, comment: clampStr(m.comment, 2000) }));
+  const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
+  const log = {
+    id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    timestamp: new Date().toISOString(),
+    type: 'freeplay',
+    mode: 'competitive',
+    itemId,
+    itemTitle: clampStr(b.itemTitle || (freeChar && freeChar.name) || '', LOG_MAX_TITLE),
+    durationSeconds: Number.isFinite(b.durationSeconds) ? Math.max(0, Math.floor(b.durationSeconds)) : 0,
+    score: null,
+    criteriaScores: null,
+    evaluation: '',
+    evaluationPending: true,
+    evalBatchId: null,
+    messages: cleanMessages,
+    userId: req.user.id,
+    userName: req.user.name,
+  };
+  await withFileLock('logs.json', async () => {
+    const arr = readJSON('logs.json');
+    arr.push(log);
+    writeJSON('logs.json', arr);
+  });
+  // Responde na hora — o aluno vê só o agradecimento ("nota em até 24h").
+  res.json({ ok: true, pending: true, logId: log.id });
+  // Dispara o batch já (submete este log). O collect roda no boot + intervalo.
+  sweepCompetitiveBatches().catch(() => {});
+});
 
 // 1) Senha — só destrava a UI do formulário. A senha é revalidada no /iniciar.
 app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
@@ -3491,10 +3650,10 @@ app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
   // Responde imediatamente — o candidato vê o agradecimento sem esperar a IA.
   res.json({ ok: true });
 
-  // A avaliação roda via BATCH API (50% off), assíncrona. Dispara uma varredura
-  // pra submeter este log já (não espera o intervalo). O resultado entra no log
-  // quando o batch volta (coletor no boot + a cada SELECAO_BATCH_POLL_MS).
-  sweepSelectionBatches().catch(() => {});
+  // Avaliação SÍNCRONA no GLM (background, fire-and-forget). z.ai não tem Batch
+  // API; roda direto e grava o resultado no log do avaliador. Nunca volta ao
+  // candidato. Se sobrar 'pending' (crash), o processPendingSelectionLogs recupera.
+  evaluateSelectionSync(log).catch((e) => console.error('[selecao] avaliação falhou:', e.message));
 });
 
 // 5) Logs de avaliações — avaliador/admin. Poda os expirados (15d) e lista todos.
@@ -3564,10 +3723,49 @@ async function runIndependenteSync({ client, provider, evaluator, model, effort,
   if (evaluator === 'v25') {
     return runAvaliacaoIndependente({ openai: client, provider, bloco1, log, model, effort });
   }
-  const body = aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider });
-  const resp = await client.chat.completions.create(body);
-  const text = resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content || '' : '';
-  return aiIndependente.finalizeSingle({ evaluatorId: evaluator, text, usage: resp.usage || null, model, effort, batch: false });
+  // GLM (z.ai): chat.completions — devolve o raciocínio em message.reasoning_content.
+  if (provider === 'glm') {
+    const body = aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider });
+    const resp = await client.chat.completions.create(body);
+    const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
+    console.log(`[aval-usage] GLM ${model} effort=${effort} usage=`, JSON.stringify(resp.usage || null));
+    return aiIndependente.finalizeSingle({
+      evaluatorId: evaluator,
+      text: msg.content || '',
+      reasoning: aiIndependente.extractReasoning(msg),
+      usage: resp.usage || null,
+      model, effort, batch: false,
+    });
+  }
+  // GPT (OpenAI): Responses API em STREAMING pra capturar o RESUMO do raciocínio —
+  // mesmo caminho da aba de produção. A OpenAI entrega o resumo nos eventos
+  // reasoning_summary_text.delta (no não-streaming ele frequentemente vem vazio).
+  // Consumimos o stream no SERVIDOR e devolvemos o resultado montado (sem SSE ao
+  // cliente). max_output_tokens é teto (reasoning + saída visível saem dele).
+  const args = aiIndependente.buildSingleEvalResponsesArgs({ evaluatorId: evaluator, bloco1, log, model, effort });
+  const stream = await client.responses.create({ ...args, stream: true });
+  let text = '';
+  let reasoning = '';
+  let usage = null;
+  for await (const ev of stream) {
+    if (ev.type === 'response.output_text.delta') {
+      if (ev.delta) text += ev.delta;
+    } else if (ev.type === 'response.reasoning_summary_text.delta') {
+      if (ev.delta) reasoning += ev.delta;
+    } else if (ev.type === 'response.reasoning_summary_part.added') {
+      if (reasoning) reasoning += '\n\n'; // separa partes do resumo
+    } else if (ev.type === 'response.completed') {
+      usage = (ev.response && ev.response.usage) || null;
+    }
+  }
+  console.log(`[aval-usage] GPT ${model} effort=${effort} usage=`, JSON.stringify(usage || null));
+  return aiIndependente.finalizeSingle({
+    evaluatorId: evaluator,
+    text,
+    reasoning: reasoning.trim(),
+    usage,
+    model, effort, batch: false,
+  });
 }
 
 // Resposta/entry unificada (todos os avaliadores). `partes` só v25; `notasDetalhe` só single.
@@ -3583,6 +3781,7 @@ function buildAvalResponse(entry, result) {
     notasDetalhe: result.notasDetalhe || null,
     corpoSintetizador: result.corpoSintetizador || null,
     feedbackAluno: result.feedbackAluno || null,
+    reasoning: result.reasoning || null, // raciocínio do supervisor (single; GLM devolve, GPT não)
     instrumentacao: result.instrumentacao || null,
   };
 }
@@ -3602,6 +3801,7 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
     notasDetalhe: result.notasDetalhe || null,
     corpoSintetizador: result.corpoSintetizador || null,
     feedbackAluno: result.feedbackAluno || null,
+    reasoning: result.reasoning || null,
     instrumentacao: result.instrumentacao || null,
   };
   await withFileLock('avaliacao-v25.json', async () => {
@@ -3684,8 +3884,8 @@ async function sweepAvaliacaoBatches() {
               const o = JSON.parse(line);
               const suffix = String(o.custom_id).split('::')[1];
               const body = o.response && o.response.body;
-              const content = (body && body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
-              outputs.set(suffix, { text: content, usage: (body && body.usage) || null });
+              const msg = (body && body.choices && body.choices[0] && body.choices[0].message) || {};
+              outputs.set(suffix, { text: msg.content || '', reasoning: aiIndependente.extractReasoning(msg), usage: (body && body.usage) || null });
             } catch {}
           }
         }
@@ -3697,7 +3897,7 @@ async function sweepAvaliacaoBatches() {
             result = await finalizeV25({ openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort, nodeOutputs, batch: true });
           } else {
             const out = outputs.get('0') || { text: '', usage: null };
-            result = aiIndependente.finalizeSingle({ evaluatorId: job.evaluator, text: out.text, usage: out.usage, model: job.model, effort: job.effort, batch: true });
+            result = aiIndependente.finalizeSingle({ evaluatorId: job.evaluator, text: out.text, reasoning: out.reasoning, usage: out.usage, model: job.model, effort: job.effort, batch: true });
           }
           const entry = await persistAvaliacaoResult({
             user: { id: job.userId, name: job.userName },
@@ -5530,10 +5730,14 @@ if (require.main === module) {
     if (ns > 0) console.log(`[selecao] ${ns} log(s) de seleção expirado(s) removido(s).`);
   }, 6 * 60 * 60 * 1000).unref();
 
-  // Processo Seletivo (Batch API): no boot, coleta batches que ficaram prontos e
-  // submete pendentes que sobraram de um restart; depois varre periodicamente.
-  sweepSelectionBatches().catch(() => {});
-  setInterval(() => { sweepSelectionBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
+  // Processo Seletivo (GLM síncrono): reprocessa avaliações 'pending' que sobraram
+  // de um restart; depois checa periodicamente.
+  processPendingSelectionLogs().catch(() => {});
+  setInterval(() => { processPendingSelectionLogs().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
+
+  // Competitivo (Batch API GPT 5.5): submete os logs pendentes e coleta os prontos.
+  sweepCompetitiveBatches().catch(() => {});
+  setInterval(() => { sweepCompetitiveBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   // Avaliação Independente (Batch API): coleta os jobs da fila que ficaram prontos.
   sweepAvaliacaoBatches().catch(() => {});

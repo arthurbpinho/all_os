@@ -106,6 +106,11 @@ function buildReport(result, log) {
   L.push('');
   L.push('— FEEDBACK —');
   L.push(result.feedbackAluno || '(sem feedback)');
+  if (result.reasoning) {
+    L.push('');
+    L.push('— RACIOCÍNIO (SUPERVISOR) —');
+    L.push(result.reasoning);
+  }
   if (log && log.trim()) {
     L.push('');
     L.push('— LOG DE ENTRADA —');
@@ -390,6 +395,21 @@ export default function Avaliacao({ user }) {
                 {(!result.notasDetalhe || result.notasDetalhe.length === 0) && (
                   <div className="aval-fila-empty">O avaliador não emitiu o bloco de notas (saída fora de formato). Veja o feedback.</div>
                 )}
+              </div>
+            )}
+
+            {/* Raciocínio "gasto" que o supervisor lê (v16-2/v18-25 raciocinam no
+                canal oculto). GLM (z.ai) devolve o texto; GPT via chat.completions não. */}
+            {!isPipe && (
+              <div className="card aval-reasoning">
+                <div className="aval-reasoning-head">Raciocínio — visível ao supervisor</div>
+                {result.reasoning
+                  ? <div className="aval-reasoning-text">{result.reasoning}</div>
+                  : (
+                    <div className="aval-reasoning-empty">
+                      Sem texto de raciocínio nesta run{inst?.totais?.reasoning ? <> (foram <strong>{fmtTok(inst.totais.reasoning)}</strong> tokens de reasoning, já no custo de saída)</> : null}. O resumo do raciocínio aparece no modo <strong>síncrono</strong>: no <strong>GPT</strong> (exceto o "mini", que não emite resumo) e no <strong>GLM</strong> com effort <strong>high/max</strong>. No modo <strong>batch</strong> o texto não vem.
+                    </div>
+                  )}
               </div>
             )}
           </>
