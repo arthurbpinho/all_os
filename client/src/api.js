@@ -59,6 +59,27 @@ async function request(path, options = {}) {
   return res.json();
 }
 
+// Fluxo do Processo Seletivo (candidato) — ISOLADO do auth global: usa um token
+// de candidato próprio (passado explicitamente) e NUNCA dispara clearAuth/logout
+// em 401, pra não derrubar uma sessão logada (avaliador/admin) aberta no mesmo
+// navegador. Uma senha incorreta responde 401, e isso não pode deslogar ninguém.
+async function selecaoRequest(path, { method = 'POST', body, token } = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(BASE + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const err = new Error((data && data.error) || `Erro ${res.status} na requisição`);
+    if (data && typeof data.daysLeft === 'number') err.daysLeft = data.daysLeft;
+    throw err;
+  }
+  return data;
+}
+
 // Catálogo de testes neuropsicológicos: fixo no servidor, então cacheamos a
 // promessa (uma requisição por sessão, compartilhada por admin + TestSelector).
 let neuroTestsPromise = null;
@@ -93,6 +114,15 @@ export const api = {
   // Gera (via gpt-5.4-mini) a descrição visual da aparência a partir da foto
   // (data URI). Não persiste — o perfil salva junto com a foto.
   describeAppearance: (photo) => request('/me/visual-description', { method: 'POST', body: { photo } }),
+
+  // Processo Seletivo — candidato (token próprio, isolado do auth global)
+  selecaoSenha: (password) => selecaoRequest('/selecao/senha', { body: { password } }),
+  selecaoIniciar: (payload) => selecaoRequest('/selecao/iniciar', { body: payload }),
+  selecaoChat: (token, messages) => selecaoRequest('/selecao/chat', { body: { messages }, token }),
+  selecaoFinish: (token, payload) => selecaoRequest('/selecao/finish', { body: payload, token }),
+  // Processo Seletivo — avaliador/admin (auth global normal)
+  selecaoLogs: () => request('/selecao/logs'),
+  selecaoDashboard: (range) => request(`/selecao/dashboard?range=${encodeURIComponent(range || 'month')}`),
 
   // Exercises
   getExercises: () => request('/exercises'),
