@@ -8,9 +8,13 @@ import { PatientAvatarButton } from '../components/PatientAvatar';
 //
 // Invariante crítica: a nota, o feedback qualitativo e a avaliação NUNCA chegam
 // ao candidato. A avaliação roda 100% no servidor (POST /api/selecao/finish) e só
-// alimenta os logs do avaliador. O token do candidato é efêmero e guardado só em
-// estado local (não no localStorage/auth global), pra não colidir com uma sessão
-// logada aberta no mesmo navegador.
+// alimenta os logs do avaliador.
+//
+// Persistência: a sessão EM ANDAMENTO (token do candidato + personagem +
+// mensagens + nº de sessão + início) é salva numa chave PRÓPRIA de localStorage
+// (PS_KEY), separada do auth global, pra que refresh/sair da página NÃO perca o
+// progresso. É limpa ao finalizar. O token efêmero (role candidate) fica só nessa
+// chave, então não colide com uma sessão logada aberta no mesmo navegador.
 
 const TERMO = 'Essa é uma simulação de atendimento realizada por Inteligência Artificial simulando o paciente, seu objetivo é tentar atendê-la da melhor maneira possível. Sua avaliação será enviada posteriormente para nossos avaliadores. Ao confirmar, você consente com a utilização da ferramenta de IA, e dos seus textos inseridos serem enviados para os seus servidores e para nossos avaliadores. Utilizaremos os dados para fins de apuração do processo seletivo e de forma anônima para pesquisas de inovação dentro da Associação Allos.';
 
@@ -21,6 +25,18 @@ const AGRADECIMENTO = 'Obrigado por participar do nosso processo seletivo. Após
 const MAX_SELECAO_SESSIONS = 6;
 // Mensagem oculta que avisa o paciente que passou uma semana (mesma da Simulação).
 const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos para a próxima sessão. Você (o paciente), acaba de entrar na sessão novamente, na próxima semana. Descreva o que aconteceu na sua semana, você já está na sala novamente com o terapeuta.';
+
+// Persistência da sessão em andamento (sobrevive a refresh/saída da página).
+const PS_KEY = 'allos_ps_session';
+// Tempo máximo da avaliação: 60 min de relógio, contados a partir do início.
+const SESSION_LIMIT_MS = 60 * 60 * 1000;
+const SESSION_WARN_MS = 5 * 60 * 1000; // fica em alerta nos últimos 5 min
+
+function fmtRemaining(ms) {
+  const s = Math.max(0, Math.floor((ms || 0) / 1000));
+  const m = Math.floor(s / 60);
+  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
 
 // Mensagens no formato que o /api/selecao/chat espera (só role/content de turnos
 // reais; marcadores de sessão, que não têm role, ficam de fora).
@@ -40,7 +56,20 @@ function Brand() {
 }
 
 export default function ProcessoSeletivo() {
-  const [step, setStep] = useState('senha'); // senha | form | chat | done
+  // Restaura a sessão em andamento (refresh / reabrir a página) SEM flash: lê o
+  // localStorage uma única vez, antes dos useState, e usa como valor inicial. Só
+  // restaura o passo 'chat' (senha/form são rápidos de refazer).
+  const savedRef = useRef(undefined);
+  if (savedRef.current === undefined) {
+    try {
+      const raw = localStorage.getItem(PS_KEY);
+      const s = raw ? JSON.parse(raw) : null;
+      savedRef.current = (s && s.token && s.step === 'chat' && Array.isArray(s.messages)) ? s : null;
+    } catch { savedRef.current = null; }
+  }
+  const saved = savedRef.current;
+
+  const [step, setStep] = useState(saved ? 'chat' : 'senha'); // senha | form | chat | done
 
   // Senha
   const [password, setPassword] = useState('');
@@ -54,29 +83,86 @@ export default function ProcessoSeletivo() {
   const [formError, setFormError] = useState('');
 
   // Sessão
-  const [token, setToken] = useState('');
-  const [character, setCharacter] = useState(null);
-  const [messages, setMessages] = useState([]); // { role, content, hidden? }
+  const [token, setToken] = useState(saved ? saved.token : '');
+  const [character, setCharacter] = useState(saved ? (saved.character || null) : null);
+  const [messages, setMessages] = useState(saved ? saved.messages : []); // { role, content, hidden? }
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
   const [chatError, setChatError] = useState('');
-  const [startedAt, setStartedAt] = useState(0);
+  const [startedAt, setStartedAt] = useState(saved && Number.isFinite(saved.startedAt) ? saved.startedAt : 0);
   const [confirmFinish, setConfirmFinish] = useState(false);
   const [finishing, setFinishing] = useState(false);
   // Sessões (passar sessão, máx. 6) + destaque/comentário das intervenções.
-  const [sessionNumber, setSessionNumber] = useState(1);
+  const [sessionNumber, setSessionNumber] = useState(saved && Number.isFinite(saved.sessionNumber) ? saved.sessionNumber : 1);
   const [skipping, setSkipping] = useState(false);
   const [confirmSkip, setConfirmSkip] = useState(false);
   const [sessionLimit, setSessionLimit] = useState(false);
   const [highlightTarget, setHighlightTarget] = useState(null); // { idx }
   const [highlightDraft, setHighlightDraft] = useState('');
+  // Cronômetro (60 min) — tempo restante em ms, derivado de startedAt.
+  const [remainingMs, setRemainingMs] = useState(null);
 
   const endRef = useRef(null);
   const taRef = useRef(null);
+  const doFinishRef = useRef(null); // aponta pra doFinish atual (pro auto-envio do timer)
+  const finishGuard = useRef(false); // trava reentrância do finish (timer + clique)
 
   useEffect(() => {
     if (endRef.current) endRef.current.scrollIntoView({ behavior: 'smooth' });
   }, [messages, typing]);
+
+  // Persiste a sessão a cada mudança relevante (só no chat).
+  useEffect(() => {
+    if (step !== 'chat' || !token) return;
+    try {
+      localStorage.setItem(PS_KEY, JSON.stringify({ token, character, messages, sessionNumber, startedAt, step: 'chat' }));
+    } catch {
+      /* quota / modo privado → segue sem persistir */
+    }
+  }, [step, token, character, messages, sessionNumber, startedAt]);
+
+  // Retomada: se a página foi recarregada ENQUANTO o paciente respondia (a última
+  // mensagem com role é do candidato, sem resposta), re-solicita a resposta pra
+  // não deixar a conversa travada. Roda uma vez, só quando restaurou uma sessão.
+  useEffect(() => {
+    if (!saved || step !== 'chat') return;
+    const roleMsgs = (saved.messages || []).filter((m) => m.role === 'user' || m.role === 'assistant');
+    const last = roleMsgs[roleMsgs.length - 1];
+    if (!last || last.role !== 'user') return;
+    let cancelled = false;
+    setTyping(true);
+    (async () => {
+      try {
+        const data = await api.selecaoChat(saved.token, toApiMessages(saved.messages));
+        if (cancelled) return;
+        const content = typeof data === 'string' ? data : (data.content || data.message || '');
+        setMessages((prev) => [...prev, { role: 'assistant', content, session: saved.sessionNumber || 1 }]);
+      } catch (err) {
+        if (!cancelled) setChatError(err.message || 'Erro ao retomar a conversa.');
+      } finally {
+        if (!cancelled) setTyping(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Cronômetro de 60 min a partir de startedAt (relógio real — conta mesmo se a
+  // pessoa sair e voltar). Ao zerar, envia a avaliação automaticamente.
+  useEffect(() => {
+    if (step !== 'chat' || !startedAt) { setRemainingMs(null); return; }
+    const tick = () => {
+      const rem = SESSION_LIMIT_MS - (Date.now() - startedAt);
+      setRemainingMs(rem);
+      if (rem <= 0 && doFinishRef.current) doFinishRef.current();
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [step, startedAt]);
+
+  function clearSession() {
+    try { localStorage.removeItem(PS_KEY); } catch {}
+  }
 
   async function submitSenha(e) {
     e.preventDefault();
@@ -231,7 +317,8 @@ export default function ProcessoSeletivo() {
   }
 
   async function doFinish() {
-    if (finishing) return;
+    if (finishGuard.current) return; // trava síncrona (timer + clique podem coincidir)
+    finishGuard.current = true;
     setFinishing(true);
     setConfirmFinish(false);
     const visible = messages
@@ -240,14 +327,18 @@ export default function ProcessoSeletivo() {
     const durationSeconds = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0;
     try {
       await api.selecaoFinish(token, { messages: visible, durationSeconds });
+      clearSession();
       setStep('done');
     } catch (err) {
       setChatError(err.message || 'Erro ao finalizar a avaliação.');
       setFinishing(false);
+      finishGuard.current = false; // permite tentar de novo
     }
   }
+  doFinishRef.current = doFinish; // sempre a versão atual (pro auto-envio do timer)
 
   const hasUserTurn = messages.some((m) => !m.hidden && m.role === 'user');
+  const timeUp = remainingMs != null && remainingMs <= 0;
 
   // ---- Render ----
   if (step === 'senha') {
@@ -356,10 +447,19 @@ export default function ProcessoSeletivo() {
             <div className="chat-status">Simulação de atendimento · Sessão {sessionNumber} de {MAX_SELECAO_SESSIONS}</div>
           </div>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {remainingMs != null && (
+              <div
+                className={`timer-chip ${remainingMs <= SESSION_WARN_MS ? 'limit' : ''}`}
+                title="Tempo restante da avaliação (60 min). Ao zerar, é enviada automaticamente."
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
+                <span>{fmtRemaining(remainingMs)}</span>
+              </div>
+            )}
             <button
               className="btn btn-sm"
               onClick={handleSkip}
-              disabled={typing || skipping || finishing}
+              disabled={typing || skipping || finishing || timeUp}
               title={sessionNumber >= MAX_SELECAO_SESSIONS ? `Máximo de ${MAX_SELECAO_SESSIONS} sessões` : 'Encerrar esta sessão e retomar na próxima semana'}
               style={{ background: 'var(--success)', color: '#fff', borderColor: 'var(--success)' }}
             >
@@ -368,13 +468,19 @@ export default function ProcessoSeletivo() {
             <button
               className="btn btn-secondary btn-sm"
               onClick={() => setConfirmFinish(true)}
-              disabled={typing || skipping || finishing || !hasUserTurn}
+              disabled={typing || skipping || finishing || timeUp || !hasUserTurn}
               title={hasUserTurn ? 'Encerrar e enviar a avaliação' : 'Converse com o paciente antes de finalizar'}
             >
               Finalizar avaliação
             </button>
           </div>
         </div>
+
+        {timeUp && (
+          <div className="alert" style={{ background: 'var(--terra-tint)', color: 'var(--terra)' }}>
+            Tempo esgotado (60 min). Sua avaliação está sendo enviada automaticamente…
+          </div>
+        )}
 
         {chatError && (
           <div className="alert error">
@@ -454,15 +560,15 @@ export default function ProcessoSeletivo() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Sua intervenção…  ·  Enter envia · Shift+Enter quebra linha"
+            placeholder={timeUp ? 'Tempo esgotado — enviando…' : 'Sua intervenção…  ·  Enter envia · Shift+Enter quebra linha'}
             rows={1}
-            disabled={typing || finishing}
+            disabled={typing || finishing || timeUp}
           />
           <button
             type="button"
             className="icon-btn primary"
             onClick={send}
-            disabled={!input.trim() || typing || finishing}
+            disabled={!input.trim() || typing || finishing || timeUp}
             title="Enviar"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

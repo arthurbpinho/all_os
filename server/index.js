@@ -15,7 +15,8 @@ const {
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
-const { runAvaliacaoIndependente } = require('./avaliacao-v25');
+const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25 } = require('./avaliacao-v25');
+const aiIndependente = require('./avaliacao-independente');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
 const {
   NEURO_TEST_CATALOG,
@@ -178,6 +179,7 @@ function envDiag(name) {
 console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
 console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
 console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
+console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — só na Avaliação Independente)');
 console.log('[startup] DATA_DIR          =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
 console.log('[startup] PORT              =', envDiag('PORT'));
 console.log('[startup] env keys count    =', Object.keys(process.env).length);
@@ -396,6 +398,11 @@ if (!fs.existsSync(path.join(DATA_DIR, 'selection-logs.json'))) {
 // dos logs completos, de modo que a Dashboard mantém o histórico agregado.
 if (!fs.existsSync(path.join(DATA_DIR, 'selection-stats.json'))) {
   writeJSON('selection-stats.json', []);
+}
+
+// Avaliação Independente — FILA de jobs em batch (async). Runtime, não versionado.
+if (!fs.existsSync(path.join(DATA_DIR, 'avaliacao-fila.json'))) {
+  writeJSON('avaliacao-fila.json', []);
 }
 
 function readMMR() {
@@ -3520,83 +3527,273 @@ app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin')
   res.json({ range, total: scored.length, activeCount, rejectedCount, avgScore, threshold: SELECTION_ACTIVE_THRESHOLD });
 });
 
-// --- Avaliação Independente v25 (TESTE) ---
-// Roda SÓ na aba "Avaliar Sessão" (supervisor/admin). 14 nós Opus 4.8 (um por
-// critério) + agregador determinístico → nota 0–100. Isolado: o avaliador atual
-// (GPT-5.x) segue intocado em todo o resto. Persiste em avaliacao-v25.json.
+// ============================================================================
+// AVALIAÇÃO INDEPENDENTE — laboratório de pricing (supervisor/admin)
+// ----------------------------------------------------------------------------
+// Alterna PROMPT (v16-2 / v18-25 / pipeline v25), MODELO (5.5 / 5.4 / 5.4-mini) e
+// EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH API (50% off) com fila.
+// Isolado: só LÊ os prompts; não toca simulação, processo seletivo nem os
+// avaliadores de produção. Resultado unificado + instrumentação de custo.
+// ============================================================================
+// Modelos selecionáveis: id pinado + PROVEDOR (openai | glm/z.ai) + efforts
+// válidos daquele modelo + se suporta Batch API. GLM (z.ai) só na Independente,
+// síncrono (z.ai não expõe Batch API); o caching por prefixo funciona igual.
+const AVAL_MODELOS = {
+  'gpt-5.5': { id: 'gpt-5.5-2026-04-23', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
+  'gpt-5.4': { id: 'gpt-5.4-2026-03-05', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
+  'gpt-5.4-mini': { id: 'gpt-5.4-mini-2026-03-17', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
+  'glm-5.2': { id: 'glm-5.2', provider: 'glm', efforts: ['disabled', 'high', 'max'], batch: false },
+};
+
+// Cliente do GLM (z.ai) — OpenAI-compatível. Base própria + GLM_API_KEY. Isolado:
+// só a Avaliação Independente usa; o resto do app continua no getOpenAI().
+function getGLM() {
+  const apiKey = process.env.GLM_API_KEY;
+  if (!apiKey) return null;
+  const OpenAI = require('openai').OpenAI || require('openai').default || require('openai');
+  // maxRetries: o SDK reenvia 429/5xx com backoff exponencial (respeita o
+  // Retry-After da z.ai). Conta nova tem rate limit apertado, daí a folga.
+  return new OpenAI({ apiKey, baseURL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/paas/v4', maxRetries: 5 });
+}
+function getClientForProvider(provider) {
+  return provider === 'glm' ? getGLM() : getOpenAI();
+}
+
+// Roda o avaliador escolhido SÍNCRONO e devolve o resultado unificado.
+async function runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log }) {
+  if (evaluator === 'v25') {
+    return runAvaliacaoIndependente({ openai: client, provider, bloco1, log, model, effort });
+  }
+  const body = aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider });
+  const resp = await client.chat.completions.create(body);
+  const text = resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content || '' : '';
+  return aiIndependente.finalizeSingle({ evaluatorId: evaluator, text, usage: resp.usage || null, model, effort, batch: false });
+}
+
+// Resposta/entry unificada (todos os avaliadores). `partes` só v25; `notasDetalhe` só single.
+function buildAvalResponse(entry, result) {
+  return {
+    id: entry ? entry.id : null,
+    casoNome: entry ? entry.casoNome : '',
+    evaluator: result.evaluator,
+    notaFinal: result.notaFinal,
+    considerados: result.considerados != null ? result.considerados : null,
+    partes: result.partes || null,
+    notas: result.notas || null,
+    notasDetalhe: result.notasDetalhe || null,
+    corpoSintetizador: result.corpoSintetizador || null,
+    feedbackAluno: result.feedbackAluno || null,
+    instrumentacao: result.instrumentacao || null,
+  };
+}
+
+// Persiste o resultado em avaliacao-v25.json (store de todos os 3 avaliadores).
+async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model, effort, batch, result }) {
+  const entry = {
+    id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    createdAt: new Date().toISOString(),
+    userId: user.id,
+    userName: user.name || '',
+    casoId, casoNome, evaluator, model, effort, batch: !!batch,
+    notaFinal: result.notaFinal,
+    considerados: result.considerados != null ? result.considerados : null,
+    partes: result.partes || null,
+    notas: result.notas || null,
+    notasDetalhe: result.notasDetalhe || null,
+    corpoSintetizador: result.corpoSintetizador || null,
+    feedbackAluno: result.feedbackAluno || null,
+    instrumentacao: result.instrumentacao || null,
+  };
+  await withFileLock('avaliacao-v25.json', async () => {
+    const store = readJSON('avaliacao-v25.json', []);
+    store.push(entry);
+    writeJSON('avaliacao-v25.json', store);
+  });
+  return entry;
+}
+
+// Enfileira um job em batch: monta as requests (1 p/ single, 14 p/ v25), submete
+// à Batch API e grava o job em avaliacao-fila.json (status 'processing').
+async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome }) {
+  const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+  let requests;
+  if (evaluator === 'v25') {
+    requests = buildV25NodeRequests({ bloco1, log, model, effort, provider }).map((n) => ({
+      custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body,
+    }));
+  } else {
+    requests = [{
+      custom_id: `${jobId}::0`, method: 'POST', url: '/v1/chat/completions',
+      body: aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider }),
+    }];
+  }
+  const jsonl = requests.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const file = await openai.files.create({ file: await toBatchFile(jsonl), purpose: 'batch' });
+  const batchObj = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+
+  const job = {
+    id: jobId, createdAt: new Date().toISOString(),
+    userId: user.id, userName: user.name || '',
+    casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: true,
+    status: 'processing', batchId: batchObj.id, requestCount: requests.length,
+    log, // necessário p/ o sintetizador do v25 no coletor (removido quando termina)
+    result: null, error: null,
+  };
+  await withFileLock('avaliacao-fila.json', async () => {
+    const arr = readJSON('avaliacao-fila.json');
+    arr.push(job);
+    writeJSON('avaliacao-fila.json', arr);
+  });
+  console.log(`[aval-batch] job ${jobId} (${evaluator}/${model}/${effort}) submetido em batch ${batchObj.id} (${requests.length} req)`);
+  return job;
+}
+
+async function markAvalJob(jobId, patch) {
+  await withFileLock('avaliacao-fila.json', async () => {
+    const arr = readJSON('avaliacao-fila.json');
+    const i = arr.findIndex((j) => j && j.id === jobId);
+    if (i === -1) return;
+    arr[i] = { ...arr[i], ...patch };
+    if (patch.status === 'completed' || patch.status === 'error') delete arr[i].log; // libera o log grande
+    writeJSON('avaliacao-fila.json', arr);
+  });
+}
+
+let avalSweepRunning = false;
+// Coleta os batches da Avaliação Independente que ficaram prontos.
+async function sweepAvaliacaoBatches() {
+  if (avalSweepRunning) return;
+  const openai = getOpenAI();
+  if (!openai) return;
+  avalSweepRunning = true;
+  try {
+    const jobs = readJSON('avaliacao-fila.json').filter((j) => j && j.status === 'processing' && j.batchId);
+    for (const job of jobs) {
+      const client = getClientForProvider(job.provider || 'openai');
+      if (!client) continue; // provedor sem chave configurada
+      let batchObj;
+      try { batchObj = await client.batches.retrieve(job.batchId); } catch (e) { console.error('[aval-batch] retrieve:', e.message); continue; }
+
+      if (batchObj.status === 'completed') {
+        const outputs = new Map(); // sufixo do custom_id → { text, usage }
+        if (batchObj.output_file_id) {
+          const text = await (await client.files.content(batchObj.output_file_id)).text();
+          for (const line of text.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const o = JSON.parse(line);
+              const suffix = String(o.custom_id).split('::')[1];
+              const body = o.response && o.response.body;
+              const content = (body && body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
+              outputs.set(suffix, { text: content, usage: (body && body.usage) || null });
+            } catch {}
+          }
+        }
+        try {
+          let result;
+          if (job.evaluator === 'v25') {
+            const nodeOutputs = [];
+            for (const [suffix, out] of outputs) nodeOutputs.push({ num: Number(suffix), text: out.text, usage: out.usage });
+            result = await finalizeV25({ openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort, nodeOutputs, batch: true });
+          } else {
+            const out = outputs.get('0') || { text: '', usage: null };
+            result = aiIndependente.finalizeSingle({ evaluatorId: job.evaluator, text: out.text, usage: out.usage, model: job.model, effort: job.effort, batch: true });
+          }
+          const entry = await persistAvaliacaoResult({
+            user: { id: job.userId, name: job.userName },
+            casoId: job.casoId, casoNome: job.casoNome, evaluator: job.evaluator, model: job.model, effort: job.effort, batch: true, result,
+          });
+          await markAvalJob(job.id, { status: 'completed', completedAt: new Date().toISOString(), result: buildAvalResponse(entry, result) });
+          console.log(`[aval-batch] job ${job.id} (${job.evaluator}) completo: nota=${result.notaFinal}`);
+        } catch (e) {
+          console.error('[aval-batch] finalize:', e.message);
+          await markAvalJob(job.id, { status: 'error', error: e.message });
+        }
+      } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batchObj.status)) {
+        await markAvalJob(job.id, { status: 'error', error: `batch ${batchObj.status}` });
+        console.log(`[aval-batch] job ${job.id} ${batchObj.status}`);
+      }
+      // validating/in_progress/finalizing → segue 'processing', checa na próxima varredura.
+    }
+  } catch (e) {
+    console.error('[aval-batch] sweep erro:', e.message);
+  } finally {
+    avalSweepRunning = false;
+  }
+}
+
 app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
   try {
-    const log = clampStr(req.body && req.body.log, 200000).trim();
-    const casoId = req.body && req.body.casoId;
+    const b = req.body || {};
+    const log = clampStr(b.log, 200000).trim();
+    const casoId = b.casoId;
+    const evaluator = b.evaluator || 'v25';
+    const modelKey = b.model || 'gpt-5.5';
+    const effort = b.effort || 'medium';
+    const batch = b.batch === true;
+
     if (!log) return res.status(400).json({ error: 'Cole ou envie a transcrição da sessão.' });
     if (!casoId) return res.status(400).json({ error: 'Selecione um caso (necessário para o Bloco 1).' });
+    if (!aiIndependente.isValidEvaluator(evaluator)) return res.status(400).json({ error: 'Avaliador inválido.' });
+    const modelInfo = AVAL_MODELOS[modelKey];
+    if (!modelInfo) return res.status(400).json({ error: 'Modelo inválido (gpt-5.5 | gpt-5.4 | gpt-5.4-mini | glm-5.2).' });
+    const model = modelInfo.id;
+    const provider = modelInfo.provider;
+    if (!modelInfo.efforts.includes(effort)) {
+      return res.status(400).json({ error: `Effort inválido para ${modelKey} (${modelInfo.efforts.join(' | ')}).` });
+    }
+    if (batch && !modelInfo.batch) {
+      return res.status(400).json({ error: `Batch não disponível para ${modelKey} (o provedor não expõe Batch API). Rode em modo síncrono — o caching continua ativo.` });
+    }
 
     const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: casoId } });
     if (!bloco1) return res.status(400).json({ error: 'O caso selecionado não tem Bloco 1 (critério de correção) configurado.' });
 
-    const openai = getOpenAI();
-    if (!openai) return res.status(503).json({ error: 'Avaliação independente indisponível: OPENAI_API_KEY não configurada.' });
-
-    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
-    const t0 = Date.now();
-    const result = await runAvaliacaoIndependente({ openai, bloco1, log });
-    const inst = result.instrumentacao || {};
-    console.log(
-      `Avaliação independente v25 (${freeChar ? freeChar.name : casoId}): nota=${result.notaFinal} ` +
-      `considerados=${result.considerados}/14 em ${Date.now() - t0}ms · ` +
-      `saída=${(inst.totais && inst.totais.output) || 0}tok cache=${(inst.totais && inst.totais.cached) || 0} ` +
-      `custo=${inst.custo ? '$' + inst.custo.usd.toFixed(4) : 'n/d'} (${inst.model}, effort=${inst.effort})`,
-    );
-    // Atribuição de custo por componente (% do gasto). Usa o ratio da família
-    // GPT-5.x ($5 in / $0,50 cache / $30 out por M) — a % independe do preço
-    // absoluto do modelo (só do ratio), então vale pra 5.4/5.5/mini.
-    {
-      const tt = inst.totais || { input: 0, cached: 0, output: 0, reasoning: 0 };
-      const visivel = Math.max(0, tt.output - tt.reasoning);
-      const U = { in: tt.input * 5, cache: tt.cached * 0.5, vis: visivel * 30, reas: tt.reasoning * 30 };
-      const tot = U.in + U.cache + U.vis + U.reas || 1;
-      const pct = (x) => Math.round((x / tot) * 100);
-      console.log(
-        `  custo-share v25 (ratio GPT-5.x): reasoning ${pct(U.reas)}% · saída-visível ${pct(U.vis)}% · ` +
-        `input-fresco ${pct(U.in)}% · input-cache ${pct(U.cache)}% | ` +
-        `tokens: in-fresco=${tt.input} cache=${tt.cached} saída=${tt.output}(reasoning=${tt.reasoning})`,
-      );
+    const client = getClientForProvider(provider);
+    if (!client) {
+      const which = provider === 'glm' ? 'GLM_API_KEY (z.ai)' : 'OPENAI_API_KEY';
+      return res.status(503).json({ error: `Avaliação independente indisponível: ${which} não configurada.` });
     }
 
-    const entry = {
-      id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
-      createdAt: new Date().toISOString(),
-      userId: req.user.id,
-      userName: req.user.name || '',
-      casoId,
-      casoNome: freeChar ? freeChar.name : '',
-      notaFinal: result.notaFinal,
-      considerados: result.considerados,
-      partes: result.partes,
-      corpoSintetizador: result.corpoSintetizador,
-      feedbackAluno: result.feedbackAluno,
-      instrumentacao: result.instrumentacao,
-    };
-    const store = readJSON('avaliacao-v25.json', []);
-    store.push(entry);
-    writeJSON('avaliacao-v25.json', store);
+    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const casoNome = freeChar ? freeChar.name : '';
 
-    res.json({
-      id: entry.id,
-      casoNome: entry.casoNome,
-      notaFinal: result.notaFinal,
-      considerados: result.considerados,
-      partes: result.partes,
-      corpoSintetizador: result.corpoSintetizador,
-      feedbackAluno: result.feedbackAluno,
-      instrumentacao: result.instrumentacao,
-    });
+    if (batch) {
+      const job = await enqueueAvaliacaoBatch({ openai: client, user: req.user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome });
+      return res.json({ queued: true, jobId: job.id, status: job.status });
+    }
+
+    const t0 = Date.now();
+    const result = await runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log });
+    const inst = result.instrumentacao || {};
+    console.log(
+      `Avaliação independente (${evaluator}/${model}/${effort}) caso=${casoNome || casoId}: nota=${result.notaFinal} ` +
+      `em ${Date.now() - t0}ms · custo=${inst.custo ? '$' + inst.custo.usd.toFixed(4) : 'n/d'} ` +
+      `tokens=in${(inst.totais && inst.totais.input) || 0}/cache${(inst.totais && inst.totais.cached) || 0}/out${(inst.totais && inst.totais.output) || 0}`,
+    );
+    const entry = await persistAvaliacaoResult({ user: req.user, casoId, casoNome, evaluator, model, effort, batch: false, result });
+    return res.json(buildAvalResponse(entry, result));
   } catch (err) {
-    console.error('Avaliação independente v25 error:', err && err.stack ? err.stack : err);
+    console.error('Avaliação independente error:', err && err.stack ? err.stack : err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Erro na avaliação: ' + ((err && err.message) || 'desconhecido') });
     }
   }
+});
+
+// Fila de avaliações (jobs em batch). Supervisor vê os próprios; admin vê todos.
+app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const jobs = readJSON('avaliacao-fila.json')
+    .filter((j) => j && (req.user.role === 'admin' || j.userId === req.user.id))
+    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, 50)
+    .map((j) => ({
+      id: j.id, createdAt: j.createdAt, completedAt: j.completedAt || null,
+      casoNome: j.casoNome, evaluator: j.evaluator, model: j.model, modelKey: j.modelKey,
+      effort: j.effort, status: j.status, error: j.error || null,
+      result: j.result || null, // já é o buildAvalResponse quando completo
+    }));
+  res.json(jobs);
 });
 
 // --- Speech to Text Proxy ---
@@ -5337,6 +5534,10 @@ if (require.main === module) {
   // submete pendentes que sobraram de um restart; depois varre periodicamente.
   sweepSelectionBatches().catch(() => {});
   setInterval(() => { sweepSelectionBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
+
+  // Avaliação Independente (Batch API): coleta os jobs da fila que ficaram prontos.
+  sweepAvaliacaoBatches().catch(() => {});
+  setInterval(() => { sweepAvaliacaoBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
