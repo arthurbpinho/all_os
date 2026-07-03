@@ -159,6 +159,9 @@ export const api = {
   // Logs
   getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
+  // Competitivo: avaliação assíncrona (nota em até 24h nos logs). Salva a sessão
+  // pendente e retorna na hora ({ ok, pending, logId }) — sem nota/MMR.
+  competitiveFinish: (data) => request('/competitive/finish', { method: 'POST', body: data }),
   getLogsPolicy: () => request('/logs/policy'),
 
   // Feedback (coletado do visitante ao fim da sessão: estrelas 0–5 + mensagem)

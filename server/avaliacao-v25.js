@@ -318,12 +318,18 @@ function sumUsages(usages) {
   const t = { input: 0, cached: 0, output: 0, reasoning: 0 };
   for (const u of usages || []) {
     if (!u) continue;
-    const promptTotal = u.prompt_tokens || 0;
-    const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
+    const promptTotal = u.prompt_tokens != null ? u.prompt_tokens : (u.input_tokens || 0);
+    const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+      || (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0;
+    const completion = u.completion_tokens != null ? u.completion_tokens : (u.output_tokens || 0);
+    const total = u.total_tokens != null ? u.total_tokens
+      : (u.input_tokens != null && u.output_tokens != null ? u.input_tokens + u.output_tokens : 0);
+    // GLM (z.ai): completion_tokens pode sub-reportar o thinking → usa total como piso.
     t.input += Math.max(0, promptTotal - cached);
     t.cached += cached;
-    t.output += u.completion_tokens || 0;
-    t.reasoning += (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0;
+    t.output += Math.max(completion, total > promptTotal ? total - promptTotal : 0);
+    t.reasoning += (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens)
+      || (u.output_tokens_details && u.output_tokens_details.reasoning_tokens) || 0;
   }
   return t;
 }

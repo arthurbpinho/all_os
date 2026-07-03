@@ -540,7 +540,9 @@ function PatientSessionList({ patient, onSelect, onBack }) {
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <ScoreBadge score={log.score} />
+                {log.evaluationPending && log.score == null
+                  ? <span className="log-pending-chip">⏳ Avaliação pendente · até 24h</span>
+                  : <ScoreBadge score={log.score} />}
                 <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
                   abrir →
                 </span>
@@ -595,12 +597,18 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
             onClick={() => onTab('evaluation')}
             style={{ padding: '6px 14px', fontSize: 13 }}
             disabled={!evaluation}
-            title={evaluation ? 'Ver a avaliação da IA desta sessão' : 'Esta sessão não tem avaliação registrada'}
+            title={evaluation ? 'Ver a avaliação da IA desta sessão' : (log.evaluationPending ? 'Sua nota está sendo calculada (até 24h)' : 'Esta sessão não tem avaliação registrada')}
           >
-            Avaliação {evaluation ? '' : '(sem registro)'}
+            Avaliação {evaluation ? '' : (log.evaluationPending ? '(calculando…)' : '(sem registro)')}
           </button>
         </div>
       </div>
+
+      {log.evaluationPending && log.score == null && (
+        <div className="alert" style={{ background: 'var(--sand)', color: 'var(--ink-soft)', marginTop: 12 }}>
+          ⏳ Sua nota, o feedback e o MMR estão sendo calculados — devem aparecer aqui em até <strong>24 horas</strong>.
+        </div>
+      )}
 
       {tab === 'log' && (
         <div className="card tight">

@@ -60,9 +60,17 @@ function loadEvaluatorPrompt(evaluatorId) {
 // Corpo /v1/chat/completions do avaliador de prompt único: developer = o prompt
 // do avaliador (prefixo cacheável); user = Bloco 1 + log (o material). Serve para
 // a chamada síncrona e para o batch (mesmo corpo).
-function buildSingleEvalBody({ evaluatorId, bloco1, log, model, effort, provider = 'openai' }) {
+// Partes do input single: o prompt do avaliador (prefixo cacheável) + a mensagem
+// do usuário (Bloco 1 + log). Reusado pelo corpo chat.completions e pela Responses.
+function singleEvalParts({ evaluatorId, bloco1, log }) {
   const prompt = loadEvaluatorPrompt(evaluatorId);
   const user = `[BLOCO 1 DO CASO] (critério de correção / gabarito)\n${bloco1 || '(sem Bloco 1)'}\n\n---\n\n[LOG DO ATENDIMENTO]\n${log}`;
+  return { prompt, user };
+}
+
+// Corpo /chat/completions (GLM usa este — devolve reasoning_content; e o batch).
+function buildSingleEvalBody({ evaluatorId, bloco1, log, model, effort, provider = 'openai' }) {
+  const { prompt, user } = singleEvalParts({ evaluatorId, bloco1, log });
   return buildChatBody({
     provider,
     model,
@@ -73,6 +81,36 @@ function buildSingleEvalBody({ evaluatorId, bloco1, log, model, effort, provider
       { role: 'user', content: user },
     ],
   });
+}
+
+// Args da Responses API (GPT síncrono usa este pra pegar o RESUMO do raciocínio).
+// `summary:'auto'` só nos modelos que suportam — o mini não emite resumo, então
+// mandamos só o effort (senão a chamada falha).
+function buildSingleEvalResponsesArgs({ evaluatorId, bloco1, log, model, effort }) {
+  const { prompt, user } = singleEvalParts({ evaluatorId, bloco1, log });
+  const reasoning = /mini/i.test(String(model)) ? { effort } : { effort, summary: 'auto' };
+  return {
+    model,
+    reasoning,
+    max_output_tokens: SINGLE_MAX_TOKENS,
+    instructions: prompt,
+    input: [{ role: 'user', content: user }],
+  };
+}
+
+// Extrai o RESUMO do raciocínio da saída da Responses API (itens type:'reasoning'
+// com `summary:[{text}]`). A OpenAI só expõe o resumo, não a cadeia bruta.
+function extractResponsesReasoning(resp) {
+  const out = (resp && resp.output) || [];
+  const parts = [];
+  for (const item of out) {
+    if (item && item.type === 'reasoning' && Array.isArray(item.summary)) {
+      for (const s of item.summary) {
+        if (s && typeof s.text === 'string' && s.text.trim()) parts.push(s.text.trim());
+      }
+    }
+  }
+  return parts.join('\n\n').trim();
 }
 
 // v16-2: prosa + `[notas-supervisor]` + JSON, no fim. Retorna { notas, feedback }.
@@ -128,15 +166,26 @@ function parseSingleEvalOutput(evaluatorId, text) {
   return { notas, notasDetalhe, feedback, score };
 }
 
+// Aceita os dois formatos de usage: chat.completions (prompt_tokens/completion_tokens)
+// e Responses API (input_tokens/output_tokens). GLM segue o chat.completions.
+// GOTCHA GLM (z.ai): o effort max gera muito thinking, mas o `usage` do GLM não
+// tem campo de reasoning e, ao que tudo indica, o `completion_tokens` sub-reporta
+// o thinking — o billing real fica maior. Usamos `total_tokens - prompt_tokens`
+// como PISO da saída (recupera o thinking quando ele está no total mas não no
+// completion). Se ainda ficar abaixo do billing, é porque a z.ai não devolve o
+// thinking nem no total — aí não dá pra calcular exato pelo usage.
 function sumUsage(u) {
-  const promptTotal = (u && u.prompt_tokens) || 0;
-  const cached = (u && u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens) || 0;
-  return {
-    input: Math.max(0, promptTotal - cached),
-    cached,
-    output: (u && u.completion_tokens) || 0,
-    reasoning: (u && u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) || 0,
-  };
+  if (!u) return { input: 0, cached: 0, output: 0, reasoning: 0 };
+  const promptTotal = u.prompt_tokens != null ? u.prompt_tokens : (u.input_tokens || 0);
+  const cached = (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens)
+    || (u.input_tokens_details && u.input_tokens_details.cached_tokens) || 0;
+  const completion = u.completion_tokens != null ? u.completion_tokens : (u.output_tokens || 0);
+  const total = u.total_tokens != null ? u.total_tokens
+    : (u.input_tokens != null && u.output_tokens != null ? u.input_tokens + u.output_tokens : 0);
+  const output = Math.max(completion, total > promptTotal ? total - promptTotal : 0);
+  const reasoning = (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens)
+    || (u.output_tokens_details && u.output_tokens_details.reasoning_tokens) || 0;
+  return { input: Math.max(0, promptTotal - cached), cached, output, reasoning };
 }
 
 // Instrumentação de custo de UMA chamada (avaliador single). `batch` aplica 50%.
@@ -162,9 +211,29 @@ function buildSingleInstrumentacao(model, effort, usage, batch) {
   return { model, effort, totais, custo, batch: !!batch };
 }
 
-// Monta o resultado unificado de um avaliador single a partir do texto + usage.
-function finalizeSingle({ evaluatorId, text, usage, model, effort, batch }) {
-  const { notas, notasDetalhe, feedback, score } = parseSingleEvalOutput(evaluatorId, text);
+// Raciocínio "gasto" que o supervisor lê (v16-2/v18-25 raciocinam no canal oculto
+// e a análise por critério vive lá). A z.ai/GLM devolve em `message.reasoning_content`
+// (com thinking ligado). A OpenAI via chat.completions NÃO devolve o texto (só a
+// contagem de reasoning tokens) — aí volta vazio e a UI avisa. Fallback: extrai de
+// <think>…</think> se vier embutido no content.
+function extractReasoning(message) {
+  const m = message || {};
+  const rc = m.reasoning_content || m.reasoning || '';
+  if (rc && String(rc).trim()) return String(rc).trim();
+  const c = typeof m.content === 'string' ? m.content : '';
+  const tag = c.match(/<think>([\s\S]*?)<\/think>/i);
+  return tag ? tag[1].trim() : '';
+}
+
+// Remove <think>…</think> do texto visível (caso o provedor embuta no content).
+function stripThink(text) {
+  return String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
+// Monta o resultado unificado de um avaliador single a partir do texto + usage +
+// (opcional) reasoning do supervisor.
+function finalizeSingle({ evaluatorId, text, usage, model, effort, batch, reasoning }) {
+  const { notas, notasDetalhe, feedback, score } = parseSingleEvalOutput(evaluatorId, stripThink(text));
   return {
     evaluator: evaluatorId,
     notaFinal: score,
@@ -173,6 +242,7 @@ function finalizeSingle({ evaluatorId, text, usage, model, effort, batch }) {
     partes: null, // exclusivo do v25
     corpoSintetizador: null,
     feedbackAluno: feedback,
+    reasoning: reasoning || '', // raciocínio visível ao supervisor (GLM devolve; GPT chat.completions não)
     instrumentacao: buildSingleInstrumentacao(model, effort, usage, batch),
   };
 }
@@ -182,9 +252,12 @@ module.exports = {
   isValidEvaluator,
   loadEvaluatorPrompt,
   buildSingleEvalBody,
+  buildSingleEvalResponsesArgs,
+  extractResponsesReasoning,
   parseSingleEvalOutput,
   buildSingleInstrumentacao,
   finalizeSingle,
+  extractReasoning,
   // exportados para teste:
   parseV162,
   parseV1825,
