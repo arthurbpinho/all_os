@@ -24,6 +24,9 @@ import DuelSession from './pages/DuelSession';
 import DuelAccept from './pages/DuelAccept';
 import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
+import ProcessoSeletivo from './pages/ProcessoSeletivo';
+import SelecaoDashboard from './pages/SelecaoDashboard';
+import SelecaoLogs from './pages/SelecaoLogs';
 import NotificationBell from './components/NotificationBell';
 import SystemUpdates from './components/SystemUpdates';
 import ThemeToggle from './components/ThemeToggle';
@@ -104,6 +107,12 @@ export default function App() {
   if (!authChecked) {
     return null;
   }
+  // Processo Seletivo: fluxo público do candidato (sem conta), FORA do shell e
+  // sem tela de Login. Precisa vir ANTES do gate de auth — o candidato entra pelo
+  // link, digita a senha e faz a avaliação sem nunca criar/usar uma conta.
+  if (location.pathname.startsWith('/processo-seletivo')) {
+    return <ProcessoSeletivo />;
+  }
   if (!user) {
     return <Login onLogin={handleLogin} />;
   }
@@ -114,6 +123,7 @@ export default function App() {
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
   const isVisitor = user.role === 'visitor';
+  const isEvaluator = user.role === 'evaluator';
 
   return (
     <div className="app-layout">
@@ -181,8 +191,9 @@ export default function App() {
           )}
 
           {/* Comunidade ACIMA de Histórico. Objetivos veio da Prática (mesma
-              audiência: aluno/admin — não visitante, não supervisor). */}
-          {!isVisitor && (
+              audiência: aluno/admin — não visitante, não supervisor). O avaliador
+              não participa da comunidade (só vê o Processo Seletivo). */}
+          {!isVisitor && !isEvaluator && (
             <>
               <div className="nav-section">Comunidade</div>
               <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''}>
@@ -239,6 +250,18 @@ export default function App() {
               </Link>
               <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
                 {ICONS.neuro}<span>Neuroavaliação</span>
+              </Link>
+            </>
+          )}
+
+          {(isEvaluator || isAdmin) && (
+            <>
+              <div className="nav-section">Processo Seletivo</div>
+              <Link to="/selecao/dashboard" className={isActive('/selecao/dashboard') ? 'active' : ''}>
+                {ICONS.evaluate}<span>Dashboard</span>
+              </Link>
+              <Link to="/selecao/logs" className={isActive('/selecao/logs') ? 'active' : ''}>
+                {ICONS.log}<span>Logs de avaliações</span>
               </Link>
             </>
           )}
@@ -302,7 +325,7 @@ export default function App() {
                 <div className="profile-mini-role">
                   {streak?.isAlive
                     ? `${streak.current} ${streak.current === 1 ? 'semana consecutiva' : 'semanas consecutivas'}`
-                    : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : 'Administrador')}
+                    : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : user.role === 'evaluator' ? 'Avaliador' : 'Administrador')}
                 </div>
               </div>
             </Link>
@@ -338,6 +361,8 @@ export default function App() {
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />
           <Route path="/ranking" element={<Ranking user={user} />} />
+          <Route path="/selecao/dashboard" element={<SelecaoDashboard user={user} />} />
+          <Route path="/selecao/logs" element={<SelecaoLogs user={user} />} />
           <Route path="/admin/users" element={<AdminUsers user={user} />} />
           <Route path="/admin/exercises" element={<AdminExercises />} />
           <Route path="/admin/freeplay" element={<AdminFreeplay />} />
@@ -353,6 +378,7 @@ export default function App() {
 function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
+  if (user.role === 'evaluator') return '/selecao/dashboard';
   // Aluno e visitante: caem na homepage (Início) — slogan + missão diária + modos.
   return '/inicio';
 }

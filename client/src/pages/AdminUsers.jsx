@@ -6,6 +6,7 @@ const ROLE_LABELS = {
   admin: 'Administrador',
   supervisor: 'Professor',
   therapist: 'Aluno',
+  evaluator: 'Avaliador',
   visitor: 'Visitante',
 };
 
@@ -424,6 +425,7 @@ export default function AdminUsers({ user: currentUser }) {
           { v: 'admin',      label: `Administradores (${users.filter(u => u.role === 'admin').length})` },
           { v: 'supervisor', label: `Professores (${users.filter(u => u.role === 'supervisor').length})` },
           { v: 'therapist',  label: `Alunos (${users.filter(u => u.role === 'therapist').length})` },
+          { v: 'evaluator',  label: `Avaliadores (${users.filter(u => u.role === 'evaluator').length})` },
         ].map((opt) => (
           <button
             key={opt.v}
@@ -521,6 +523,7 @@ export default function AdminUsers({ user: currentUser }) {
                   <select id="role" name="role" value={form.role} onChange={handleChange}>
                     <option value="therapist">Aluno</option>
                     <option value="supervisor">Professor</option>
+                    <option value="evaluator">Avaliador</option>
                     <option value="admin">Administrador</option>
                   </select>
                 </div>

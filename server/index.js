@@ -232,7 +232,9 @@ const DEFAULT_PROFILE = {
   updateAllos: false,
 };
 
-const VALID_ROLES = ['therapist', 'supervisor', 'admin'];
+// 'evaluator' (Avaliador) acompanha o Processo Seletivo (Dashboard + Logs de
+// avaliações). Conta real criada pelo admin, como as demais.
+const VALID_ROLES = ['therapist', 'supervisor', 'admin', 'evaluator'];
 
 function hashPasswordSync(plain) {
   return bcrypt.hashSync(String(plain), BCRYPT_ROUNDS);
@@ -380,6 +382,20 @@ if (!fs.existsSync(path.join(DATA_DIR, 'desafio.json'))) {
 // visitante (estrelas 0–5 + mensagem livre). Lista append-only.
 if (!fs.existsSync(path.join(DATA_DIR, 'feedback.json'))) {
   writeJSON('feedback.json', []);
+}
+
+// Processo Seletivo — logs completos dos candidatos (dados do candidato +
+// mensagens + avaliação + nota + status). Retenção PRÓPRIA de 15 dias
+// (pruneExpiredSelectionLogs), independente dos 30 dias do logs.json.
+if (!fs.existsSync(path.join(DATA_DIR, 'selection-logs.json'))) {
+  writeJSON('selection-logs.json', []);
+}
+
+// Processo Seletivo — estatísticas anônimas e PERMANENTES para a Dashboard.
+// { timestamp, score, status } — sem PII, sem mensagens. Sobrevive à expiração
+// dos logs completos, de modo que a Dashboard mantém o histórico agregado.
+if (!fs.existsSync(path.join(DATA_DIR, 'selection-stats.json'))) {
+  writeJSON('selection-stats.json', []);
 }
 
 function readMMR() {
@@ -2706,6 +2722,18 @@ function loadAvaliacaoPrompt() {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
+// Avaliador dedicado do Processo Seletivo: "só-nota", saída curta e direcionada ao
+// AVALIADOR (síntese + pontos fortes/fracos + observações), sem o diálogo socrático
+// nem o feedback longo ao aluno do v16-2. Mesmos 6 critérios/régua e o mesmo bloco
+// [notas-supervisor] (a nota final sai igual do scoring.js). System muito menor
+// (~3k vs ~32k) → corta input; saída curta → corta prosa. Fallback no v16-2 se o
+// arquivo sumir — o seletivo nunca fica sem avaliador.
+function loadSelecaoEvaluatorPrompt() {
+  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-processo-seletivo-v1.md');
+  if (!fs.existsSync(promptFile)) return loadAvaliacaoPrompt();
+  return fs.readFileSync(promptFile, 'utf-8');
+}
+
 // Avaliador dedicado da Neuroavaliação: sessão única, foco em acolhimento,
 // entrevista, hipótese diagnóstica e adequação da bateria de testes. Se o arquivo
 // não existir, cai no avaliador global (v16.2) — neuro nunca fica sem avaliador.
@@ -3023,6 +3051,473 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
     }
   }
+});
+
+// ============================================================================
+// PROCESSO SELETIVO — avaliação externa individual por link fixo + role avaliador
+// ----------------------------------------------------------------------------
+// Um link fixo público (/processo-seletivo), protegido por senha compartilhada,
+// pelo qual candidatos externos (sem conta, como o visitante) fazem UMA simulação.
+// A avaliação/nota/feedback rodam 100% no servidor e NUNCA voltam ao candidato —
+// só o agradecimento. O avaliador (role 'evaluator') acompanha por Dashboard +
+// Logs de avaliações. O padrão de "sessão externa por link" espelha o Duelo.
+// ============================================================================
+const SELECAO_PASSWORD = process.env.SELECAO_PASSWORD || 'allos1';
+const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
+const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
+const SELECTION_ACTIVE_THRESHOLD = 40; // nota mínima p/ contar como candidato ATIVO
+const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
+// Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
+// Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
+// efetivo fica ~metade do preço de tabela desse modelo.
+const OPENAI_SELECAO_MODEL = process.env.OPENAI_SELECAO_MODEL || OPENAI_SIM_MODEL;
+const OPENAI_SELECAO_EFFORT = process.env.OPENAI_SELECAO_EFFORT || OPENAI_SIM_EFFORT;
+const SELECAO_BATCH_POLL_MS = 3 * 60 * 1000; // frequência do coletor de batches
+const SELECAO_MAX_SESSIONS = 6; // máx. de sessões por candidato (igual à Simulação)
+
+const selecaoLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+});
+
+// WhatsApp normalizado (só dígitos) — chave de deduplicação por pessoa.
+function normalizeWhatsapp(v) {
+  return String(v == null ? '' : v).replace(/\D+/g, '');
+}
+
+// Espelha pruneExpiredLogs (logs.json), mas com TTL PRÓPRIO de 15 dias. Chamado
+// no boot/6h, na listagem e antes do dedup de WhatsApp. As estatísticas anônimas
+// (selection-stats.json) NÃO são podadas — a Dashboard mantém o histórico.
+function pruneExpiredSelectionLogs() {
+  let logs;
+  try { logs = readJSON('selection-logs.json'); } catch { return 0; }
+  if (!Array.isArray(logs) || logs.length === 0) return 0;
+  const cutoff = Date.now() - SELECTION_LOG_TTL_MS;
+  const kept = logs.filter((l) => {
+    const t = new Date((l && l.timestamp) || 0).getTime();
+    if (!Number.isFinite(t) || t === 0) return true;
+    return t >= cutoff;
+  });
+  if (kept.length === logs.length) return 0;
+  writeJSON('selection-logs.json', kept);
+  return logs.length - kept.length;
+}
+
+// Auth do candidato: JWT role 'candidate' com o characterId sorteado + os dados
+// do candidato, tudo ASSINADO (tamper-proof). Isolado do requireAuth central pra
+// não mexer na auth testada. O candidato não é persistido em users.json.
+function requireCandidate(req, res, next) {
+  const token = getTokenFromReq(req);
+  if (!token) return res.status(401).json({ error: 'Não autenticado' });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.role !== 'candidate') return res.status(403).json({ error: 'Acesso negado' });
+    req.candidate = payload; // { sub, role, characterId, candidate: {...} }
+    return next();
+  } catch {
+    return res.status(401).json({ error: 'Sessão expirada' });
+  }
+}
+
+// --- Avaliação do candidato via OpenAI BATCH API (50% off) ---------------------
+// A avaliação NÃO é síncrona: ela roda em lote assíncrono. O candidato só vê o
+// agradecimento; o avaliador lê o resultado depois (o batch volta em até 24h, em
+// geral bem antes). Vantagem: metade do preço, mesmo modelo e MESMO effort — sem
+// perda de qualidade. Fluxo, todo dirigido pelo estado no próprio log:
+//   status 'pending' + sem batchId  → precisa submeter
+//   status 'pending' + batchId      → aguardando aquele batch
+//   status ativo|rejeitado|erro     → concluído
+// O varredor (sweepSelectionBatches) SUBMETE os pendentes e COLETA os prontos.
+// Nunca devolve nota/feedback ao candidato; grava só no log + stats anônimos.
+
+// Monta o corpo de uma request /v1/chat/completions p/ o batch (avaliador enxuto
+// do seletivo + Bloco 1 do personagem, injetado server-side). O gabarito nunca
+// sai pro candidato. Reusa o mesmo helper de mensagens do resto (system→developer).
+// Transcrição do seletivo: agrupa por sessão (divisória "═══ SESSÃO N ═══" a cada
+// virada) e marca ★ + {comentário} das intervenções destacadas pelo candidato.
+function buildSelectionTranscript(messages, patientName) {
+  const rows = [];
+  let lastSession = null;
+  for (const m of (messages || [])) {
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    const s = Number.isFinite(m.session) && m.session >= 1 ? Math.floor(m.session) : 1;
+    if (s !== lastSession) { rows.push(`═══════ SESSÃO ${s} ═══════`); lastSession = s; }
+    const author = m.role === 'user' ? 'Candidato' : (patientName || 'Paciente');
+    const star = m.highlighted ? ' ★' : '';
+    const comment = m.highlighted && m.comment ? `\n   {${m.comment}}` : '';
+    rows.push(`[${author}${star}]\n${m.content}${comment}`);
+  }
+  return rows.join('\n\n---\n\n');
+}
+
+function buildSelectionEvalChatBody(log) {
+  const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.characterId))
+    || { id: log.characterId, name: log.characterName || 'Paciente' };
+  const transcript = buildSelectionTranscript(log.messages, char.name || 'Paciente');
+  const evalUser = {
+    role: 'user',
+    content: `[LOG DO ATENDIMENTO — pode conter várias sessões com o mesmo paciente]\nPersonagem: ${char.name || 'Paciente'}\nLegenda: "═══ SESSÃO N ═══" separa as sessões (acompanhamento ao longo do tempo — avalie também a evolução entre elas); "★" marca uma intervenção que o próprio candidato destacou e a linha "{...}" logo abaixo é a justificativa dele.\n\n${transcript}`,
+  };
+  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: char.id } });
+  const inputTurns = withBloco1([evalUser], bloco1);
+  return {
+    model: OPENAI_SELECAO_MODEL,
+    reasoning_effort: OPENAI_SELECAO_EFFORT, // effort preservado (não baixa)
+    max_completion_tokens: 64000, // TETO (só paga o gerado); saída é curta
+    messages: buildOpenAIMessages(loadSelecaoEvaluatorPrompt(), inputTurns),
+  };
+}
+
+// Extrai nota + avaliação limpa do texto do avaliador (mesma régua do resto):
+// tira o bloco [notas-supervisor] e calcula a nota em código (scoring.js).
+function parseSelectionEval(rawText) {
+  const { clean, criteria } = extractSupervisorNotes(rawText || '');
+  let score = null;
+  if (criteria) {
+    const computed = finalScoreFromCriteria(criteria);
+    if (computed !== null) score = computed;
+  }
+  return { evaluation: clean, criteriaScores: criteria, score };
+}
+
+// Cria um File (multipart) a partir do JSONL do batch, sem tocar em disco.
+function toBatchFile(jsonl) {
+  const O = require('openai');
+  const toFile = O.toFile || (O.default && O.default.toFile);
+  return toFile(Buffer.from(jsonl, 'utf-8'), 'selecao-batch.jsonl', { type: 'application/jsonl' });
+}
+
+let selectionSweepRunning = false;
+
+// Submete todos os logs 'pending' que ainda não têm batchId, num único batch.
+async function submitSelectionBatches(openai) {
+  const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.batchId);
+  if (!pending.length) return;
+  const lines = [];
+  const ids = [];
+  for (const log of pending) {
+    let body;
+    try { body = buildSelectionEvalChatBody(log); } catch (e) { console.error('[selecao-batch] corpo:', e.message); continue; }
+    lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
+    ids.push(log.id);
+  }
+  if (!lines.length) return;
+  const file = await openai.files.create({ file: await toBatchFile(lines.join('\n') + '\n'), purpose: 'batch' });
+  const batch = await openai.batches.create({
+    input_file_id: file.id,
+    endpoint: '/v1/chat/completions',
+    completion_window: '24h',
+  });
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    for (const l of arr) {
+      if (ids.includes(l.id) && l.status === 'pending' && !l.batchId) {
+        l.batchId = batch.id;
+        l.batchSubmittedAt = new Date().toISOString();
+      }
+    }
+    writeJSON('selection-logs.json', arr);
+  });
+  console.log(`[selecao-batch] submetidos ${ids.length} candidato(s) no batch ${batch.id}`);
+}
+
+// Coleta os batches já submetidos: aplica os resultados dos que completaram e
+// marca 'erro' os que falharam/expiraram.
+async function collectSelectionBatches(openai) {
+  const withBatch = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && l.batchId);
+  if (!withBatch.length) return;
+  const batchIds = [...new Set(withBatch.map((l) => l.batchId))];
+  for (const bid of batchIds) {
+    let batch;
+    try { batch = await openai.batches.retrieve(bid); } catch (e) { console.error('[selecao-batch] retrieve:', e.message); continue; }
+
+    if (batch.status === 'completed') {
+      const results = new Map();  // custom_id → texto de saída
+      const errored = new Set();  // custom_id com erro
+      if (batch.output_file_id) {
+        const text = await (await openai.files.content(batch.output_file_id)).text();
+        for (const line of text.split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const obj = JSON.parse(line);
+            const out = obj.response && obj.response.body && obj.response.body.choices;
+            results.set(obj.custom_id, (out && out[0] && out[0].message && out[0].message.content) || '');
+          } catch {}
+        }
+      }
+      if (batch.error_file_id) {
+        try {
+          const etext = await (await openai.files.content(batch.error_file_id)).text();
+          for (const line of etext.split('\n')) {
+            if (!line.trim()) continue;
+            try { const o = JSON.parse(line); if (o.custom_id) errored.add(o.custom_id); } catch {}
+          }
+        } catch {}
+      }
+      const statsToAppend = [];
+      await withFileLock('selection-logs.json', async () => {
+        const arr = readJSON('selection-logs.json');
+        for (const l of arr) {
+          if (l.batchId !== bid || l.status !== 'pending') continue;
+          if (results.has(l.id) && results.get(l.id)) {
+            const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
+            const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
+            l.status = st;
+            l.score = score;
+            l.criteriaScores = criteriaScores;
+            l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
+            if (score != null) statsToAppend.push({ timestamp: l.timestamp, score, status: st });
+          } else {
+            l.status = 'erro'; // sem resultado ou erro explícito no batch
+          }
+        }
+        writeJSON('selection-logs.json', arr);
+      });
+      if (statsToAppend.length) {
+        await withFileLock('selection-stats.json', async () => {
+          const stats = readJSON('selection-stats.json');
+          for (const s of statsToAppend) stats.push(s);
+          writeJSON('selection-stats.json', stats);
+        });
+      }
+      console.log(`[selecao-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
+    } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
+      await withFileLock('selection-logs.json', async () => {
+        const arr = readJSON('selection-logs.json');
+        for (const l of arr) { if (l.batchId === bid && l.status === 'pending') l.status = 'erro'; }
+        writeJSON('selection-logs.json', arr);
+      });
+      console.log(`[selecao-batch] batch ${bid} ${batch.status} — candidato(s) marcados como erro`);
+    }
+    // validating/in_progress/finalizing → deixa pending, checa na próxima varredura.
+  }
+}
+
+// Varredura única (coleta os prontos, depois submete os novos). Guard reentrante
+// pra não submeter o mesmo pendente duas vezes. Sem OpenAI, é no-op (dev/teste).
+async function sweepSelectionBatches() {
+  if (selectionSweepRunning) return;
+  const openai = getOpenAI();
+  if (!openai) return;
+  selectionSweepRunning = true;
+  try {
+    await collectSelectionBatches(openai);
+    await submitSelectionBatches(openai);
+  } catch (e) {
+    console.error('[selecao-batch] sweep erro:', e.message);
+  } finally {
+    selectionSweepRunning = false;
+  }
+}
+
+// 1) Senha — só destrava a UI do formulário. A senha é revalidada no /iniciar.
+app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
+  const pw = String((req.body && req.body.password) || '');
+  if (pw !== SELECAO_PASSWORD) return res.status(401).json({ error: 'Senha incorreta.' });
+  res.json({ ok: true });
+});
+
+// 2) Iniciar — valida senha + campos + termo; dedup 15 dias por WhatsApp; sorteia
+// personagem do Treinamento; emite o JWT do candidato com o characterId + dados.
+app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
+  const b = req.body || {};
+  if (String(b.password || '') !== SELECAO_PASSWORD) {
+    return res.status(401).json({ error: 'Senha incorreta.' });
+  }
+  const nome = clampStr(b.nome, 200).trim();
+  const email = clampStr(b.email, 200).trim();
+  const whatsapp = clampStr(b.whatsapp, 40).trim();
+  const faculdade = clampStr(b.faculdade, 200).trim();
+  const periodo = clampStr(b.periodo, 100).trim();
+  if (!nome || !email || !whatsapp || !faculdade || !periodo) {
+    return res.status(400).json({ error: 'Preencha todos os campos.' });
+  }
+  if (b.consent !== true) {
+    return res.status(400).json({ error: 'É necessário aceitar o termo de consentimento.' });
+  }
+  const wa = normalizeWhatsapp(whatsapp);
+  if (wa.length < 10) {
+    return res.status(400).json({ error: 'Informe um número de WhatsApp válido, com DDD.' });
+  }
+
+  // Dedup: 1 avaliação por WhatsApp a cada 15 dias. Baseado nos logs de seleção
+  // (que duram 15 dias) + checagem explícita de tempo, pra não depender do prune.
+  pruneExpiredSelectionLogs();
+  const logs = readJSON('selection-logs.json');
+  const lastTs = logs
+    .filter((l) => l && normalizeWhatsapp(l.candidate && l.candidate.whatsapp) === wa)
+    .map((l) => new Date(l.timestamp || 0).getTime())
+    .filter((t) => Number.isFinite(t) && t > 0)
+    .sort((a, c) => c - a)[0];
+  if (lastTs) {
+    const daysLeft = Math.max(1, Math.ceil((lastTs + SELECTION_LOG_TTL_MS - Date.now()) / (24 * 60 * 60 * 1000)));
+    return res.status(403).json({
+      error: `Ainda faltam ${daysLeft} dias para você tentar realizar a avaliação novamente`,
+      daysLeft,
+    });
+  }
+
+  // Personagem sorteado a cada início (os mesmos do modo Treinamento).
+  const chars = readJSON('freeplay-characters.json');
+  if (!Array.isArray(chars) || chars.length === 0) {
+    return res.status(500).json({ error: 'Nenhum personagem disponível no momento.' });
+  }
+  const c = chars[Math.floor(Math.random() * chars.length)];
+
+  const candidate = { nome, email, whatsapp, faculdade, periodo };
+  const sessionId = 'sel-' + Date.now() + '-' + crypto.randomBytes(6).toString('hex');
+  const token = jwt.sign(
+    { sub: sessionId, role: 'candidate', characterId: String(c.id), candidate },
+    JWT_SECRET,
+    { expiresIn: SELECAO_TOKEN_TTL },
+  );
+  // NUNCA devolve specificInstruction/evaluationCriteria — só o público do card.
+  res.json({
+    token,
+    character: {
+      id: String(c.id),
+      name: c.name,
+      age: c.age,
+      description: c.description,
+      photoIcon: c.photoIcon || '',
+      photoFull: c.photoFull || '',
+    },
+  });
+});
+
+// 3) Chat do candidato (paciente). O characterId vem do JWT (candidato NÃO escolhe
+// o caso). Monta o prompt do paciente server-side, igual ao /api/chat freeplay.
+app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages deve ser uma lista' });
+  }
+  const c = readJSON('freeplay-characters.json').find((x) => String(x.id) === String(req.candidate.characterId));
+  if (!c) return res.status(404).json({ error: 'Personagem não encontrado' });
+  const openai = getOpenAI();
+  if (!openai) {
+    return res.json({
+      role: 'assistant',
+      content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?',
+    });
+  }
+  const validTurns = (messages || []).filter(
+    (m) => m && (m.role === 'user' || m.role === 'assistant') &&
+      (typeof m.content === 'string' ? m.content : String(m.content || '')),
+  );
+  if (!validTurns.length) {
+    return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+  }
+  try {
+    const { text, usage } = await openaiComplete({
+      openai,
+      model: PATIENT_MODEL,
+      effort: PATIENT_EFFORT,
+      systemPrompt: buildFreeplayPrompt(c.specificInstruction),
+      messages,
+      maxCompletionTokens: 1500 + 2000,
+    });
+    logOpenAIUsage('Seleção paciente', PATIENT_MODEL, usage);
+    res.json({ role: 'assistant', content: text });
+  } catch (err) {
+    console.error('Seleção paciente error:', err.message);
+    res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+  }
+});
+
+// 4) Finalizar — grava o log completo (avaliação pendente) e responde JÁ com o
+// agradecimento. A avaliação roda depois via BATCH API (assíncrona). Preserva
+// destaque(★)/comentário e o nº de sessão de cada mensagem, pra ver a evolução do
+// candidato ao longo do acompanhamento. Nunca devolve nota/feedback ao candidato.
+app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
+  const b = req.body || {};
+  const sessionId = req.candidate.sub;
+  const cleanMessages = (Array.isArray(b.messages) ? b.messages : [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .slice(0, LOG_MAX_MESSAGES)
+    .map((m) => ({
+      role: m.role,
+      content: clampStr(m.content, LOG_MAX_MESSAGE_LEN),
+      highlighted: !!m.highlighted,
+      comment: clampStr(m.comment, 2000),
+      session: Number.isFinite(m.session) && m.session >= 1 ? Math.min(Math.floor(m.session), SELECAO_MAX_SESSIONS) : 1,
+    }));
+  const sessionCount = cleanMessages.reduce((mx, m) => Math.max(mx, m.session || 1), 1);
+  const durationSeconds = Number.isFinite(b.durationSeconds) ? Math.max(0, Math.floor(b.durationSeconds)) : 0;
+
+  const chars = readJSON('freeplay-characters.json');
+  const c = chars.find((x) => String(x.id) === String(req.candidate.characterId))
+    || { id: req.candidate.characterId, name: 'Paciente' };
+
+  // Idempotência: um segundo finish da mesma sessão não regrava (nem duplica stats).
+  const existing = readJSON('selection-logs.json');
+  if (existing.some((l) => l && l.sessionId === sessionId)) {
+    return res.json({ ok: true });
+  }
+
+  const timestamp = new Date().toISOString();
+  const log = {
+    id: 'sellog-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    sessionId,
+    timestamp,
+    candidate: req.candidate.candidate || {},
+    characterId: String(c.id),
+    characterName: c.name || 'Paciente',
+    durationSeconds,
+    sessionCount,
+    messages: cleanMessages,
+    status: 'pending', // pending → ativo | rejeitado | erro
+    score: null,
+    criteriaScores: null,
+    evaluation: '',
+  };
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    if (arr.some((l) => l && l.sessionId === sessionId)) return;
+    arr.push(log);
+    writeJSON('selection-logs.json', arr);
+  });
+
+  // Responde imediatamente — o candidato vê o agradecimento sem esperar a IA.
+  res.json({ ok: true });
+
+  // A avaliação roda via BATCH API (50% off), assíncrona. Dispara uma varredura
+  // pra submeter este log já (não espera o intervalo). O resultado entra no log
+  // quando o batch volta (coletor no boot + a cada SELECAO_BATCH_POLL_MS).
+  sweepSelectionBatches().catch(() => {});
+});
+
+// 5) Logs de avaliações — avaliador/admin. Poda os expirados (15d) e lista todos.
+app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+  pruneExpiredSelectionLogs();
+  const logs = readJSON('selection-logs.json');
+  const sorted = [...logs].sort((a, c) => new Date(c.timestamp || 0) - new Date(a.timestamp || 0));
+  res.json(sorted.map((l) => ({
+    ...l,
+    expiresAt: l.timestamp ? new Date(new Date(l.timestamp).getTime() + SELECTION_LOG_TTL_MS).toISOString() : null,
+  })));
+});
+
+// 6) Dashboard — avaliador/admin. Agrega selection-stats.json (anônimo, permanente)
+// no período pedido: ativos (nota ≥ 40), rejeitados (nota < 40) e média das notas.
+app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+  const range = ['day', 'week', 'month', 'year'].includes(req.query.range) ? req.query.range : 'month';
+  const spanMs = ({ day: 1, week: 7, month: 30, year: 365 }[range]) * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - spanMs;
+  const stats = readJSON('selection-stats.json').filter((s) => {
+    const t = new Date((s && s.timestamp) || 0).getTime();
+    return Number.isFinite(t) && t >= cutoff;
+  });
+  const scored = stats.filter((s) => Number.isFinite(Number(s.score)));
+  const activeCount = scored.filter((s) => Number(s.score) >= SELECTION_ACTIVE_THRESHOLD).length;
+  const rejectedCount = scored.filter((s) => Number(s.score) < SELECTION_ACTIVE_THRESHOLD).length;
+  const avgScore = scored.length
+    ? Math.round(scored.reduce((a, s) => a + Number(s.score), 0) / scored.length)
+    : null;
+  res.json({ range, total: scored.length, activeCount, rejectedCount, avgScore, threshold: SELECTION_ACTIVE_THRESHOLD });
 });
 
 // --- Avaliação Independente v25 (TESTE) ---
@@ -4829,10 +5324,19 @@ if (require.main === module) {
   // processo vivo só por causa do timer.
   const removed = pruneExpiredLogs();
   if (removed > 0) console.log(`[logs] ${removed} log(s) expirado(s) (>${LOG_TTL_DAYS} dias) removido(s) no boot.`);
+  const removedSel = pruneExpiredSelectionLogs();
+  if (removedSel > 0) console.log(`[selecao] ${removedSel} log(s) de seleção expirado(s) (>${SELECTION_LOG_TTL_DAYS} dias) removido(s) no boot.`);
   setInterval(() => {
     const n = pruneExpiredLogs();
     if (n > 0) console.log(`[logs] ${n} log(s) expirado(s) removido(s).`);
+    const ns = pruneExpiredSelectionLogs();
+    if (ns > 0) console.log(`[selecao] ${ns} log(s) de seleção expirado(s) removido(s).`);
   }, 6 * 60 * 60 * 1000).unref();
+
+  // Processo Seletivo (Batch API): no boot, coleta batches que ficaram prontos e
+  // submete pendentes que sobraram de um restart; depois varre periodicamente.
+  sweepSelectionBatches().catch(() => {});
+  setInterval(() => { sweepSelectionBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));

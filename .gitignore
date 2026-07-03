@@ -16,6 +16,8 @@ server/data/duels.json
 server/data/notifications.json
 server/data/desafio.json
 server/data/desafio-history.json
+server/data/selection-logs.json
+server/data/selection-stats.json
 server/data/counters.json
 server/data/daily-missions.json
 server/data/tmp_audio.webm
