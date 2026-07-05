@@ -4438,6 +4438,39 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .selecao-consent input[type="checkbox"] { margin-top: 3px; width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--marrs); cursor: pointer; }
 
+.selecao-instrucoes { list-style: none; margin: 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.selecao-instrucoes li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: var(--cream-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 15px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.selecao-instrucoes li strong { color: var(--marrs-deep); font-weight: 600; }
+.selecao-instrucoes-ico {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  background: var(--marrs-tint); color: var(--marrs);
+  font-size: 15px; font-weight: 700;
+}
+.selecao-instrucoes-aviso {
+  background: var(--terra-tint);
+  border: 1px solid var(--terra);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--terra);
+}
+.selecao-instrucoes-aviso strong { color: var(--terra); font-weight: 700; }
+
 .selecao-done { text-align: center; padding: 12px 4px 6px; }
 .selecao-done-check {
   width: 66px; height: 66px; margin: 6px auto 18px;
