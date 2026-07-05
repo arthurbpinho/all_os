@@ -69,7 +69,7 @@ export default function ProcessoSeletivo() {
   }
   const saved = savedRef.current;
 
-  const [step, setStep] = useState(saved ? 'chat' : 'senha'); // senha | form | chat | done
+  const [step, setStep] = useState(saved ? 'chat' : 'senha'); // senha | form | instrucoes | chat | done
 
   // Senha
   const [password, setPassword] = useState('');
@@ -210,7 +210,10 @@ export default function ProcessoSeletivo() {
       });
       setToken(data.token);
       setCharacter(data.character);
-      await beginChat(data.token, data.character);
+      // Não entra direto no chat: mostra as instruções primeiro. O cronômetro de
+      // 60 min só começa quando o candidato clica em "Começar" (em beginChat).
+      setStep('instrucoes');
+      setStarting(false);
     } catch (err) {
       // 403 com daysLeft = já fez a avaliação nos últimos 15 dias.
       setFormError(err.message || 'Não foi possível iniciar a avaliação.');
@@ -412,6 +415,54 @@ export default function ProcessoSeletivo() {
               {starting ? 'Iniciando…' : 'Iniciar avaliação'}
             </button>
           </form>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'instrucoes') {
+    return (
+      <div className="selecao-page">
+        <div className="selecao-card wide">
+          <Brand />
+          <h2>Como funciona a simulação</h2>
+          <p className="selecao-sub">Leia com atenção antes de começar. O tempo só começa a contar quando você iniciar.</p>
+
+          <ul className="selecao-instrucoes">
+            <li>
+              <span className="selecao-instrucoes-ico">🗓</span>
+              <div>Você terá até <strong>{MAX_SELECAO_SESSIONS} sessões</strong> com o mesmo paciente, para acompanhar a evolução ao longo do tempo.</div>
+            </li>
+            <li>
+              <span className="selecao-instrucoes-ico">→</span>
+              <div>Use o botão <strong>“Passar sessão →”</strong> para avançar para a próxima sessão. <strong>Seu progresso não é perdido</strong> ao passar de sessão.</div>
+            </li>
+            <li>
+              <span className="selecao-instrucoes-ico">★</span>
+              <div>Você pode <strong>destacar (★) suas intervenções</strong> e explicar seu raciocínio — isso ajuda os avaliadores a entenderem suas escolhas.</div>
+            </li>
+            <li>
+              <span className="selecao-instrucoes-ico">✓</span>
+              <div>Nada é enviado até você clicar em <strong>“Finalizar avaliação”</strong>. Só então o atendimento vai para os avaliadores.</div>
+            </li>
+            <li>
+              <span className="selecao-instrucoes-ico">⏱</span>
+              <div>Você tem <strong>60 minutos</strong> no total. Ao esgotar o tempo, a avaliação é enviada automaticamente.</div>
+            </li>
+          </ul>
+
+          <div className="selecao-instrucoes-aviso">
+            <strong>⚠ Não saia desta janela</strong> enquanto estiver fazendo a simulação — principalmente no <strong>celular</strong>. Se você fechar ou trocar de aba/aplicativo, seu progresso pode ser perdido.
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-primary btn-lg"
+            style={{ width: '100%', marginTop: 18 }}
+            onClick={() => beginChat(token, character)}
+          >
+            Começar simulação
+          </button>
         </div>
       </div>
     );
