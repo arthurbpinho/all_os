@@ -25,6 +25,7 @@ import DuelAccept from './pages/DuelAccept';
 import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
 import ProcessoSeletivo from './pages/ProcessoSeletivo';
+import Antessala from './pages/Antessala';
 import SelecaoDashboard from './pages/SelecaoDashboard';
 import SelecaoLogs from './pages/SelecaoLogs';
 import NotificationBell from './components/NotificationBell';
@@ -187,6 +188,13 @@ export default function App() {
                   {ICONS.skill}<span>Trilha</span>
                 </Link>
               )}
+              {/* Antessala (pré-supervisão): ferramenta do aluno pra preparar a
+                  supervisão do paciente real. Visitante não usa (efêmero). */}
+              {(isTherapist || isAdmin) && (
+                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''}>
+                  {ICONS.antessala}<span>Antessala</span>
+                </Link>
+              )}
             </>
           )}
 
@@ -220,6 +228,12 @@ export default function App() {
               {isSupervisor && (
                 <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
                   {ICONS.supervisor}<span>Logs dos Alunos</span>
+                </Link>
+              )}
+              {/* Antessala: o supervisor lê aqui os mapas entregues pelos alunos. */}
+              {isSupervisor && (
+                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''}>
+                  {ICONS.antessala}<span>Antessala</span>
                 </Link>
               )}
               {(isSupervisor || isAdmin) && (
@@ -354,6 +368,7 @@ export default function App() {
           {/* Progressão foi integrada ao Treinamento — rota antiga redireciona. */}
           <Route path="/progression" element={<Navigate to="/freeplay" replace />} />
           <Route path="/terapeutas" element={<Terapeutas user={user} />} />
+          <Route path="/antessala" element={<Antessala user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />
