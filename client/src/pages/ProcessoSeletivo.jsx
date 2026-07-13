@@ -431,7 +431,7 @@ export default function ProcessoSeletivo() {
           <ul className="selecao-instrucoes">
             <li>
               <span className="selecao-instrucoes-ico">🗓</span>
-              <div>Você terá até <strong>{MAX_SELECAO_SESSIONS} sessões</strong> com o mesmo paciente, para acompanhar a evolução ao longo do tempo.</div>
+              <div>Você pode usar no máximo <strong>{MAX_SELECAO_SESSIONS} sessões</strong> com cada paciente para acompanhar seu progresso, mas finalize quando achar o melhor momento, independentemente do número de sessões.</div>
             </li>
             <li>
               <span className="selecao-instrucoes-ico">→</span>
