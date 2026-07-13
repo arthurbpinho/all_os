@@ -531,6 +531,20 @@ export const api = {
     return { evaluationStream: full, ...(finalPayload || {}) };
   },
 
+  // --- Antessala (pré-supervisão) ---
+  // Aluno: seus mapas de caso (resumos). Supervisor/admin: mapas entregues dos
+  // alunos. get/save/deliver/delete operam sobre um mapa. reflect é a camada
+  // maiêutica (o servidor monta o system prompt travado).
+  getAntessalaCases: () => request('/antessala'),
+  getSupervisorAntessala: () => request('/antessala/supervisor'),
+  getAntessalaCase: (id) => request(`/antessala/${encodeURIComponent(id)}`),
+  createAntessalaCase: (doc) => request('/antessala', { method: 'POST', body: doc }),
+  updateAntessalaCase: (id, doc) => request(`/antessala/${encodeURIComponent(id)}`, { method: 'PUT', body: doc }),
+  deliverAntessalaCase: (id) => request(`/antessala/${encodeURIComponent(id)}/deliver`, { method: 'POST', body: {} }),
+  deleteAntessalaCase: (id) => request(`/antessala/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // { questions: string[], text } — perguntas para o aluno aprofundar a etapa.
+  reflectAntessala: (step, doc) => request('/antessala/reflect', { method: 'POST', body: { step, doc } }),
+
   // --- Notificações in-app ---
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),

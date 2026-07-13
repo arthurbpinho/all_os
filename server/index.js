@@ -17,6 +17,7 @@ const {
 const mmrEngine = require('./mmr');
 const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
+const { buildReflectionPrompt: buildAntessalaReflection } = require('./antessala');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
 const {
   NEURO_TEST_CATALOG,
@@ -179,7 +180,7 @@ function envDiag(name) {
 console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
 console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
 console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
-console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — só na Avaliação Independente)');
+console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — Treinamento, Seletivo, Avaliação Independente e reflexão da Antessala)');
 console.log('[startup] DATA_DIR          =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
 console.log('[startup] PORT              =', envDiag('PORT'));
 console.log('[startup] env keys count    =', Object.keys(process.env).length);
@@ -403,6 +404,14 @@ if (!fs.existsSync(path.join(DATA_DIR, 'selection-stats.json'))) {
 // Avaliação Independente — FILA de jobs em batch (async). Runtime, não versionado.
 if (!fs.existsSync(path.join(DATA_DIR, 'avaliacao-fila.json'))) {
   writeJSON('avaliacao-fila.json', []);
+}
+
+// Antessala (pré-supervisão) — mapas de caso criados pelo aluno antes da
+// supervisão. Um registro por mapa, indexado por aluno (ownerId) e data — a
+// leitura longitudinal (mesma tendência do aluno por vários mapas) fica
+// consultável pelo supervisor sem refatoração.
+if (!fs.existsSync(path.join(DATA_DIR, 'antessala.json'))) {
+  writeJSON('antessala.json', []);
 }
 
 function readMMR() {
@@ -3711,8 +3720,9 @@ const AVAL_MODELOS = {
   'glm-5.2': { id: 'glm-5.2', provider: 'glm', efforts: ['disabled', 'high', 'max'], batch: false },
 };
 
-// Cliente do GLM (z.ai) — OpenAI-compatível. Base própria + GLM_API_KEY. Isolado:
-// só a Avaliação Independente usa; o resto do app continua no getOpenAI().
+// Cliente do GLM (z.ai) — OpenAI-compatível. Base própria + GLM_API_KEY. Usado
+// pelos avaliadores de Treinamento/Seletivo, pela Avaliação Independente e pela
+// reflexão da Antessala; o resto do app continua no getOpenAI().
 function getGLM() {
   const apiKey = process.env.GLM_API_KEY;
   if (!apiKey) return null;
@@ -5711,6 +5721,299 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
       },
     },
   ]);
+});
+
+// ============================================================
+// --- Antessala (pré-supervisão) ---
+// O aluno (therapist) monta, antes da supervisão, um "mapa de caso": título,
+// objetivo, fatos hierarquizados, saídas clínicas, armadilhas, conceitos e
+// direções. Um registro por mapa em antessala.json. O supervisor lê os mapas
+// ENTREGUES dos alunos que supervisiona (leitura longitudinal do raciocínio).
+//
+// Princípio da ferramenta: a IA (endpoint /reflect) age sobre a FORMA do
+// pensamento — só faz perguntas maiêuticas, nunca gera conteúdo clínico. Por
+// isso o system prompt vive no servidor (server/antessala.js), fora do alcance
+// do cliente. Ver briefing-mapa-pre-supervisao.md.
+// ============================================================
+
+const ANTESSALA_FILE = 'antessala.json';
+// Aviso de política de dados: o mapa fala de um paciente REAL (sem campo de
+// identificação). O front orienta a não escrever nome/dado identificável; aqui
+// só limitamos tamanho, não conteúdo.
+const ANT_MAX_FATOS = 40;
+const ANT_MAX_CHILDREN = 200; // variações/armadilhas/conceitos/relações/direções
+
+function antGenId() {
+  return crypto.randomBytes(5).toString('hex');
+}
+function antClampStr(v, max) {
+  return typeof v === 'string' ? v.slice(0, max) : '';
+}
+function antClampInt(v, min, max, dflt) {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return dflt;
+  return Math.min(max, Math.max(min, n));
+}
+
+// Escrita (criar/editar/entregar/excluir) é restrita a therapist (aluno) e admin
+// via requireRole nas rotas — supervisor apenas lê, e o visitante (efêmero) não
+// participa (o mapa é longitudinal por aluno).
+//
+// Leitura de um mapa: o dono (qualquer status), o admin, ou o supervisor do dono
+// (só quando o mapa foi entregue). Espelha o escopo por teacherId de /api/logs.
+function canReadAntessalaCase(user, c) {
+  if (!user || !c) return false;
+  if (user.role === 'admin') return true;
+  if (c.ownerId === user.id) return true;
+  if (user.role === 'supervisor' && c.status === 'delivered') {
+    const users = readJSON('users.json');
+    const owner = users.find((u) => u.id === c.ownerId);
+    return !!(owner && owner.teacherId === user.id);
+  }
+  return false;
+}
+
+// Aceita só a forma conhecida do documento, coagindo tipos, limitando tamanhos e
+// descartando referências órfãs (variação de um fato inexistente etc.).
+function sanitizeAntessalaDoc(b) {
+  b = b && typeof b === 'object' ? b : {};
+  const fatos = (Array.isArray(b.fatos) ? b.fatos : []).slice(0, ANT_MAX_FATOS).map((f) => ({
+    id: antClampStr(f && f.id, 40) || antGenId(),
+    texto: antClampStr(f && f.texto, 1000),
+    centralidade: antClampInt(f && f.centralidade, 1, 5, 3),
+  }));
+  const fatoIds = new Set(fatos.map((f) => f.id));
+
+  const variacoes = (Array.isArray(b.variacoes) ? b.variacoes : []).slice(0, ANT_MAX_CHILDREN)
+    .map((v) => ({ id: antClampStr(v && v.id, 40) || antGenId(), fatoId: antClampStr(v && v.fatoId, 40), texto: antClampStr(v && v.texto, 1000) }))
+    .filter((v) => fatoIds.has(v.fatoId));
+  const varIds = new Set(variacoes.map((v) => v.id));
+
+  const pitfalls = (Array.isArray(b.pitfalls) ? b.pitfalls : []).slice(0, ANT_MAX_CHILDREN)
+    .map((p) => ({ id: antClampStr(p && p.id, 40) || antGenId(), variacaoId: antClampStr(p && p.variacaoId, 40), texto: antClampStr(p && p.texto, 1000), flagged: !!(p && p.flagged) }))
+    .filter((p) => varIds.has(p.variacaoId));
+
+  const conceitos = (Array.isArray(b.conceitos) ? b.conceitos : []).slice(0, ANT_MAX_CHILDREN)
+    .map((c) => ({ id: antClampStr(c && c.id, 40) || antGenId(), fatoId: antClampStr(c && c.fatoId, 40), texto: antClampStr(c && c.texto, 1000), tipo: antClampStr(c && c.tipo, 200) }))
+    .filter((c) => fatoIds.has(c.fatoId));
+
+  const relacoes = (Array.isArray(b.relacoes) ? b.relacoes : []).slice(0, ANT_MAX_CHILDREN)
+    .map((r) => ({ id: antClampStr(r && r.id, 40) || antGenId(), origem: antClampStr(r && r.origem, 40), destino: antClampStr(r && r.destino, 40), descricao: antClampStr(r && r.descricao, 300) }))
+    .filter((r) => fatoIds.has(r.origem) && fatoIds.has(r.destino));
+
+  const direcoes = (Array.isArray(b.direcoes) ? b.direcoes : []).slice(0, ANT_MAX_CHILDREN)
+    .map((d) => ({ id: antClampStr(d && d.id, 40) || antGenId(), texto: antClampStr(d && d.texto, 1000) }));
+
+  return {
+    titulo: antClampStr(b.titulo, 200),
+    business: antClampStr(b.business, 2000),
+    fatos, relacoes, variacoes, pitfalls, conceitos, direcoes,
+  };
+}
+
+// Resumo pra listagens (sem o corpo completo do mapa).
+function antessalaSummary(c) {
+  return {
+    id: c.id,
+    ownerId: c.ownerId,
+    ownerName: c.ownerName,
+    titulo: c.titulo || '',
+    status: c.status,
+    fatosCount: Array.isArray(c.fatos) ? c.fatos.length : 0,
+    createdAt: c.createdAt,
+    updatedAt: c.updatedAt,
+    deliveredAt: c.deliveredAt || null,
+  };
+}
+
+// Modelo da camada de reflexão: GLM 5.2 (z.ai) em effort HIGH, por decisão do
+// dono — mesmo avaliador/effort do Treinamento e do Seletivo. Env-overridável
+// (trocar p/ 'gpt-*' reverte pro OpenAI; provider derivado do prefixo). GLM 5.2
+// aceita disabled|high|max; ficamos no 'high' (não 'max').
+const ANTESSALA_MODEL = process.env.ANTESSALA_MODEL || 'glm-5.2';
+const ANTESSALA_EFFORT = process.env.ANTESSALA_EFFORT || 'high';
+
+// Chamada de reflexão: GLM 5.2. Se o GLM falhar (rate limit/instabilidade),
+// cai no mini da OpenAI pra que o aluno não fique sem as perguntas — mesmo
+// padrão de fallback do avaliador de Treinamento. Sem nenhuma chave, devolve
+// null (o endpoint responde "IA indisponível" sem quebrar o resto).
+async function callAntessalaReflection(system, userText) {
+  const provider = providerForModel(ANTESSALA_MODEL);
+  const client = getClientForProvider(provider);
+  if (client) {
+    try {
+      const body = buildChatBody({
+        provider, model: ANTESSALA_MODEL, effort: ANTESSALA_EFFORT, maxTokens: 8000,
+        messages: [{ role: 'developer', content: system }, { role: 'user', content: userText }],
+      });
+      const resp = await client.chat.completions.create(body);
+      const text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content || '').trim();
+      if (text) return text;
+      throw new Error('resposta vazia');
+    } catch (err) {
+      console.error(`[antessala/reflect] ${ANTESSALA_MODEL} falhou → fallback OpenAI mini:`, err.message);
+    }
+  }
+  const openai = getOpenAI();
+  if (openai) {
+    const { text } = await openaiComplete({
+      openai,
+      model: OPENAI_EXERCISE_MODEL,
+      effort: 'low',
+      systemPrompt: system,
+      messages: [{ role: 'user', content: userText }],
+      maxCompletionTokens: 4000,
+    });
+    return (text || '').trim();
+  }
+  return null;
+}
+
+// GET /api/antessala — mapas do próprio aluno (resumos, mais recentes primeiro).
+app.get('/api/antessala', requireAuth, requireRole('therapist', 'admin'), (req, res) => {
+  const all = readJSON(ANTESSALA_FILE, []);
+  const mine = all
+    .filter((c) => c.ownerId === req.user.id)
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+  res.json(mine.map(antessalaSummary));
+});
+
+// GET /api/antessala/supervisor — mapas ENTREGUES dos alunos supervisionados
+// (admin vê todos). Congelados; agrupáveis por aluno no front pra leitura
+// longitudinal. Registrado ANTES de /:id.
+app.get('/api/antessala/supervisor', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const all = readJSON(ANTESSALA_FILE, []);
+  const users = readJSON('users.json');
+  let visible;
+  if (req.user.role === 'admin') {
+    visible = all.filter((c) => c.status === 'delivered');
+  } else {
+    const myStudents = new Set(
+      users.filter((u) => u.role === 'therapist' && u.teacherId === req.user.id).map((u) => u.id),
+    );
+    visible = all.filter((c) => c.status === 'delivered' && myStudents.has(c.ownerId));
+  }
+  visible.sort((a, b) => new Date(b.deliveredAt || b.updatedAt || 0) - new Date(a.deliveredAt || a.updatedAt || 0));
+  res.json(visible.map(antessalaSummary));
+});
+
+// POST /api/antessala/reflect — camada maiêutica. { step, doc } → perguntas.
+// O system prompt é montado no servidor (papel travado). Registrado ANTES de /:id.
+app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'admin'), aiLimiter, async (req, res) => {
+  const step = Number(req.body && req.body.step);
+  if (!Number.isInteger(step) || step < 1 || step > 7) {
+    return res.status(400).json({ error: 'step inválido (1 a 7)' });
+  }
+  const doc = sanitizeAntessalaDoc(req.body && req.body.doc);
+  const { system, userText } = buildAntessalaReflection(step, doc);
+  try {
+    const text = await callAntessalaReflection(system, userText);
+    if (text == null) {
+      return res.status(503).json({ error: 'Reflexão indisponível (IA não configurada).' });
+    }
+    // Só as perguntas (uma por linha) — normaliza tirando marcadores de lista.
+    const questions = text
+      .split('\n')
+      .map((l) => l.replace(/^[-•\d.\s]+/, '').trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    res.json({ questions, text });
+  } catch (err) {
+    console.error('[antessala/reflect]', err.message);
+    res.status(502).json({ error: 'Não consegui gerar as perguntas agora. Tente de novo em instantes.' });
+  }
+});
+
+// POST /api/antessala — cria um mapa novo (rascunho).
+app.post('/api/antessala', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+  const doc = sanitizeAntessalaDoc(req.body);
+  const now = new Date().toISOString();
+  const record = {
+    id: antGenId() + antGenId(),
+    ownerId: req.user.id,
+    ownerName: req.user.name || req.user.username || '—',
+    ...doc,
+    status: 'draft',
+    createdAt: now,
+    updatedAt: now,
+    deliveredAt: null,
+  };
+  await withFileLock(ANTESSALA_FILE, async () => {
+    const all = readJSON(ANTESSALA_FILE, []);
+    all.push(record);
+    writeJSON(ANTESSALA_FILE, all);
+  });
+  res.status(201).json(record);
+});
+
+// GET /api/antessala/:id — mapa completo. Dono (qualquer status), supervisor do
+// dono (só entregue) ou admin.
+app.get('/api/antessala/:id', requireAuth, (req, res) => {
+  const all = readJSON(ANTESSALA_FILE, []);
+  const c = all.find((x) => x.id === req.params.id);
+  if (!c) return res.status(404).json({ error: 'Mapa não encontrado' });
+  if (!canReadAntessalaCase(req.user, c)) return res.status(403).json({ error: 'Acesso negado' });
+  res.json(c);
+});
+
+// PUT /api/antessala/:id — atualiza o mapa. Só o dono, e só enquanto rascunho
+// (depois de entregue, não é mais editável).
+app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+  const doc = sanitizeAntessalaDoc(req.body);
+  let out = null;
+  let status = 200;
+  await withFileLock(ANTESSALA_FILE, async () => {
+    const all = readJSON(ANTESSALA_FILE, []);
+    const idx = all.findIndex((x) => x.id === req.params.id);
+    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
+    const c = all[idx];
+    if (c.ownerId !== req.user.id && req.user.role !== 'admin') { status = 403; out = { error: 'Acesso negado' }; return; }
+    if (c.status === 'delivered') { status = 409; out = { error: 'Mapa já entregue — não pode mais ser editado.' }; return; }
+    all[idx] = { ...c, ...doc, updatedAt: new Date().toISOString() };
+    writeJSON(ANTESSALA_FILE, all);
+    out = all[idx];
+  });
+  res.status(status).json(out);
+});
+
+// POST /api/antessala/:id/deliver — entrega para a supervisão (torna o mapa
+// não editável).
+app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+  let out = null;
+  let status = 200;
+  await withFileLock(ANTESSALA_FILE, async () => {
+    const all = readJSON(ANTESSALA_FILE, []);
+    const idx = all.findIndex((x) => x.id === req.params.id);
+    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
+    const c = all[idx];
+    if (c.ownerId !== req.user.id && req.user.role !== 'admin') { status = 403; out = { error: 'Acesso negado' }; return; }
+    if (c.status === 'delivered') { out = c; return; } // idempotente
+    const now = new Date().toISOString();
+    all[idx] = { ...c, status: 'delivered', deliveredAt: now, updatedAt: now };
+    writeJSON(ANTESSALA_FILE, all);
+    out = all[idx];
+  });
+  res.status(status).json(out);
+});
+
+// DELETE /api/antessala/:id — dono (só rascunho) ou admin (qualquer).
+app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+  let out = null;
+  let status = 200;
+  await withFileLock(ANTESSALA_FILE, async () => {
+    const all = readJSON(ANTESSALA_FILE, []);
+    const idx = all.findIndex((x) => x.id === req.params.id);
+    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
+    const c = all[idx];
+    const isOwner = c.ownerId === req.user.id;
+    const isAdminUser = req.user.role === 'admin';
+    if (!isOwner && !isAdminUser) { status = 403; out = { error: 'Acesso negado' }; return; }
+    if (c.status === 'delivered' && !isAdminUser) { status = 409; out = { error: 'Mapa já entregue — não pode ser excluído.' }; return; }
+    all.splice(idx, 1);
+    writeJSON(ANTESSALA_FILE, all);
+    out = { ok: true };
+  });
+  res.status(status).json(out);
 });
 
 // Serve static files in production
