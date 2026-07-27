@@ -36,9 +36,9 @@ export function copyText(text) {
   });
 }
 
-// Baixa texto como arquivo .txt.
-export function downloadText(filename, text) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+// Baixa texto como arquivo (.txt por padrão; passe outro `mime` p/ .csv/.json etc).
+export function downloadText(filename, text, mime = 'text/plain;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

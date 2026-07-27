@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import LogActions from '../components/LogActions';
-import { makeLogItems, evalSection } from '../logFiles';
+import { makeLogItems, evalSection, downloadText } from '../logFiles';
 
 const SORT_OPTIONS = [
   { value: 'recent', label: 'Mais recentes' },
@@ -46,6 +46,30 @@ function filterLogs(list, statusFilter, search) {
     const hay = [c.nome, c.email, c.whatsapp, c.faculdade, l.characterName].filter(Boolean).join(' ').toLowerCase();
     return hay.includes(q);
   });
+}
+
+// CSV: legível por humano (abre em Excel/Sheets) e igualmente fácil de somar/
+// filtrar por máquina (aqui ou pelo Claude) — mais direto que JSON pra uma
+// tabela simples, e mais estruturado que .txt. Aspas duplicadas escapam campo;
+// campo com vírgula/aspas/quebra de linha vai entre aspas.
+function csvField(v) {
+  const s = v == null ? '' : String(v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function buildSummaryCsv(list) {
+  const header = ['Nome completo', 'Paciente (caso)', 'Nota final', 'Status', 'Data/hora (ISO)'];
+  const rows = list.map((l) => {
+    const c = l.candidate || {};
+    return [
+      c.nome || '',
+      l.characterName || '',
+      l.score == null ? '' : l.score,
+      STATUS_LABEL[l.status] || l.status || '',
+      l.timestamp || '',
+    ].map(csvField).join(',');
+  });
+  // BOM no início: Excel só reconhece acentos em UTF-8 sem BOM como Latin-1.
+  return '\uFEFF' + [header.map(csvField).join(','), ...rows].join('\r\n');
 }
 
 function fmtDate(iso) {
@@ -136,6 +160,12 @@ export default function SelecaoLogs() {
   }
   useEffect(() => { load(); }, []);
 
+  function downloadSummary() {
+    const csv = buildSummaryCsv(visibleLogs);
+    const date = new Date().toISOString().slice(0, 10);
+    downloadText(`sumario-processo-seletivo-${date}.csv`, csv, 'text/csv;charset=utf-8');
+  }
+
   return (
     <div>
       <div className="page-header with-action">
@@ -179,7 +209,17 @@ export default function SelecaoLogs() {
               </select>
             </div>
           </div>
-          <div className="selecao-logs-count">{visibleLogs.length} de {logs.length} avaliações</div>
+          <div className="selecao-logs-count-row">
+            <span className="selecao-logs-count">{visibleLogs.length} de {logs.length} avaliações</span>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={downloadSummary}
+              disabled={visibleLogs.length === 0}
+              title="Nome completo + paciente atendido + nota final, em .csv (abre no Excel/Sheets e é fácil de processar)"
+            >
+              Baixar sumário (.csv)
+            </button>
+          </div>
         </div>
       )}
 
