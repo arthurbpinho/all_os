@@ -1,8 +1,52 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import LogActions from '../components/LogActions';
 import { makeLogItems, evalSection } from '../logFiles';
+
+const SORT_OPTIONS = [
+  { value: 'recent', label: 'Mais recentes' },
+  { value: 'oldest', label: 'Mais antigos' },
+  { value: 'score-desc', label: 'Nota: mais alta' },
+  { value: 'score-asc', label: 'Nota: mais baixa' },
+];
+const STATUS_FILTERS = [
+  { value: 'all', label: 'Todos os status' },
+  { value: 'ativo', label: 'Ativo' },
+  { value: 'rejeitado', label: 'Rejeitado' },
+  { value: 'pending', label: 'Em avaliação (lote)' },
+  { value: 'erro', label: 'Erro' },
+];
+
+function sortLogs(list, sortBy) {
+  const arr = [...list];
+  const score = (l) => (Number.isFinite(l.score) ? l.score : null);
+  if (sortBy === 'score-desc' || sortBy === 'score-asc') {
+    const dir = sortBy === 'score-desc' ? -1 : 1;
+    arr.sort((a, b) => {
+      const sa = score(a), sb = score(b);
+      if (sa == null && sb == null) return 0;
+      if (sa == null) return 1; // sem nota sempre por último
+      if (sb == null) return -1;
+      return dir * (sa - sb);
+    });
+  } else {
+    const dir = sortBy === 'oldest' ? 1 : -1;
+    arr.sort((a, b) => dir * (new Date(a.timestamp || 0) - new Date(b.timestamp || 0)));
+  }
+  return arr;
+}
+
+function filterLogs(list, statusFilter, search) {
+  const q = search.trim().toLowerCase();
+  return list.filter((l) => {
+    if (statusFilter !== 'all' && l.status !== statusFilter) return false;
+    if (!q) return true;
+    const c = l.candidate || {};
+    const hay = [c.nome, c.email, c.whatsapp, c.faculdade, l.characterName].filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+}
 
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -74,6 +118,14 @@ export default function SelecaoLogs() {
   const [error, setError] = useState('');
   const [openId, setOpenId] = useState(null);
   const [tab, setTab] = useState('log'); // log | eval
+  const [sortBy, setSortBy] = useState('recent');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const visibleLogs = useMemo(
+    () => sortLogs(filterLogs(logs, statusFilter, search), sortBy),
+    [logs, statusFilter, search, sortBy],
+  );
 
   function load() {
     setLoading(true);
@@ -100,6 +152,37 @@ export default function SelecaoLogs() {
 
       {error && <div className="alert error">{error}</div>}
 
+      {!loading && logs.length > 0 && (
+        <div className="card selecao-logs-filters">
+          <div className="aval-controls">
+            <div>
+              <label htmlFor="selecao-search">Buscar</label>
+              <input
+                id="selecao-search"
+                type="text"
+                placeholder="Nome, e-mail, faculdade, caso…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ width: '100%' }}
+              />
+            </div>
+            <div>
+              <label htmlFor="selecao-status">Status</label>
+              <select id="selecao-status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: '100%' }}>
+                {STATUS_FILTERS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="selecao-sort">Ordenar por</label>
+              <select id="selecao-sort" value={sortBy} onChange={(e) => setSortBy(e.target.value)} style={{ width: '100%' }}>
+                {SORT_OPTIONS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="selecao-logs-count">{visibleLogs.length} de {logs.length} avaliações</div>
+        </div>
+      )}
+
       {loading ? (
         <div className="card" style={{ textAlign: 'center', padding: 40 }}>
           <span className="spinner" /> <span style={{ marginLeft: 12 }}>Carregando…</span>
@@ -108,8 +191,12 @@ export default function SelecaoLogs() {
         <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
           Nenhuma avaliação de candidato registrada ainda.
         </div>
+      ) : visibleLogs.length === 0 ? (
+        <div className="card" style={{ textAlign: 'center', padding: 40, color: 'var(--ink-soft)' }}>
+          Nenhuma avaliação encontrada com esse filtro.
+        </div>
       ) : (
-        logs.map((log) => {
+        visibleLogs.map((log) => {
           const c = log.candidate || {};
           const reasoning = (log.reasoning || '').trim();
           const { logStr, evalBody, hasEval } = buildStrings(log);
