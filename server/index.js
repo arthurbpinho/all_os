@@ -3876,6 +3876,42 @@ async function markAvalJob(jobId, patch) {
   });
 }
 
+// Modo síncrono via JOB LOCAL (não é a Batch API da OpenAI): a chamada ao
+// modelo roda em background, fora do ciclo request/response, então a rota
+// devolve o jobId na hora e nunca esbarra no timeout de 100s do Cloudflare —
+// mesmo se o avaliador demorar bastante (GLM effort high/max, v18-25/v25 com
+// prompt grande). O cliente faz polling em /fila igual ao batch real, só que
+// aqui não há desconto de 50% nem espera de horas: termina assim que o modelo
+// responde. Bug corrigido: antes disso, batch:false fazia `await
+// runIndependenteSync` direto na resposta HTTP e o Cloudflare cortava com 524
+// antes da origem terminar.
+async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome }) {
+  const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+  const job = {
+    id: jobId, createdAt: new Date().toISOString(),
+    userId: user.id, userName: user.name || '',
+    casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: false, local: true,
+    status: 'processing', result: null, error: null,
+  };
+  await withFileLock('avaliacao-fila.json', async () => {
+    const arr = readJSON('avaliacao-fila.json');
+    arr.push(job);
+    writeJSON('avaliacao-fila.json', arr);
+  });
+  runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log })
+    .then(async (result) => {
+      const entry = await persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model, effort, batch: false, result });
+      await markAvalJob(jobId, { status: 'completed', completedAt: new Date().toISOString(), result: buildAvalResponse(entry, result) });
+      console.log(`[aval-local] job ${jobId} (${evaluator}) completo: nota=${result.notaFinal}`);
+    })
+    .catch(async (e) => {
+      console.error(`[aval-local] job ${jobId} erro:`, e.message);
+      await markAvalJob(jobId, { status: 'error', error: e.message });
+    });
+  console.log(`[aval-local] job ${jobId} (${evaluator}/${model}/${effort}) iniciado em background`);
+  return job;
+}
+
 let avalSweepRunning = false;
 // Coleta os batches da Avaliação Independente que ficaram prontos.
 async function sweepAvaliacaoBatches() {
@@ -3980,16 +4016,10 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
       return res.json({ queued: true, jobId: job.id, status: job.status });
     }
 
-    const t0 = Date.now();
-    const result = await runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log });
-    const inst = result.instrumentacao || {};
-    console.log(
-      `Avaliação independente (${evaluator}/${model}/${effort}) caso=${casoNome || casoId}: nota=${result.notaFinal} ` +
-      `em ${Date.now() - t0}ms · custo=${inst.custo ? '$' + inst.custo.usd.toFixed(4) : 'n/d'} ` +
-      `tokens=in${(inst.totais && inst.totais.input) || 0}/cache${(inst.totais && inst.totais.cached) || 0}/out${(inst.totais && inst.totais.output) || 0}`,
-    );
-    const entry = await persistAvaliacaoResult({ user: req.user, casoId, casoNome, evaluator, model, effort, batch: false, result });
-    return res.json(buildAvalResponse(entry, result));
+    // Não-batch: roda como job LOCAL em background (ver enqueueAvaliacaoLocal) —
+    // nunca bloqueia a resposta HTTP, então nunca esbarra no timeout do Cloudflare.
+    const job = await enqueueAvaliacaoLocal({ client, provider, user: req.user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome });
+    return res.json({ queued: true, jobId: job.id, status: job.status, local: true });
   } catch (err) {
     console.error('Avaliação independente error:', err && err.stack ? err.stack : err);
     if (!res.headersSent) {

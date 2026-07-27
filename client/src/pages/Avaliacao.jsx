@@ -179,6 +179,35 @@ export default function Avaliacao({ user }) {
     reader.readAsText(file);
   }
 
+  // Job local (não-batch): a run roda em background no servidor (evita o timeout
+  // 524 do Cloudflare em avaliações demoradas); aqui só ficamos perguntando por
+  // ela até sair da fila, mantendo a tela de "avaliando" como antes.
+  async function pollLocalJob(jobId) {
+    const POLL_MS = 3000;
+    const MAX_TRIES = 400; // teto de segurança (~20min)
+    for (let i = 0; i < MAX_TRIES; i++) {
+      await new Promise((r) => setTimeout(r, POLL_MS));
+      let list;
+      try { list = await api.avaliacaoFila(); } catch { continue; }
+      const job = Array.isArray(list) ? list.find((j) => j.id === jobId) : null;
+      if (!job) continue;
+      if (job.status === 'completed' && job.result) {
+        setResult(job.result);
+        setLoading(false);
+        refreshFila();
+        return;
+      }
+      if (job.status === 'error') {
+        setError(job.error || 'Erro ao rodar a avaliação.');
+        setLoading(false);
+        refreshFila();
+        return;
+      }
+    }
+    setError('A avaliação está demorando demais. Confira em "Fila de avaliações" mais tarde.');
+    setLoading(false);
+  }
+
   async function handleStart() {
     if (!selectedCharacterId) { setError('Selecione o caso correspondente (necessário para o Bloco 1).'); return; }
     if (!transcript.trim()) { setError('Cole ou envie a transcrição da sessão.'); return; }
@@ -191,17 +220,21 @@ export default function Avaliacao({ user }) {
       const data = await api.avaliacaoIndependente({
         log: transcript, casoId: selectedCharacterId, evaluator, model, effort, batch: isBatch,
       });
-      if (data && data.queued) {
+      if (data && data.queued && data.local) {
+        await pollLocalJob(data.jobId);
+      } else if (data && data.queued) {
         setQueuedMsg('Avaliação enviada para a fila (batch — ~50% mais barato, assíncrono). Ela aparece em "Fila de avaliações" quando o lote volta.');
         setFilaOpen(true);
         refreshFila();
+        setLoading(false);
       } else {
         setResult(data);
+        setLoading(false);
       }
     } catch (err) {
       setError(err.message || 'Erro ao rodar a avaliação.');
-    } finally {
       setLoading(false);
+    } finally {
       setSubmitting(false);
     }
   }
