@@ -83,6 +83,7 @@ export default function FreePlay({ user }) {
           <div className="sidequest-banner-desc">{sidequest.description}</div>
           <div className="sidequest-banner-hint">
             Esta missão é o foco do seu próximo treino — escolha um paciente e persiga o objetivo acima.
+            {' '}Enquanto ela estiver ativa, a missão diária fica pausada: é uma missão por vez.
           </div>
         </div>
       )}

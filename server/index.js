@@ -1,6 +1,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -17,6 +18,8 @@ const {
 const mmrEngine = require('./mmr');
 const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
+const simIndependente = require('./simulacao-independente');
+const errorLog = require('./error-log');
 const { buildReflectionPrompt: buildAntessalaReflection } = require('./antessala');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
 const {
@@ -32,6 +35,83 @@ const app = express();
 // Railway/Cloudflare ficam na frente; sem isso o express-rate-limit aborta com
 // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR e req.ip fica errado.
 app.set('trust proxy', 1);
+
+// Não anuncia "Express" em toda resposta — é reconhecimento de graça pra scanner.
+app.disable('x-powered-by');
+
+// Headers de segurança. Vem ANTES de tudo pra valer também nos estáticos.
+// O CSP é o único ponto que pode quebrar a tela, então está escrito explícito
+// em vez de usar o default do helmet — cada linha abaixo corresponde a algo que
+// o app realmente carrega:
+//   style/font externos  → Google Fonts (client/index.html)
+//   img data:            → recortador de foto (canvas.toDataURL)
+//   img/media blob:      → download de log e gravação de áudio do entrevistador
+//   script 'self' apenas → o anti-flash do tema virou /theme-init.js justamente
+//                          pra não precisar de 'unsafe-inline' aqui
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      'default-src': ["'self'"],
+      'base-uri': ["'self'"],
+      'object-src': ["'none'"],
+      'frame-ancestors': ["'none'"], // trava clickjacking do painel admin
+      'form-action': ["'self'"],
+      'script-src': ["'self'"],
+      'script-src-attr': ["'none'"],
+      'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      'img-src': ["'self'", 'data:', 'blob:'],
+      'media-src': ["'self'", 'blob:'],
+      'connect-src': ["'self'"],
+      'worker-src': ["'self'"],
+      'manifest-src': ["'self'"],
+      'upgrade-insecure-requests': [],
+    },
+  },
+  // O app é servido inteiro pela mesma origem; nada é embutido de fora.
+  crossOriginEmbedderPolicy: false,
+  // Casa com frame-ancestors 'none' acima (o default do helmet é SAMEORIGIN).
+  // Navegador moderno obedece o CSP; este header cobre os antigos.
+  xFrameOptions: { action: 'deny' },
+  // 1 ano. Sem `preload` de propósito: preload é praticamente irreversível e
+  // exige decisão consciente sobre o domínio inteiro.
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: false },
+}));
+
+// --- IP real do cliente (base de TODO rate limit pré-autenticação) ---
+// O X-Forwarded-For é parcialmente controlado por quem chama: o atacante manda
+// o header, o Cloudflare só APENDA o IP real, e `trust proxy` faz o Express
+// escolher uma posição que o atacante consegue prever. Efeito prático: um balde
+// de rate limit novo e zerado a cada request forjada — brute-force sem limite.
+// O CF-Connecting-IP é SOBRESCRITO pelo Cloudflare em toda request, então é o
+// único valor confiável aqui.
+//
+// ATENÇÃO: isso só vale enquanto o tráfego chegar pelo Cloudflare. A URL
+// *.up.railway.app fura o Cloudflare e, por ela, o CF-Connecting-IP volta a ser
+// forjável. Mantenha o domínio da Railway fora de divulgação (ver DEPLOY.md).
+function clientIp(req) {
+  const cf = req.headers['cf-connecting-ip'];
+  const raw = (typeof cf === 'string' && cf.trim()) ? cf.trim() : (req.ip || '');
+  // Express entrega IPv4 como ::ffff:1.2.3.4 quando o socket é IPv6.
+  if (raw.startsWith('::ffff:') && raw.includes('.')) return raw.slice(7);
+  return raw;
+}
+
+// Chave de rate limit por IP. IPv6 é agrupado pelo /64 porque um único cliente
+// costuma ter um /64 inteiro à disposição — chavear pelo endereço completo
+// devolveria baldes infinitos de graça, que é exatamente o bypass que estamos
+// fechando.
+function ipKey(req) {
+  const ip = clientIp(req);
+  if (!ip) return 'ip:desconhecido';
+  if (!ip.includes(':')) return `ip4:${ip}`;
+  const [head, tail] = ip.split('%')[0].split('::');
+  const h = head ? head.split(':').filter(Boolean) : [];
+  const t = tail ? tail.split(':').filter(Boolean) : [];
+  const full = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  return `ip6:${full.slice(0, 4).join(':')}`;
+}
 
 // CORS allowlist. Em produção o front é servido pelo mesmo origin (o Express
 // serve o build do React), então só precisa abrir pra dev local.
@@ -120,6 +200,9 @@ if (!JWT_SECRET || JWT_SECRET.length < 32) {
   process.exit(1);
 }
 const TOKEN_TTL = '7d';
+// Visitante é anônimo e não persistido: token curto limita a janela em que um
+// token raspado do site serve pra queimar chamada de IA. Ver signToken.
+const VISITOR_TOKEN_TTL = '2h';
 const BCRYPT_ROUNDS = 10;
 
 // --- Rate limiting ---
@@ -129,12 +212,14 @@ const SKIP_RATE_LIMIT = process.env.NODE_ENV === 'test';
 const noopLimiter = (req, res, next) => next();
 
 // Pre-auth (chave por IP): protege contra brute-force de credenciais e flood
-// de geração de tokens.
+// de geração de tokens. O keyGenerator explícito é obrigatório — o default do
+// express-rate-limit usa req.ip, que é forjável atrás do Cloudflare (ver ipKey).
 const loginLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: ipKey,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
 const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
@@ -142,12 +227,79 @@ const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: ipKey,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
-// Post-auth (chave por user.id, fallback IP): protege a chave Anthropic
-// (e a OpenAI do Whisper) de abuse, e segura escrita massiva em logs.
+// Post-auth: protege a chave Anthropic (e a OpenAI do Whisper) de abuse, e
+// segura escrita massiva em logs.
+//
+// Visitante é chaveado por IP, NÃO por user.id: o id dele é sorteado a cada
+// /api/login/visitor, então chavear por id daria 300 chamadas de IA novas a
+// cada token pedido — torneira aberta na conta de IA, sem senha nenhuma.
+// Usuário real continua por id (o IP é compartilhado numa clínica/faculdade e
+// não deve fazer um aluno consumir a cota do outro).
 function userKey(req) {
-  return (req.user && req.user.id) ? `u:${req.user.id}` : `ip:${req.ip}`;
+  if (req.user && req.user.id && !req.user.isVisitor) return `u:${req.user.id}`;
+  return ipKey(req);
+}
+// Teto de IA do visitante: uma conversa de demonstração cabe folgado; farm de
+// chamada não. Usuário autenticado mantém os 300/h.
+const VISITOR_AI_MAX = 40;
+
+// --- Política de senha ---
+// Piso por perfil. Supervisor e admin exigem mais porque são as contas que
+// alcançam dados de todos os alunos. Antes o piso era 6 pra todo mundo — o que
+// deixava o admin trocar, pela tela de Perfil, a senha de 12 exigida no boot
+// (ADMIN_INITIAL_PASSWORD) por uma de 6.
+const PASSWORD_MIN = 8;
+const PASSWORD_MIN_PRIVILEGIADO = 12;
+function senhaMinimaPara(role) {
+  return (role === 'admin' || role === 'supervisor') ? PASSWORD_MIN_PRIVILEGIADO : PASSWORD_MIN;
+}
+// Devolve a mensagem de erro, ou null se a senha serve.
+function validarSenha(senha, role) {
+  const min = senhaMinimaPara(role);
+  if (String(senha == null ? '' : senha).length < min) {
+    const extra = min === PASSWORD_MIN_PRIVILEGIADO ? ' (contas de supervisor e admin exigem mais)' : '';
+    return `Senha deve ter ao menos ${min} caracteres${extra}`;
+  }
+  return null;
+}
+
+// --- Atraso progressivo por CONTA nas tentativas de login ---
+// O loginLimiter é por IP. Quem tem muitos IPs (botnet, VPN, Tor) ataca uma
+// conta específica sem teto nenhum, porque cada IP traz 10 tentativas novas.
+// Um contador por username fecha essa brecha.
+//
+// Por que ATRASO e não bloqueio: bloquear a conta transformaria isso numa arma
+// — bastaria errar a senha de um aluno de propósito pra trancá-lo pra fora.
+// O atraso encarece o ataque (que precisa de milhares de tentativas) sem
+// impedir a pessoa certa de entrar.
+const falhasLogin = new Map(); // username -> { count, last }
+const FALHA_JANELA_MS = 15 * 60 * 1000;
+const FALHA_TOLERANCIA = 3;      // as 3 primeiras não atrasam — typo acontece
+const FALHA_ATRASO_MAX_MS = 5000;
+
+function limparFalhasVelhas() {
+  const cutoff = Date.now() - FALHA_JANELA_MS;
+  for (const [k, v] of falhasLogin) if (v.last < cutoff) falhasLogin.delete(k);
+}
+function atrasoLoginMs(username) {
+  const reg = falhasLogin.get(username);
+  if (!reg || Date.now() - reg.last > FALHA_JANELA_MS) return 0;
+  const excedente = reg.count - FALHA_TOLERANCIA;
+  if (excedente <= 0) return 0;
+  return Math.min(250 * (2 ** (excedente - 1)), FALHA_ATRASO_MAX_MS);
+}
+function registrarFalhaLogin(username) {
+  limparFalhasVelhas();
+  const reg = falhasLogin.get(username);
+  const agora = Date.now();
+  if (!reg || agora - reg.last > FALHA_JANELA_MS) falhasLogin.set(username, { count: 1, last: agora });
+  else falhasLogin.set(username, { count: reg.count + 1, last: agora });
+}
+function limparFalhasLogin(username) {
+  falhasLogin.delete(username);
 }
 // 300 req/hora cobre ~6 sessões clínicas longas. Era 60 antes — apertado
 // demais pra uso real. Como /api/chat e /api/evaluate só aceitam context com
@@ -155,7 +307,7 @@ function userKey(req) {
 // o risco de abuse da chave Anthropic caiu — podemos afrouxar com segurança.
 const aiLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 300,
+  max: (req) => ((req.user && req.user.isVisitor) ? VISITOR_AI_MAX : 300),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: userKey,
@@ -202,6 +354,35 @@ function writeJSON(file, data) {
   const tmp = `${dest}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, dest);
+}
+
+// --- Registro de erros (painel "Logs de Erro" do admin) ---
+// Grava o erro COMPLETO no DATA_DIR e devolve um código curto. A resposta ao
+// usuário nunca deve conter err.message: use `falhou()` logo abaixo.
+// Nunca lança — falhar ao registrar um erro não pode virar um segundo erro.
+function registrarErro(req, err, where, { status = 500, extra = null } = {}) {
+  let entry;
+  try {
+    entry = errorLog.buildErrorEntry({
+      err, req, where, status, extra,
+      ip: (() => { try { return clientIp(req); } catch { return null; } })(),
+    });
+    writeJSON(errorLog.ERROR_LOG_FILE, errorLog.appendError(readJSON(errorLog.ERROR_LOG_FILE), entry));
+  } catch (e) {
+    console.error('[error-log] não consegui registrar o erro:', e && e.message);
+    if (!entry) return errorLog.newErrorId(); // ainda devolve código pro usuário
+  }
+  // Mantém o rastro no stdout do Railway também — o painel pode estar fora do ar
+  // justamente quando mais se precisa dele.
+  console.error(`[${entry.where}] ${entry.id}:`, (err && err.message) || err);
+  return entry.id;
+}
+
+// Registra e devolve o corpo JSON pronto pra resposta: mensagem genérica com
+// emoji + código. Uso: `res.status(500).json(falhou(req, err, 'chat/paciente'))`.
+function falhou(req, err, where, { status = 500, message, extra } = {}) {
+  const id = registrarErro(req, err, where, { status, extra });
+  return errorLog.userFacingError(id, message);
 }
 
 // Mutex em memória por arquivo (fila de promises). Serializa o ciclo
@@ -463,7 +644,7 @@ function signToken(user) {
   return jwt.sign(
     { sub: user.id, role: user.role, username: user.username },
     JWT_SECRET,
-    { expiresIn: TOKEN_TTL }
+    { expiresIn: user.role === 'visitor' ? VISITOR_TOKEN_TTL : TOKEN_TTL }
   );
 }
 
@@ -530,13 +711,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
   }
+  // Atraso progressivo por conta (ver falhasLogin). Aplicado ANTES de comparar
+  // o hash e valendo mesmo pra usuário inexistente — se só as contas reais
+  // atrasassem, o atraso viraria um oráculo de enumeração.
+  const atraso = SKIP_RATE_LIMIT ? 0 : atrasoLoginMs(String(username));
+  if (atraso > 0) await new Promise((r) => setTimeout(r, atraso));
+
   const users = readJSON('users.json');
   const user = users.find(u => u.username === username);
   // Bcrypt sempre — se não houver hash, falha silenciosa (resposta genérica para evitar enumeration)
   const ok = user && user.passwordHash
     ? await bcrypt.compare(String(password), user.passwordHash)
     : false;
-  if (!ok) return res.status(401).json({ error: 'Credenciais inválidas' });
+  if (!ok) {
+    registrarFalhaLogin(String(username));
+    return res.status(401).json({ error: 'Credenciais inválidas' });
+  }
+  limparFalhasLogin(String(username)); // acertou: zera o contador
   const token = signToken(user);
   res.json({ token, user: publicUser(user) });
 });
@@ -570,9 +761,8 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Senha atual e nova são obrigatórias' });
   }
-  if (String(newPassword).length < 6) {
-    return res.status(400).json({ error: 'Nova senha deve ter ao menos 6 caracteres' });
-  }
+  const erroSenha = validarSenha(newPassword, req.user.role);
+  if (erroSenha) return res.status(400).json({ error: erroSenha.replace('Senha deve', 'Nova senha deve') });
   const ok = await bcrypt.compare(String(currentPassword), req.user.passwordHash || '');
   if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
   const users = readJSON('users.json');
@@ -686,9 +876,8 @@ app.post('/api/me/visual-description', requireAuth, aiLimiter, async (req, res) 
     if (!description) return res.status(502).json({ error: 'Não foi possível gerar a descrição.' });
     return res.json({ description });
   } catch (err) {
-    console.error('Visual description error:', err && err.stack ? err.stack : err);
     if (!res.headersSent) {
-      return res.status(500).json({ error: 'Erro ao gerar a descrição: ' + ((err && err.message) || 'desconhecido') });
+      return res.status(500).json(falhou(req, err, 'perfil/descrição-visual'));
     }
   }
 });
@@ -783,11 +972,12 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
     const dup = users.find(u => u.username === username && (!currentUser || u.id !== currentUser.id));
     if (dup) errors.push('Usuário já existe');
   }
-  if (!isUpdate && (!body.password || String(body.password).length < 6)) {
-    errors.push('Senha deve ter ao menos 6 caracteres');
-  }
-  if (body.password !== undefined && body.password !== '' && String(body.password).length < 6) {
-    errors.push('Senha deve ter ao menos 6 caracteres');
+  // Piso depende do perfil sendo criado/editado (ver validarSenha).
+  if (!isUpdate && !body.password) {
+    errors.push(`Senha deve ter ao menos ${senhaMinimaPara(role)} caracteres`);
+  } else if (body.password !== undefined && body.password !== '') {
+    const erroSenha = validarSenha(body.password, role);
+    if (erroSenha) errors.push(erroSenha);
   }
   if (!isUpdate && !VALID_ROLES.includes(role)) {
     errors.push('Função inválida');
@@ -869,9 +1059,10 @@ app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, r
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
 
   if (req.body.password) {
-    if (String(req.body.password).length < 6) {
-      return res.status(400).json({ error: 'Senha deve ter ao menos 6 caracteres' });
-    }
+    // Piso pelo perfil RESULTANTE: promover alguém a supervisor já na mesma
+    // request exige a senha do perfil novo, não a do antigo.
+    const erroSenha = validarSenha(req.body.password, merged.role);
+    if (erroSenha) return res.status(400).json({ error: erroSenha });
     merged.passwordHash = await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS);
   }
 
@@ -912,27 +1103,41 @@ app.delete('/api/admin/users/:id', requireAuth, requireRole('admin'), (req, res)
 
 app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'), async (req, res) => {
   const newPassword = req.body && req.body.newPassword;
-  if (!newPassword || String(newPassword).length < 6) {
-    return res.status(400).json({ error: 'Senha deve ter ao menos 6 caracteres' });
-  }
   const users = readJSON('users.json');
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  // Piso pelo perfil de quem está sendo resetado (ver validarSenha).
+  const erroSenha = validarSenha(newPassword, users[idx].role);
+  if (erroSenha) return res.status(400).json({ error: erroSenha });
   users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
   writeJSON('users.json', users);
   res.json({ ok: true });
 });
 
 // Export completo dos JSON do DATA_DIR — admin-only. Para backup/migração
-// pra SQL. Retorna passwordHash dos users (admin já tem acesso total).
-// Em produção, o admin loga e baixa via interface (AdminUsers.jsx).
+// pra SQL. Em produção, o admin loga e baixa via interface (AdminUsers.jsx).
+//
+// passwordHash NÃO vai no export por padrão. O endpoint é admin-only, mas o
+// ARQUIVO gerado sai do servidor: vai pro notebook, pro Drive, pro WhatsApp.
+// Hash bcrypt não é senha, mas é quebrável OFFLINE, onde nenhum rate limit
+// alcança — um backup de dados não deve virar um arquivo de credenciais.
+// Pra restaurar um desastre você não precisa deles: recria os usuários e emite
+// senhas novas. Quem realmente precisar pede ?includeSecrets=true, e aí é um
+// ato consciente e registrado no log.
 app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
+  const incluirSegredos = req.query.includeSecrets === 'true';
+  const users = readJSON('users.json');
+  if (incluirSegredos) {
+    console.warn(`[export] ${req.user.username} exportou COM os hashes de senha.`);
+  }
   const payload = {
     exportedAt: new Date().toISOString(),
     exportedBy: req.user.username,
     schemaVersion: 1,
+    // Deixa explícito no próprio arquivo se ele contém credenciais ou não.
+    includesSecrets: incluirSegredos,
     data: {
-      users: readJSON('users.json'),
+      users: incluirSegredos ? users : users.map(({ passwordHash, ...rest }) => rest),
       exercises: readJSON('exercises.json'),
       freeplayCharacters: readJSON('freeplay-characters.json'),
       neuroCharacters: readJSON('neuro-characters.json'),
@@ -1447,7 +1652,7 @@ app.get('/api/profile-photos', requireAuth, (req, res) => {
       label: filename.replace(/\(\d+\)/, '').replace(/\.[^.]+$/, '').trim()
     })));
   } catch (err) {
-    res.status(500).json({ error: 'Erro ao listar fotos: ' + err.message });
+    res.status(500).json(falhou(req, err, 'admin/listar-fotos'));
   }
 });
 
@@ -1653,7 +1858,8 @@ app.put('/api/freeplay/:id/photo', requireAuth, requireRole('admin'), writeLimit
     fs.writeFileSync(path.join(PATIENT_PHOTOS_DIR, `${req.params.id}-icon.jpg`), icon);
     fs.writeFileSync(path.join(PATIENT_PHOTOS_DIR, `${req.params.id}-full.jpg`), full);
   } catch (err) {
-    return res.status(500).json({ error: 'Erro ao gravar a foto: ' + err.message });
+    return res.status(500).json(falhou(req, err, 'admin/gravar-foto-paciente',
+      { extra: { casoId: req.params.id } }));
   }
   // ?v=<ts> quebra o cache do navegador quando a foto muda.
   const v = Date.now();
@@ -2095,9 +2301,18 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // uma sidequest ativa e o avaliador a marcou como cumprida, conclui aqui —
   // move pra histórico, concede o título de recompensa e devolve o resultado pra
   // tela pós-sessão celebrar. O Competitivo (mode 'competitive') nunca entra.
+  // Resolve a missão do Treinamento UMA VEZ, antes de concluir qualquer coisa: se
+  // a sidequest for concluída logo abaixo, ela sai de `active`, e uma releitura
+  // depois disso faria a missão diária "assumir" no meio da própria submissão —
+  // concedendo uma missão que nunca foi ao prompt do avaliador.
+  const missionEligible = log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor';
+  const { sidequest: activeMissionSq, daily: activeMissionDaily } = missionEligible
+    ? resolveTrainingMission(req.user.id)
+    : { sidequest: null, daily: null };
+
   let sidequestOutcome = null;
-  if (log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor') {
-    const active = getActiveSidequest(req.user.id);
+  if (missionEligible) {
+    const active = activeMissionSq;
     if (active && sidequestResult) {
       if (sidequestResult.completed) {
         const record = completeSidequest(req.user.id, sidequestResult.justification, {
@@ -2129,10 +2344,11 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   }
 
   // Missão diária (desafio do dia, rotacionado do banco): mesmo gate da sidequest
-  // — Treinamento, não-visitante. Independente da sidequest (uma não anula a outra).
+  // — Treinamento, não-visitante. Só entra quando NÃO havia sidequest ativa (uma
+  // ou outra): `activeMissionDaily` já vem null se havia.
   let dailyMissionOutcome = null;
-  if (log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor') {
-    const activeDaily = getActiveDailyMission(req.user.id);
+  if (missionEligible) {
+    const activeDaily = activeMissionDaily;
     if (activeDaily && dailyResult) {
       if (dailyResult.completed) {
         const record = completeDailyMission(req.user.id, dailyResult.justification, {
@@ -2207,6 +2423,27 @@ app.post('/api/feedback', requireAuth, writeLimiter, (req, res) => {
 app.get('/api/admin/feedback', requireAuth, requireRole('admin'), (req, res) => {
   const all = readJSON('feedback.json', []);
   res.json([...all].reverse());
+});
+
+// --- Logs de Erro (painel do admin) ---
+// Contrapartida do `falhou()`: o usuário recebe só a mensagem genérica + código,
+// e o detalhe (mensagem real, stack, quem, onde, quando) vive aqui.
+app.get('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) => {
+  const all = readJSON(errorLog.ERROR_LOG_FILE, []);
+  // Já vem do mais recente pro mais antigo (appendError insere no topo).
+  res.json({
+    errors: all,
+    meta: { max: errorLog.MAX_ENTRIES, ttlDays: errorLog.TTL_DAYS },
+  });
+});
+
+// Admin: limpa o painel. Útil depois de resolver uma leva de erros, pra a
+// próxima falha não se perder no meio das antigas.
+app.delete('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) => {
+  const antes = readJSON(errorLog.ERROR_LOG_FILE, []).length;
+  writeJSON(errorLog.ERROR_LOG_FILE, []);
+  console.log(`[error-log] painel limpo por ${req.user.username} (${antes} entradas)`);
+  res.json({ ok: true, removidos: antes });
 });
 
 // Admin: dispara um aviso (notificação in-app) para TODOS os usuários reais.
@@ -2689,8 +2926,8 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       logOpenAIUsage('Entrevistador', OPENAI_HEAVY_MODEL, usage);
       return res.json({ role: 'assistant', content: text });
     } catch (err) {
-      console.error('OpenAI entrevistador error:', err.message);
-      return res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+      return res.status(500).json(falhou(req, err, 'entrevistador/chat',
+        { extra: { modelo: OPENAI_HEAVY_MODEL } }));
     }
   }
 
@@ -2727,8 +2964,8 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     logOpenAIUsage('Chat paciente', PATIENT_MODEL, usage);
     res.json({ role: 'assistant', content: text });
   } catch (err) {
-    console.error('OpenAI paciente error:', err.message);
-    res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    res.status(500).json(falhou(req, err, 'chat/paciente',
+      { extra: { modelo: PATIENT_MODEL } }));
   }
 });
 
@@ -2950,8 +3187,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // Duelo e Trilha. O Competitivo (MMR) nunca entra aqui.
   if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
     const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
-    const activeSq = getActiveSidequest(req.user.id);
-    const activeDaily = getActiveDailyMission(req.user.id);
+    // Uma missão OU outra (ver resolveTrainingMission): no máximo um dos dois vem
+    // preenchido, então o avaliador recebe um único objetivo de missão.
+    const { sidequest: activeSq, daily: activeDaily } = resolveTrainingMission(req.user.id);
     if (prevLog || activeSq || activeDaily) {
       progressionMode = true;
       sidequestActive = !!activeSq;
@@ -2986,7 +3224,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         content += `[SIDEQUEST ATIVA]\nTÍTULO: ${activeSq.title}\nDescrição: ${activeSq.description}\n\nEsta sidequest é o objetivo principal deste atendimento. Avalie primariamente se o aluno a cumpriu e emita o bloco [sidequest-resultado] conforme a especificação.\n\n---\n\n`;
       }
       if (activeDaily) {
-        content += `[MISSÃO DIÁRIA]\nTÍTULO: ${activeDaily.title}\nDescrição: ${activeDaily.description}\n\nEste é o desafio do dia, um objetivo clínico ADICIONAL (independente da sidequest). Avalie se o aluno o cumpriu, com a mesma régua da sidequest, e emita o bloco [missao-diaria-resultado] conforme a especificação.\n\n---\n\n`;
+        content += `[MISSÃO DIÁRIA]\nTÍTULO: ${activeDaily.title}\nDescrição: ${activeDaily.description}\n\nEste é o desafio do dia e é o objetivo principal deste atendimento (o aluno não tem sidequest ativa — as duas nunca aparecem juntas). Avalie primariamente se o aluno o cumpriu, com a mesma régua da sidequest, e emita o bloco [missao-diaria-resultado] conforme a especificação.\n\n---\n\n`;
       }
       content += `[ATENDIMENTO 2 — ${studentName} com ${characterName}] (objeto da avaliação)\n${atd2Content || '(sem mensagens)'}`;
 
@@ -3104,13 +3342,15 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
   } catch (err) {
-    console.error('Evaluate error:', err.message);
+    // Registra uma vez só e reaproveita o mesmo corpo nos dois caminhos, pra o
+    // aluno ver o mesmo código independentemente de o stream já ter começado.
+    const corpo = falhou(req, err, 'avaliação/evaluate', { extra: { modelo: evalModel } });
     if (res.headersSent) {
       // Stream já começou (status 200 enviado) — reporta o erro pelo próprio SSE.
-      try { res.write(`data: ${JSON.stringify({ error: 'Erro ao comunicar com a IA: ' + err.message })}\n\n`); } catch {}
+      try { res.write(`data: ${JSON.stringify(corpo)}\n\n`); } catch {}
       res.end();
     } else {
-      res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+      res.status(500).json(corpo);
     }
   }
 });
@@ -3124,7 +3364,21 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
 // só o agradecimento. O avaliador (role 'evaluator') acompanha por Dashboard +
 // Logs de avaliações. O padrão de "sessão externa por link" espelha o Duelo.
 // ============================================================================
-const SELECAO_PASSWORD = process.env.SELECAO_PASSWORD || 'allos1';
+// Senha do processo seletivo. É deliberadamente fácil — vai por WhatsApp pro
+// candidato e só destrava um formulário público; não protege dado sensível.
+// O que a protege de força bruta é o selecaoLimiter (agora chaveado por IP real).
+const SELECAO_PASSWORD = process.env.SELECAO_PASSWORD || 'allos01';
+
+// Comparação em tempo constante: com `!==`, o tempo de resposta vaza quantos
+// caracteres iniciais bateram. Não é o vetor mais provável aqui, mas custa 4 linhas.
+function senhaSelecaoConfere(entrada) {
+  const a = Buffer.from(String(entrada == null ? '' : entrada), 'utf8');
+  const b = Buffer.from(SELECAO_PASSWORD, 'utf8');
+  // timingSafeEqual exige buffers do mesmo tamanho; compara contra si mesmo
+  // pra não responder mais rápido só porque o comprimento difere.
+  if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
+  return crypto.timingSafeEqual(a, b);
+}
 const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
 const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
 const SELECTION_ACTIVE_THRESHOLD = 40; // nota mínima p/ contar como candidato ATIVO
@@ -3142,6 +3396,7 @@ const selecaoLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: ipKey,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
 
@@ -3498,7 +3753,7 @@ app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) 
 // 1) Senha — só destrava a UI do formulário. A senha é revalidada no /iniciar.
 app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
   const pw = String((req.body && req.body.password) || '');
-  if (pw !== SELECAO_PASSWORD) return res.status(401).json({ error: 'Senha incorreta.' });
+  if (!senhaSelecaoConfere(pw)) return res.status(401).json({ error: 'Senha incorreta.' });
   res.json({ ok: true });
 });
 
@@ -3506,7 +3761,7 @@ app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
 // personagem do Treinamento; emite o JWT do candidato com o characterId + dados.
 app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
   const b = req.body || {};
-  if (String(b.password || '') !== SELECAO_PASSWORD) {
+  if (!senhaSelecaoConfere(b.password)) {
     return res.status(401).json({ error: 'Senha incorreta.' });
   }
   const nome = clampStr(b.nome, 200).trim();
@@ -3605,8 +3860,8 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
     logOpenAIUsage('Seleção paciente', PATIENT_MODEL, usage);
     res.json({ role: 'assistant', content: text });
   } catch (err) {
-    console.error('Seleção paciente error:', err.message);
-    res.status(500).json({ error: 'Erro ao comunicar com a IA: ' + err.message });
+    res.status(500).json(falhou(req, err, 'seletivo/chat-paciente',
+      { extra: { modelo: PATIENT_MODEL } }));
   }
 });
 
@@ -3905,7 +4160,9 @@ async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model,
       console.log(`[aval-local] job ${jobId} (${evaluator}) completo: nota=${result.notaFinal}`);
     })
     .catch(async (e) => {
-      console.error(`[aval-local] job ${jobId} erro:`, e.message);
+      // Job assíncrono: ninguém está esperando uma resposta HTTP, então o
+      // painel de Logs de Erro é o único lugar onde essa falha aparece.
+      registrarErro(null, e, 'avaliação-independente/job-local', { extra: { jobId, evaluator, model, effort } });
       await markAvalJob(jobId, { status: 'error', error: e.message });
     });
   console.log(`[aval-local] job ${jobId} (${evaluator}/${model}/${effort}) iniciado em background`);
@@ -3959,7 +4216,7 @@ async function sweepAvaliacaoBatches() {
           await markAvalJob(job.id, { status: 'completed', completedAt: new Date().toISOString(), result: buildAvalResponse(entry, result) });
           console.log(`[aval-batch] job ${job.id} (${job.evaluator}) completo: nota=${result.notaFinal}`);
         } catch (e) {
-          console.error('[aval-batch] finalize:', e.message);
+          registrarErro(null, e, 'avaliação-independente/job-batch', { extra: { jobId: job.id, evaluator: job.evaluator, model: job.model } });
           await markAvalJob(job.id, { status: 'error', error: e.message });
         }
       } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batchObj.status)) {
@@ -4021,9 +4278,8 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
     const job = await enqueueAvaliacaoLocal({ client, provider, user: req.user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome });
     return res.json({ queued: true, jobId: job.id, status: job.status, local: true });
   } catch (err) {
-    console.error('Avaliação independente error:', err && err.stack ? err.stack : err);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Erro na avaliação: ' + ((err && err.message) || 'desconhecido') });
+      res.status(500).json(falhou(req, err, 'avaliação-independente'));
     }
   }
 });
@@ -4041,6 +4297,106 @@ app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor
       result: j.result || null, // já é o buildAvalResponse quando completo
     }));
   res.json(jobs);
+});
+
+// ============================================================================
+// SIMULAÇÃO INDEPENDENTE — laboratório de pricing do PACIENTE (supervisor/admin)
+// ----------------------------------------------------------------------------
+// Conversa com o personagem trocando MODELO e EFFORT, mostrando o custo REAL de
+// CADA turno em tempo real (a Avaliação Independente só mostra o custo no fim,
+// porque lá é uma chamada só). SEM avaliador, sem log, sem gamificação: o
+// laboratório é só sobre custo × qualidade da fala do paciente.
+// Usa o MESMO prompt do personagem da produção (resolveChatSystemPrompt), então o
+// que você lê aqui é o que o aluno leria — com o modelo que você escolheu.
+// ============================================================================
+
+// Catálogo dos modelos + preços (fonte única: server/simulacao-independente.js).
+app.get('/api/simulacao-independente/modelos', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  res.json({ modelos: simIndependente.simCatalogo(), maxTokens: simIndependente.SIM_MAX_TOKENS });
+});
+
+// Cliente do provedor pedido. Anthropic entra SÓ aqui (o resto do app é
+// OpenAI/GLM) — é um dos candidatos do teste de custo × qualidade do paciente.
+function getClientForSimProvider(provider) {
+  if (provider === 'anthropic') return getAnthropic();
+  if (provider === 'glm') return getGLM();
+  return getOpenAI();
+}
+function simProviderKeyName(provider) {
+  if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
+  if (provider === 'glm') return 'GLM_API_KEY (z.ai)';
+  return 'OPENAI_API_KEY';
+}
+
+app.post('/api/simulacao-independente/chat', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const casoId = b.casoId;
+    const modelKey = b.model;
+    const effort = b.effort;
+
+    if (!casoId) return res.status(400).json({ error: 'Selecione o personagem.' });
+    if (!simIndependente.isValidSimModel(modelKey)) return res.status(400).json({ error: 'Modelo inválido.' });
+    const info = simIndependente.simModelInfo(modelKey);
+    if (!info.efforts.includes(effort)) {
+      return res.status(400).json({ error: `Effort inválido para ${info.label} (${info.efforts.join(' | ')}).` });
+    }
+
+    const turns = simIndependente.normalizeTurns(b.messages);
+    if (!turns.length) return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant).' });
+    if (turns[0].role !== 'user') return res.status(400).json({ error: 'A conversa precisa começar com um turno do usuário.' });
+
+    // Prompt do personagem resolvido server-side, igual à produção — o cliente
+    // nunca manda systemPrompt.
+    const resolved = resolveChatSystemPrompt({ context: { type: 'freeplay', itemId: casoId }, user: req.user });
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+    const client = getClientForSimProvider(info.provider);
+    if (!client) {
+      return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(info.provider)} não configurada.` });
+    }
+
+    const t0 = Date.now();
+    let text = '';
+    let usage = null;
+    if (info.provider === 'anthropic') {
+      const args = simIndependente.buildSimAnthropicArgs({
+        model: info.id, effort, systemPrompt: resolved.systemPrompt, turns, thinking: info.thinking,
+      });
+      const resp = await client.messages.create(args);
+      text = simIndependente.extractSimText('anthropic', resp);
+      usage = resp.usage || null;
+    } else {
+      const body = simIndependente.buildSimChatBody({
+        provider: info.provider, model: info.id, effort,
+        systemPrompt: resolved.systemPrompt, turns, thinking: info.thinking,
+      });
+      const resp = await client.chat.completions.create(body);
+      text = simIndependente.extractSimText(info.provider, resp);
+      usage = resp.usage || null;
+    }
+    const latenciaMs = Date.now() - t0;
+
+    const totais = simIndependente.normalizeSimUsage(info.provider, usage);
+    const custo = simIndependente.computeSimCost(modelKey, totais);
+    console.log(
+      `[sim-indep] ${info.id} effort=${effort} ${latenciaMs}ms in=${totais.input} cacheR=${totais.cacheRead} cacheW=${totais.cacheWrite} out=${totais.output} usd=${custo ? custo.usd.toFixed(6) : 'n/d'}`,
+    );
+
+    res.json({
+      role: 'assistant',
+      content: text,
+      turno: {
+        modelKey, model: info.id, provider: info.provider, effort, latenciaMs,
+        totais, custo, // custo === null quando o modelo não está na tabela de preços
+      },
+    });
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).json(falhou(req, err, 'simulação-independente',
+        { extra: { modelo: (req.body && req.body.model) || null, effort: (req.body && req.body.effort) || null } }));
+    }
+  }
 });
 
 // --- Speech to Text Proxy ---
@@ -4071,8 +4427,8 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
     if (req.user.role !== 'visitor') bumpMicUses(req.user.id);
     res.json({ text: transcription.text });
   } catch (err) {
-    console.error('Transcription error:', err.message);
-    res.status(500).json({ error: 'Erro na transcrição' });
+    res.status(500).json(falhou(req, err, 'transcrição/whisper',
+      { message: '😵‍💫 Não consegui transcrever o áudio. Tente de novo.' }));
   } finally {
     // Limpeza sempre, mesmo se a chamada à OpenAI falhar
     try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
@@ -4762,14 +5118,14 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
     notifyDuelResult(target);
     return res.json(sanitizeDuelForUser(target, req.user));
   } catch (err) {
-    console.error('Duel evaluation error:', err.message);
+    const corpo = falhou(req, err, 'duelo/avaliação', { extra: { dueloId: duel.id } });
     await withFileLock('duels.json', () => {
       const fresh = readDuels();
       const t = fresh.find((d) => d.id === duel.id) || duel;
       t.status = 'pending'; // volta a pendente pra permitir retry
       writeDuels(fresh);
     });
-    return res.status(500).json({ error: 'Erro ao avaliar o duelo: ' + err.message });
+    return res.status(500).json(corpo);
   }
 });
 
@@ -5008,8 +5364,12 @@ function completeSidequest(userId, justification, ctx = {}) {
 // --- Missão diária: rotação GLOBAL e determinística do banco de sidequests ---
 // Toda meia-noite UTC entra outra missão (bank[diasDesdeEpoca % tamanho]); é a
 // MESMA para todos. Avaliada e recompensada como uma sidequest (concede o
-// título de recompensa daquela entrada do banco). Coexiste com a sidequest
-// atribuída — uma não anula a outra.
+// título de recompensa daquela entrada do banco).
+//
+// EXCLUSIVIDADE (regra do dono, 2026-07-31): a missão diária e a sidequest do
+// supervisor NUNCA rodam juntas. Sidequest ativa desliga a diária; sem sidequest,
+// a diária assume o lugar. O aluno nunca fica sem missão, mas nunca tem as duas.
+// Ver resolveTrainingMission — é por lá que todo consumidor deve passar.
 function dailyMissionIndex() {
   // Dia de calendário no fuso de São Paulo (UTC−3): a missão diária vira à
   // meia-noite LOCAL (0h), não à meia-noite UTC. Determinístico e global.
@@ -5028,12 +5388,25 @@ function hasCompletedReward(userId, rewardTitleId) {
   const list = readSidequests().completed[userId] || [];
   return list.some((c) => c.rewardTitleId === rewardTitleId);
 }
-// Missão diária ATIVA para o usuário: a do dia, se ele ainda não a concluiu.
+// Missão diária ATIVA para o usuário: a do dia, se (1) ele não tem sidequest do
+// supervisor e (2) ainda não a concluiu. O gate da sidequest está DENTRO daqui de
+// propósito: assim nenhum consumidor — presente ou futuro — consegue ligar a
+// diária por engano enquanto existe sidequest ativa.
 function getActiveDailyMission(userId) {
+  if (getActiveSidequest(userId)) return null; // sidequest tem prioridade absoluta
   const dm = getDailyMission();
   if (!dm) return null;
   if (hasCompletedReward(userId, dm.rewardTitleId)) return null;
   return dm;
+}
+
+// Missão do Treinamento: UMA ou OUTRA, nunca as duas. Fonte única de verdade —
+// prompt do avaliador, conclusão pós-sessão e /api/me/daily-mission passam aqui.
+// Devolve { sidequest, daily } com no máximo um dos dois preenchido.
+function resolveTrainingMission(userId) {
+  const sidequest = getActiveSidequest(userId);
+  if (sidequest) return { sidequest, daily: null };
+  return { sidequest: null, daily: getActiveDailyMission(userId) };
 }
 // Conclui a missão diária do dia: grava na lista de concluídas (concede o título
 // de recompensa, igual à sidequest) — dedup por recompensa (não dá pra farmar).
@@ -5197,7 +5570,13 @@ app.get('/api/me/sidequest', requireAuth, (req, res) => {
 });
 
 // Missão diária do usuário (Treinamento). Mostra a do dia + se ele já concluiu.
+// Com sidequest do supervisor ativa a diária fica DESLIGADA (uma ou outra — ver
+// resolveTrainingMission): responde mission null + pausedBySidequest, e a tela
+// mostra só a sidequest.
 app.get('/api/me/daily-mission', requireAuth, (req, res) => {
+  if (req.user.role !== 'visitor' && getActiveSidequest(req.user.id)) {
+    return res.json({ mission: null, completed: false, pausedBySidequest: true });
+  }
   const dm = getDailyMission();
   if (!dm) return res.json({ mission: null, completed: false });
   const completed = req.user.role !== 'visitor' && hasCompletedReward(req.user.id, dm.rewardTitleId);
@@ -5542,14 +5921,14 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
     if (usage) logOpenAIUsage('Reivindicar (v15 opaco)', OPENAI_SIM_MODEL, usage);
   } catch (err) {
     clearInterval(heartbeat);
-    console.error('Reivindicar evaluate error:', err.message);
+    const { error: msgFalha } = falhou(req, err, 'desafio/reivindicar');
     // A reivindicação já foi gravada; só sinaliza que a avaliação falhou.
     try {
       res.write(`data: ${JSON.stringify({
         done: true,
         kind: 'claimed',
         evaluation: '',
-        error: 'A reivindicação foi registrada, mas a avaliação falhou: ' + err.message,
+        error: `A reivindicação foi registrada, mas a avaliação falhou. ${msgFalha}`,
         titular: titularPublic,
         character: { id: char.id, name: char.name },
       })}\n\n`);
@@ -5662,8 +6041,7 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
     if (usage) logOpenAIUsage('Desafio (titular-desafiante)', OPENAI_SIM_MODEL, usage);
   } catch (err) {
     clearInterval(heartbeat);
-    console.error('Desafio evaluate error:', err.message);
-    try { res.write(`data: ${JSON.stringify({ error: 'Erro ao comunicar com a IA: ' + err.message })}\n\n`); } catch {}
+    try { res.write(`data: ${JSON.stringify(falhou(req, err, 'desafio/avaliação'))}\n\n`); } catch {}
     res.end();
     return;
   }

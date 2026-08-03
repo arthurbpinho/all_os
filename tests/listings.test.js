@@ -16,22 +16,31 @@ describe('listings — filtros de campos sensíveis', () => {
       expect(res.body[0].specificInstruction).toContain('NEURO_PROMPT_SECRETO');
     });
 
-    it('visitor NÃO vê diagnosis nem specificInstruction', async () => {
-      const token = await loginVisitor();
-      const res = await request(app).get('/api/neuro').set(authHeader(token));
+    // O Neuro está fechado a aluno/visitante "por enquanto" (403 em /api/neuro).
+    // A invariante que estes testes protegem, porém, é sobre VAZAMENTO — e ela
+    // vale nos dois mundos. Por isso aceitam 403 (fechado, estado de hoje) OU
+    // 200 sem os campos secretos (quando o Neuro reabrir a alunos). Assim o
+    // teste não morre na reabertura nem fica verde por acidente.
+    const esperaSemSegredo = (res) => {
+      if (res.status === 403) return; // acesso negado: não há o que vazar
       expect(res.status).toBe(200);
       expect(res.body[0].diagnosis).toBeUndefined();
       expect(res.body[0].specificInstruction).toBeUndefined();
-      // Campos públicos continuam
-      expect(res.body[0].name).toBe('Beatriz Test');
+      return res;
+    };
+
+    it('visitor NÃO vê diagnosis nem specificInstruction', async () => {
+      const token = await loginVisitor();
+      const res = await request(app).get('/api/neuro').set(authHeader(token));
+      if (esperaSemSegredo(res)) {
+        // Campos públicos continuam
+        expect(res.body[0].name).toBe('Beatriz Test');
+      }
     });
 
     it('aluno NÃO vê diagnosis nem specificInstruction (defesa em profundidade)', async () => {
       const token = await loginAs('aluno');
-      const res = await request(app).get('/api/neuro').set(authHeader(token));
-      expect(res.status).toBe(200);
-      expect(res.body[0].diagnosis).toBeUndefined();
-      expect(res.body[0].specificInstruction).toBeUndefined();
+      esperaSemSegredo(await request(app).get('/api/neuro').set(authHeader(token)));
     });
   });
 

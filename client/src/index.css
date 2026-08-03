@@ -4595,9 +4595,140 @@ select option { background: var(--cream); color: var(--ink); }
 .aval-reasoning-empty { font-size: 13.5px; line-height: 1.6; color: var(--ink-soft); font-style: italic; }
 .aval-reasoning-empty code { font-style: normal; background: var(--cream-2); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
 
+/* ============================================================
+   SIMULAÇÃO INDEPENDENTE — laboratório de pricing do paciente
+   (custo em tempo real, turno a turno)
+   ============================================================ */
+.sim-model-card {
+  background: var(--cream-2); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px;
+}
+.sim-model-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--marrs-deep); }
+.sim-provider-chip {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+  background: var(--sand); color: var(--ink-soft); padding: 2px 8px; border-radius: 999px;
+}
+.sim-model-nota { font-size: 12px; color: var(--muted); font-style: italic; }
+.sim-model-precos { font-size: 12.5px; color: var(--ink-soft); margin-top: 7px; line-height: 1.55; }
+.sim-model-precos strong { color: var(--marrs-deep); }
+
+.sim-inline-select {
+  font-size: 12.5px; padding: 6px 9px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--cream); color: var(--ink); max-width: 170px;
+}
+
+/* HUD de custo ao vivo, entre o header e as mensagens */
+.sim-hud {
+  background: var(--cream-2); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px; margin: 12px 0 4px; display: flex; flex-direction: column; gap: 10px;
+}
+.sim-hud-main { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.sim-hud-total { display: flex; flex-direction: column; }
+.sim-hud-num { font-family: var(--serif); font-size: 26px; line-height: 1.1; color: var(--marrs-deep); }
+.sim-hud-label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+.sim-hud-stats { display: flex; gap: 16px; flex-wrap: wrap; margin-left: auto; }
+.sim-hud-stat { display: flex; flex-direction: column; align-items: flex-end; }
+.sim-hud-stat-val { font-size: 14.5px; font-weight: 700; color: var(--ink); }
+.sim-hud-stat-key { font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-top: 2px; }
+.sim-hud-tokens { font-size: 12px; color: var(--muted); letter-spacing: 0.02em; }
+.sim-hud-nota {
+  font-size: 12px; line-height: 1.55; color: var(--ink-soft);
+  background: var(--marrs-tint); border-radius: var(--radius); padding: 8px 11px;
+}
+.sim-hud-nota strong { color: var(--marrs-deep); }
+.sim-hud-models { display: flex; flex-direction: column; gap: 6px; border-top: 1px dashed var(--line); padding-top: 9px; }
+.sim-hud-model {
+  display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline;
+  font-size: 12.5px; color: var(--ink-soft);
+}
+.sim-hud-model strong { color: var(--marrs-deep); min-width: 130px; }
+
+/* Selo de custo abaixo de cada fala do paciente */
+.sim-turn-chip {
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline;
+  margin-top: 5px; font-size: 11.5px; color: var(--muted); letter-spacing: 0.02em;
+}
+.sim-turn-chip strong { color: var(--marrs-deep); font-size: 12.5px; }
+
+@media (max-width: 640px) {
+  .sim-hud-stats { margin-left: 0; gap: 12px; }
+  .sim-hud-stat { align-items: flex-start; }
+  .sim-hud-num { font-size: 22px; }
+  .sim-inline-select { max-width: 120px; }
+}
+
 /* Selo de avaliação pendente (competitivo assíncrono, nota em até 24h) */
 .log-pending-chip {
   display: inline-block; font-size: 12px; font-weight: 600; white-space: nowrap;
   padding: 4px 10px; border-radius: 999px;
   background: var(--sand); color: var(--ink-soft);
+}
+
+/* ============================================================
+   Logs de Erro (admin) — painel de diagnóstico.
+   O usuário recebe só um código; o detalhe do erro vive aqui.
+   ============================================================ */
+.errlog-empty { display: flex; align-items: center; gap: 14px; }
+.errlog-empty-icon {
+  width: 38px; height: 38px; flex: 0 0 38px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 18px;
+  background: var(--sand); color: var(--marrs-deep);
+}
+
+.errlog-stats { display: flex; gap: 28px; flex-wrap: wrap; }
+.errlog-stat { display: flex; flex-direction: column; }
+.errlog-stat-num { font-family: var(--serif); font-size: 26px; line-height: 1.1; color: var(--marrs-deep); }
+.errlog-stat-key { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-top: 3px; }
+
+.errlog-filters { margin-bottom: 14px; }
+
+.errlog-card {
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--paper); padding: 12px 14px; margin-bottom: 10px;
+}
+.errlog-head {
+  display: flex; align-items: flex-start; gap: 12px;
+  cursor: pointer; user-select: none;
+}
+.errlog-head-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.errlog-where {
+  font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--terra); font-weight: 700;
+}
+/* Mensagem longa não pode empurrar a data pra fora do card. */
+.errlog-msg { color: var(--ink); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.errlog-head-side { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.errlog-when { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.errlog-caret { color: var(--muted); font-size: 12px; }
+
+.errlog-meta {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--line);
+  font-size: 12px; color: var(--muted);
+}
+/* O código é o que o usuário informa no suporte — dá pra selecionar e colar. */
+.errlog-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; background: var(--sand); color: var(--marrs-deep);
+  padding: 2px 7px; border-radius: 5px; user-select: all;
+}
+
+.errlog-detail { margin-top: 11px; font-size: 13px; }
+.errlog-detail-row { display: flex; gap: 10px; padding: 3px 0; overflow-wrap: anywhere; }
+.errlog-detail-key {
+  font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); flex: 0 0 130px;
+}
+.errlog-stack {
+  margin: 6px 0 0; padding: 10px 12px; border-radius: 8px;
+  background: var(--sand); color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px; line-height: 1.5;
+  white-space: pre; overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .errlog-stats { gap: 18px; }
+  .errlog-detail-row { flex-direction: column; gap: 2px; }
+  .errlog-detail-key { flex: none; }
 }

@@ -2,6 +2,14 @@
 // e a homepage (Home.jsx). Mantê-los num só lugar evita divergência entre o
 // ícone do menu e o do card "Como jogar".
 export const ICONS = {
+  // Triângulo de alerta — painel de Logs de Erro (admin).
+  alert: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+      <path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
+  ),
   home: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <path d="M3 10.5 12 3l9 7.5" />

@@ -4,8 +4,12 @@
 // server-side não gera nota — o que basta pra checar a estrutura e o não-vazamento.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 
+// Default de SELECAO_PASSWORD no server. Constante única: a senha é trocada de
+// tempos em tempos e antes ela estava repetida em três lugares deste arquivo.
+const SENHA = 'allos01';
+
 const CAMPOS = {
-  password: 'allos1',
+  password: SENHA,
   nome: 'Ana Silva',
   email: 'ana@exemplo.com',
   whatsapp: '(11) 91234-5678',
@@ -48,13 +52,13 @@ describe('Processo Seletivo', () => {
   it('senha: recusa incorreta, aceita a correta', async () => {
     const wrong = await request(app).post('/api/selecao/senha').send({ password: 'errada' });
     expect(wrong.status).toBe(401);
-    const ok = await request(app).post('/api/selecao/senha').send({ password: 'allos1' });
+    const ok = await request(app).post('/api/selecao/senha').send({ password: SENHA });
     expect(ok.status).toBe(200);
     expect(ok.body.ok).toBe(true);
   });
 
   it('iniciar: valida campos/termo e devolve token + personagem SEM prompt secreto', async () => {
-    const semCampos = await request(app).post('/api/selecao/iniciar').send({ password: 'allos1', consent: true });
+    const semCampos = await request(app).post('/api/selecao/iniciar').send({ password: SENHA, consent: true });
     expect(semCampos.status).toBe(400);
 
     const semConsent = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, consent: false });

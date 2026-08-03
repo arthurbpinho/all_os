@@ -14,7 +14,9 @@ import AdminExercises from './pages/AdminExercises';
 import AdminFreeplay from './pages/AdminFreeplay';
 import AdminNeuro from './pages/AdminNeuro';
 import AdminEntrevistador from './pages/AdminEntrevistador';
+import AdminErrorLogs from './pages/AdminErrorLogs';
 import Avaliacao from './pages/Avaliacao'
+import SimulacaoIndependente from './pages/SimulacaoIndependente'
 import Profile from './pages/Profile';
 import Missoes from './pages/Missoes';
 import Ranking from './pages/Ranking';
@@ -250,6 +252,12 @@ export default function App() {
               <Link to="/avaliacao" className={isActive('/avaliacao') ? 'active' : ''}>
                 {ICONS.evaluate}<span>Avaliar Sessão</span>
               </Link>
+              {/* Laboratório de custo do PACIENTE (a IA que conversa com o aluno).
+                  Irmão da Avaliar Sessão, mas mede custo × qualidade da fala do
+                  personagem, com o custo em tempo real e sem avaliador. */}
+              <Link to="/simulacao-independente" className={isActive('/simulacao-independente') ? 'active' : ''}>
+                {ICONS.freeplay}<span>Simulação Independente</span>
+              </Link>
             </>
           )}
 
@@ -297,6 +305,11 @@ export default function App() {
               </Link>
               <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
                 {ICONS.log}<span>Todos os Logs</span>
+              </Link>
+              {/* Erros que os usuários encontraram. Eles só recebem um código;
+                  o detalhe (mensagem real, stack, quem, onde) fica aqui. */}
+              <Link to="/admin/erros" className={isActive('/admin/erros') ? 'active' : ''}>
+                {ICONS.alert}<span>Logs de Erro</span>
               </Link>
             </>
           )}
@@ -373,6 +386,7 @@ export default function App() {
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
+          <Route path="/simulacao-independente" element={<SimulacaoIndependente user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />
           <Route path="/ranking" element={<Ranking user={user} />} />
@@ -383,6 +397,7 @@ export default function App() {
           <Route path="/admin/freeplay" element={<AdminFreeplay />} />
           <Route path="/admin/neuro" element={<AdminNeuro />} />
           <Route path="/admin/entrevistador" element={<AdminEntrevistador user={user} />} />
+          <Route path="/admin/erros" element={<AdminErrorLogs />} />
           <Route path="*" element={<Navigate to={defaultRoute(user)} />} />
         </Routes>
       </main>

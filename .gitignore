@@ -22,6 +22,7 @@ server/data/avaliacao-fila.json
 server/data/antessala.json
 server/data/counters.json
 server/data/daily-missions.json
+server/data/error-logs.json
 server/data/tmp_audio.webm
 server/data/tmp_audio_*.webm
 

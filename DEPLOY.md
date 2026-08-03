@@ -67,6 +67,14 @@ no repo **não** sobrescrevem o que já está no volume.
    - SSL/TLS mode: **Full** (Railway já serve HTTPS).
 3. Railway → Settings → Networking → **Custom Domain** → cole o domínio Cloudflare.
 
+> **Não divulgue a URL `*.up.railway.app`.** Ela chega no app **por fora** do
+> Cloudflare, e todo o rate limit pré-autenticação (login, visitante, processo
+> seletivo) é chaveado pelo header `CF-Connecting-IP` — que só é confiável
+> porque o Cloudflare o sobrescreve em toda request. Por dentro do domínio da
+> Railway esse header volta a ser forjável e os limites viram decoração.
+> Se um dia a URL vazar, o caminho é ativar Authenticated Origin Pulls no
+> Cloudflare e recusar no Express o que não vier dele.
+
 ## 6. Primeiro acesso
 
 - Acesse o domínio.

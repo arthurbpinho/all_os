@@ -8,6 +8,13 @@
 
 export const CHANGELOG = [
   {
+    date: '2026-07-31',
+    title: 'Uma missão por vez: sidequest OU missão diária',
+    body: `🔹 Missão do Treinamento:
+• A sidequest do seu supervisor e a missão diária não acontecem mais ao mesmo tempo. Se você tem uma sidequest ativa, ela é a sua missão e a missão diária fica pausada; quando não há sidequest, a missão diária entra no lugar.
+• Você nunca fica sem missão no Treinamento — é sempre uma ou outra. (Isso corrige o comportamento anterior, em que as duas apareciam juntas.)`,
+  },
+  {
     date: '2026-05-29',
     title: 'Homepage, conquistas reformuladas, missão diária e mais',
     body: `🔹 Nova tela inicial (Início):

@@ -237,11 +237,17 @@ export default function Terapeutas({ user }) {
                     <div className="sidequest-bank-reward" style={{ marginTop: 6 }}>
                       Recompensa: <strong>{studentSq.active.rewardTitleLabel}</strong>
                     </div>
+                    <div className="sidequest-bank-desc" style={{ marginTop: 6, fontStyle: 'italic' }}>
+                      Enquanto esta sidequest estiver ativa, a missão diária do aluno fica pausada — é uma missão por vez.
+                    </div>
                     <button className="btn btn-ghost btn-sm" onClick={unassign} disabled={busy}
                       style={{ color: 'var(--terra)', marginTop: 8 }}>Remover sidequest ativa</button>
                   </div>
                 ) : (
-                  <p style={{ color: 'var(--ink-soft)' }}>Nenhuma sidequest ativa. Atribua uma do banco abaixo.</p>
+                  <p style={{ color: 'var(--ink-soft)' }}>
+                    Nenhuma sidequest ativa — o aluno está com a <strong>missão diária</strong> no lugar. Atribuir uma
+                    sidequest abaixo pausa a missão diária dele.
+                  </p>
                 )}
 
                 <div className="sidequest-assign-row">
