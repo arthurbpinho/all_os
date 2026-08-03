@@ -615,6 +615,82 @@ function writeMMR(data) {
   writeJSON('mmr.json', data);
 }
 
+// --- TRI: populações anônimas alimentando a MESMA dificuldade ---
+//
+// A dificuldade dos personagens é ÚNICA. Competitivo, Processo Seletivo e
+// (quando ligado) visitante escrevem todos em mmr.characters. É o ponto do
+// sistema: Elo/TRI existe justamente para que respondentes de níveis
+// diferentes produzam a mesma estimativa de dificuldade. Pools separadas
+// devolveriam só "nota média por personagem" e jogariam essa propriedade fora.
+//
+// Candidato e visitante não têm MMR próprio (o candidato é efêmero; o visitante
+// tem id sorteado a cada sessão). Cada um desses grupos vira então UM jogador
+// persistente — a "população" —, guardado em mmr.anonPlayers. Começa em 50 e
+// aprende: se o grupo é de fato mais fraco, o rating dele cai e o sistema para
+// de confundir "respondente fraco" com "personagem difícil". Sem isso, um
+// rating fixo em 50 empurraria a dificuldade compartilhada para cima.
+const TRI_POOLS = ['selecao', 'visitante'];
+
+// Peso do ajuste de dificuldade por fonte. Sinal de população é mais ruidoso
+// que o de um aluno conhecido (o rating usado é a média do grupo, não a
+// habilidade daquela pessoa), então recebe ganho menor — e o seletivo, que terá
+// muito mais volume, não afoga o sinal do competitivo. Aluno real = 1.
+const TRI_PESOS = {
+  selecao: Number(process.env.TRI_PESO_SELECAO) || 0.35,
+  visitante: Number(process.env.TRI_PESO_VISITANTE) || 0.5,
+};
+
+// Avaliação de visitante ainda não existe. A ligação está pronta: quando ligar,
+// basta VISITOR_TRI=1 — o resto do caminho já está escrito e testado.
+const VISITOR_TRI_ENABLED = process.env.VISITOR_TRI === '1';
+
+// Quantos atendimentos cada fonte contribuiu para cada personagem. Não entra no
+// engine — é só para a dashboard poder dizer de onde veio o número.
+function bumpTriFonte(mmr, characterId, fonte) {
+  if (!mmr.charSources) mmr.charSources = {};
+  const id = String(characterId);
+  if (!mmr.charSources[id]) mmr.charSources[id] = {};
+  mmr.charSources[id][fonte] = (mmr.charSources[id][fonte] || 0) + 1;
+}
+
+// Registra UM atendimento de população anônima. Atualiza a dificuldade
+// COMPARTILHADA e o rating da própria população. Idempotência não é garantida —
+// quem chama deve fazê-lo uma única vez por avaliação concluída.
+// Nunca lança: a TRI é observabilidade, não pode derrubar uma avaliação.
+async function registrarTriAnonimo(pool, characterId, score) {
+  if (!TRI_POOLS.includes(pool)) return null;
+  if (!characterId || !Number.isFinite(Number(score))) return null;
+  let out = null;
+  try {
+    await withFileLock('mmr.json', async () => {
+      const mmr = readMMR();
+      if (!mmr.anonPlayers) mmr.anonPlayers = {};
+      const { player, character, result } = mmrEngine.updateMatch(
+        mmr.anonPlayers[pool] || mmrEngine.newAnonPopulation(),
+        mmr.characters[String(characterId)],
+        Number(score),
+        { dWeight: TRI_PESOS[pool] },
+      );
+      mmr.anonPlayers[pool] = player;
+      mmr.characters[String(characterId)] = character;
+      // Durante a calibração da população (3 primeiras) o engine não mexe no D;
+      // só conta como contribuição o que de fato moveu a dificuldade.
+      if (!result.calibratingBefore) bumpTriFonte(mmr, characterId, pool);
+      writeMMR(mmr);
+      out = result;
+    });
+    console.log(
+      `[tri:${pool}] ${characterId} nota=${Math.round(Number(score))} ` +
+      `D ${out.D_before.toFixed(1)} → ${out.D_after.toFixed(1)} · ` +
+      `rating da população ${out.P_before.toFixed(1)} → ${out.P_after.toFixed(1)}` +
+      (out.calibratingBefore ? ' (população em calibração, D intocado)' : ''),
+    );
+  } catch (e) {
+    console.error(`[tri:${pool}] falha ao registrar ${characterId}:`, e && e.message);
+  }
+  return out;
+}
+
 // --- Auth helpers ---
 function publicUser(u) {
   if (!u) return null;
@@ -2298,6 +2374,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     );
     mmr.players[req.user.id] = player;
     mmr.characters[log.itemId] = character;
+    if (!result.calibratingBefore) bumpTriFonte(mmr, log.itemId, 'competitivo');
     writeMMR(mmr);
     mmrResult = result;
     // Grava o MMR antes/depois desta partida no log (conquista "Consistente":
@@ -2305,6 +2382,20 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     log.mmrBefore = Math.round(result.P_before);
     log.mmrAfter = Math.round(result.P_after);
     writeJSON('logs.json', logs);
+  }
+
+  // TRI do visitante — desligada por padrão (VISITOR_TRI=1 liga).
+  // O visitante não tem MMR (id sorteado a cada sessão), então entra na mesma
+  // camada anônima do seletivo, com rating fixo 50, mas em POOL SEPARADA: é
+  // outra população e misturar corromperia as duas leituras.
+  if (
+    VISITOR_TRI_ENABLED &&
+    req.user.role === 'visitor' &&
+    log.type === 'freeplay' &&
+    Number.isFinite(log.score) &&
+    log.itemId
+  ) {
+    registrarTriAnonimo('visitante', log.itemId, log.score).catch(() => {});
   }
 
   // Sidequest: só no Treinamento (freeplay + mode 'training'). Se o aluno tinha
@@ -2479,9 +2570,13 @@ app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, re
 });
 
 // Atualizações do sistema criadas pelo admin (painel "Atualizações"). Ficam em
-// updates.json e são mescladas no cliente com o changelog estático. GET é pra
-// qualquer logado (inclusive visitante — o painel aparece pra todos).
-app.get('/api/updates', requireAuth, (req, res) => {
+// updates.json e são mescladas no cliente com o changelog estático.
+//
+// Restrito a admin e supervisor: são notas de versão, comunicação interna de
+// desenvolvimento — aluno e visitante não veem. O painel também some pra eles
+// no cliente; o gate está aqui porque esconder só na tela deixaria o conteúdo
+// acessível a qualquer um com uma sessão.
+app.get('/api/updates', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
   const list = readJSON('updates.json', []);
   const sorted = [...list].sort((a, b) =>
     String(b.date || '').localeCompare(String(a.date || '')) ||
@@ -3578,6 +3673,11 @@ async function evaluateSelectionSync(log) {
       writeJSON('selection-stats.json', stats);
     });
   }
+  // TRI: o candidato entra com rating fixo 50 e o personagem aprende. Depois de
+  // persistir a nota, e só com nota válida — avaliação com erro não é sinal.
+  if (score != null) {
+    await registrarTriAnonimo('selecao', log.characterId, score);
+  }
   console.log(`[selecao] avaliado ${log.id}: nota=${score} status=${st}`);
 }
 
@@ -3682,6 +3782,7 @@ async function collectCompetitiveBatches(openai) {
               if (!mmr) mmr = readMMR();
               const { player, character, result } = mmrEngine.updateMatch(mmr.players[l.userId], mmr.characters[l.itemId], score);
               mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
+              if (!result.calibratingBefore) bumpTriFonte(mmr, l.itemId, 'competitivo');
               l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
             }
           } else {
@@ -3965,6 +4066,70 @@ app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin')
     ? Math.round(scored.reduce((a, s) => a + Number(s.score), 0) / scored.length)
     : null;
   res.json({ range, total: scored.length, activeCount, rejectedCount, avgScore, threshold: SELECTION_ACTIVE_THRESHOLD });
+});
+
+// 6b) TRI dos personagens — quais casos são mais difíceis. A dificuldade é
+// ÚNICA e vem de todas as fontes juntas (competitivo + seletivo + visitante):
+// é assim que o sistema separa "respondente fraco" de "personagem difícil".
+// A dashboard do seletivo é só onde isso é lido primeiro.
+//
+// Cumulativo, sem recorte por período: a estimativa se acumula atendimento a
+// atendimento, e filtrar por data devolveria um número diferente do que o
+// engine está de fato usando.
+app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+  const mmr = readMMR();
+  const fontes = mmr.charSources || {};
+  const catalogo = readJSON('freeplay-characters.json');
+
+  const characters = catalogo.map((c) => {
+    const st = mmr.characters[String(c.id)];
+    const n = (st && Number.isFinite(st.n_D)) ? st.n_D : 0;
+    const avg = st ? mmrEngine.characterAvgScore(st) : null;
+    return {
+      id: String(c.id),
+      name: c.name || 'Personagem',
+      difficulty: mmrEngine.characterDifficulty(st),
+      // Distância da baseline: diz se o personagem já se afastou do ponto de
+      // partida ou se ainda está em 50 por falta de dado.
+      delta: Math.round((st && Number.isFinite(st.D) ? st.D : mmrEngine.D0) - mmrEngine.D0),
+      n,
+      avgScore: avg == null ? null : Math.round(avg),
+      // De onde vieram os atendimentos deste personagem.
+      fontes: fontes[String(c.id)] || {},
+      // Só a partir de CHAR_MATURE_AT o engine liga a regressão; abaixo disso o
+      // número é indicativo e a tela precisa dizer isso.
+      madura: n >= mmrEngine.CHAR_MATURE_AT,
+    };
+  });
+
+  // Mais difícil primeiro. Personagem sem nenhum atendimento vai pro fim: está
+  // em 50 por ausência de dado, não por ser mediano.
+  characters.sort((a, b) => (b.n > 0) - (a.n > 0) || b.difficulty - a.difficulty);
+
+  // Rating aprendido de cada população anônima — é o número que mostra o
+  // sistema funcionando: se os candidatos são mais fracos, isto fica < 50 e a
+  // dificuldade deixa de ser inflada por eles.
+  const populacoes = TRI_POOLS.map((p) => {
+    const st = mmr.anonPlayers && mmr.anonPlayers[p];
+    return {
+      pool: p,
+      rating: st ? Math.round(st.P) : mmrEngine.P0,
+      n: st ? st.n : 0,
+      calibrando: !st || st.n < mmrEngine.CALIBRATION_MATCHES,
+      peso: TRI_PESOS[p],
+    };
+  });
+
+  res.json({
+    baseline: mmrEngine.D0,
+    min: mmrEngine.D_MIN,
+    max: mmrEngine.D_MAX,
+    maturaEm: mmrEngine.CHAR_MATURE_AT,
+    ratingInicial: mmrEngine.P0,
+    totalAtendimentos: characters.reduce((a, c) => a + c.n, 0),
+    populacoes,
+    characters,
+  });
 });
 
 // ============================================================================

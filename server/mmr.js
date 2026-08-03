@@ -102,7 +102,14 @@ function fitRegression(history) {
 // Pipeline completo de UMA partida competitiva. Recebe o estado do jogador e do
 // personagem (ou undefined → estado inicial) e a nota crua S (0..100). Devolve
 // { player, character, result } com estados NOVOS (não muta a entrada). Sem I/O.
-function updateMatch(playerIn, charIn, Sraw) {
+// `opts.dWeight` escala o passo de ajuste da DIFICULDADE (1 = normal).
+// Serve para fontes de sinal mais ruidosas — ver as populações anônimas em
+// mmr.js §"Camada anônima": um atendimento de candidato de processo seletivo
+// diz menos sobre o personagem do que um de aluno conhecido, porque o rating
+// que entra na conta é a média de uma população, não a habilidade daquela
+// pessoa. Ganho menor para observação mais ruidosa.
+function updateMatch(playerIn, charIn, Sraw, opts = {}) {
+  const dWeight = Number.isFinite(opts.dWeight) ? opts.dWeight : 1;
   const player = { ...newPlayer(), ...(playerIn || {}) };
   player.W = Array.isArray(playerIn && playerIn.W) ? [...playerIn.W] : [];
   const character = { ...newCharacter(), ...(charIn || {}) };
@@ -119,7 +126,7 @@ function updateMatch(playerIn, charIn, Sraw) {
   // Durante a calibração o sinal do jogador é ruidoso demais para mexer no D.
   const D_before = character.D;
   if (!calibrating) {
-    const deltaD = 0.1 * (S_esp - S);
+    const deltaD = dWeight * 0.1 * (S_esp - S);
     character.D = clamp(character.D + deltaD, D_MIN, D_MAX);
     character.n_D += 1;
     character.history.push({ P: player.P, D: D_before, S }); // D jogado, não o ajustado
@@ -169,6 +176,43 @@ function updateMatch(playerIn, charIn, Sraw) {
     matchesRemaining: Math.max(0, CALIBRATION_MATCHES - player.n),
   };
   return { player, character, result };
+}
+
+// --- Camada anônima: populações sem conta (Processo Seletivo, visitante) ---
+//
+// A dificuldade dos personagens é ÚNICA e compartilhada: competitivo, seletivo
+// e visitante alimentam o MESMO D. É o ponto do sistema — Elo/TRI existe
+// justamente para que respondentes de níveis diferentes produzam a mesma
+// estimativa de dificuldade. Separar por população jogaria fora essa
+// propriedade e devolveria só "nota média por personagem".
+//
+// O problema a resolver é outro: candidato e visitante não têm MMR próprio (o
+// candidato é efêmero, o visitante tem id sorteado a cada sessão). Se
+// entrassem com um rating FIXO de 50 e o grupo fosse de fato mais fraco, o
+// sistema leria as notas baixas como "personagem difícil" em vez de
+// "respondente mais fraco", e enviesaria o D compartilhado para cima —
+// exatamente o erro que o MMR deveria evitar.
+//
+// Solução: cada população é UM jogador persistente. Começa em P0 (50) e
+// aprende com o próprio desempenho agregado, convergindo para o nível real do
+// grupo. O candidato individual vira ruído em torno dessa média, que é o que
+// se quer estimar. Daí em diante o ajuste de D fica sem viés.
+//
+// Como é um jogador comum do ponto de vista do engine, o pipeline é o mesmo
+// updateMatch — inclusive a calibração: as 3 primeiras sessões da população
+// não mexem no D, tempo de o rating dela sair de 50. Só o dWeight muda (ver
+// updateMatch): sinal de população é mais ruidoso e recebe ganho menor.
+function newAnonPopulation() {
+  return newPlayer();
+}
+
+// Média das notas registradas no histórico do personagem. É o número que o
+// avaliador humano entende de imediato, ao lado do D.
+function characterAvgScore(character) {
+  const h = (character && Array.isArray(character.history)) ? character.history : [];
+  const notas = h.map((x) => Number(x && x.S)).filter(Number.isFinite);
+  if (!notas.length) return null;
+  return notas.reduce((a, b) => a + b, 0) / notas.length;
 }
 
 // --- Camada PvP (duelos), conforme mmr_pvp_v1.md ---
@@ -272,6 +316,8 @@ module.exports = {
   sensitivity,
   fitRegression,
   updateMatch,
+  newAnonPopulation,
+  characterAvgScore,
   processDuel,
   playerView,
   characterDifficulty,

@@ -182,7 +182,9 @@ export default function App() {
     <div className="app-layout">
       <div className="topbar-actions">
         <ThemeToggle />
-        <SystemUpdates />
+        {/* Notas de versão: só equipe (admin/supervisor). Aluno e visitante não
+            veem — é comunicação interna de desenvolvimento, não conteúdo deles. */}
+        {(isAdmin || isSupervisor) && <SystemUpdates />}
         {!isVisitor && <NotificationBell user={user} />}
         {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
         {isVisitor && (
