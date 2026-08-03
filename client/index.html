@@ -5,16 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>all_OS · Plataforma de Simulação Clínica</title>
 
-  <!-- Tema: aplica o modo escuro salvo ANTES do paint pra não piscar claro. -->
-  <script>
-    (function () {
-      try {
-        if (localStorage.getItem('allos_theme') === 'dark') {
-          document.documentElement.setAttribute('data-theme', 'dark');
-        }
-      } catch (e) { /* localStorage indisponível */ }
-    })();
-  </script>
+  <!-- Tema: aplica o modo escuro salvo ANTES do paint pra não piscar claro.
+       Arquivo externo (não inline) porque o CSP do servidor é script-src 'self'
+       sem 'unsafe-inline'. Síncrono de propósito. -->
+  <script src="/theme-init.js"></script>
 
   <!-- PWA -->
   <link rel="manifest" href="/manifest.json" />

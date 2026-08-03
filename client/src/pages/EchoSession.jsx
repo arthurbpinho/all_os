@@ -197,8 +197,10 @@ export default function EchoSession({ user, sessionType }) {
     return () => { cancelled = true; };
   }, [isFreeSim, isVisitor]);
 
-  // Missão diária (desafio do dia): objetivo adicional do Treinamento, mostrado
-  // durante o atendimento se ainda não foi cumprido hoje. Avaliada ao final.
+  // Missão diária (desafio do dia): entra NO LUGAR da sidequest quando o aluno não
+  // tem uma ativa — o servidor devolve mission null se houver sidequest, então as
+  // duas nunca aparecem juntas. Mostrada se ainda não foi cumprida hoje; avaliada
+  // ao final, igual à sidequest.
   useEffect(() => {
     if (!isFreeSim || isVisitor) return;
     let cancelled = false;

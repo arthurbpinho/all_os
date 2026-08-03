@@ -171,6 +171,15 @@ export const api = {
   // payload: { log, casoId, evaluator, model, effort, batch }. batch:true → { queued, jobId }.
   avaliacaoIndependente: (payload) => request('/avaliacao-independente', { method: 'POST', body: payload }),
   avaliacaoFila: () => request('/avaliacao-independente/fila'),
+  // Simulação Independente (laboratório de pricing do PACIENTE): catálogo de
+  // modelos/preços + um turno de conversa. A resposta traz `turno` com tokens,
+  // custo em USD e latência daquela chamada — é o que a tela mostra em tempo real.
+  simIndependenteModelos: () => request('/simulacao-independente/modelos'),
+  simIndependenteChat: (payload) => request('/simulacao-independente/chat', { method: 'POST', body: payload }),
+  // Admin: painel de Logs de Erro. O usuário só vê "deu erro (código X)" — o
+  // detalhe (mensagem real, stack, quem, onde) mora aqui.
+  adminErrorLogs: () => request('/admin/error-logs'),
+  adminClearErrorLogs: () => request('/admin/error-logs', { method: 'DELETE' }),
   // Admin: dispara um aviso (notificação) pra todos + publica atualização.
   adminSendNotification: (data) => request('/admin/notifications', { method: 'POST', body: data }),
   adminSendUpdate: (data) => request('/admin/updates', { method: 'POST', body: data }),

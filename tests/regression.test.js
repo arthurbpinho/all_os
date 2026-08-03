@@ -220,9 +220,26 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
       expect(res.body.data.activeSessions).toBeTypeOf('object');
     });
 
-    it('inclui passwordHash dos users (necessário pra migração — admin já tem total)', async () => {
+    // Contrato invertido de propósito: o arquivo exportado SAI do servidor
+    // (notebook, Drive, WhatsApp) e hash bcrypt é quebrável offline, onde
+    // nenhum rate limit alcança. Backup de dados não deve virar arquivo de
+    // credenciais — quem precisa dos hashes pede explicitamente.
+    it('NÃO inclui passwordHash por padrão', async () => {
       const token = await loginAs('admin');
       const res = await request(app).get('/api/admin/export').set(authHeader(token));
+      expect(res.body.data.users.length).toBeGreaterThan(0);
+      expect(res.body.includesSecrets).toBe(false);
+      for (const u of res.body.data.users) {
+        expect(u.passwordHash).toBeUndefined();
+      }
+      // O resto do usuário continua lá — o export segue servindo pra migração.
+      expect(res.body.data.users[0].username).toBeTruthy();
+    });
+
+    it('inclui passwordHash só com ?includeSecrets=true', async () => {
+      const token = await loginAs('admin');
+      const res = await request(app).get('/api/admin/export?includeSecrets=true').set(authHeader(token));
+      expect(res.body.includesSecrets).toBe(true);
       expect(res.body.data.users[0].passwordHash).toBeTruthy();
     });
 
