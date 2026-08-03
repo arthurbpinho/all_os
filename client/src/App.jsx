@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import Login from './pages/Login';
 import Home from './pages/Home';
@@ -35,6 +35,10 @@ import SystemUpdates from './components/SystemUpdates';
 import ThemeToggle from './components/ThemeToggle';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 import { ICONS } from './icons';
+
+// A tela de login virou uma ROTA em vez do portão de entrada: quem chega sem
+// conta cai direto no modo visitante e chega aqui pelo botão "Entrar" do topo.
+const LOGIN_PATH = '/login';
 
 export default function App() {
   const [user, setUser] = useState(() => {
@@ -74,13 +78,49 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Entrada sem conta: em vez de barrar com a tela de login, o app já abre em
+  // modo visitante. Quem tem conta clica em "Entrar" no topo e vai pro /login.
+  //
+  // O ref evita duas chamadas: o efeito roda de novo a cada mudança de rota, e
+  // em dev o StrictMode monta o componente duas vezes. Sem ele, cada abertura
+  // gastaria dois tokens do limite de visitante por IP.
+  const visitorPedidoRef = useRef(false);
+  useEffect(() => {
+    if (!authChecked || user || visitorPedidoRef.current) return;
+    // Nestas rotas a ausência de conta é proposital: o /login é onde a pessoa
+    // vai justamente pra sair do modo visitante, e o seletivo tem auth própria.
+    if (location.pathname === LOGIN_PATH) return;
+    if (location.pathname.startsWith('/processo-seletivo')) return;
+
+    visitorPedidoRef.current = true;
+    let cancelled = false;
+    api.loginVisitor()
+      .then((u) => {
+        if (cancelled || !u) return;
+        setUser(u);
+        localStorage.setItem('allos_user', JSON.stringify(u));
+      })
+      .catch(() => {
+        // Sem sessão de visitante (rede fora, ou limite por IP estourado):
+        // cai na tela de login, que é a única saída útil nesse estado.
+        if (!cancelled) navigate(LOGIN_PATH);
+      })
+      .finally(() => { if (!cancelled) visitorPedidoRef.current = false; });
+    return () => { cancelled = true; };
+  }, [authChecked, user, location.pathname, navigate]);
+
   // Logout automático se a API sinalizar 401 em qualquer chamada.
   useEffect(() => {
     return onSessionExpired(() => {
+      // Visitante com token vencido (dura 2h) é renovado em silêncio pelo efeito
+      // acima — ele está só passeando, não faz sentido jogá-lo numa tela de
+      // login. Sessão real expirada vai pro /login, pra ficar explícito que
+      // saiu da conta em vez de virar visitante sem perceber.
+      const eraVisitante = user && user.role === 'visitor';
       setUser(null);
-      navigate('/');
+      if (!eraVisitante) navigate(LOGIN_PATH);
     });
-  }, [navigate]);
+  }, [navigate, user]);
 
   useEffect(() => {
     if (!user?.id) { setStreak(null); return; }
@@ -94,6 +134,8 @@ export default function App() {
   const handleLogin = (u) => {
     setUser(u);
     localStorage.setItem('allos_user', JSON.stringify(u));
+    // O /login é uma rota agora — depois de entrar precisa sair dela.
+    navigate('/');
   };
 
   const handleUpdateUser = (updated) => {
@@ -104,7 +146,9 @@ export default function App() {
   const handleLogout = () => {
     clearAuth();
     setUser(null);
-    navigate('/');
+    // Vai pro /login em vez da home: sair da conta e reaparecer como visitante
+    // sem aviso nenhum seria confuso. De lá dá pra voltar ao modo visitante.
+    navigate(LOGIN_PATH);
   };
 
   if (!authChecked) {
@@ -116,8 +160,14 @@ export default function App() {
   if (location.pathname.startsWith('/processo-seletivo')) {
     return <ProcessoSeletivo />;
   }
+  // Tela de login: agora é uma rota, não o portão de entrada. Vale também com
+  // sessão de visitante ativa — é assim que o visitante troca por uma conta real.
+  if (location.pathname === LOGIN_PATH) {
+    return <Login onLogin={handleLogin} visitorAtivo={!!user && user.role === 'visitor'} />;
+  }
   if (!user) {
-    return <Login onLogin={handleLogin} />;
+    // Sessão de visitante sendo criada pelo efeito acima. Dura um round-trip.
+    return null;
   }
 
   const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
@@ -134,6 +184,10 @@ export default function App() {
         <ThemeToggle />
         <SystemUpdates />
         {!isVisitor && <NotificationBell user={user} />}
+        {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
+        {isVisitor && (
+          <Link to={LOGIN_PATH} className="topbar-login-btn">Entrar</Link>
+        )}
       </div>
       <header className="mobile-topbar">
         <button
@@ -322,8 +376,8 @@ export default function App() {
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
               </span>
               <div className="profile-mini-info">
-                <div className="profile-mini-name">Visitante</div>
-                <div className="profile-mini-role">sessão temporária</div>
+                <div className="profile-mini-name">Modo visitante</div>
+                <div className="profile-mini-role">versão de teste</div>
               </div>
             </div>
           ) : (
@@ -364,6 +418,17 @@ export default function App() {
       </aside>
 
       <main className="main-content">
+        {/* Deixa explícito o que a pessoa está usando. Sem isso ela pode achar
+            que o app é limitado, quando na verdade só não entrou numa conta.
+            Fica no fluxo do conteúdo (e não fixo no topo) porque a sidebar é
+            position:fixed — uma faixa fixa exigiria realinhar três breakpoints. */}
+        {isVisitor && (
+          <div className="visitor-banner">
+            <span className="visitor-banner-tag">Modo visitante</span>
+            <span className="visitor-banner-text">versão de teste com funcionalidades limitadas</span>
+            <Link to={LOGIN_PATH} className="visitor-banner-link">Entrar na minha conta</Link>
+          </div>
+        )}
         <Routes>
           <Route path="/inicio" element={<Home user={user} />} />
           <Route path="/skills" element={<SkillMap user={user} />} />

@@ -4732,3 +4732,47 @@ select option { background: var(--cream); color: var(--ink); }
   .errlog-detail-row { flex-direction: column; gap: 2px; }
   .errlog-detail-key { flex: none; }
 }
+
+/* ============================================================
+   Modo visitante — entrada sem conta.
+   O app abre direto em modo visitante; estes dois elementos deixam
+   isso explícito e oferecem o caminho pra uma conta real.
+   ============================================================ */
+
+/* Botão "Entrar" na topbar, ao lado do sino/tema. Pílula em vez de círculo
+   porque é o único item com texto — precisa se ler como ação, não como ícone. */
+.topbar-login-btn {
+  height: 42px; display: inline-flex; align-items: center;
+  padding: 0 18px; border-radius: 999px;
+  border: 1px solid var(--marrs-deep); background: var(--marrs-deep);
+  color: var(--cream); text-decoration: none;
+  font-size: 14px; font-weight: 600; letter-spacing: 0.01em;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.topbar-login-btn:hover { opacity: 0.88; }
+.topbar-login-btn:active { transform: translateY(1px); }
+
+/* Faixa no topo do conteúdo. */
+.visitor-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 26px; padding: 10px 16px;
+  border: 1px dashed var(--sand); border-radius: 10px;
+  background: var(--cream-2);
+  font-size: 13.5px; color: var(--ink-soft);
+}
+.visitor-banner-tag {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--cream); background: var(--terra);
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.visitor-banner-text { flex: 1; min-width: 180px; }
+.visitor-banner-link {
+  color: var(--marrs-deep); font-weight: 600; text-decoration: underline;
+  text-underline-offset: 3px; white-space: nowrap;
+}
+
+/* Telas estreitas: o texto do botão come espaço demais ao lado dos ícones. */
+@media (max-width: 560px) {
+  .topbar-login-btn { height: 38px; padding: 0 13px; font-size: 13px; }
+  .visitor-banner { gap: 7px; padding: 9px 12px; font-size: 12.5px; }
+}
