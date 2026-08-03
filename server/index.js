@@ -222,9 +222,19 @@ const loginLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   keyGenerator: ipKey,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
+// Emissão de token de visitante. Era 5/15min, de quando o visitante nascia de
+// um clique deliberado em "Entrar como visitante". Agora o app ABRE em modo
+// visitante, então cada primeira visita gasta um token — e numa faculdade ou
+// clínica todo mundo sai pelo mesmo IP: com 5, a sexta pessoa da sala não
+// entraria.
+//
+// Afrouxar aqui não reabre a torneira: emitir token é só assinar um JWT (custo
+// zero). O que custa dinheiro são as chamadas de IA, e essas estão travadas em
+// VISITOR_AI_MAX por HORA por IP — teto que independe de quantos tokens o IP
+// pediu. É o aiLimiter que segura o custo, não este.
 const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,

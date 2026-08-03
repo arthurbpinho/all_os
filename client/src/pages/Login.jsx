@@ -23,7 +23,10 @@ function isAndroid() {
   return /Android/i.test(window.navigator.userAgent || '');
 }
 
-export default function Login({ onLogin }) {
+// `visitorAtivo`: a pessoa já está navegando como visitante e veio aqui pelo
+// botão "Entrar" do topo. Muda só o rótulo do botão de visitante, que nesse
+// caso é um "voltar" e não um "começar".
+export default function Login({ onLogin, visitorAtivo = false }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -155,7 +158,7 @@ export default function Login({ onLogin }) {
           onClick={handleVisitor}
           disabled={loading}
         >
-          Entrar como visitante
+          {visitorAtivo ? 'Voltar ao modo visitante' : 'Entrar como visitante'}
         </button>
 
         {canShowInstall && (
