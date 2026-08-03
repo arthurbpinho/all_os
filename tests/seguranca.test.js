@@ -145,6 +145,27 @@ describe('segurança — erro genérico + Logs de Erro', () => {
   });
 });
 
+describe('atualizações do sistema — só equipe', () => {
+  beforeEach(() => resetData());
+
+  // Notas de versão são comunicação interna de desenvolvimento. O painel some
+  // no cliente pra aluno/visitante, e o endpoint fecha junto — esconder só na
+  // tela deixaria o conteúdo acessível a qualquer sessão.
+  it('admin e supervisor leem; aluno e visitante recebem 403', async () => {
+    for (const quem of ['admin', 'prof']) {
+      const token = await loginAs(quem);
+      const res = await request(app).get('/api/updates').set(authHeader(token));
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body)).toBe(true);
+    }
+    const aluno = await loginAs('aluno');
+    expect((await request(app).get('/api/updates').set(authHeader(aluno))).status).toBe(403);
+
+    const visitante = await loginVisitor();
+    expect((await request(app).get('/api/updates').set(authHeader(visitante))).status).toBe(403);
+  });
+});
+
 describe('segurança — redação de segredo no registro de erro', () => {
   // O painel é lido por humanos e pode ser copiado pra fora. Provedores de IA
   // às vezes ecoam trechos da request na mensagem de erro.

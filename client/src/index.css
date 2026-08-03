@@ -4776,3 +4776,70 @@ select option { background: var(--cream); color: var(--ink); }
   .topbar-login-btn { height: 38px; padding: 0 13px; font-size: 13px; }
   .visitor-banner { gap: 7px; padding: 9px 12px; font-size: 12.5px; }
 }
+
+/* ============================================================
+   TRI — dificuldade dos personagens no Processo Seletivo.
+   Todo candidato entra com rating fixo; só o personagem aprende.
+   ============================================================ */
+.tri-panel {
+  margin-top: 28px; padding: 20px 22px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--paper);
+}
+.tri-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.tri-head h3 { margin: 0; font-family: var(--serif); font-size: 20px; color: var(--marrs-deep); }
+.tri-sub { font-size: 12.5px; color: var(--muted); }
+.tri-vazio, .tri-semdado { font-size: 13px; color: var(--ink-soft); margin: 0; }
+.tri-semdado { margin-top: 12px; font-style: italic; color: var(--muted); }
+
+.tri-list { display: flex; flex-direction: column; gap: 11px; }
+.tri-row { display: grid; grid-template-columns: 150px 1fr 118px; align-items: center; gap: 14px; }
+.tri-nome { font-size: 14px; color: var(--ink); display: flex; align-items: center; gap: 7px; }
+.tri-provisorio {
+  font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--line);
+  padding: 1px 5px; border-radius: 4px; white-space: nowrap;
+}
+
+.tri-barra {
+  position: relative; height: 9px; border-radius: 999px;
+  background: var(--sand); overflow: hidden;
+}
+.tri-preenchimento { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 999px; }
+.tri-preenchimento.dificil { background: var(--terra); }
+.tri-preenchimento.facil { background: var(--marrs-deep); }
+/* Referência do ponto de partida — sem ela o número não se lê como "mais
+   difícil que a base", só como um valor solto. */
+.tri-baseline {
+  position: absolute; top: -3px; bottom: -3px; width: 1px;
+  background: var(--ink-soft); opacity: 0.45; z-index: 2;
+}
+
+.tri-num { display: flex; flex-direction: column; align-items: flex-end; }
+.tri-num strong { font-family: var(--serif); font-size: 19px; color: var(--marrs-deep); line-height: 1.1; }
+.tri-meta { font-size: 10.5px; color: var(--muted); white-space: nowrap; margin-top: 2px; }
+
+.tri-legenda { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin: 16px 0 0; }
+
+@media (max-width: 640px) {
+  .tri-row { grid-template-columns: 1fr 92px; grid-template-areas: "nome num" "barra barra"; gap: 6px 10px; }
+  .tri-nome { grid-area: nome; }
+  .tri-num { grid-area: num; }
+  .tri-barra { grid-area: barra; }
+}
+
+/* Nível aprendido de cada população anônima (seletivo, visitantes). Mostra o
+   sistema funcionando: se o grupo é mais fraco, o número cai e a dificuldade
+   dos personagens deixa de ser inflada por ele. */
+.tri-populacoes {
+  margin-top: 14px; padding-top: 13px; border-top: 1px dashed var(--line);
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px;
+  font-size: 12.5px; color: var(--ink-soft);
+}
+.tri-populacoes-titulo {
+  font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  width: 100%;
+}
+.tri-populacao strong { color: var(--marrs-deep); font-size: 14px; }
+.tri-populacao em { color: var(--muted); font-size: 12px; }
+.tri-populacao-peso { color: var(--muted); font-size: 11.5px; }
+.tri-populacoes-nota { width: 100%; font-size: 12px; color: var(--muted); line-height: 1.55; }

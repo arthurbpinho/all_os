@@ -176,6 +176,9 @@ export const api = {
   // custo em USD e latência daquela chamada — é o que a tela mostra em tempo real.
   simIndependenteModelos: () => request('/simulacao-independente/modelos'),
   simIndependenteChat: (payload) => request('/simulacao-independente/chat', { method: 'POST', body: payload }),
+  // TRI dos personagens: dificuldade ÚNICA, alimentada por competitivo +
+  // processo seletivo + visitante juntos. Cumulativo — sem recorte por período.
+  triPersonagens: () => request('/tri/personagens'),
   // Admin: painel de Logs de Erro. O usuário só vê "deu erro (código X)" — o
   // detalhe (mensagem real, stack, quem, onde) mora aqui.
   adminErrorLogs: () => request('/admin/error-logs'),
