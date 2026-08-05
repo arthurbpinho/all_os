@@ -80,6 +80,25 @@ async function selecaoRequest(path, { method = 'POST', body, token } = {}) {
   return data;
 }
 
+// Poll do job de avaliação em Batch da Trilha (exercício com avaliador OpenAI
+// — ver /api/evaluate no server, que devolve {pending:true, jobId} nesse caso
+// em vez de abrir o SSE). Backoff simples 4s → dobra até um teto de 60s; pode
+// levar minutos a até 24h, mesma natureza do Batch do Competitivo.
+async function pollTrilhaEvalBatch(jobId) {
+  let delay = 4000;
+  for (;;) {
+    const data = await request(`/trilha/evaluate-batch/${encodeURIComponent(jobId)}`);
+    if (data.status === 'completed') {
+      return { role: 'assistant', content: data.content || '', reasoning: '', usage: data.usage || null };
+    }
+    if (data.status === 'error') {
+      throw new Error(data.error || 'Falha na avaliação em lote.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 60000);
+  }
+}
+
 // Catálogo de testes neuropsicológicos: fixo no servidor, então cacheamos a
 // promessa (uma requisição por sessão, compartilhada por admin + TestSelector).
 let neuroTestsPromise = null;
@@ -245,9 +264,15 @@ export const api = {
       throw new Error(err.error || 'Erro na avaliação');
     }
     // Modo demonstração (sem API key) e erros pré-stream voltam como JSON.
+    // Exercício da Trilha com avaliador OpenAI também: {pending:true, jobId} —
+    // roda em Batch, então troca sozinho pra polling em vez de esperar SSE.
     const ctype = res.headers.get('content-type') || '';
     if (!ctype.includes('text/event-stream') || !res.body) {
-      return res.json();
+      const data = await res.json();
+      if (data && data.pending && data.jobId) {
+        return await pollTrilhaEvalBatch(data.jobId);
+      }
+      return data;
     }
     // Stream SSE: acumula os deltas (eventos `data: {delta|done|error}`).
     const reader = res.body.getReader();
@@ -613,6 +638,11 @@ export const api = {
     if (streamError) throw new Error(streamError);
     return { evaluationStream: full, ...(finalPayload || {}) };
   },
+  // Visitante que acabou de virar Titular (reivindicou ou venceu um desafio)
+  // digita o próprio nome — sem foto. Só funciona pra quem acabou de vencer
+  // (o servidor trava por sessão).
+  setDesafioVisitorName: (characterId, name) =>
+    request('/desafio/nome-visitante', { method: 'POST', body: { characterId, name } }),
 
   // --- Antessala (pré-supervisão) ---
   // Aluno: seus mapas de caso (resumos). Supervisor/admin: mapas entregues dos
