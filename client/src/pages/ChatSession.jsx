@@ -4,7 +4,6 @@ import { api } from '../api';
 import {
   buildDirectEvaluationPrompt,
   stripSupervisorBlock,
-  SKILL_NAMES,
 } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
@@ -28,6 +27,7 @@ export default function ChatSession({ user }) {
   const navigate = useNavigate();
 
   const [item, setItem] = useState(null);
+  const [skillsById, setSkillsById] = useState({});
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [phase, setPhase] = useState(PHASE_SIMULATION);
@@ -65,11 +65,12 @@ export default function ChatSession({ user }) {
     let cancelled = false;
     async function loadItem() {
       try {
-        const items = await api.getExercises();
+        const [items, skillList] = await Promise.all([api.getExercises(), api.getTrilhaSkills().catch(() => [])]);
         const found = items.find((i) => String(i.id) === String(id));
         if (cancelled) return;
         if (!found) { setError('Exercício não encontrado.'); return; }
         setItem(found);
+        setSkillsById(Object.fromEntries((skillList || []).map((s) => [s.id, s])));
         // O system prompt é resolvido no servidor a partir do context — o
         // cliente nunca recebe o texto do specificInstruction.
 
@@ -242,7 +243,7 @@ export default function ChatSession({ user }) {
     setPhase(PHASE_EVALUATING);
     setEvalError('');
 
-    const skillName = SKILL_NAMES[item.skillId] || `Skill ${item.skillId}`;
+    const skillName = skillsById[item.skillId]?.name || `Skill ${item.skillId}`;
     const sessionLabel = `Trilha · ${skillName}`;
     const transcript = buildTranscript();
 
@@ -515,7 +516,7 @@ export default function ChatSession({ user }) {
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
           <h2>Avaliação do <span className="accent">exercício</span></h2>
-          <p>{item?.title} · {SKILL_NAMES[item?.skillId] || ''}</p>
+          <p>{item?.title} · {skillsById[item?.skillId]?.name || ''}</p>
           <div className="ornament" />
         </div>
 
@@ -608,7 +609,7 @@ export default function ChatSession({ user }) {
         <div className="chat-title">
           <h3>{item?.title || '...'}</h3>
           <div className="chat-status">
-            {item ? `${SKILL_NAMES[item.skillId] || ''}` : ''}
+            {item ? `${skillsById[item.skillId]?.name || ''}` : ''}
             {item?.difficulty ? ` · ${DIFFICULTY_LABEL[item.difficulty]}` : ''}
           </div>
         </div>
