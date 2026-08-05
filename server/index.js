@@ -12,6 +12,7 @@ const {
   buildTrilhaExercisePrompt,
   buildFreeplayPrompt,
   buildNeuroPrompt,
+  buildImageSchemaPrompt,
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
@@ -1772,10 +1773,12 @@ function canUseNeuro(user) {
 }
 
 function publicExercise(e) {
-  const { specificInstruction, evaluatorPrompt, ...safe } = e;
-  // Cliente precisa saber SE existe avaliador customizado para escolher fluxo,
-  // mas não precisa ver o texto.
+  const { specificInstruction, evaluatorPrompt, imageSchemaPrompt, ...safe } = e;
+  // Cliente precisa saber SE existe avaliador customizado / esquema visual
+  // para escolher fluxo, mas não precisa ver o texto (evaluatorPrompt e a
+  // observação do esquema são instruções do admin, não gabarito do aluno).
   safe.hasCustomEvaluator = !!(evaluatorPrompt && String(evaluatorPrompt).trim());
+  safe.hasImageSchema = !!e.imageSchemaEnabled;
   return safe;
 }
 function publicFreeplayChar(c) {
@@ -1836,17 +1839,23 @@ app.get('/api/exercises', requireAuth, (req, res) => {
 app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const ex = { id: 'ex' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...req.body };
-  // evaluatorModel/chatModel são allowlists fechadas (TRILHA_EXERCISE_MODELS/
-  // TRILHA_CHAT_MODELS, definidas mais abaixo) — valor fora delas cai no
-  // default da Trilha (mini).
+  // evaluatorModel/chatModel/imageSchemaModel são allowlists fechadas
+  // (TRILHA_EXERCISE_MODELS/TRILHA_CHAT_MODELS/TRILHA_IMAGE_MODELS, definidas
+  // mais abaixo) — valor fora delas cai no default da Trilha.
   if (!TRILHA_EXERCISE_MODELS[ex.evaluatorModel]) ex.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
   if (!TRILHA_CHAT_MODELS[ex.chatModel]) ex.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
+  if (!TRILHA_IMAGE_MODELS[ex.imageSchemaModel]) ex.imageSchemaModel = TRILHA_IMAGE_MODEL_DEFAULT;
+  ex.imageSchemaEnabled = !!ex.imageSchemaEnabled;
   exercises.push(ex);
   writeJSON('exercises.json', exercises);
   res.json(ex);
 });
 
-const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt', 'evaluatorModel', 'chatModel'];
+const EXERCISE_FIELDS = [
+  'title', 'description', 'skillId', 'difficulty', 'specificInstruction',
+  'evaluatorPrompt', 'evaluatorModel', 'chatModel',
+  'imageSchemaEnabled', 'imageSchemaPrompt', 'imageSchemaModel',
+];
 function pickFields(body, fields) {
   const out = {};
   for (const f of fields) {
@@ -1863,6 +1872,8 @@ app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   const patch = pickFields(req.body, EXERCISE_FIELDS);
   if ('evaluatorModel' in patch && !TRILHA_EXERCISE_MODELS[patch.evaluatorModel]) patch.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
   if ('chatModel' in patch && !TRILHA_CHAT_MODELS[patch.chatModel]) patch.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
+  if ('imageSchemaModel' in patch && !TRILHA_IMAGE_MODELS[patch.imageSchemaModel]) patch.imageSchemaModel = TRILHA_IMAGE_MODEL_DEFAULT;
+  if ('imageSchemaEnabled' in patch) patch.imageSchemaEnabled = !!patch.imageSchemaEnabled;
   exercises[idx] = { ...exercises[idx], ...patch };
   writeJSON('exercises.json', exercises);
   res.json(exercises[idx]);
@@ -2253,6 +2264,7 @@ const LOG_MAX_TITLE = 200;
 const LOG_MAX_MESSAGES = 500;
 const LOG_MAX_MESSAGE_LEN = 20000;
 const LOG_MAX_EVAL_LEN = 50000;
+const LOG_MAX_IMAGE_SCHEMA_LEN = 100000; // SVG do esquema visual (opcional, Trilha)
 const LOG_VALID_TYPES = ['exercise', 'freeplay', 'neuro'];
 
 function clampStr(v, max) {
@@ -2435,6 +2447,9 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     score: finalScore,
     criteriaScores: explicitCriteria || supervisorCriteria || null,
     evaluation: clampStr(cleanEvaluation, LOG_MAX_EVAL_LEN),
+    // Esquema visual (opcional, Trilha): revalida o SVG aqui também (não confia
+    // no que o cliente manda) — só persiste um bloco <svg> sanitizado ou null.
+    imageSchema: clampStr(extractAndSanitizeSvg(body.imageSchema), LOG_MAX_IMAGE_SCHEMA_LEN) || null,
     messages: cleanMessages,
     neuroTests,
     userId: req.user.id,
@@ -2989,6 +3004,18 @@ const TRILHA_CHAT_MODELS = {
   'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
 
+// Esquema visual (SVG) OPCIONAL ao final do exercício — admin liga por
+// exercício (imageSchemaEnabled) e escreve a observação (imageSchemaPrompt, ver
+// buildImageSchemaPrompt) do que o esquema deve representar. Duas opções: o
+// modelo ESCREVE um SVG autocontido (texto), que o navegador renderiza como
+// imagem vetorial — não é geração de imagem "de pixel" (Claude não tem essa
+// capacidade via API), por isso funciona igual pros dois provedores.
+const TRILHA_IMAGE_MODEL_DEFAULT = 'gpt-5.4';
+const TRILHA_IMAGE_MODELS = {
+  'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
+  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
+};
+
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
@@ -3025,6 +3052,24 @@ function buildAnthropicArgs({ model, effort, systemPrompt, turns, maxTokens }) {
 function extractAnthropicText(resp) {
   const blocks = (resp && resp.content) || [];
   return blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('').trim();
+}
+
+// Extrai o bloco <svg>...</svg> da resposta do esquema visual e sanitiza
+// defensivamente (o modelo às vezes cerca em texto/```; a transcrição do
+// aluno — conteúdo não confiável — entra no prompt, então tratamos a saída
+// como HTML não confiável também). O cliente ainda renderiza via <img> (blob
+// URL), que por si só já impede execução de script num SVG — isto é
+// defesa em profundidade, não a única barreira.
+function extractAndSanitizeSvg(text) {
+  const s = String(text || '');
+  const match = s.match(/<svg[\s\S]*?<\/svg>/i);
+  if (!match) return null;
+  return match[0]
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son\w+\s*=\s*'[^']*'/gi, '')
+    .replace(/(xlink:href|href)\s*=\s*"\s*javascript:[^"]*"/gi, '')
+    .replace(/(xlink:href|href)\s*=\s*'\s*javascript:[^']*'/gi, '');
 }
 
 function getOpenAI() {
@@ -3706,6 +3751,85 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       res.status(500).json(corpo);
     }
   }
+});
+
+// Esquema visual (SVG) OPCIONAL ao final de um exercício da Trilha — só roda
+// se o admin ligou imageSchemaEnabled nesse exercício (ver TRILHA_IMAGE_MODELS
+// e buildImageSchemaPrompt). O cliente manda a transcrição (messages); a
+// observação do admin (imageSchemaPrompt) é injetada AQUI, server-side — nunca
+// sai pro aluno, mesma lógica do evaluatorPrompt.
+app.post('/api/trilha/image-schema', requireAuth, aiLimiter, async (req, res) => {
+  const { itemId, messages } = req.body || {};
+
+  // Mesmo gate de custo de IA que a avaliação usa pra visitante.
+  if (req.user.role === 'visitor' && !visitorEvaluationEnabled()) {
+    return res.status(403).json({ error: 'Não disponível para visitantes no momento.' });
+  }
+  if (!itemId) return res.status(400).json({ error: 'itemId é obrigatório' });
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'messages deve ser uma lista' });
+  }
+
+  const ex = readJSON('exercises.json').find((e) => String(e.id) === String(itemId));
+  if (!ex) return res.status(404).json({ error: 'Exercício não encontrado' });
+  if (!ex.imageSchemaEnabled) {
+    return res.status(400).json({ error: 'Este exercício não tem esquema visual habilitado.' });
+  }
+
+  const turns = messages
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
+    .filter((m) => m.content);
+  if (!turns.length) return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+
+  const modelKey = TRILHA_IMAGE_MODELS[ex.imageSchemaModel] ? ex.imageSchemaModel : TRILHA_IMAGE_MODEL_DEFAULT;
+  const spec = TRILHA_IMAGE_MODELS[modelKey];
+  const systemPrompt = buildImageSchemaPrompt(ex.imageSchemaPrompt);
+
+  const client = getClientForProvider(spec.provider);
+  if (!client) {
+    return res.status(503).json({ error: `Indisponível: ${spec.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'} não configurada.` });
+  }
+
+  // SSE por causa do timeout de 100s do Cloudflare — effort 'high' com o
+  // histórico inteiro do exercício pode demorar. Igual ao /api/evaluate: o
+  // heartbeat segura a conexão; a resposta só sai completa no final (não dá
+  // pra validar/extrair um SVG parcial no meio do stream).
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.flushHeaders) res.flushHeaders();
+  res.write(': ok\n\n');
+  const heartbeat = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch {}
+  }, 15000);
+
+  try {
+    let raw = '';
+    if (spec.provider === 'anthropic') {
+      const args = buildAnthropicArgs({ model: spec.model, effort: spec.effort, systemPrompt, turns, maxTokens: 8000 });
+      const resp = await client.messages.create(args);
+      raw = extractAnthropicText(resp);
+    } else {
+      const resp = await client.responses.create({
+        model: spec.model, reasoning: { effort: spec.effort },
+        max_output_tokens: 16000, instructions: systemPrompt, input: turns,
+      });
+      raw = resp.output_text || '';
+    }
+    const svg = extractAndSanitizeSvg(raw);
+    if (!svg) throw new Error('esquema visual sem SVG válido na resposta');
+    console.log(`Image schema (${spec.model} · trilha): ok`);
+    res.write(`data: ${JSON.stringify({ svg })}\n\n`);
+  } catch (err) {
+    const corpo = falhou(req, err, 'trilha/esquema-visual', { extra: { modelo: spec.model } });
+    try { res.write(`data: ${JSON.stringify(corpo)}\n\n`); } catch {}
+  } finally {
+    clearInterval(heartbeat);
+  }
+  res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+  res.end();
 });
 
 // ============================================================================

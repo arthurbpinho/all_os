@@ -32,6 +32,15 @@ const CHAT_MODEL_OPTIONS = [
 ];
 const CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 
+// As 2 opções de modelo do ESQUEMA VISUAL (SVG opcional ao final do
+// exercício). Espelha TRILHA_IMAGE_MODELS no servidor. Não é geração de
+// imagem "de pixel" — é o modelo escrevendo um SVG, que o navegador renderiza.
+const IMAGE_SCHEMA_MODEL_OPTIONS = [
+  { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
+];
+const IMAGE_SCHEMA_MODEL_DEFAULT = 'gpt-5.4';
+
 const DEFAULT_SKILL_COLOR = '#5C8A82';
 
 const EMPTY_FORM = {
@@ -43,6 +52,9 @@ const EMPTY_FORM = {
   chatModel: CHAT_MODEL_DEFAULT,
   evaluatorPrompt: '',
   evaluatorModel: EVALUATOR_MODEL_DEFAULT,
+  imageSchemaEnabled: false,
+  imageSchemaPrompt: '',
+  imageSchemaModel: IMAGE_SCHEMA_MODEL_DEFAULT,
 };
 
 function difficultyLabel(value) {
@@ -108,6 +120,9 @@ export default function AdminExercises() {
       chatModel: exercise.chatModel || CHAT_MODEL_DEFAULT,
       evaluatorPrompt: exercise.evaluatorPrompt || '',
       evaluatorModel: exercise.evaluatorModel || EVALUATOR_MODEL_DEFAULT,
+      imageSchemaEnabled: !!exercise.imageSchemaEnabled,
+      imageSchemaPrompt: exercise.imageSchemaPrompt || '',
+      imageSchemaModel: exercise.imageSchemaModel || IMAGE_SCHEMA_MODEL_DEFAULT,
     });
     setEditingId(exercise.id);
     setFormError('');
@@ -122,8 +137,8 @@ export default function AdminExercises() {
   }
 
   function handleChange(e) {
-    const { name, value } = e.target;
-    setForm((prev) => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setForm((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   }
 
   // Importa um .md local direto pro campo de prompt (exercício ou avaliador) —
@@ -370,6 +385,35 @@ export default function AdminExercises() {
                     ))}
                   </select>
                 </div>
+              )}
+              <div style={{ borderTop: '1px solid var(--line)', paddingTop: 16, marginTop: 4 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input type="checkbox" name="imageSchemaEnabled" checked={form.imageSchemaEnabled} onChange={handleChange} style={{ width: 'auto' }} />
+                  <span>Gerar esquema visual ao final do exercício <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></span>
+                </label>
+                <small style={{ display: 'block', marginTop: 4, color: 'var(--muted)', fontSize: 12 }}>
+                  Ao finalizar, a IA escreve um diagrama (SVG) que sintetiza o exercício, a partir da transcrição. Não é uma foto — é um esquema/diagrama vetorial.
+                </small>
+              </div>
+              {form.imageSchemaEnabled && (
+                <>
+                  <div>
+                    <label htmlFor="imageSchemaPrompt">Observação (o que o esquema deve representar)</label>
+                    <textarea
+                      id="imageSchemaPrompt" name="imageSchemaPrompt" value={form.imageSchemaPrompt} onChange={handleChange}
+                      placeholder="Ex: Desenhe um genograma com as relações familiares mencionadas. Ou: um mapa da queixa principal aos objetivos combinados na sessão."
+                      style={{ minHeight: 100 }}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="imageSchemaModel">Modelo do esquema visual</label>
+                    <select id="imageSchemaModel" name="imageSchemaModel" value={form.imageSchemaModel} onChange={handleChange}>
+                      {IMAGE_SCHEMA_MODEL_OPTIONS.map((m) => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </>
               )}
               {formError && <div className="alert error">{formError}</div>}
               <div className="modal-actions">

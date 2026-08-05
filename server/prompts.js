@@ -62,10 +62,31 @@ Na ÚLTIMA linha da sua resposta, emita OBRIGATORIAMENTE, exatamente neste forma
 onde X é um número inteiro de 0 a 100. Sem essa linha, o sistema não consegue registrar a pontuação.`;
 }
 
+// Esquema visual (opcional, por exercício da Trilha): o modelo escreve um
+// ÚNICO SVG autocontido que sintetiza a sessão, a partir da observação do
+// admin (imageSchemaPrompt) + a transcrição. NÃO é geração de imagem "de
+// pixel" (a Claude não tem essa capacidade via API) — é o modelo escrevendo
+// texto/SVG, que o navegador renderiza como imagem vetorial. Funciona igual
+// para GPT e Claude, sem precisar de nenhuma tool de imagem.
+function buildImageSchemaPrompt(observacao) {
+  return `Você gera um ÚNICO esquema/diagrama visual em SVG que sintetiza o que aconteceu num exercício da Trilha de prática deliberada da Allos (formação de psicólogos), a partir da transcrição que você vai receber a seguir.
+
+OBSERVAÇÃO DE QUEM CRIOU O EXERCÍCIO (o que o esquema deve representar):
+${(observacao || '').trim() || '(sem observação específica — use seu critério clínico para sintetizar o que for mais relevante na sessão)'}
+
+## REGRAS OBRIGATÓRIAS
+- Responda com absolutamente NADA além de um único bloco <svg>...</svg>, autocontido.
+- Use viewBox (não width/height fixos em pixel bruto), pra ficar responsivo.
+- Só formas, texto e cores DENTRO do próprio SVG (rect, circle, path, line, text etc.) — nada de <script>, <foreignObject>, referências externas ou imagens embutidas.
+- Texto em português, legível e direto.
+- Sem comentário, sem explicação, sem cerca de código (\`\`\`) — a resposta é só o SVG cru.`;
+}
+
 module.exports = {
   buildTrilhaExercisePrompt,
   buildFreeplayPrompt,
   buildNeuroPrompt,
+  buildImageSchemaPrompt,
   wrapCustomEvaluatorPrompt,
   stripApendice,
 };
