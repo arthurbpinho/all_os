@@ -11,6 +11,7 @@ import EchoSession from './pages/EchoSession';
 import ChallengeSession from './pages/ChallengeSession';
 import Logs from './pages/Logs';
 import AdminExercises from './pages/AdminExercises';
+import AdminTrilhaLogs from './pages/AdminTrilhaLogs';
 import AdminFreeplay from './pages/AdminFreeplay';
 import AdminNeuro from './pages/AdminNeuro';
 import AdminEntrevistador from './pages/AdminEntrevistador';
@@ -355,6 +356,9 @@ export default function App() {
               <Link to="/admin/exercises" className={isActive('/admin/exercises') ? 'active' : ''}>
                 {ICONS.admin}<span>Exercícios da Trilha</span>
               </Link>
+              <Link to="/admin/trilha-logs" className={isActive('/admin/trilha-logs') ? 'active' : ''}>
+                {ICONS.log}<span>Logs da Trilha</span>
+              </Link>
               <Link to="/admin/freeplay" className={isActive('/admin/freeplay') ? 'active' : ''}>
                 {ICONS.characters}<span>Personagens da Simulação</span>
               </Link>
@@ -463,6 +467,7 @@ export default function App() {
           <Route path="/selecao/logs" element={<SelecaoLogs user={user} />} />
           <Route path="/admin/users" element={<AdminUsers user={user} />} />
           <Route path="/admin/exercises" element={<AdminExercises />} />
+          <Route path="/admin/trilha-logs" element={<AdminTrilhaLogs />} />
           <Route path="/admin/freeplay" element={<AdminFreeplay />} />
           <Route path="/admin/neuro" element={<AdminNeuro />} />
           <Route path="/admin/entrevistador" element={<AdminEntrevistador user={user} />} />

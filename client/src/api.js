@@ -255,6 +255,7 @@ export const api = {
     let buf = '';
     let full = '';
     let reasoning = '';
+    let usage = null;
     let streamError = null;
     for (;;) {
       const { value, done } = await reader.read();
@@ -276,6 +277,10 @@ export const api = {
           } else if (obj.reasoning) {
             reasoning += obj.reasoning;
             if (onReasoning) { try { onReasoning(obj.reasoning, reasoning); } catch {} }
+          } else if (obj.usage) {
+            // Custo dos Logs da Trilha: tokens normalizados pelo servidor —
+            // o cliente só acumula/repassa ao salvar o log (ver ChatSession).
+            usage = obj.usage;
           } else if (obj.error) {
             streamError = obj.error;
           }
@@ -283,7 +288,7 @@ export const api = {
       }
     }
     if (streamError) throw new Error(streamError);
-    return { role: 'assistant', content: full, reasoning };
+    return { role: 'assistant', content: full, reasoning, usage };
   },
 
   // Trilha — esquema visual (SVG) opcional ao final do exercício. Mesmo
@@ -313,12 +318,13 @@ export const api = {
     if (!ctype.includes('text/event-stream') || !res.body) {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      return data.svg || '';
+      return { svg: data.svg || '', usage: data.usage || null };
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';
     let svg = '';
+    let usage = null;
     let streamError = null;
     for (;;) {
       const { value, done } = await reader.read();
@@ -335,13 +341,14 @@ export const api = {
           let obj;
           try { obj = JSON.parse(payload); } catch { continue; }
           if (obj.svg) svg = obj.svg;
-          else if (obj.error) streamError = obj.error;
+          if (obj.usage) usage = obj.usage;
+          if (obj.error) streamError = obj.error;
         }
       }
     }
     if (streamError) throw new Error(streamError);
     if (!svg) throw new Error('Não recebi o esquema visual.');
-    return svg;
+    return { svg, usage };
   },
 
   // Profile
