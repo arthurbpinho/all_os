@@ -1836,15 +1836,17 @@ app.get('/api/exercises', requireAuth, (req, res) => {
 app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const ex = { id: 'ex' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...req.body };
-  // evaluatorModel é uma allowlist fechada (TRILHA_EXERCISE_MODELS, definida mais
-  // abaixo) — qualquer valor fora dela cai no default da Trilha (mini/low).
+  // evaluatorModel/chatModel são allowlists fechadas (TRILHA_EXERCISE_MODELS/
+  // TRILHA_CHAT_MODELS, definidas mais abaixo) — valor fora delas cai no
+  // default da Trilha (mini).
   if (!TRILHA_EXERCISE_MODELS[ex.evaluatorModel]) ex.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
+  if (!TRILHA_CHAT_MODELS[ex.chatModel]) ex.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
   exercises.push(ex);
   writeJSON('exercises.json', exercises);
   res.json(ex);
 });
 
-const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt', 'evaluatorModel'];
+const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt', 'evaluatorModel', 'chatModel'];
 function pickFields(body, fields) {
   const out = {};
   for (const f of fields) {
@@ -1860,6 +1862,7 @@ app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   // Allowlist: evita que campos arbitrários do body poluam o JSON.
   const patch = pickFields(req.body, EXERCISE_FIELDS);
   if ('evaluatorModel' in patch && !TRILHA_EXERCISE_MODELS[patch.evaluatorModel]) patch.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
+  if ('chatModel' in patch && !TRILHA_CHAT_MODELS[patch.chatModel]) patch.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
   exercises[idx] = { ...exercises[idx], ...patch };
   writeJSON('exercises.json', exercises);
   res.json(exercises[idx]);
@@ -2967,6 +2970,20 @@ const TRILHA_EXERCISE_MODELS = {
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'high' },
 };
 
+// Modelo do PERSONAGEM/exercício em si (o lado da CONVERSA, não da nota) —
+// também escolhido por exercício na Trilha (chatModel). Mesmas 3 opções do
+// evaluatorModel, mas sem reasoning (a persona só responde em personagem,
+// não "pensa"): mini com effort 'none' (igual ao PATIENT_MODEL de sempre,
+// usado por freeplay/neuro), GLM com thinking desligado, ou 5.5/none pra
+// personagens mais nuançados. GLM tem FALLBACK pro mini padrão se falhar,
+// igual ao par Treinamento/GLM.
+const TRILHA_CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
+const TRILHA_CHAT_MODELS = {
+  'gpt-5.4-mini': { model: PATIENT_MODEL, provider: 'openai', effort: PATIENT_EFFORT },
+  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'disabled' },
+  'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'none' },
+};
+
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
@@ -3064,8 +3081,10 @@ function resolveChatSystemPrompt({ context, mode, user }) {
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
     // O exercício nem sempre é uma simulação de paciente — a instrução define
     // o papel (paciente, colega, escrita livre etc.). O avaliador customizado
-    // entra apenas no /api/evaluate.
-    return { systemPrompt: buildTrilhaExercisePrompt(ex.specificInstruction) };
+    // entra apenas no /api/evaluate. chatModelKey: qual IA roda ESSA conversa
+    // (escolha do admin ao salvar o exercício, ver TRILHA_CHAT_MODELS).
+    const chatModelKey = TRILHA_CHAT_MODELS[ex.chatModel] ? ex.chatModel : TRILHA_CHAT_MODEL_DEFAULT;
+    return { systemPrompt: buildTrilhaExercisePrompt(ex.specificInstruction), chatModelKey };
   }
   if (type === 'freeplay') {
     const c = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
@@ -3141,10 +3160,17 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     }
   }
 
-  // --- Paciente → OpenAI (gpt-5.4-mini, effort none) ---
+  // --- Paciente/Personagem → OpenAI (gpt-5.4-mini, effort none) por padrão.
+  // Na Trilha, o admin pode escolher outra IA por exercício (chatModel, ver
+  // TRILHA_CHAT_MODELS) — freeplay/neuro continuam fixos no PATIENT_MODEL.
   // O personagem responde direto, SEM reasoning. Prompt caching da OpenAI é
   // automático no prefixo (>1024 tokens), então o system + histórico (chat de
   // 50-100 turnos) é cacheado sozinho a partir do 2º turno.
+  const isExerciseChat = !!(context && context.type === 'exercise');
+  const chatModelSpec = isExerciseChat
+    ? (TRILHA_CHAT_MODELS[resolved.chatModelKey] || TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT])
+    : TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT];
+
   const openai = getOpenAI();
   if (!openai) {
     return res.json({
@@ -3162,20 +3188,46 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   }
 
   try {
+    if (chatModelSpec.provider === 'glm') {
+      // Exercício da Trilha com GLM 5.2 escolhido pelo admin: chamada direta
+      // (/api/chat não streama pro cliente). FALLBACK pro mini padrão se o
+      // GLM falhar (rate limit/instabilidade) — o aluno sempre recebe resposta.
+      const gClient = getClientForProvider('glm');
+      try {
+        if (!gClient) throw new Error('glm indisponível');
+        const body = buildChatBody({
+          provider: 'glm', model: chatModelSpec.model, effort: chatModelSpec.effort,
+          maxTokens: tokenCap + 2000, messages: buildOpenAIMessages(resolved.systemPrompt, messages),
+        });
+        const resp = await gClient.chat.completions.create(body);
+        const text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+        if (!text.trim()) throw new Error('resposta vazia');
+        return res.json({ role: 'assistant', content: text });
+      } catch (glmErr) {
+        console.error(`[chat trilha] ${chatModelSpec.model} falhou → fallback ${PATIENT_MODEL}:`, glmErr.message);
+        const { text, usage } = await openaiComplete({
+          openai, model: PATIENT_MODEL, effort: PATIENT_EFFORT,
+          systemPrompt: resolved.systemPrompt, messages, maxCompletionTokens: tokenCap + 2000,
+        });
+        logOpenAIUsage('Chat paciente (fallback)', PATIENT_MODEL, usage);
+        return res.json({ role: 'assistant', content: text });
+      }
+    }
+
     // effort 'none' = sem reasoning → resposta direta e rápida.
     const { text, usage } = await openaiComplete({
       openai,
-      model: PATIENT_MODEL,
-      effort: PATIENT_EFFORT,
+      model: chatModelSpec.model,
+      effort: chatModelSpec.effort,
       systemPrompt: resolved.systemPrompt,
       messages,
       maxCompletionTokens: tokenCap + 2000,
     });
-    logOpenAIUsage('Chat paciente', PATIENT_MODEL, usage);
+    logOpenAIUsage('Chat paciente', chatModelSpec.model, usage);
     res.json({ role: 'assistant', content: text });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'chat/paciente',
-      { extra: { modelo: PATIENT_MODEL } }));
+      { extra: { modelo: chatModelSpec.model } }));
   }
 });
 
