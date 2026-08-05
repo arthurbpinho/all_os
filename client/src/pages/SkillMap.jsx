@@ -141,8 +141,14 @@ export default function SkillMap({ user }) {
     const p = progressMap[ex.id];
     return p && Number.isFinite(p.score) ? p.score : null;
   }
+  // "Passou" vem do progresso salvo (p.passed), não é recalculado do score —
+  // exercícios sem avaliador salvam passed:true com score:null (só finalizam).
+  function passedOf(ex) {
+    const p = progressMap[ex.id];
+    return !!(p && p.passed === true);
+  }
   function passedCount(skillId) {
-    return (bySkill[skillId] || []).filter((ex) => { const s = scoreOf(ex); return s !== null && s >= PASS; }).length;
+    return (bySkill[skillId] || []).filter(passedOf).length;
   }
 
   // Estados das fases de uma competência: 'done' | 'active' | 'locked'.
@@ -152,7 +158,7 @@ export default function SkillMap({ user }) {
     let activeFound = false;
     return phases.map((ex, i) => {
       const score = scoreOf(ex);
-      const passed = score !== null && score >= PASS;
+      const passed = passedOf(ex);
       const unlocked = i === 0 ? true : prevPassed;
       let state;
       if (passed) state = 'done';
@@ -173,7 +179,7 @@ export default function SkillMap({ user }) {
   }
 
   // ── Stats da barra superior ──
-  const completed = stats?.completed ?? Object.values(progressMap).filter((p) => p && Number.isFinite(p.score) && p.score >= PASS).length;
+  const completed = stats?.completed ?? Object.values(progressMap).filter((p) => p && p.passed === true).length;
   const level = stats?.level ?? levelFromCount(completed);
   const nextThreshold = stats?.nextThreshold ?? (level < 5 ? LEVEL_THRESHOLDS[level - 1] : null);
   const constancia = stats?.constancia || { current: 0, isAlive: false };

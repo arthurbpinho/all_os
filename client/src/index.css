@@ -4026,6 +4026,7 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .trilha-result-flag.pass { background: rgba(63,164,94,0.12); color: #2D8F4E; border-color: rgba(63,164,94,0.4); }
 .trilha-result-flag.fail { background: rgba(224,138,60,0.12); color: #C2761C; border-color: rgba(224,138,60,0.4); }
+.trilha-result-flag.neutral { background: var(--sand-2); color: var(--ink-soft); border-color: var(--line); }
 [data-theme="dark"] .trilha-result-flag.pass { color: #67c98a; }
 [data-theme="dark"] .trilha-result-flag.fail { color: #eca85a; }
 

@@ -12,7 +12,6 @@ const {
   buildTrilhaExercisePrompt,
   buildFreeplayPrompt,
   buildNeuroPrompt,
-  buildTrilhaEvaluatorPrompt,
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
@@ -2150,7 +2149,10 @@ app.get('/api/trilha/:userId', requireAuth, (req, res) => {
   let completed = 0;
   for (const k of Object.keys(userProgress)) {
     const p = userProgress[k];
-    if (p && typeof p === 'object' && Number.isFinite(p.score) && p.score >= TRILHA_PASS) completed++;
+    // p.passed é a fonte de verdade (setada pelo cliente ao salvar progresso —
+    // inclui exercícios SEM avaliador, que "passam" ao só finalizar, com
+    // score: null). O check por score fica como fallback pra dado antigo.
+    if (p && typeof p === 'object' && (p.passed === true || (Number.isFinite(p.score) && p.score >= TRILHA_PASS))) completed++;
   }
   const level = trilhaLevel(completed);
   const nextThreshold = level < 5 ? TRILHA_LEVEL_THRESHOLDS[level - 1] : null;
@@ -3240,24 +3242,19 @@ function loadProgressaoPrompt() {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
-// Resolve o system prompt do avaliador server-side. Se context.type ===
-// 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
-// (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
-// avaliador global Allos. Para exercícios, também resolve QUAL MODELO roda o
-// avaliador (escolha do admin ao salvar o exercício, ver evaluatorModel).
+// Resolve o system prompt do avaliador server-side. Para exercícios da Trilha,
+// o avaliador é OPCIONAL e definido pelo admin (evaluatorPrompt): sem ele, não
+// há avaliador padrão de fallback — a avaliação simplesmente não acontece
+// (400). Também resolve QUAL MODELO roda o avaliador (evaluatorModel).
 function resolveEvaluatorSystemPrompt({ context }) {
   if (context && typeof context === 'object' && context.type === 'exercise' && context.itemId) {
     const ex = readJSON('exercises.json').find((e) => String(e.id) === String(context.itemId));
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
-    const evaluatorModelKey = TRILHA_EXERCISE_MODELS[ex.evaluatorModel] ? ex.evaluatorModel : TRILHA_EXERCISE_MODEL_DEFAULT;
-    if (ex.evaluatorPrompt && String(ex.evaluatorPrompt).trim()) {
-      return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt), evaluatorModelKey };
+    if (!ex.evaluatorPrompt || !String(ex.evaluatorPrompt).trim()) {
+      return { status: 400, error: 'Este exercício não tem avaliador configurado — a avaliação não está disponível.' };
     }
-    // Exercício sem avaliador customizado → avaliador PADRÃO da Trilha (nota
-    // 0–100). Não cai mais no avaliador global v16 (que é dos casos clínicos
-    // com Bloco 1 e emite notas por critério/saldo ±, incompatível com a régua
-    // de 75% por porcentagem da Trilha).
-    return { systemPrompt: buildTrilhaEvaluatorPrompt(), evaluatorModelKey };
+    const evaluatorModelKey = TRILHA_EXERCISE_MODELS[ex.evaluatorModel] ? ex.evaluatorModel : TRILHA_EXERCISE_MODEL_DEFAULT;
+    return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt), evaluatorModelKey };
   }
   // Neuroavaliação → avaliador dedicado (sessão única, diagnóstico + testes).
   if (context && typeof context === 'object' && context.type === 'neuro') {

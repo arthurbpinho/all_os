@@ -218,7 +218,7 @@ export default function AdminExercises() {
         <div>
           <div className="eyebrow">Administração</div>
           <h2><Typewriter text="Exercícios da " /><span className="accent"><Typewriter text="Trilha" delayStart={420} /></span></h2>
-          <p>Cadastre os exercícios da trilha de prática deliberada. Cada exercício tem dois prompts: o do exercício (o papel que a IA incorpora — nem sempre um paciente) e o do avaliador (que dá a nota ao final).</p>
+          <p>Cadastre os exercícios da trilha de prática deliberada. Cada exercício tem o prompt do exercício (o papel que a IA incorpora — nem sempre um paciente) e, opcionalmente, um prompt de avaliador: sem ele, a sessão só finaliza, sem nota.</p>
         </div>
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn btn-outline" onClick={openSkillsModal}>Gerenciar competências</button>
@@ -254,11 +254,12 @@ export default function AdminExercises() {
                   </td>
                   <td style={{ color: 'var(--ink-soft)', fontSize: 13 }}>
                     {ex.evaluatorPrompt ? (
-                      <span style={{ color: 'var(--marrs-dark)' }}>customizado</span>
+                      <>
+                        <span style={{ color: 'var(--marrs-dark)' }}>{modelLabel(ex.evaluatorModel || EXERCISE_MODEL_DEFAULT)}</span>
+                      </>
                     ) : (
-                      <em style={{ fontFamily: 'var(--serif-it)' }}>padrão Allos</em>
+                      <em style={{ fontFamily: 'var(--serif-it)' }}>sem avaliador — só finaliza</em>
                     )}
-                    <span style={{ color: 'var(--muted)' }}> · {modelLabel(ex.evaluatorModel || EXERCISE_MODEL_DEFAULT)}</span>
                   </td>
                   <td>
                     <div className="actions">
@@ -317,14 +318,6 @@ export default function AdminExercises() {
                 <textarea id="specificInstruction" name="specificInstruction" value={form.specificInstruction} onChange={handleChange} placeholder="Descreva o papel que a IA deve incorporar durante o exercício — um paciente simulado, um colega, uma situação de escrita etc. — e os comportamentos esperados…" style={{ minHeight: 160 }} />
               </div>
               <div>
-                <label htmlFor="evaluatorModel">Modelo do avaliador</label>
-                <select id="evaluatorModel" name="evaluatorModel" value={form.evaluatorModel} onChange={handleChange}>
-                  {EXERCISE_MODEL_OPTIONS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
                   <label htmlFor="evaluatorPrompt" style={{ margin: 0 }}>
                     Prompt do avaliador <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em>
@@ -337,9 +330,21 @@ export default function AdminExercises() {
                 </div>
                 <textarea id="evaluatorPrompt" name="evaluatorPrompt" value={form.evaluatorPrompt} onChange={handleChange} placeholder="Como a IA deve avaliar o desempenho neste exercício específico? Defina critérios, escala de notas, o que olhar e o que ignorar. O sistema acrescenta automaticamente a exigência de [NOTA:X] no final." style={{ minHeight: 200 }} />
                 <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12 }}>
-                  Se vazio, usa o avaliador padrão da Trilha. A nota é uma <strong>porcentagem de 0 a 100</strong> (o aluno passa de fase com <strong>75%</strong>) e é lida automaticamente do formato <code style={{ color: 'var(--marrs-deep)' }}>[NOTA:X]</code> que o avaliador emite no fim — o sistema acrescenta essa exigência mesmo em avaliadores customizados.
+                  {form.evaluatorPrompt.trim()
+                    ? <>A nota é uma <strong>porcentagem de 0 a 100</strong> (o aluno passa de fase com <strong>75%</strong>) e é lida automaticamente do formato <code style={{ color: 'var(--marrs-deep)' }}>[NOTA:X]</code> que o avaliador emite no fim — o sistema acrescenta essa exigência ao seu prompt.</>
+                    : <><strong>Se vazio, este exercício não terá avaliação</strong> — o aluno só finaliza a sessão (sem nota), e ela conta como concluída na trilha.</>}
                 </small>
               </div>
+              {form.evaluatorPrompt.trim() && (
+                <div>
+                  <label htmlFor="evaluatorModel">Modelo do avaliador</label>
+                  <select id="evaluatorModel" name="evaluatorModel" value={form.evaluatorModel} onChange={handleChange}>
+                    {EXERCISE_MODEL_OPTIONS.map((m) => (
+                      <option key={m.value} value={m.value}>{m.label}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {formError && <div className="alert error">{formError}</div>}
               <div className="modal-actions">
                 <button type="button" className="btn btn-outline" onClick={closeModal} disabled={saving}>Cancelar</button>

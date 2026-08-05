@@ -124,3 +124,38 @@ describe('Exercícios — evaluatorModel (modelo do avaliador por exercício)', 
     expect(badUpdate.body.evaluatorModel).toBe('gpt-5.4-mini');
   });
 });
+
+describe('Avaliador da Trilha é OPCIONAL — sem fallback pro avaliador padrão', () => {
+  beforeEach(() => resetData());
+
+  // getOpenAI() só retorna null (modo demonstração) quando OPENAI_API_KEY está
+  // vazia — helpers.js zera a env pra suite nunca bater na rede de verdade.
+  // Aqui setamos uma chave FALSA só pra passar por esse gate: o 400 "sem
+  // avaliador" é devolvido ANTES de qualquer chamada de rede, então não há
+  // risco de a suite tentar acessar a OpenAI de verdade.
+  const withDummyOpenAIKey = async (fn) => {
+    const prev = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-test-dummy-nao-e-uma-chave-real';
+    try {
+      await fn();
+    } finally {
+      process.env.OPENAI_API_KEY = prev;
+    }
+  };
+
+  // Só testamos o caminho NEGATIVO (sem evaluatorPrompt → 400 antes de
+  // qualquer chamada de IA). O caminho positivo (com evaluatorPrompt) seguiria
+  // adiante pra uma chamada de rede de verdade — a suite deliberadamente nunca
+  // faz isso (ver comentário sobre modo demo em helpers.js).
+  it('exercício SEM evaluatorPrompt: /api/evaluate recusa com 400 (não cai em avaliador padrão)', async () => {
+    await withDummyOpenAIKey(async () => {
+      const token = await loginAs('aluno');
+      const res = await request(app).post('/api/evaluate').set(authHeader(token)).send({
+        messages: [{ role: 'user', content: 'Sessão de teste' }],
+        context: { type: 'exercise', itemId: 'ex-test-2' }, // sem evaluatorPrompt (ver helpers.js)
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/não tem avaliador configurado/i);
+    });
+  });
+});
