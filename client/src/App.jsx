@@ -232,16 +232,18 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {(isTherapist || isAdmin || isVisitor) && (
+          {(isTherapist || isSupervisor || isAdmin || isVisitor) && (
             <>
               <div className="nav-section">Prática</div>
-              <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''}>
-                {ICONS.home}<span>Início</span>
-              </Link>
-              {/* Trilha continua oculta — só admin acessa via menu. Os modos de
+              {(isTherapist || isAdmin || isVisitor) && (
+                <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''}>
+                  {ICONS.home}<span>Início</span>
+                </Link>
+              )}
+              {/* Trilha: aberta a aluno, professor/supervisor e admin. Os modos de
                   prática (Treinamento, Competitivo, Duelo) saíram do menu: agora
                   são abertos pelos cards de "como jogar" na tela de Início. */}
-              {isAdmin && (
+              {(isTherapist || isSupervisor || isAdmin) && (
                 <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
                   {ICONS.skill}<span>Trilha</span>
                 </Link>
