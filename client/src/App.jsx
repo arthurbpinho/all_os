@@ -241,23 +241,11 @@ export default function App() {
                   {ICONS.home}<span>Início</span>
                 </Link>
               )}
-              {/* Trilha: aberta a aluno, professor/supervisor e admin. Os modos de
-                  prática (Treinamento, Competitivo, Duelo) saíram do menu: agora
-                  são abertos pelos cards de "como jogar" na tela de Início. */}
-              {(isTherapist || isSupervisor || isAdmin) && (
-                <Link to="/skills" className={isActive('/skills') ? 'active' : ''}>
-                  {ICONS.skill}<span>Trilha</span>
-                </Link>
-              )}
-              {/* Antessala (pré-supervisão): ferramenta do aluno pra preparar a
-                  supervisão do paciente real. Visitante não usa (efêmero). */}
-              {(isTherapist || isAdmin) && (
-                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''}>
-                  {ICONS.antessala}<span>Antessala</span>
-                </Link>
-              )}
             </>
           )}
+          {/* Trilha e Antessala saíram do menu: agora são abertas pelos cards da
+              seção "Como evoluir" na tela de Início, do mesmo jeito que Treinamento,
+              Competitivo e Duelo já eram abertos pelos cards de "Como jogar". */}
 
           {/* Comunidade ACIMA de Histórico. Objetivos veio da Prática (mesma
               audiência: aluno/admin — não visitante, não supervisor). O avaliador

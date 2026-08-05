@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
-import { buildDirectEvaluationPrompt, stripSupervisorBlock } from '../prompts';
+import { buildDirectEvaluationPrompt, cleanEvaluationForStudent } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import { PatientAvatarButton } from '../components/PatientAvatar';
 import LogActions from '../components/LogActions';
@@ -591,7 +591,7 @@ export default function EchoSession({ user, sessionType }) {
   // Texto da avaliação prefixado pela nota geral (única menção da nota num log
   // exportado). Limpo do bloco [notas-supervisor] que é só pra backend.
   function buildEvaluationBody() {
-    const clean = stripSupervisorBlock(evaluationText);
+    const clean = cleanEvaluationForStudent(evaluationText);
     const score = evalScore !== null ? `Nota final: ${evalScore}\n\n` : '';
     return `${score}${clean}`;
   }
@@ -1002,24 +1002,15 @@ export default function EchoSession({ user, sessionType }) {
             <div className="post-evaluation">
               <h4>Análise da IA</h4>
               <div className="post-evaluation-body">
-                {evaluationText
-                  .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
-                  .replace(/\[NOTA:[^\]]+\]\s*/g, '')
-                  .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
-                  // [sidequest-resultado] / [missao-diaria-resultado] (JSON de
-                  // conclusão) são só pro sistema/supervisor.
-                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
-                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[missao-diaria-resultado\][\s\S]*$/i, '')
-                  // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
-                  // some da visão do aluno, mas continua salvo no log.
-                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
-                  .trim()}
+                {/* Blocos de máquina (notas por critério, resultado de missão)
+                    somem da visão do aluno, mas continuam salvos no log. */}
+                {cleanEvaluationForStudent(evaluationText)}
               </div>
             </div>
           )}
 
           {visibleMessages.length > 0 && (() => {
-            const hasEval = !!stripSupervisorBlock(evaluationText).trim();
+            const hasEval = !!cleanEvaluationForStudent(evaluationText).trim();
             return (
               <div style={{ marginTop: 14 }}>
                 <LogActions

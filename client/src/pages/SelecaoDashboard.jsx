@@ -54,7 +54,7 @@ export default function SelecaoDashboard() {
             <Typewriter text="Visão " />
             <span className="accent"><Typewriter text="Geral" delayStart={360} /></span>
           </h2>
-          <p>Candidatos ativos (nota ≥ {data?.threshold ?? 40}), rejeitados e média das notas no período.</p>
+          <p>Candidatos ativos (nota ≥ {data?.threshold ?? 55}), rejeitados e média das notas no período.</p>
         </div>
         <button className="btn btn-outline" onClick={copyLink} title="Copiar o link para enviar aos candidatos">
           {copied ? '✓ Link copiado' : 'Copiar link do processo seletivo'}

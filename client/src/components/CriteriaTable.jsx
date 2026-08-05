@@ -1,8 +1,30 @@
-// Tabela de notas por critério do avaliador v15 (chaves "1".."6").
+// Tabela de notas por critério do avaliador.
 // DESTINADA SÓ A SUPERVISOR/ADMIN — nunca ao aluno. Quem renderiza é responsável
-// por gatear por role: nos Logs o servidor já esconde criteriaScores do aluno;
-// na aba Avaliar Sessão (onde o bloco vem cru no texto) o gate é por role no
-// cliente. Renderiza qualquer criteriaScores não-vazio, ordenando por chave.
+// por gatear por role: nos Logs o servidor já esconde criteriaScores do aluno.
+// Renderiza qualquer criteriaScores não-vazio, ordenando por chave.
+
+// Avaliador v18.25 (atual): 15 critérios em 6 grupos. Os critérios 10 e 13 podem
+// sair NA quando o caso não dá material — aí a linha simplesmente não aparece.
+export const V18_CRITERIA = {
+  '1': 'Precisão lexical',
+  '2': 'Construção e economia',
+  '3': 'Modulação da intensidade clínica',
+  '4': 'Adequação à prontidão para mudança',
+  '5': 'Manejo do vínculo',
+  '6': 'Antifragilidade',
+  '7': 'Coerência interna',
+  '8': 'Coerência narrativa',
+  '9': 'Ganchos verbais',
+  '10': 'Ganchos não-verbais',
+  '11': 'Profundidade vertical',
+  '12': 'Articulação lateral',
+  '13': 'Formulação',
+  '14': 'Flexibilidade',
+  '15': 'Criatividade',
+};
+
+// Avaliador v15/v16 (logs antigos, 6 critérios). Mantido porque o histórico não
+// é reprocessado: log salvo com a grade antiga continua sendo lido com ela.
 export const V15_CRITERIA = {
   '1': 'Construção linguística',
   '2': 'Relação terapêutica',
@@ -20,7 +42,17 @@ export const NEURO_CRITERIA = {
   '4': 'Indicação de testes',
 };
 
-export default function CriteriaTable({ criteriaScores, labels = V15_CRITERIA }) {
+// Escolhe a grade certa para um criteriaScores: neuro tem a própria (4
+// critérios); fora dela, o número mais alto de critério distingue a grade de 15
+// (v18.25) da de 6 (logs antigos), sem precisar de campo novo no log.
+export function labelsForCriteria(criteriaScores, logType) {
+  if (logType === 'neuro') return NEURO_CRITERIA;
+  const keys = Object.keys(criteriaScores || {}).map((k) => Number(k)).filter(Number.isFinite);
+  const max = keys.length ? Math.max(...keys) : 0;
+  return max > 6 ? V18_CRITERIA : V15_CRITERIA;
+}
+
+export default function CriteriaTable({ criteriaScores, labels = V18_CRITERIA }) {
   if (!criteriaScores || typeof criteriaScores !== 'object') return null;
   const entries = Object.entries(criteriaScores)
     .filter(([, v]) => Number.isFinite(Number(v)))

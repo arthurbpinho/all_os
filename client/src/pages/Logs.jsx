@@ -3,7 +3,7 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
-import CriteriaTable, { V15_CRITERIA, NEURO_CRITERIA } from '../components/CriteriaTable';
+import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
 
@@ -107,7 +107,7 @@ function buildLogStrings(log) {
   // recebe criteriaScores do servidor).
   let criteriaPart = '';
   if (log.criteriaScores && typeof log.criteriaScores === 'object') {
-    const critLabels = log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA;
+    const critLabels = labelsForCriteria(log.criteriaScores, log.type);
     const rows = Object.entries(log.criteriaScores)
       .filter(([, v]) => Number.isFinite(Number(v)))
       .sort((a, b) => Number(a[0]) - Number(b[0]))
@@ -261,7 +261,7 @@ function LogCard({ log, showDownload }) {
           {tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
               <div>
-                <CriteriaTable criteriaScores={log.criteriaScores} labels={log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA} />
+                <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                     {evaluation}
@@ -639,7 +639,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div className="card tight">
           {evaluation || log.criteriaScores ? (
             <div>
-              <CriteriaTable criteriaScores={log.criteriaScores} labels={log.type === 'neuro' ? NEURO_CRITERIA : V15_CRITERIA} />
+              <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                   {evaluation}

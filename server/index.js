@@ -190,6 +190,12 @@ const PATIENT_PHOTOS_DIR = path.join(DATA_DIR, 'patient-photos');
 if (!fs.existsSync(PATIENT_PHOTOS_DIR)) fs.mkdirSync(PATIENT_PHOTOS_DIR, { recursive: true });
 app.use('/patient-photos', express.static(PATIENT_PHOTOS_DIR, { maxAge: '7d' }));
 
+// Mesma ideia para o avatar da IA de cada exercício da Trilha ("a bolinha" no
+// chat) — o admin escolhe a foto no editor do exercício (AdminExercises).
+const EXERCISE_PHOTOS_DIR = path.join(DATA_DIR, 'exercise-photos');
+if (!fs.existsSync(EXERCISE_PHOTOS_DIR)) fs.mkdirSync(EXERCISE_PHOTOS_DIR, { recursive: true });
+app.use('/exercise-photos', express.static(EXERCISE_PHOTOS_DIR, { maxAge: '7d' }));
+
 // JWT secret — obrigatório em todos os ambientes. Fail-closed: se ausente ou
 // curto demais, encerramos o processo em vez de continuar com fallback inseguro
 // (que zera todas as sessões a cada restart e é frágil contra deploys novos).
@@ -1883,7 +1889,54 @@ app.delete('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) =
   let exercises = readJSON('exercises.json');
   exercises = exercises.filter(e => e.id !== req.params.id);
   writeJSON('exercises.json', exercises);
+  removeExercisePhotoFiles(req.params.id); // limpa o avatar do volume junto
   res.json({ ok: true });
+});
+
+function removeExercisePhotoFiles(id) {
+  for (const suf of ['-icon.jpg', '-full.jpg']) {
+    try {
+      const p = path.join(EXERCISE_PHOTOS_DIR, id + suf);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch { /* ignora */ }
+  }
+}
+
+// Avatar da IA do exercício ("a bolinha" no chat da Trilha) — mesmo esquema da
+// foto de paciente: o cliente recorta no canvas e manda icon+full já prontos
+// como JPEG data URL; o servidor só grava os bytes. `clear:true` remove.
+app.put('/api/exercises/:id/photo', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
+  const exercises = readJSON('exercises.json');
+  const idx = exercises.findIndex((e) => e.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
+
+  if (req.body && req.body.clear) {
+    removeExercisePhotoFiles(req.params.id);
+    delete exercises[idx].photoIcon;
+    delete exercises[idx].photoFull;
+    writeJSON('exercises.json', exercises);
+    return res.json(exercises[idx]);
+  }
+
+  const icon = decodeImageDataUrl(req.body && req.body.icon);
+  const full = decodeImageDataUrl(req.body && req.body.full);
+  if (!icon || !full) return res.status(400).json({ error: 'Envie a foto (icon e full) como data URL de imagem.' });
+  const MAX = 6 * 1024 * 1024; // bytes por arquivo
+  if (icon.length > MAX || full.length > MAX) return res.status(413).json({ error: 'Imagem muito grande.' });
+
+  try {
+    fs.writeFileSync(path.join(EXERCISE_PHOTOS_DIR, `${req.params.id}-icon.jpg`), icon);
+    fs.writeFileSync(path.join(EXERCISE_PHOTOS_DIR, `${req.params.id}-full.jpg`), full);
+  } catch (err) {
+    return res.status(500).json(falhou(req, err, 'admin/gravar-avatar-exercicio',
+      { extra: { exercicioId: req.params.id } }));
+  }
+  // ?v=<ts> quebra o cache do navegador quando a foto muda.
+  const v = Date.now();
+  exercises[idx].photoIcon = `/exercise-photos/${req.params.id}-icon.jpg?v=${v}`;
+  exercises[idx].photoFull = `/exercise-photos/${req.params.id}-full.jpg?v=${v}`;
+  writeJSON('exercises.json', exercises);
+  res.json(exercises[idx]);
 });
 
 // --- Trilha Skills (competências) ---
@@ -2272,42 +2325,120 @@ function clampStr(v, max) {
   return String(v).slice(0, max);
 }
 
-// --- Bloco [notas-supervisor] do avaliador (v15+) ---
-// O avaliador emite, ao final do texto, um bloco com as notas internas por
-// critério. v15 atual usa JSON; versões anteriores usavam Base64 de linhas
-// "N:nota". Esse bloco é destinado a SUPERVISOR/ADMIN — nunca ao aluno. No save
-// extraímos as notas (vão pro criteriaScores, que o GET esconde do aluno) e
-// gravamos o texto da avaliação SEM o bloco.
+// --- Notas internas por critério na saída do avaliador ---
+// Duas gerações de formato convivem aqui, e a extração aceita as duas:
+//
+//   v18.25 (atual, avaliacao/avaliador 18/*) → bloco `[notas]` NO INÍCIO, uma
+//     linha por critério ("N: nota" ou "N: NA"; no comparativo do Duelo as
+//     chaves são A1..A15 / B1..B15), depois a linha `[feedback]` e o corpo. As
+//     notas vêm ANTES da prosa de propósito (anti-compressão: o número nasce da
+//     avaliação fria, antes de a escrita amolecê-lo).
+//   v15/v16 (logs antigos) → prosa + `[notas-supervisor]` no FIM, com JSON
+//     (ou Base64 de linhas "N:nota", nas primeiras versões).
+//
+// Em qualquer um dos dois, as notas são de SUPERVISOR/ADMIN — nunca do aluno. No
+// save extraímos (vão pro criteriaScores, que o GET esconde do aluno) e gravamos
+// a avaliação só com o texto que o aluno pode ler.
+//
+// Saudação: os avaliadores v18.25 não escrevem saudação — a especificação deles
+// diz que "o sistema monta a mensagem" —, então é aqui que ela entra, quando o
+// texto é o que o aluno vai ler. ESPELHO: client/src/prompts.js repete o mesmo
+// texto (o aluno vê a avaliação na tela antes de o log ser salvo). Mudou aqui,
+// mude lá.
+const EVAL_GREETING = [
+  'Trate este feedback como pré-correção — ponto de partida para conversa com seu supervisor e colegas, não veredicto.',
+  '',
+  'Tenho acesso apenas ao que você escreveu, não ao que você pensou. Use o botão de estrela para descrever seu raciocínio clínico nas falas em que ele importa — isso me ajuda a diferenciar decisões clínicas conscientes de erros por falta de percepção.',
+].join('\n');
+
+// Uma linha do bloco [notas]: "12: 8", "10: NA", "A1: 7" (comparativo).
+const V18_NOTE_LINE = /^[^\S\n]*([AB]?\d{1,2})[^\S\n]*:[^\S\n]*(NA|[-+]?\d+(?:[.,]\d+)?)[^\S\n]*$/i;
+
 function parseSupervisorPayload(payload) {
   if (!payload) return null;
-  // 1) JSON direto (v15)
+  // 1) JSON direto (v15/v16)
   try {
     const obj = JSON.parse(payload);
     if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
       const out = {};
       for (const [k, v] of Object.entries(obj)) {
         const n = Number(String(v).replace(',', '.'));
-        if (Number.isFinite(n)) out[String(k)] = n;
+        if (Number.isFinite(n)) out[String(k).trim().toUpperCase()] = n;
       }
       if (Object.keys(out).length) return out;
     }
   } catch {}
-  // 2) Base64 (v15 original) ou texto puro de linhas "N:nota" (retrocompat)
+  // 2) Base64 (v15 original) ou texto puro de linhas "N: nota" (retrocompat).
+  //    Uma linha pode trazer VÁRIOS pares ("A1: 7  A2: 8  …"): era o formato que
+  //    o comparativo v2 pedia, em duas linhas. A linha só conta quando é feita
+  //    exclusivamente de pares — assim prosa solta no payload não vira nota.
   let lines = payload;
   if (!payload.includes(':') && /^[A-Za-z0-9+/=\s]+$/.test(payload)) {
     try { lines = Buffer.from(payload, 'base64').toString('utf-8'); } catch {}
   }
+  const PAIR = /([AB]?\d{1,2})[^\S\n]*:[^\S\n]*([-+]?\d+(?:[.,]\d+)?)/gi;
   const out = {};
   for (const line of lines.split(/\r?\n/)) {
-    const m = line.match(/^\s*(\d+)\s*:\s*([-+]?\d+(?:[.,]\d+)?)\s*$/);
-    if (m) out[m[1]] = Number(m[2].replace(',', '.'));
+    if (!line.trim()) continue;
+    if (!/^(?:[^\S\n]*[AB]?\d{1,2}[^\S\n]*:[^\S\n]*[-+]?\d+(?:[.,]\d+)?[^\S\n]*)+$/i.test(line)) continue;
+    for (const m of line.matchAll(PAIR)) out[m[1].toUpperCase()] = Number(m[2].replace(',', '.'));
   }
   return Object.keys(out).length ? out : null;
 }
 
-function extractSupervisorNotes(evaluation) {
+// Formato v18.25: `[notas]` → linhas de nota → `[feedback]` → corpo. Retorna
+// null quando nenhum dos dois marcadores aparece (aí o texto é de outra geração).
+// `NA` é preservado como string: finalScoreFromCriteria o descarta (NaN) e a
+// tabela do supervisor não mostra a linha.
+function parseV18EvaluatorOutput(text) {
+  // Marcadores só valem em linha própria — um "[feedback]" solto no meio de uma
+  // frase (ou dentro do log que o aluno colou) não pode cortar o texto.
+  const notasMatch = text.match(/(?:^|\r?\n)[^\S\n]*\[notas\][^\S\n]*\r?\n/i);
+  const fbMatch = text.match(/(?:^|\r?\n)[^\S\n]*\[feedback\][^\S\n]*(?:\r?\n|$)/i);
+  if (!notasMatch && !fbMatch) return null;
+  let criteria = null;
+  // Fim do bloco de notas: o marcador [feedback], quando vem depois; senão, a
+  // primeira linha que não é linha de nota nem linha vazia. O segundo caso cobre
+  // o modelo que esquece o [feedback] — aí o corpo começa ali, e devolvê-lo é
+  // muito melhor que devolver feedback vazio.
+  let notesEnd = text.length;
+  if (notasMatch) {
+    const start = notasMatch.index + notasMatch[0].length;
+    const hardEnd = fbMatch && fbMatch.index > notasMatch.index ? fbMatch.index : text.length;
+    const out = {};
+    let cursor = start;
+    for (const line of text.slice(start, hardEnd).split(/\r?\n/)) {
+      const lm = line.match(V18_NOTE_LINE);
+      if (!lm) {
+        if (line.trim() === '') { cursor += line.length + 1; continue; }
+        break;
+      }
+      out[lm[1].toUpperCase()] = /^na$/i.test(lm[2]) ? 'NA' : Number(lm[2].replace(',', '.'));
+      cursor += line.length + 1;
+    }
+    if (Object.keys(out).length) criteria = out;
+    notesEnd = Math.min(cursor, hardEnd);
+  }
+  let feedback;
+  if (fbMatch) feedback = text.slice(fbMatch.index + fbMatch[0].length);
+  else if (notasMatch) feedback = text.slice(notesEnd);
+  else feedback = text;
+  // Defesa: se o modelo emitiu o bloco de notas fora de ordem (depois do corpo),
+  // ele não pode sobrar no texto do aluno.
+  feedback = feedback.replace(/(?:^|\r?\n)[^\S\n]*\[notas\][^\S\n]*\r?\n[\s\S]*$/i, '').trim();
+  return { criteria, feedback };
+}
+
+// { clean, criteria }. `clean` é o texto sem os blocos de máquina — com a
+// saudação prefixada quando o destino é o aluno (greeting) e o avaliador é v18.25.
+function extractSupervisorNotes(evaluation, { greeting = true } = {}) {
   const text = typeof evaluation === 'string' ? evaluation : '';
-  // bloco no fim do texto: (--- opcional) + [notas-supervisor] + payload até o fim
+  const v18 = parseV18EvaluatorOutput(text);
+  if (v18) {
+    const clean = greeting && v18.feedback ? `${EVAL_GREETING}\n\n${v18.feedback}` : v18.feedback;
+    return { clean, criteria: v18.criteria };
+  }
+  // Legado: (--- opcional) + [notas-supervisor] + payload até o fim do texto.
   const m = text.match(/\n*(?:-{3,}[^\S\n]*\r?\n+)?\[notas-supervisor\][^\S\n]*\r?\n?([\s\S]*)$/i);
   if (!m) return { clean: text, criteria: null };
   const clean = text.slice(0, m.index).replace(/\s+$/, '');
@@ -2397,7 +2528,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(cleanAfterDaily);
 
   // Nota final: calculada em CÓDIGO a partir das notas por critério do bloco
-  // [notas-supervisor] (avaliadores v15/progressão). A IA não emite mais a nota
+  // [notas] (avaliadores v18.25) ou [notas-supervisor] (logs antigos). A IA não emite a nota
   // 0–100 no texto — `server/scoring.js` faz a conta (soma → base 100). A trilha
   // (exercise) manda criteriaScores explícito + score já calculado client-side
   // (escala -9..+9, outra fórmula), então nesse caso respeitamos o body.score.
@@ -2932,7 +3063,7 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 //    (Trilha/Treinamento/Neuro/Duelo). gpt-5.4-mini com effort 'minimal' — o
 //    personagem responde direto, rápido e natural, sem raciocínio denso. O
 //    prompt caching da OpenAI é automático no prefixo (system + histórico).
-//  - OpenAI GPT-5.x (reasoning): avaliador (v15), avaliador de duelo e
+//  - OpenAI GPT-5.x (reasoning): avaliador (v18.25), avaliador de duelo e
 //    entrevistador. São tarefas de raciocínio denso onde o modelo precisa
 //    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
@@ -2944,7 +3075,7 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 // 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
 const PATIENT_MODEL = process.env.OPENAI_PATIENT_MODEL || 'gpt-5.4-mini-2026-03-17';
 const PATIENT_EFFORT = process.env.OPENAI_PATIENT_EFFORT || 'none';
-// Avaliador (v15 + duelo) roda no gpt-5.5. O entrevistador segue no full 5.4
+// Avaliador (v18.25 + duelo) roda no gpt-5.5. O entrevistador segue no full 5.4
 // (HEAVY) — geração de prompt de paciente é menos sensível a custo.
 const OPENAI_EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
 const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
@@ -2952,7 +3083,7 @@ const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05
 // GPT-5.x (setado explícito p/ não depender de defaults da API e manter o
 // summary). O canal de raciocínio OCULTO mantém o cruzamento gabarito × log fora
 // da prosa que o ALUNO lê (Echo/ChatSession); NÃO zerar o canal (ir abaixo de
-// minimal), senão reabre o vazamento do Bloco 1 — causa-raiz do bug do Opus v15.
+// minimal), senão reabre o vazamento do Bloco 1 — causa-raiz do bug do Opus (v15).
 const OPENAI_EVAL_EFFORT = process.env.OPENAI_EVAL_EFFORT || 'medium';
 const OPENAI_HEAVY_EFFORT = process.env.OPENAI_HEAVY_EFFORT || 'medium';
 // Avaliador da Simulação Livre (freeplay em treino). Por decisão do dono é um
@@ -3497,55 +3628,57 @@ function sanitizeAssistantId(input) {
 }
 
 // --- Avaliação de Sessão (Chat com IA) ---
+// FAMÍLIA v18.25: todos os avaliadores de produção vivem em
+// `avaliacao/avaliador 18/`, derivados do mesmo base (avaliador-v18-25.md) com a
+// adaptação de cada modo. Saída única em todos: bloco `[notas]` (15 critérios,
+// 1–10 ou NA) no início, `[feedback]` + corpo depois — exceto o Desafio, que é
+// opaco (nenhuma nota na saída). Os prompts v15/v16 continuam em `avaliacao/`
+// só como referência e para o laboratório da Avaliação Independente.
 const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
+const AVALIACAO_18_DIR = path.join(AVALIACAO_DIR, 'avaliador 18');
 
-function loadAvaliacaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-v16-2.md');
+function loadEvaluatorFile(fileName) {
+  const promptFile = path.join(AVALIACAO_18_DIR, fileName);
   if (!fs.existsSync(promptFile)) {
     throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
   }
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
-// Avaliador dedicado do Processo Seletivo: "só-nota", saída curta e direcionada ao
-// AVALIADOR (síntese + pontos fortes/fracos + observações), sem o diálogo socrático
-// nem o feedback longo ao aluno do v16-2. Mesmos 6 critérios/régua e o mesmo bloco
-// [notas-supervisor] (a nota final sai igual do scoring.js). System muito menor
-// (~3k vs ~32k) → corta input; saída curta → corta prosa. Fallback no v16-2 se o
-// arquivo sumir — o seletivo nunca fica sem avaliador.
-function loadSelecaoEvaluatorPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-processo-seletivo-v1.md');
-  if (!fs.existsSync(promptFile)) return loadAvaliacaoPrompt();
-  return fs.readFileSync(promptFile, 'utf-8');
+// Avaliador individual (Treinamento sem progressão, Competitivo, Reivindicar,
+// avaliação manual): 15 critérios em 6 grupos, nota final calculada no
+// scoring.js a partir do bloco [notas].
+function loadAvaliacaoPrompt() {
+  return loadEvaluatorFile('avaliador-v18-25.md');
 }
 
-// Avaliador dedicado da Neuroavaliação: sessão única, foco em acolhimento,
-// entrevista, hipótese diagnóstica e adequação da bateria de testes. Se o arquivo
-// não existir, cai no avaliador global (v16.2) — neuro nunca fica sem avaliador.
+// Avaliador dedicado do Processo Seletivo: "só-nota", saída curta e direcionada ao
+// AVALIADOR (síntese + pontos fortes/fracos + observações), sem o feedback longo
+// ao aluno. Mesma régua e mesmos 15 critérios do individual, mas system menor
+// (~13k vs ~25k) → corta input; saída curta → corta prosa.
+function loadSelecaoEvaluatorPrompt() {
+  return loadEvaluatorFile('avaliador-v18-25-processo-seletivo.md');
+}
+
+// Avaliador dedicado da Neuroavaliação: sessão única, 4 critérios próprios
+// (acolhimento, entrevista, hipótese diagnóstica, bateria de testes) na régua e
+// no formato de saída do v18.25. Único modo em que o gabarito diagnóstico pode
+// (e deve) ser explicitado ao aluno no feedback.
 function loadNeuroEvaluatorPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'neuro', 'avaliador-neuro-v1.md');
-  if (!fs.existsSync(promptFile)) return loadAvaliacaoPrompt();
-  return fs.readFileSync(promptFile, 'utf-8');
+  return loadEvaluatorFile('avaliador-v18-25-neuro.md');
 }
 
 // Avaliador comparativo (Duelo): recebe os dois logs do mesmo caso e devolve a
-// análise comparativa + JSON [notas-supervisor] com A1..A6 / B1..B6.
+// análise comparativa + bloco [notas] com A1..A15 / B1..B15.
 function loadComparativoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-comparativo-v2.md');
-  if (!fs.existsSync(promptFile)) {
-    throw new Error(`Prompt do avaliador comparativo não encontrado em ${promptFile}`);
-  }
-  return fs.readFileSync(promptFile, 'utf-8');
+  return loadEvaluatorFile('avaliador-v18-25-duelo.md');
 }
 
 // Avaliador de progressão: compara dois logs (Atendimento 1 e 2) do mesmo paciente.
 // Atendimento 2 é o objeto da avaliação; Atendimento 1 é referência contextual.
+// Também é o avaliador das missões (sidequest / missão diária).
 function loadProgressaoPrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-progressao-v2.md');
-  if (!fs.existsSync(promptFile)) {
-    throw new Error(`Prompt do avaliador de progressão não encontrado em ${promptFile}`);
-  }
-  return fs.readFileSync(promptFile, 'utf-8');
+  return loadEvaluatorFile('avaliador-v18-25-progressao.md');
 }
 
 // Resolve o system prompt do avaliador server-side. Para exercícios da Trilha,
@@ -3733,13 +3866,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       if (prevLog) {
         const transcript1 = transcriptFromMessages(prevLog.messages, studentName, characterName);
         content += `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n`;
-        const { criteria: prevCriteria, pointsToReview } = getPreviousFeedback(req.user.id, context.itemId);
-        if (prevCriteria) {
-          const noteLines = Object.entries(prevCriteria).map(([k, v]) => `${k}: ${v}`).join(', ');
-          content += `[AVALIAÇÃO DO ATENDIMENTO 1 — Notas anteriores]\nNotas por critério: ${noteLines}\n`;
-          if (pointsToReview) content += `\nPontos para revisar com supervisor:\n${pointsToReview}`;
-          content += `\n\n---\n\n`;
-        }
+        const prevSection = buildPreviousEvalSection(getPreviousFeedback(req.user.id, context.itemId));
+        if (prevSection) content += `${prevSection}\n---\n\n`;
       }
       if (activeSq) {
         content += `[SIDEQUEST ATIVA]\nTÍTULO: ${activeSq.title}\nDescrição: ${activeSq.description}\n\nEsta sidequest é o objetivo principal deste atendimento. Avalie primariamente se o aluno a cumpriu e emita o bloco [sidequest-resultado] conforme a especificação.\n\n---\n\n`;
@@ -3804,8 +3932,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const streamReasoning = canSeeReasoning && showReasoning === true;
 
   try {
-    // Avaliador v16-2 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
-    // Bloco 1 × log e pontua os 6 critérios no canal de reasoning OCULTO — não
+    // Avaliador v18.25 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
+    // Bloco 1 × log e pontua os 15 critérios no canal de reasoning OCULTO — não
     // sai no output_text, então o gabarito não vaza pro aluno (era o que o Opus
     // sem thinking fazia errado, externalizando a análise). Quando o pedido vem
     // da aba Avaliar Sessão (supervisor/admin), o RESUMO do raciocínio
@@ -4080,7 +4208,13 @@ function senhaSelecaoConfere(entrada) {
 }
 const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
 const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
-const SELECTION_ACTIVE_THRESHOLD = 40; // nota mínima p/ contar como candidato ATIVO
+// Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 junto com a
+// migração pro avaliador v18.25: o seletivo roda no GPT-5.5 (batch), que pontua
+// mais alto que o GLM em que o corte de 40 foi calibrado, então o mesmo 40
+// deixaria passar candidato mediano. Muda só a etiqueta ativo/rejeitado e a
+// contagem da dashboard — a nota em si não se move, e logs já avaliados
+// conservam o status que receberam na época.
+const SELECTION_ACTIVE_THRESHOLD = 55;
 const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
 // Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
 // Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
@@ -4186,9 +4320,10 @@ function selectionEvalParts(log) {
 }
 
 // Extrai nota + avaliação limpa do texto do avaliador (mesma régua do resto):
-// tira o bloco [notas-supervisor] e calcula a nota em código (scoring.js).
+// tira o bloco de notas e calcula a nota em código (scoring.js). Sem saudação —
+// quem lê é o recrutador, e o candidato nunca vê nota nem feedback.
 function parseSelectionEval(rawText) {
-  const { clean, criteria } = extractSupervisorNotes(rawText || '');
+  const { clean, criteria } = extractSupervisorNotes(rawText || '', { greeting: false });
   let score = null;
   if (criteria) {
     const computed = finalScoreFromCriteria(criteria);
@@ -4807,7 +4942,8 @@ app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), (re
 });
 
 // 6) Dashboard — avaliador/admin. Agrega selection-stats.json (anônimo, permanente)
-// no período pedido: ativos (nota ≥ 40), rejeitados (nota < 40) e média das notas.
+// no período pedido: ativos e rejeitados pelo SELECTION_ACTIVE_THRESHOLD (que vai
+// no payload, pra tela não repetir o número em código) e média das notas.
 app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
   const range = ['day', 'week', 'month', 'year'].includes(req.query.range) ? req.query.range : 'month';
   const spanMs = ({ day: 1, week: 7, month: 30, year: 365 }[range]) * 24 * 60 * 60 * 1000;
@@ -5375,8 +5511,8 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
 // Fluxo: o desafiante (challenger) escolhe um personagem e um oponente (um
 // terapeuta do sistema OU um visitante via link). Cada um atende o MESMO
 // personagem na sua própria sessão. Quando os DOIS enviam, o avaliador
-// comparativo roda server-side, gera a análise + JSON [notas-supervisor]
-// (A1..A6 = challenger, B1..B6 = opponent), e o backend calcula as duas notas
+// comparativo roda server-side, gera a análise + bloco [notas]
+// (A1..A15 = challenger, B1..B15 = opponent), e o backend calcula as duas notas
 // (server/scoring.js) e o vencedor. Só treino por enquanto — não toca no MMR.
 
 const DUEL_TTL_MS = 30 * 24 * 60 * 60 * 1000; // mesma janela dos logs
@@ -5560,31 +5696,79 @@ function getLastLogForCharacter(userId, characterId) {
   return relevant.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
 }
 
-// Extrai as notas (criteria) e pontos-para-revisar da avaliação anterior de um paciente.
-// Retorna { criteria, pointsToReview } ou { criteria: null, pointsToReview: '' } se não encontrado.
+// Avaliação do atendimento anterior do aluno com aquele paciente, para o
+// avaliador de progressão: as notas por critério + o FEEDBACK que o aluno leu.
+//
+// Antes daqui saía só a seção "Pontos para revisar com seu supervisor", que os
+// avaliadores v15/v16 emitiam com título fixo. No v18.25 esse movimento virou um
+// parágrafo sem rótulo dentro da prosa, então não há mais o que recortar — vai o
+// feedback inteiro (limitado), que é a mesma informação e ainda fecha o ciclo
+// melhor. `pointsToReview` continua sendo extraído quando o log é antigo e tem a
+// seção, só pra não perder o destaque em quem já tem histórico.
+const PREV_FEEDBACK_MAX = 8000;
+
 function getPreviousFeedback(userId, characterId) {
   const lastLog = getLastLogForCharacter(userId, characterId);
-  if (!lastLog) return { criteria: null, pointsToReview: '' };
+  if (!lastLog) return { criteria: null, feedback: '', pointsToReview: '' };
 
-  const { criteria } = extractSupervisorNotes(lastLog.evaluation || '');
-
-  // Extrai a seção "Pontos para revisar com supervisor" do texto da avaliação.
-  // Padrão: procura por "Pontos para revisar com supervisor:" (case-insensitive)
   const text = lastLog.evaluation || '';
-  const pointsMatch = text.match(/pontos?\s+para\s+revisar\s+com\s+supervisor[:\s]*([\s\S]*?)(?:\[notas-supervisor\]|$)/i);
+  const { criteria } = extractSupervisorNotes(text, { greeting: false });
+
+  const pointsMatch = text.match(/pontos?\s+para\s+revisar\s+com\s+(?:seu\s+)?supervisor[:\s]*([\s\S]*?)(?:\[notas-supervisor\]|$)/i);
   const pointsToReview = pointsMatch ? pointsMatch[1].trim() : '';
 
-  return { criteria, pointsToReview };
+  return { criteria, feedback: clampStr(text, PREV_FEEDBACK_MAX).trim(), pointsToReview };
+}
+
+// Nomes dos critérios para rotular as notas do atendimento anterior no contexto
+// do avaliador de progressão. Logs antigos têm a grade de 6 critérios (v15/v16);
+// os novos têm os 15 do v18.25. Sem rótulo, o avaliador leria "3: 7" sem saber de
+// que dimensão se trata — e pior, leria a grade antiga como se fosse a nova.
+const CRITERIA_NAMES_V18 = {
+  1: 'Precisão lexical', 2: 'Construção e economia', 3: 'Modulação da intensidade clínica',
+  4: 'Adequação à prontidão para mudança', 5: 'Manejo do vínculo', 6: 'Antifragilidade',
+  7: 'Coerência interna', 8: 'Coerência narrativa', 9: 'Ganchos verbais', 10: 'Ganchos não-verbais',
+  11: 'Profundidade vertical', 12: 'Articulação lateral', 13: 'Formulação',
+  14: 'Flexibilidade', 15: 'Criatividade',
+};
+const CRITERIA_NAMES_V16 = {
+  1: 'Construção linguística', 2: 'Relação terapêutica', 3: 'Confiança transmitida',
+  4: 'Priorização', 5: 'Aprofundamento', 6: 'Flexibilidade e Criatividade',
+};
+
+// Bloco "[AVALIAÇÃO DO ATENDIMENTO 1]" do contexto de progressão. Retorna '' se
+// não houver avaliação anterior aproveitável.
+function buildPreviousEvalSection({ criteria, feedback, pointsToReview }) {
+  const parts = [];
+  if (criteria && Object.keys(criteria).length) {
+    const keys = Object.keys(criteria).map((k) => Number(k)).filter(Number.isFinite);
+    const legacy = keys.length > 0 && Math.max(...keys) <= 6;
+    const names = legacy ? CRITERIA_NAMES_V16 : CRITERIA_NAMES_V18;
+    const lines = Object.entries(criteria)
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([k, v]) => `${k} · ${names[Number(k)] || 'Critério ' + k}: ${v}`)
+      .join('\n');
+    parts.push(
+      legacy
+        ? `Notas por critério (grade ANTIGA, de 6 critérios — referência grossa do nível anterior, não comparável critério a critério com a grade de 15):\n${lines}`
+        : `Notas por critério (0–10):\n${lines}`,
+    );
+  }
+  if (feedback) parts.push(`Feedback que o aluno leu:\n${feedback}`);
+  else if (pointsToReview) parts.push(`Pontos para revisar com supervisor:\n${pointsToReview}`);
+  if (!parts.length) return '';
+  return `[AVALIAÇÃO DO ATENDIMENTO 1]\n${parts.join('\n\n')}\n`;
 }
 
 // Executa avaliação de progressão: compara Atendimento 1 (anterior) vs Atendimento 2 (novo).
 // userMessages: array de mensagens da nova sessão (Log 2).
-// Retorna { evaluationClean, criteria } onde criteria tem apenas as 6 notas do Atendimento 2.
+// Retorna { evaluationClean, criteria } onde criteria tem apenas as 15 notas do Atendimento 2.
 async function runProgressionEvaluation(userId, characterId, userMessages) {
   const openai = getOpenAI();
 
   if (!openai) {
-    const criteria = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+    const criteria = {};
+    for (let i = 1; i <= 15; i++) criteria[i] = 0;
     return {
       evaluationClean: '[Modo demonstração — OPENAI_API_KEY não configurada] Avaliação de progressão indisponível.',
       criteria,
@@ -5610,22 +5794,11 @@ async function runProgressionEvaluation(userId, characterId, userMessages) {
   const transcript1 = transcriptFromMessages(log1.messages, studentName, characterName);
   const transcript2 = transcriptFromMessages(userMessages, studentName, characterName);
 
-  // Busca feedback anterior (notas do Atendimento 1 + pontos para revisar)
-  const { criteria: previousCriteria, pointsToReview } = getPreviousFeedback(userId, characterId);
+  // Avaliação do Atendimento 1 (notas por critério + feedback que o aluno leu)
+  const previousFeedbackSection = buildPreviousEvalSection(getPreviousFeedback(userId, characterId));
 
-  // Monta o bloco de feedback anterior (notas + pontos para revisar)
-  let previousFeedbackSection = '';
-  if (previousCriteria) {
-    const noteLines = Object.entries(previousCriteria)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join(', ');
-    previousFeedbackSection = `[AVALIAÇÃO DO ATENDIMENTO 1 — Notas anteriores]\nNotas por critério: ${noteLines}\n`;
-    if (pointsToReview) {
-      previousFeedbackSection += `\nPontos para revisar com supervisor:\n${pointsToReview}`;
-    }
-  }
-
-  // Monta conteúdo para o avaliador (4 materiais conforme avaliador-progressao-v1.md)
+  // Monta o conteúdo para o avaliador de progressão (Bloco 1 + atendimento 1 +
+  // avaliação do 1 + atendimento 2, na ordem que o prompt v18.25 descreve).
   const userContent =
     (bloco1 ? `[BLOCO 1 DO CASO]\n${bloco1}\n\n---\n\n` : '') +
     `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n` +
@@ -5658,7 +5831,8 @@ async function runComparativeEvaluation(duel) {
 
   if (!client) {
     // Modo demonstração (sem API key): nota neutra pros dois, sem vencedor real.
-    const criteria = { A1: 5, A2: 5, A3: 5, A4: 5, A5: 5, A6: 5, B1: 5, B2: 5, B3: 5, B4: 5, B5: 5, B6: 5 };
+    const criteria = {};
+    for (let i = 1; i <= 15; i++) { criteria['A' + i] = 5; criteria['B' + i] = 5; }
     const comp = comparativeScores(criteria);
     return {
       evaluationClean: `[Modo demonstração — ${provider} indisponível] Avaliação comparativa indisponível.`,
@@ -5682,7 +5856,9 @@ async function runComparativeEvaluation(duel) {
   const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
   const text = msg.content || '';
   logOpenAIUsage('Duel evaluate', DUEL_EVAL_MODEL, resp.usage || null);
-  const { clean, criteria } = extractSupervisorNotes(text);
+  // Sem saudação: a análise do Duelo é comparativa, escrita para os dois alunos
+  // (a saudação em segunda pessoa do singular não cabe aqui).
+  const { clean, criteria } = extractSupervisorNotes(text, { greeting: false });
   const comp = comparativeScores(criteria);
   return { evaluationClean: clean, comp };
 }
@@ -6632,16 +6808,14 @@ function cleanDesafioMessages(rawMessages) {
     }));
 }
 
-// Avaliador titular-desafiante: mesma família dos demais avaliadores em
-// avaliacao/. Comparativo, mas com resultado binário (Titular permanece ou
-// Desafiante assume). Output NÃO carrega notas numéricas — só o bloco
-// [titular-desafiante-resultado] com {"desafiante_assume": bool, "justification": "..."}.
+// Avaliador titular-desafiante: mesma família v18.25 dos demais. Comparativo, mas
+// com resultado binário (Titular permanece ou Desafiante assume) decidido por
+// contagem de critérios vencidos — empate no critério vai pro Desafiante. Output
+// OPACO: nenhuma nota numérica, nem bloco [notas]; só a linha de resultado, a
+// prosa e o bloco [titular-desafiante-resultado] com
+// {"desafiante_assume": bool, "justification": "..."}.
 function loadTitularDesafiantePrompt() {
-  const promptFile = path.join(AVALIACAO_DIR, 'avaliador-titular-desafiante-v2.md');
-  if (!fs.existsSync(promptFile)) {
-    throw new Error(`Prompt do avaliador titular-desafiante não encontrado em ${promptFile}`);
-  }
-  return fs.readFileSync(promptFile, 'utf-8');
+  return loadEvaluatorFile('avaliador-v18-25-desafio.md');
 }
 
 // Extrai o bloco [titular-desafiante-resultado] do output do avaliador.
@@ -6729,9 +6903,9 @@ app.get('/api/desafio/state/:characterId', requireAuth, (req, res) => {
 // Reivindica um Titular (não há Titular atual). O aluno vira Titular ao final,
 // SEMPRE — independente da nota; reivindicar nunca "falha". Mas, como todo
 // atendimento do Treinamento, agora recebe avaliação clínica: rodamos o
-// avaliador individual (v15) sobre o log do reivindicante e devolvemos a prosa
+// avaliador individual (v18.25) sobre o log do reivindicante e devolvemos a prosa
 // de feedback. Por viver no Modo Desafio, a avaliação é OPACA — o bloco oculto
-// [notas-supervisor] é stripado server-side ANTES de qualquer byte chegar ao
+// [notas] é stripado server-side ANTES de qualquer byte chegar ao
 // cliente (a nota nunca aparece, nem ao aluno nem ao supervisor; ver opacidade
 // do titular-desafiante). Reivindicamos PRIMEIRO (write atômico instantâneo) e
 // só então rodamos a avaliação — assim a avaliação demorada não abre janela de
@@ -6809,11 +6983,11 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
     });
   }
 
-  // Avaliação individual (v15) do log do reivindicante, em GLM 5.2/high
+  // Avaliação individual (v18.25) do log do reivindicante, em GLM 5.2/high
   // (buffered — sem chamada em stream token a token; o heartbeat abaixo segura
   // a conexão). Opaca: o texto bruto nunca é escrito na resposta — só o
-  // `clean` (pós extractSupervisorNotes) sai, então o bloco [notas-supervisor]
-  // jamais chega ao cliente.
+  // `clean` (pós extractSupervisorNotes) sai, então o bloco [notas] com as notas
+  // por critério jamais chega ao cliente.
   const context = { type: 'freeplay', itemId: char.id };
   const systemPrompt = loadAvaliacaoPrompt();
   const bloco1 = resolveBloco1({ context });
@@ -6840,7 +7014,7 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
     });
     const resp = await desafioClient.chat.completions.create(evalBody);
     const fullText = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-    logOpenAIUsage('Reivindicar (v15 opaco)', DESAFIO_EVAL_MODEL, resp.usage || null);
+    logOpenAIUsage('Reivindicar (v18.25 opaco)', DESAFIO_EVAL_MODEL, resp.usage || null);
     const { clean } = extractSupervisorNotes(fullText);
     clearInterval(heartbeat);
     if (clean) res.write(`data: ${JSON.stringify({ delta: clean })}\n\n`);
@@ -6962,7 +7136,12 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
   // Parse do bloco [titular-desafiante-resultado] + atualização de estado.
   // Se o desafiante assume, troca o Titular. Read-modify-write atômico no
   // mesmo request — improvável ter race aqui (avaliação demora minutos).
-  const { clean, result } = extractTitularDesafianteResult(fullText);
+  const { clean: cleanResult, result } = extractTitularDesafianteResult(fullText);
+  // Defesa da opacidade do Desafio: o prompt v18.25 deste modo proíbe qualquer
+  // nota na saída, mas se o modelo escorregar e emitir o bloco [notas] (o base
+  // do qual ele deriva emite), ele não pode chegar ao cliente. O parse preserva
+  // a linha de resultado e a prosa; só o bloco de notas cai.
+  const { clean } = extractSupervisorNotes(cleanResult, { greeting: false });
   let outcome = 'titular-permanece';
   let newTitular = titular;
   // Atualização de estado sob lock: a IA (demorada) já rodou FORA do lock; aqui

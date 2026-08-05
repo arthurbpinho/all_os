@@ -33,7 +33,7 @@ describe('Processo Seletivo', () => {
     const avalToken = await loginAs('aval1', 'avalpass123');
     const dash = await request(app).get('/api/selecao/dashboard').set(authHeader(avalToken));
     expect(dash.status).toBe(200);
-    expect(dash.body).toMatchObject({ activeCount: 0, rejectedCount: 0, total: 0, threshold: 40 });
+    expect(dash.body).toMatchObject({ activeCount: 0, rejectedCount: 0, total: 0, threshold: 55 });
 
     const logs = await request(app).get('/api/selecao/logs').set(authHeader(avalToken));
     expect(logs.status).toBe(200);

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import PatientPhotoCropper from '../components/PatientPhotoCropper';
 
 const DIFFICULTY_OPTIONS = [
   { value: 'iniciante', label: 'Iniciante' },
@@ -88,6 +89,14 @@ export default function AdminExercises() {
   const specFileRef = useRef(null);
   const evalFileRef = useRef(null);
 
+  // Avatar da IA do exercício ("a bolinha" no chat) — mesmo esquema da foto de
+  // paciente: photoData = { iconDataUrl, fullDataUrl } pendente de salvar;
+  // photoCleared = remover; currentPhotoUrl = foto atual ao abrir a edição.
+  const [photoData, setPhotoData] = useState(null);
+  const [photoCleared, setPhotoCleared] = useState(false);
+  const [currentPhotoUrl, setCurrentPhotoUrl] = useState(null);
+  function resetPhoto() { setPhotoData(null); setPhotoCleared(false); setCurrentPhotoUrl(null); }
+
   const skillsById = Object.fromEntries(skills.map((s) => [s.id, s]));
 
   function load() {
@@ -107,6 +116,7 @@ export default function AdminExercises() {
     setForm({ ...EMPTY_FORM, skillId: skills[0] ? String(skills[0].id) : '' });
     setEditingId(null);
     setFormError('');
+    resetPhoto();
     setShowModal(true);
   }
 
@@ -126,6 +136,9 @@ export default function AdminExercises() {
     });
     setEditingId(exercise.id);
     setFormError('');
+    setPhotoData(null);
+    setPhotoCleared(false);
+    setCurrentPhotoUrl(exercise.photoIcon || null);
     setShowModal(true);
   }
 
@@ -134,6 +147,7 @@ export default function AdminExercises() {
     setEditingId(null);
     setForm(EMPTY_FORM);
     setFormError('');
+    resetPhoto();
   }
 
   function handleChange(e) {
@@ -158,8 +172,12 @@ export default function AdminExercises() {
     setFormError('');
     try {
       const payload = { ...form, skillId: Number(form.skillId) };
+      let exerciseId = editingId;
       if (editingId) await api.updateExercise(editingId, payload);
-      else await api.createExercise(payload);
+      else { const created = await api.createExercise(payload); exerciseId = created.id; }
+      // Avatar vai separado (arquivo no volume), depois que o exercício tem id.
+      if (photoData) await api.setExercisePhoto(exerciseId, { icon: photoData.iconDataUrl, full: photoData.fullDataUrl });
+      else if (photoCleared) await api.setExercisePhoto(exerciseId, { clear: true });
       closeModal();
       load();
     } catch (err) {
@@ -330,6 +348,16 @@ export default function AdminExercises() {
                     ))}
                   </select>
                 </div>
+              </div>
+              <div>
+                <label style={{ marginBottom: 6, display: 'block' }}>
+                  Avatar da IA <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(a bolinha no chat do exercício)</em>
+                </label>
+                <PatientPhotoCropper
+                  currentUrl={photoCleared ? null : currentPhotoUrl}
+                  onChange={(d) => { setPhotoData(d); setPhotoCleared(false); }}
+                  onClear={() => { setPhotoData(null); setPhotoCleared(true); }}
+                />
               </div>
               <div>
                 <label htmlFor="title">Título</label>
