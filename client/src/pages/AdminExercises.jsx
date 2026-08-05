@@ -8,12 +8,14 @@ const DIFFICULTY_OPTIONS = [
   { value: 'avancado', label: 'Avançado' },
 ];
 
-// As 3 opções fixas de modelo do AVALIADOR (por exercício). Espelha
+// As opções fixas de modelo do AVALIADOR (por exercício). Espelha
 // TRILHA_EXERCISE_MODELS no servidor — mudar lá exige mudar aqui também.
 const EVALUATOR_MODEL_OPTIONS = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão — barato, alto volume)' },
+  { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
   { value: 'glm-5.2', label: 'GLM 5.2 (high)' },
   { value: 'gpt-5.5', label: 'GPT-5.5 (high — melhor qualidade)' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
 ];
 const EVALUATOR_MODEL_DEFAULT = 'gpt-5.4-mini';
 

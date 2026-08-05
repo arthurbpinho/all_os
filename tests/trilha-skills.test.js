@@ -105,7 +105,7 @@ describe('Exercícios — evaluatorModel (modelo do avaliador por exercício)', 
     expect(res2.body.evaluatorModel).toBe('gpt-5.4-mini');
   });
 
-  it('aceita glm-5.2 e gpt-5.5 na criação/edição', async () => {
+  it('aceita gpt-5.4, glm-5.2, gpt-5.5 e claude-sonnet-5 na criação/edição', async () => {
     const token = await loginAs('admin');
     const created = await request(app).post('/api/exercises').set(authHeader(token)).send({
       title: 'Com GLM', skillId: 1, specificInstruction: 'x', evaluatorModel: 'glm-5.2',
@@ -117,6 +117,16 @@ describe('Exercícios — evaluatorModel (modelo do avaliador por exercício)', 
     });
     expect(updated.status).toBe(200);
     expect(updated.body.evaluatorModel).toBe('gpt-5.5');
+
+    const toHeavy = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      evaluatorModel: 'gpt-5.4',
+    });
+    expect(toHeavy.body.evaluatorModel).toBe('gpt-5.4');
+
+    const toClaude = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      evaluatorModel: 'claude-sonnet-5',
+    });
+    expect(toClaude.body.evaluatorModel).toBe('claude-sonnet-5');
 
     const badUpdate = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
       evaluatorModel: 'bogus',
