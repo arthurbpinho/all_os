@@ -2903,7 +2903,7 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
 //    content), o que mantém o Bloco 1 opaco por construção.
 // getAnthropic() voltou a ser chamado: Claude Sonnet 5 é uma das opções de
-// evaluatorModel da Trilha (ver TRILHA_EXERCISE_MODELS/buildAnthropicEvalArgs).
+// evaluatorModel da Trilha (ver TRILHA_EXERCISE_MODELS/buildAnthropicArgs).
 // Modelo dos pacientes (chat de simulação). Mini da família 5.4. O personagem
 // responde direto, SEM reasoning — effort 'none' (o gpt-5.4-mini não aceita
 // 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
@@ -2974,17 +2974,19 @@ const TRILHA_EXERCISE_MODELS = {
 };
 
 // Modelo do PERSONAGEM/exercício em si (o lado da CONVERSA, não da nota) —
-// também escolhido por exercício na Trilha (chatModel). Mesmas 3 opções do
-// evaluatorModel, mas sem reasoning (a persona só responde em personagem,
-// não "pensa"): mini com effort 'none' (igual ao PATIENT_MODEL de sempre,
-// usado por freeplay/neuro), GLM com thinking desligado, ou 5.5/none pra
-// personagens mais nuançados. GLM tem FALLBACK pro mini padrão se falhar,
-// igual ao par Treinamento/GLM.
+// também escolhido por exercício na Trilha (chatModel). Mesmas 5 opções do
+// evaluatorModel. Mini e GPT-5.5 seguem sem reasoning (igual ao PATIENT_MODEL
+// de sempre usado por freeplay/neuro — resposta direta, rápida); GLM 5.2,
+// GPT-5.4 e Claude Sonnet 5 rodam em 'high' por decisão do dono (mesmo padrão
+// do evaluatorModel) — personagem mais lento, porém mais nuançado. GLM/Claude
+// têm FALLBACK pro mini padrão se falharem, igual ao par Treinamento/GLM.
 const TRILHA_CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 const TRILHA_CHAT_MODELS = {
   'gpt-5.4-mini': { model: PATIENT_MODEL, provider: 'openai', effort: PATIENT_EFFORT },
-  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'disabled' },
+  'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
+  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'none' },
+  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
 
 function getAnthropic() {
@@ -2994,13 +2996,14 @@ function getAnthropic() {
   return new Anthropic({ apiKey });
 }
 
-// Monta os args da Messages API da Anthropic pro avaliador da Trilha em Claude
-// Sonnet 5 (única chamada de produção que usa Anthropic — a Simulação
-// Independente tem o helper próprio dela, isolado). cache_control no system
-// (reaproveitado entre alunos do mesmo exercício) e no último turno.
-// max_tokens fica alto (igual ao teto do GLM/OpenAI no avaliador) — o
-// feedback pode ser longo.
-function buildAnthropicEvalArgs({ model, effort, systemPrompt, turns, maxTokens }) {
+// Monta os args da Messages API da Anthropic pro avaliador OU pro
+// personagem/exercício da Trilha em Claude Sonnet 5 (única chamada de produção
+// que usa Anthropic — a Simulação Independente tem o helper próprio dela,
+// isolado). cache_control no system (reaproveitado entre turnos/alunos do
+// mesmo exercício) e no último turno — importante pro chat, que reenvia o
+// histórico inteiro a cada turno. max_tokens varia por chamador (avaliador
+// precisa de folga pro feedback; chat usa o teto normal de resposta).
+function buildAnthropicArgs({ model, effort, systemPrompt, turns, maxTokens }) {
   const args = {
     model,
     max_tokens: maxTokens,
@@ -3221,23 +3224,36 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   }
 
   try {
-    if (chatModelSpec.provider === 'glm') {
-      // Exercício da Trilha com GLM 5.2 escolhido pelo admin: chamada direta
-      // (/api/chat não streama pro cliente). FALLBACK pro mini padrão se o
-      // GLM falhar (rate limit/instabilidade) — o aluno sempre recebe resposta.
-      const gClient = getClientForProvider('glm');
+    if (chatModelSpec.provider !== 'openai') {
+      // Exercício da Trilha com GLM 5.2 ou Claude Sonnet 5 escolhido pelo
+      // admin: chamada direta (/api/chat não streama pro cliente). FALLBACK
+      // pro mini padrão se o provedor alternativo falhar (rate limit/
+      // instabilidade/sem API key) — o aluno sempre recebe resposta.
+      const altProvider = chatModelSpec.provider;
+      const altClient = getClientForProvider(altProvider);
       try {
-        if (!gClient) throw new Error('glm indisponível');
-        const body = buildChatBody({
-          provider: 'glm', model: chatModelSpec.model, effort: chatModelSpec.effort,
-          maxTokens: tokenCap + 2000, messages: buildOpenAIMessages(resolved.systemPrompt, messages),
-        });
-        const resp = await gClient.chat.completions.create(body);
-        const text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+        if (!altClient) throw new Error(`${altProvider} indisponível`);
+        let text;
+        if (altProvider === 'anthropic') {
+          const args = buildAnthropicArgs({
+            model: chatModelSpec.model, effort: chatModelSpec.effort,
+            systemPrompt: resolved.systemPrompt, turns: normalizeMessagesForAnthropic(messages),
+            maxTokens: tokenCap + 2000,
+          });
+          const resp = await altClient.messages.create(args);
+          text = extractAnthropicText(resp);
+        } else {
+          const body = buildChatBody({
+            provider: altProvider, model: chatModelSpec.model, effort: chatModelSpec.effort,
+            maxTokens: tokenCap + 2000, messages: buildOpenAIMessages(resolved.systemPrompt, messages),
+          });
+          const resp = await altClient.chat.completions.create(body);
+          text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+        }
         if (!text.trim()) throw new Error('resposta vazia');
         return res.json({ role: 'assistant', content: text });
-      } catch (glmErr) {
-        console.error(`[chat trilha] ${chatModelSpec.model} falhou → fallback ${PATIENT_MODEL}:`, glmErr.message);
+      } catch (altErr) {
+        console.error(`[chat trilha] ${chatModelSpec.model} falhou → fallback ${PATIENT_MODEL}:`, altErr.message);
         const { text, usage } = await openaiComplete({
           openai, model: PATIENT_MODEL, effort: PATIENT_EFFORT,
           systemPrompt: resolved.systemPrompt, messages, maxCompletionTokens: tokenCap + 2000,
@@ -3621,7 +3637,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         try {
           if (!altClient) throw new Error(`${altProvider} indisponível`);
           if (altProvider === 'anthropic') {
-            const args = buildAnthropicEvalArgs({
+            const args = buildAnthropicArgs({
               model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
               systemPrompt, turns: inputTurns, maxTokens: 64000,
             });
