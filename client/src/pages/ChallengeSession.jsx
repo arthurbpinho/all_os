@@ -297,7 +297,7 @@ export default function ChallengeSession({ user }) {
         <div className="card" style={{ padding: 24 }}>
           <h3>Não foi possível abrir o modo Desafio</h3>
           <p style={{ color: 'var(--ink-soft)' }}>{stateError}</p>
-          <button className="btn btn-primary" onClick={() => navigate('/freeplay')}>Voltar</button>
+          <button className="btn btn-primary" onClick={() => navigate('/progressao')}>Voltar</button>
         </div>
       </div>
     );
@@ -322,7 +322,7 @@ export default function ChallengeSession({ user }) {
           <div className="ornament" />
         </div>
         <div className="card" style={{ padding: 24 }}>
-          <button className="btn btn-primary" onClick={() => navigate('/freeplay')}>Voltar ao Treinamento</button>
+          <button className="btn btn-primary" onClick={() => navigate('/progressao')}>Voltar à Progressão</button>
         </div>
       </div>
     );
@@ -402,8 +402,8 @@ export default function ChallengeSession({ user }) {
           )}
 
           <div className="post-session-actions">
-            <button className="btn btn-primary" onClick={() => navigate('/freeplay')}>
-              Voltar ao Treinamento
+            <button className="btn btn-primary" onClick={() => navigate('/progressao')}>
+              Voltar à Progressão
             </button>
           </div>
         </div>

@@ -147,7 +147,7 @@ export default function NotificationBell({ user }) {
     } else if (n.type === 'achievement_unlocked' || n.type === 'sidequest_completed') {
       navigate('/missoes');
     } else if (n.type === 'sidequest_assigned') {
-      navigate('/freeplay');
+      navigate('/progressao');
     }
   }
 

@@ -2,248 +2,43 @@ import { useNavigate } from 'react-router-dom';
 import { ICONS } from '../icons';
 import InstallAppBanner from '../components/InstallAppBanner';
 
-// Homepage (pós-login): "Como jogar" (os 4 modos de prática) e "Como evoluir"
-// (Trilha e Antessala) no topo, depois os banners de processo seletivo e
-// formação. A missão diária vive só no Treinamento (FreePlay), não aqui. Os
-// ícones dos modos são os mesmos do menu lateral. Em "Como jogar", a ordem
-// coloca o Competitivo primeiro (é o modo base, em torno do qual o app foi
-// desenhado), depois Duelo, Treinamento (modo de treino, sem ranking) e Modo
-// Desafio. Neuroavaliação fica de fora de propósito (ainda oculta nesta versão).
+// Homepage (pós-login). O layout segue o mockup em .manuais/Simulação.svg:
 //
-// Estes cards são a porta de entrada dos modos: Treinamento, Competitivo,
-// Duelo, Trilha e Antessala saíram do menu lateral. Cada card tem um botão de
-// acesso (no cabeçalho, ao lado da setinha) e um botão equivalente dentro da
-// descrição. `route` é o destino e `canPlay(user)` decide se o botão aparece
-// (respeita o que cada papel acessa — visitante não joga Competitivo nem
-// acessa Trilha/Antessala).
-const FAQ_ITEMS = [
-  {
-    icon: ICONS.trophy,
-    q: 'Competitivo',
-    route: '/competitivo',
-    inlineCta: 'Jogar esse modo',
-    canPlay: (u) => u?.role !== 'visitor',
-    a: (
-      <>
-        <p>
-          É o <strong>modo base</strong> — aquele em torno do qual o aplicativo foi
-          desenhado para girar, o principal. Aqui você atende valendo rating: é a
-          forma de praticar a sério, medindo sua evolução contra a comunidade.
-        </p>
-        <p>
-          São os mesmos pacientes do Treinamento, mas valendo nota. Cada atendimento
-          finalizado gera uma nota que alimenta o seu <strong>MMR</strong>, e a{' '}
-          <strong>dificuldade</strong> de cada paciente se ajusta ao desempenho coletivo
-          de todos os jogadores.
-        </p>
-        <p>
-          As <strong>3 primeiras partidas</strong> são de calibração — o seu MMR fica
-          oculto até lá. O ranking da comunidade é ordenado pelo MMR.
-        </p>
-      </>
-    ),
-  },
-  {
-    icon: ICONS.duel,
-    q: 'Duelo',
-    route: '/duelo',
-    inlineCta: 'Jogar esse modo',
-    canPlay: (u) => u?.role === 'therapist' || u?.role === 'admin',
-    a: (
-      <>
-        <p>
-          Você e outra pessoa atendem o <strong>mesmo paciente</strong>, cada um na sua
-          sessão. Quando os dois terminam, um avaliador comparativo lê os dois
-          atendimentos lado a lado, dá uma nota a cada um e aponta o vencedor.
-        </p>
-        <p>Você escolhe o paciente e como convidar o oponente:</p>
-        <ul>
-          <li>
-            <strong>Pelo sistema</strong> — convite in-app para outro terapeuta cadastrado.
-          </li>
-          <li>
-            <strong>Por link / WhatsApp</strong> — link aberto; quem abrir entra e atende o
-            mesmo paciente, inclusive como visitante.
-          </li>
-        </ul>
-        <p>E há dois modos de disputa:</p>
-        <ul>
-          <li>
-            <strong>Treino</strong> — só feedback comparativo, sem ranking; dá para duelar
-            até contra visitante.
-          </li>
-          <li>
-            <strong>Competitivo</strong> — vale MMR, apenas entre jogadores cadastrados e
-            fora da calibração; diferenças de nível muito grandes não contam
-            (anti-smurf).
-          </li>
-        </ul>
-      </>
-    ),
-  },
-  {
-    icon: ICONS.freeplay,
-    q: 'Treinamento',
-    route: '/freeplay',
-    inlineCta: 'Jogar esse modo',
-    canPlay: () => true,
-    a: (
-      <>
-        <p>
-          O modo de <strong>treino</strong> — recomendado para experimentar à vontade,
-          sem se preocupar com pontuação nem ranking. Escolha um paciente simulado e
-          conduza o atendimento por mensagens, como numa sessão real — praticando
-          escuta, manejo do vínculo e ritmo de sessão. Ao encerrar, uma{' '}
-          <strong>IA avaliadora</strong> analisa o atendimento e devolve um feedback, e o
-          log fica salvo no seu histórico.
-        </p>
-        <p>
-          Reatender um paciente que você já viu faz a avaliação comparar a sua{' '}
-          <strong>evolução</strong> com a sessão anterior. E quando você tem um{' '}
-          <strong>objetivo</strong> ativo, ele vira o foco do próximo treino.
-        </p>
-      </>
-    ),
-  },
-  {
-    icon: ICONS.crown,
-    q: 'Modo Desafio',
-    route: '/freeplay',
-    inlineCta: 'Ir para o Treinamento',
-    canPlay: () => true,
-    a: (
-      <>
-        <p>
-          O Modo Desafio <strong>não é um modo separado</strong>: ele vive dentro do
-          Treinamento. Por isso o botão "Jogar" leva você direto ao Treinamento,
-          onde os desafios acontecem no card de cada paciente.
-        </p>
-        <p>
-          Cada paciente tem uma posição de <strong>Titular</strong> 👑 — o terapeuta
-          que detém a referência daquele caso. No card do paciente, dentro do
-          Treinamento:
-        </p>
-        <ul>
-          <li>
-            Se <strong>ninguém</strong> reivindicou ainda, toque na coroa para atender e
-            garantir o título — você vira Titular ao final, independente da nota.
-          </li>
-          <li>
-            Se <strong>já existe um Titular</strong>, tocar na coroa abre um desafio: você
-            atende o mesmo paciente e a IA compara o seu atendimento com o dele,
-            decidindo se você assume a posição.
-          </li>
-        </ul>
-        <p>
-          O resultado é apenas posicional — <em>você assume</em> ou <em>o Titular
-          permanece</em>, com uma justificativa clínica. Não aparece nota numérica.
-        </p>
-      </>
-    ),
-  },
-];
+//   ┌── Simulação ──┬── Treinamento ──┐   duas portas grandes, lado a lado
+//   └───────────────┴─────────────────┘
+//            Cursos · Processo Seletivo     dois cartões menores
+//        Suporte ····················· Clínica   rodapé
+//
+// A ideia por trás: a SIMULAÇÃO é o modo base (é em torno dela que o app foi
+// desenhado) e ganhou peso visual próprio; TREINAMENTO é a Trilha, e todo o
+// resto — Progressão, Duelo, Desafio, Antessala — passou a viver lá dentro, como
+// competências. Nada foi removido: é reorganização de interface, com o objetivo
+// declarado de puxar mais gente para a Simulação.
+//
+// As explicações longas de cada modo saíram daqui e foram para onde o modo mora:
+// os cartões da Trilha (ver MODE_GROUPS em SkillMap.jsx) e o cabeçalho de cada
+// página. Aqui fica só a frase que ajuda a escolher entre as duas portas.
 
-// Trilha e Antessala saíram do menu lateral e ganharam o mesmo tratamento dos
-// modos de prática acima: cards com botão de acesso direto. A diferença é que
-// aqui o eixo não é "jogar" um paciente simulado, e sim evoluir através de
-// supervisão — por isso vivem numa seção própria, "Como evoluir", com o botão
-// "Abrir" no lugar de "Jogar". canPlay espelha o que hoje decide a visibilidade
-// desses itens no menu lateral (App.jsx).
-const SUPERVISION_ITEMS = [
-  {
-    icon: ICONS.skill,
-    q: 'Trilha',
-    route: '/skills',
-    inlineCta: 'Abrir a Trilha',
-    canPlay: (u) => u?.role === 'therapist' || u?.role === 'supervisor' || u?.role === 'admin',
-    a: (
-      <>
-        <p>
-          Um percurso <strong>linear</strong>, estilo trilha de jogo: fases organizadas por
-          dificuldade (verde, laranja, vermelho), cada uma com exercícios que vão sendo
-          destravados conforme você avança.
-        </p>
-        <p>
-          Cada exercício é avaliado por uma <strong>IA</strong> e sua nota em porcentagem —{' '}
-          <strong>75% ou mais</strong> aprova a fase e libera a próxima. A barra superior
-          acompanha sua constância diária, nível e quantos exercícios você já concluiu.
-        </p>
-      </>
-    ),
-  },
-  {
-    icon: ICONS.antessala,
-    q: 'Antessala',
-    route: '/antessala',
-    inlineCta: 'Abrir a Antessala',
-    canPlay: (u) => u?.role === 'therapist' || u?.role === 'admin',
-    a: (
-      <>
-        <p>
-          A <strong>pré-supervisão</strong>: um espaço para organizar o pensamento sobre um
-          paciente real antes de levá-lo à supervisão. Um wizard de 7 etapas guia você — dos
-          fatos do caso às possíveis condutas — e desenha, sozinho, um <strong>mapa</strong>{' '}
-          visual das relações entre eles.
-        </p>
-        <p>
-          A IA só faz <strong>perguntas maiêuticas</strong> sobre a forma do seu pensamento —
-          nunca entrega fato, conduta ou conceito. Ao entregar, o rascunho congela e fica
-          disponível para seu supervisor ler.
-        </p>
-      </>
-    ),
-  },
-];
+// VISITANTE não entra na Trilha (só quem tem conta), então a porta "Treinamento"
+// leva ele direto à Progressão, que é o que ele pode usar. Sem isso o visitante
+// ficaria sem nenhuma porta aberta: a Simulação também exige cadastro.
+function trilhaRouteFor(user) {
+  return user?.role === 'visitor' ? '/progressao' : '/skills';
+}
 
-function Chevron() {
+function ArrowIcon() {
   return (
-    <svg className="faq-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polyline points="6 9 12 15 18 9" />
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="5" y1="12" x2="19" y2="12" />
+      <polyline points="12 5 19 12 12 19" />
     </svg>
   );
 }
 
-// Compartilhado pelas seções "Como jogar" e "Como evoluir" — só muda a lista
-// de itens e o texto do botão de acesso ("Jogar" vs "Abrir").
-function ModeAccordion({ items, user, play, actionLabel }) {
-  return items.map((item) => {
-    const canPlay = item.canPlay ? item.canPlay(user) : true;
-    return (
-      <details key={item.q} className="faq-item">
-        <summary>
-          <span className="faq-q-icon" aria-hidden="true">{item.icon}</span>
-          <span>{item.q}</span>
-          <span className="faq-actions">
-            {canPlay && item.route && (
-              <button type="button" className="faq-play-btn" onClick={(e) => play(item.route, e)}>
-                {actionLabel}
-              </button>
-            )}
-            <Chevron />
-          </span>
-        </summary>
-        <div className="faq-a">
-          {item.a}
-          {canPlay && item.route && (
-            <button type="button" className="btn btn-primary faq-play-inline" onClick={(e) => play(item.route, e)}>
-              {item.inlineCta || `${actionLabel} esse modo`} →
-            </button>
-          )}
-        </div>
-      </details>
-    );
-  });
-}
-
 export default function Home({ user }) {
   const navigate = useNavigate();
-  // Botão "Jogar": dentro de um <summary>, clicar num botão alternaria o
-  // <details>. preventDefault + stopPropagation impedem isso — o clique navega
-  // em vez de abrir/fechar a descrição.
-  function play(route, e) {
-    if (e) { e.preventDefault(); e.stopPropagation(); }
-    navigate(route);
-  }
+  const isVisitor = user?.role === 'visitor';
+
   return (
     <div className="home-page">
       <InstallAppBanner />
@@ -262,48 +57,77 @@ export default function Home({ user }) {
         </a>
       </div>
 
-      <section className="home-about" aria-label="Como jogar">
-        <div className="home-about-header">
-          <div className="home-about-eyebrow">Como jogar</div>
-          <h3 className="home-about-title">Quatro formas de praticar</h3>
-          <p className="home-about-intro">
-            Toda a prática gira em torno de atender pacientes simulados por IA.
-            Cada modo coloca esse atendimento sob uma luz diferente.
-          </p>
-        </div>
-        <ModeAccordion items={FAQ_ITEMS} user={user} play={play} actionLabel="Jogar" />
-      </section>
-
-      <section className="home-about" aria-label="Como evoluir">
-        <div className="home-about-header">
-          <div className="home-about-eyebrow">Como evoluir</div>
-          <h3 className="home-about-title">Formas de supervisão</h3>
-          <p className="home-about-intro">
-            Além de atender pacientes simulados, você evolui organizando o próprio
-            pensamento clínico e percorrendo um percurso de exercícios.
-          </p>
-        </div>
-        <ModeAccordion items={SUPERVISION_ITEMS} user={user} play={play} actionLabel="Abrir" />
-      </section>
-
-      <div className="home-promos">
-        <a
-          className="home-promo home-promo--seletivo"
-          href="https://allos.org.br/processoseletivopsi"
-          target="_blank"
-          rel="noopener noreferrer"
+      {/* As duas portas. A Simulação é a primeira de propósito. */}
+      <div className="home-doors">
+        <button
+          type="button"
+          className="home-door home-door--simulacao"
+          onClick={() => navigate('/simulacao')}
+          disabled={isVisitor}
+          title={isVisitor ? 'A Simulação vale ranking — precisa de uma conta' : 'Abrir a Simulação'}
         >
-          <div className="home-promo-label">Processo seletivo</div>
-          <div className="home-promo-title">Participe do nosso processo seletivo na Allos</div>
-        </a>
+          <span className="home-door-icon" aria-hidden="true">{ICONS.trophy}</span>
+          <span className="home-door-name">Simulação</span>
+          <span className="home-door-desc">
+            {isVisitor
+              ? 'Atender valendo ranking, medindo sua evolução contra a comunidade. Disponível para quem tem conta.'
+              : 'Atenda pacientes simulados valendo ranking. É o modo principal: cada atendimento gera nota e move o seu MMR.'}
+          </span>
+          <span className="home-door-go" aria-hidden="true"><ArrowIcon /></span>
+        </button>
+
+        <button
+          type="button"
+          className="home-door home-door--treinamento"
+          onClick={() => navigate(trilhaRouteFor(user))}
+        >
+          <span className="home-door-icon" aria-hidden="true">{ICONS.skill}</span>
+          <span className="home-door-name">Treinamento</span>
+          <span className="home-door-desc">
+            {isVisitor
+              ? 'Pratique sem valer nota: escolha um paciente simulado e conduza o atendimento.'
+              : 'A trilha de exercícios e todos os modos de prática livre: Progressão, Duelo, Desafio e a Antessala.'}
+          </span>
+          <span className="home-door-go" aria-hidden="true"><ArrowIcon /></span>
+        </button>
+      </div>
+
+      {/* Cursos e Processo Seletivo: fora do app, no site da Allos. */}
+      <div className="home-cards">
         <a
-          className="home-promo home-promo--formacao"
+          className="home-card home-card--cursos"
           href="https://allos.org.br/formacao"
           target="_blank"
           rel="noopener noreferrer"
         >
-          <div className="home-promo-label">Formação</div>
-          <div className="home-promo-title">Conheça a formação gravada na nossa plataforma</div>
+          <span className="home-card-label">Cursos</span>
+          <span className="home-card-title">Conheça a formação gravada na nossa plataforma</span>
+        </a>
+        <a
+          className="home-card home-card--seletivo"
+          href="https://allos.org.br/processoseletivopsi"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <span className="home-card-label">Processo Seletivo</span>
+          <span className="home-card-title">Participe do nosso processo seletivo na Allos</span>
+        </a>
+      </div>
+
+      {/* Rodapé: Suporte à esquerda, Clínica à direita. */}
+      <div className="home-footer">
+        <button type="button" className="home-footer-link" onClick={() => navigate('/suporte')}>
+          {ICONS.alert}
+          <span>Suporte</span>
+        </button>
+        <a
+          className="home-footer-link home-footer-link--clinica"
+          href="https://allos.org.br/clinica"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <span>Conheça nossa clínica</span>
+          <ArrowIcon />
         </a>
       </div>
     </div>

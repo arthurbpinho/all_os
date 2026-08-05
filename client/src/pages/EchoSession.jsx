@@ -981,10 +981,10 @@ export default function EchoSession({ user, sessionType }) {
 
           {isFreeSim && !isVisitor && (
             <div className="alert" style={{ marginBottom: 16, borderLeft: '3px solid var(--warning, #d99100)' }}>
-              <strong>Treinamento.</strong> Este é o espaço de prática e progressão: ao
+              <strong>Progressão.</strong> Este é o espaço de prática livre: ao
               reatender o mesmo paciente, a avaliação compara sua evolução com o
               atendimento anterior. A nota de um primeiro atendimento isolado é menos
-              precisa que a do modo <strong>Competitivo</strong>.
+              precisa que a da <strong>Simulação</strong>.
             </div>
           )}
 
@@ -1026,7 +1026,7 @@ export default function EchoSession({ user, sessionType }) {
           })()}
 
           <div className="post-session-actions">
-            <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/competitivo' : (sessionType === 'freeplay' ? '/freeplay' : '/neuro'))}>
+            <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/simulacao' : (sessionType === 'freeplay' ? '/progressao' : '/neuro'))}>
               Voltar à biblioteca
             </button>
           </div>
@@ -1149,8 +1149,8 @@ export default function EchoSession({ user, sessionType }) {
 
   // -------- TELA DE CHAT --------
   const sessionLabel = isCompetitive
-    ? 'Competitivo'
-    : (sessionType === 'freeplay' ? 'Treinamento' : 'Neuroavaliação');
+    ? 'Simulação'
+    : (sessionType === 'freeplay' ? 'Progressão' : 'Neuroavaliação');
   // Diagnóstico temporário: deve logar a cada render com o sessionNumber atual.
   // Depois de clicar "passar sessão", o próximo render aqui deve mostrar #2.
   if (sessionStarted) console.log('[render] sessionNumber =', sessionNumber);
@@ -1205,7 +1205,7 @@ export default function EchoSession({ user, sessionType }) {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.7 3" /><polyline points="3 3 3 8 8 8" /></svg>
                 Reiniciar
               </button>
-              {/* "Próxima sessão" só faz sentido no Treinamento/Competitivo. A
+              {/* "Próxima sessão" só faz sentido na Progressão/Simulação. A
                   Neuroavaliação é sessão única — não tem time skip. */}
               {!isNeuro && (
                 <button

@@ -4,9 +4,15 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { PatientAvatar } from '../components/PatientAvatar';
 
-// Modo Competitivo: mesmos personagens da Simulação, mas cada partida finalizada
-// alimenta o MMR (rating competitivo). A dificuldade de cada personagem é aberta
-// e exibida no card. O MMR fica oculto até a 4ª partida (calibração de 3 partidas).
+// Simulação (nome antigo: Competitivo) — o modo BASE do app, e por isso uma das
+// duas portas da tela de Início. Mesmos personagens da Progressão, mas cada
+// partida finalizada alimenta o MMR (rating). A dificuldade de cada personagem é
+// aberta e exibida no card. O MMR fica oculto até a 4ª partida (calibração de 3).
+//
+// O componente segue chamado Competitive e a rota antiga /competitivo continua
+// respondendo (redireciona pra /simulacao): o identificador interno do modo é
+// 'competitive' em log.mode, MMR e Duelo, e renomeá-lo migraria dados por
+// cosmética. O que virou "Simulação" é o NOME VISÍVEL.
 export default function Competitive({ user }) {
   const [characters, setCharacters] = useState([]);
   const [mmr, setMmr] = useState(null);
@@ -27,13 +33,14 @@ export default function Competitive({ user }) {
   return (
     <div>
       <div className="page-header">
-        <div className="eyebrow">Sistema 2 · Modo Competitivo</div>
-        <h2><Typewriter text="Compe" /><span className="accent"><Typewriter text="titivo" delayStart={180} /></span></h2>
+        <div className="eyebrow">Prática · Simulação</div>
+        <h2><Typewriter text="Simu" /><span className="accent"><Typewriter text="lação" delayStart={180} /></span></h2>
         <p>
-          Os mesmos pacientes da Simulação, agora valendo ranking. Ao finalizar, a partida é enviada
-          para avaliação e sua <strong>nota</strong> + <strong>MMR</strong> são calculados em até <strong>24 horas</strong> —
-          você confere em <strong>Minhas Sessões</strong>. A dificuldade de cada personagem se ajusta ao
-          desempenho coletivo. As 3 primeiras partidas são de calibração.
+          Atender pacientes simulados valendo ranking — é aqui que a sua evolução é medida contra
+          a comunidade. Ao finalizar, a partida é enviada para avaliação e sua <strong>nota</strong> +{' '}
+          <strong>MMR</strong> são calculados em até <strong>24 horas</strong> — você confere em{' '}
+          <strong>Minhas Sessões</strong>. A dificuldade de cada personagem se ajusta ao desempenho
+          coletivo. As 3 primeiras partidas são de calibração.
         </p>
         <div className="ornament" />
       </div>

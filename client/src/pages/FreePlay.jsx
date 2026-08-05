@@ -5,6 +5,14 @@ import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import { PatientAvatar } from '../components/PatientAvatar';
 
+// Progressão (nome antigo: Treinamento) — prática livre, sem ranking, onde o
+// valor é REATENDER: da segunda vez em diante a avaliação compara a sessão nova
+// com a anterior. Vive dentro da Trilha (competência "Treinamento"), junto de
+// Duelo e Desafio; a Simulação é que ficou como porta grande da tela de Início.
+//
+// O componente segue chamado FreePlay e o tipo interno segue 'freeplay' (log.type,
+// context.type, chaves de autosave, /chat/freeplay/:id): o que virou "Progressão"
+// é o NOME VISÍVEL. A rota antiga /freeplay redireciona pra /progressao.
 export default function FreePlay({ user }) {
   const [characters, setCharacters] = useState([]);
   const [bestScores, setBestScores] = useState({});
@@ -66,12 +74,13 @@ export default function FreePlay({ user }) {
   return (
     <div>
       <div className="page-header">
-        <div className="eyebrow">Sistema 2 · Treinamento</div>
-        <h2><Typewriter text="Treina" /><span className="accent"><Typewriter text="mento" delayStart={180} /></span></h2>
+        <div className="eyebrow">Treinamento · Progressão</div>
+        <h2><Typewriter text="Progre" /><span className="accent"><Typewriter text="ssão" delayStart={180} /></span></h2>
         <p>
-          Atenda pacientes simulados para praticar escuta, manejo relacional e tempo de sessão. Ao reatender
-          um paciente que você já viu, a avaliação compara sua <strong>evolução</strong> com o atendimento
-          anterior. Ao finalizar, o log é salvo no seu histórico e enviado ao seu supervisor vinculado.
+          Atenda pacientes simulados para praticar escuta, manejo relacional e tempo de sessão, sem
+          valer ranking. Ao <strong>reatender</strong> um paciente que você já viu, a avaliação compara
+          sua evolução com o atendimento anterior — é o que dá nome ao modo. Ao finalizar, o log é
+          salvo no seu histórico e enviado ao seu supervisor vinculado.
         </p>
         <div className="ornament" />
       </div>
@@ -98,7 +107,7 @@ export default function FreePlay({ user }) {
           <div className="sidequest-banner-hint">
             {dailyMission.completed
               ? 'Você já cumpriu o desafio de hoje. Amanhã entra uma nova missão.'
-              : 'Desafio do dia (rotaciona diariamente). Cumpra durante um atendimento de Treinamento para ganhar a recompensa.'}
+              : 'Desafio do dia (rotaciona diariamente). Cumpra durante um atendimento de Progressão para ganhar a recompensa.'}
           </div>
         </div>
       )}
@@ -183,7 +192,7 @@ export default function FreePlay({ user }) {
         </div>
       )}
 
-      {/* CTA flutuante no canto inferior direito da página de Treinamento.
+      {/* CTA flutuante no canto inferior direito da página de Progressão.
           Lembra ao aluno que clicar no rosto do Titular abre o modo Desafio. */}
       <div className="desafio-cta" role="note">
         Desafie seus amigos no modo <span aria-hidden>👑</span> clicando no ícone para ser titular de um paciente

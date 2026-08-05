@@ -5,6 +5,13 @@
 // — que vazava modelo, estado de cota, ids de request e caminhos de disco.
 // O detalhe todo veio parar aqui, e o código é a ponte: o aluno manda o código,
 // o admin acha a entrada exata pela busca.
+//
+// O painel também recebe as MENSAGENS DE SUPORTE (página /suporte): o usuário
+// escreve para a administração e o recado cai aqui, com origem
+// 'suporte/mensagem'. Não é falha, então vem marcado como "suporte" e conta
+// separado nas estatísticas do topo — o admin precisa distinguir de bate-pronto
+// o que quebrou do que alguém pediu. Provisório por decisão do dono; o passo
+// natural é uma caixa de entrada própria.
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
@@ -29,6 +36,10 @@ function fmtRelative(iso) {
   const d = Math.round(h / 24);
   return `há ${d} ${d === 1 ? 'dia' : 'dias'}`;
 }
+
+// Origem das mensagens da página /suporte (ver POST /api/suporte no servidor).
+const SUPORTE_WHERE = 'suporte/mensagem';
+const isSuporte = (e) => !!e && e.where === SUPORTE_WHERE;
 
 const PAPEL_LABEL = {
   admin: 'admin',
@@ -79,7 +90,8 @@ export default function AdminErrorLogs() {
       if (ondeFiltro !== 'all' && e.where !== ondeFiltro) return false;
       if (!q) return true;
       const ator = e.actor || {};
-      const alvo = [e.id, e.where, e.message, e.name, e.path, ator.username, ator.id, e.ip]
+      const alvo = [e.id, e.where, e.message, e.name, e.path, ator.username, ator.id, e.ip,
+        e.extra && e.extra.assunto, e.extra && e.extra.autor]
         .filter(Boolean).join(' ').toLowerCase();
       return alvo.includes(q);
     });
@@ -89,6 +101,9 @@ export default function AdminErrorLogs() {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     return errors.filter((e) => new Date(e.timestamp || 0).getTime() >= cutoff).length;
   }, [errors]);
+
+  // Recados de suporte contam à parte: são o que pede RESPOSTA, não conserto.
+  const suporteCount = useMemo(() => errors.filter(isSuporte).length, [errors]);
 
   async function limpar() {
     if (!window.confirm(`Apagar as ${errors.length} entradas do painel? Isso não afeta o app, só o histórico de erros.`)) return;
@@ -114,7 +129,8 @@ export default function AdminErrorLogs() {
           </h2>
           <p>
             O que os usuários veem é só uma mensagem genérica com um código. O erro real —
-            mensagem, stack, quem, onde e quando — fica aqui.
+            mensagem, stack, quem, onde e quando — fica aqui, junto das mensagens que
+            chegam pela página de Suporte.
             {meta && ` Guarda as últimas ${meta.max} ocorrências por até ${meta.ttlDays} dias.`}
           </p>
         </div>
@@ -133,9 +149,10 @@ export default function AdminErrorLogs() {
         <div className="card errlog-empty">
           <div className="errlog-empty-icon">✓</div>
           <div>
-            <strong>Nenhum erro registrado.</strong>
+            <strong>Nada registrado.</strong>
             <p style={{ margin: '4px 0 0', color: 'var(--ink-soft)' }}>
-              É o estado saudável. Quando algo falhar pra um usuário, aparece aqui na hora.
+              É o estado saudável. Quando algo falhar pra um usuário — ou quando alguém
+              escrever pelo Suporte — aparece aqui na hora.
             </p>
           </div>
         </div>
@@ -157,6 +174,12 @@ export default function AdminErrorLogs() {
             <div className="errlog-stat">
               <div className="errlog-stat-num">{origens.length}</div>
               <div className="errlog-stat-key">origens distintas</div>
+            </div>
+            <div className="errlog-stat">
+              <div className="errlog-stat-num" style={{ color: suporteCount > 0 ? 'var(--marrs-deep)' : undefined }}>
+                {suporteCount}
+              </div>
+              <div className="errlog-stat-key">{suporteCount === 1 ? 'recado de suporte' : 'recados de suporte'}</div>
             </div>
           </div>
 
@@ -192,7 +215,7 @@ export default function AdminErrorLogs() {
             const ator = e.actor || {};
             const expandido = aberto === e.id;
             return (
-              <div className="errlog-card" key={e.id}>
+              <div className={`errlog-card ${isSuporte(e) ? 'is-suporte' : ''}`} key={e.id}>
                 <div
                   className="errlog-head"
                   onClick={() => setAberto(expandido ? null : e.id)}
@@ -201,8 +224,13 @@ export default function AdminErrorLogs() {
                   onKeyDown={(ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); setAberto(expandido ? null : e.id); } }}
                 >
                   <div className="errlog-head-main">
-                    <span className="errlog-where">{e.where}</span>
-                    <span className="errlog-msg">{e.message}</span>
+                    <span className={`errlog-where ${isSuporte(e) ? 'suporte' : ''}`}>
+                      {isSuporte(e) ? 'suporte' : e.where}
+                    </span>
+                    <span className="errlog-msg">
+                      {isSuporte(e) && e.extra && e.extra.assunto ? `${e.extra.assunto} — ` : ''}
+                      {e.message}
+                    </span>
                   </div>
                   <div className="errlog-head-side">
                     <span className="errlog-when" title={fmtDate(e.timestamp)}>{fmtRelative(e.timestamp)}</span>
