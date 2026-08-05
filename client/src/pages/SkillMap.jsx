@@ -1,11 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import { SKILL_NAMES, SKILL_COLORS } from '../prompts';
-
-// Ordem de exibição das competências no menu conversacional (pedido do produto):
-// Hermenêutica, Personalidade, Estrutura, Especificidade do caso, Empatia.
-const MENU_ORDER = [1, 5, 2, 4, 3];
 
 // Aprovação na fase: nota (porcentagem 0–100) ≥ 75 libera a próxima.
 const PASS = 75;
@@ -82,6 +77,7 @@ function levelFromCount(count) {
 export default function SkillMap({ user }) {
   const navigate = useNavigate();
   const [exercises, setExercises] = useState([]);
+  const [skills, setSkills] = useState([]);
   const [progressMap, setProgressMap] = useState({});
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -93,13 +89,15 @@ export default function SkillMap({ user }) {
     let cancelled = false;
     async function load() {
       try {
-        const [exList, prog, st] = await Promise.all([
+        const [exList, skillList, prog, st] = await Promise.all([
           api.getExercises(),
+          api.getTrilhaSkills(),
           user?.id ? api.getProgress(user.id) : Promise.resolve({}),
           user?.id ? api.getTrilhaStats(user.id).catch(() => null) : Promise.resolve(null),
         ]);
         if (cancelled) return;
         setExercises(exList || []);
+        setSkills(skillList || []);
         setProgressMap(prog || {});
         setStats(st);
       } catch (e) {
@@ -112,16 +110,24 @@ export default function SkillMap({ user }) {
     return () => { cancelled = true; };
   }, [user?.id]);
 
+  // Nome/cor por id — as competências são dados (o admin cria/renomeia/exclui),
+  // não mais uma lista fixa de 5 no código.
+  const skillsById = useMemo(() => {
+    const map = {};
+    for (const s of skills) map[s.id] = s;
+    return map;
+  }, [skills]);
+
   // Agrupa exercícios por competência e ordena as fases por dificuldade
   // (iniciante → intermediário → avançado) e, em empate, por ordem de criação.
   const bySkill = useMemo(() => {
     const map = {};
-    for (let i = 1; i <= 5; i++) map[i] = [];
+    for (const s of skills) map[s.id] = [];
     for (const ex of exercises) {
-      if (ex.skillId >= 1 && ex.skillId <= 5) map[ex.skillId].push(ex);
+      if (map[ex.skillId]) map[ex.skillId].push(ex);
     }
-    for (let i = 1; i <= 5; i++) {
-      map[i].sort((a, b) => {
+    for (const sid of Object.keys(map)) {
+      map[sid].sort((a, b) => {
         const da = DIFFICULTY_ORDER[a.difficulty] ?? 1;
         const db = DIFFICULTY_ORDER[b.difficulty] ?? 1;
         if (da !== db) return da - db;
@@ -129,7 +135,7 @@ export default function SkillMap({ user }) {
       });
     }
     return map;
-  }, [exercises]);
+  }, [exercises, skills]);
 
   function scoreOf(ex) {
     const p = progressMap[ex.id];
@@ -184,7 +190,7 @@ export default function SkillMap({ user }) {
         </span>
         <div className="trilha-id-text">
           <div className="trilha-hello">Olá, {firstName(user?.name)}</div>
-          <div className="trilha-id-sub">{selectedSkill ? SKILL_NAMES[selectedSkill] : 'Trilha de competências'}</div>
+          <div className="trilha-id-sub">{selectedSkill ? skillsById[selectedSkill]?.name : 'Trilha de competências'}</div>
         </div>
       </div>
       <div className="trilha-stats">
@@ -232,10 +238,11 @@ export default function SkillMap({ user }) {
           </div>
         </div>
         <div className="trilha-choices">
-          {MENU_ORDER.map((sid, i) => {
+          {skills.map((skill, i) => {
+            const sid = skill.id;
             const total = (bySkill[sid] || []).length;
             const done = passedCount(sid);
-            const color = SKILL_COLORS[sid];
+            const color = skill.color;
             const pct = total ? Math.round((done / total) * 100) : 0;
             const complete = total > 0 && done === total;
             return (
@@ -249,7 +256,7 @@ export default function SkillMap({ user }) {
                   {complete ? <IconCheck /> : <span className="trilha-choice-num">{i + 1}</span>}
                 </span>
                 <span className="trilha-choice-body">
-                  <span className="trilha-choice-name">{SKILL_NAMES[sid]}</span>
+                  <span className="trilha-choice-name">{skill.name}</span>
                   <span className="trilha-choice-meta">
                     {total === 0 ? 'Em breve' : complete ? 'Competência concluída' : `${done} de ${total} ${total === 1 ? 'fase' : 'fases'}`}
                   </span>
@@ -268,7 +275,7 @@ export default function SkillMap({ user }) {
 
   // ── Tela da trilha de uma competência ──
   const phases = phaseStates(selectedSkill);
-  const color = SKILL_COLORS[selectedSkill];
+  const color = skillsById[selectedSkill]?.color || '#5C8A82';
   const total = phases.length;
   const done = phases.filter((p) => p.passed).length;
   const H = PAD_TOP + Math.max(0, total - 1) * STEP + PAD_BOTTOM;
@@ -283,7 +290,7 @@ export default function SkillMap({ user }) {
 
         <div className="trilha-unit-band" style={{ background: `linear-gradient(135deg, ${color}, ${shade(color, -0.18)})` }}>
           <div className="trilha-unit-eyebrow">Competência</div>
-          <h3>{SKILL_NAMES[selectedSkill]}</h3>
+          <h3>{skillsById[selectedSkill]?.name}</h3>
           <p>{total === 0 ? 'Nenhuma fase cadastrada ainda' : `${done} de ${total} ${total === 1 ? 'fase concluída' : 'fases concluídas'}`}</p>
         </div>
 

@@ -130,6 +130,12 @@ export const api = {
   updateExercise: (id, data) => request(`/exercises/${id}`, { method: 'PUT', body: data }),
   deleteExercise: (id) => request(`/exercises/${id}`, { method: 'DELETE' }),
 
+  // Trilha — competências (etiquetas dos exercícios, editáveis pelo admin)
+  getTrilhaSkills: () => request('/trilha-skills'),
+  createTrilhaSkill: (data) => request('/trilha-skills', { method: 'POST', body: data }),
+  updateTrilhaSkill: (id, data) => request(`/trilha-skills/${id}`, { method: 'PUT', body: data }),
+  deleteTrilhaSkill: (id) => request(`/trilha-skills/${id}`, { method: 'DELETE' }),
+
   // FreePlay
   getFreeplay: () => request('/freeplay'),
   createFreeplay: (data) => request('/freeplay', { method: 'POST', body: data }),

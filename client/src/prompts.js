@@ -6,22 +6,6 @@
 //
 // Este módulo guarda apenas: constantes de display + parsing/cálculo das notas.
 
-export const SKILL_NAMES = {
-  1: 'Hermenêutica',
-  2: 'Estrutura',
-  3: 'Empatia',
-  4: 'Especificidade do caso',
-  5: 'Personalidade'
-};
-
-export const SKILL_COLORS = {
-  1: '#008f8f',  // Marrs Green   — Hermenêutica
-  2: '#B85A40',  // Terra         — Estrutura
-  3: '#1A7A6D',  // Deep green    — Empatia
-  4: '#5C8A82',  // Sage          — Especificidade do caso
-  5: '#A07845'   // Amber/brown   — Personalidade
-};
-
 // Mapeamento critério → skill e peso. Necessário no cliente porque calculateScores
 // roda aqui (a partir das notas que a IA devolve no [CRITERIOS:...]).
 export const CRITERIA_MAP = {

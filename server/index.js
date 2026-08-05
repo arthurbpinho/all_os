@@ -9,7 +9,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const {
-  buildExercisePrompt,
+  buildTrilhaExercisePrompt,
   buildFreeplayPrompt,
   buildNeuroPrompt,
   buildTrilhaEvaluatorPrompt,
@@ -507,6 +507,21 @@ if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
 if (!fs.existsSync(path.join(DATA_DIR, 'exercises.json'))) {
   // Inicia sem exercícios — o admin cadastra via interface.
   writeJSON('exercises.json', []);
+}
+
+// Competências da Trilha (etiquetas que agrupam os exercícios em "lanes").
+// Deixam de ser fixas em código: o admin pode renomear, recolorir, criar e
+// excluir (bloqueado se algum exercício ainda usa a competência). `order`
+// controla a ordem de exibição no menu de escolha. Seed reproduz as 5
+// competências originais, na mesma ordem em que já apareciam (MENU_ORDER).
+if (!fs.existsSync(path.join(DATA_DIR, 'trilha-skills.json'))) {
+  writeJSON('trilha-skills.json', [
+    { id: 1, name: 'Hermenêutica', color: '#008f8f', order: 1 },
+    { id: 5, name: 'Personalidade', color: '#A07845', order: 2 },
+    { id: 2, name: 'Estrutura', color: '#B85A40', order: 3 },
+    { id: 4, name: 'Especificidade do caso', color: '#5C8A82', order: 4 },
+    { id: 3, name: 'Empatia', color: '#1A7A6D', order: 5 },
+  ]);
 }
 
 if (!fs.existsSync(path.join(DATA_DIR, 'freeplay-characters.json'))) {
@@ -1822,12 +1837,15 @@ app.get('/api/exercises', requireAuth, (req, res) => {
 app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   const exercises = readJSON('exercises.json');
   const ex = { id: 'ex' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...req.body };
+  // evaluatorModel é uma allowlist fechada (TRILHA_EXERCISE_MODELS, definida mais
+  // abaixo) — qualquer valor fora dela cai no default da Trilha (mini/low).
+  if (!TRILHA_EXERCISE_MODELS[ex.evaluatorModel]) ex.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
   exercises.push(ex);
   writeJSON('exercises.json', exercises);
   res.json(ex);
 });
 
-const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt'];
+const EXERCISE_FIELDS = ['title', 'description', 'skillId', 'difficulty', 'specificInstruction', 'evaluatorPrompt', 'evaluatorModel'];
 function pickFields(body, fields) {
   const out = {};
   for (const f of fields) {
@@ -1841,7 +1859,9 @@ app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
   const idx = exercises.findIndex(e => e.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
   // Allowlist: evita que campos arbitrários do body poluam o JSON.
-  exercises[idx] = { ...exercises[idx], ...pickFields(req.body, EXERCISE_FIELDS) };
+  const patch = pickFields(req.body, EXERCISE_FIELDS);
+  if ('evaluatorModel' in patch && !TRILHA_EXERCISE_MODELS[patch.evaluatorModel]) patch.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
+  exercises[idx] = { ...exercises[idx], ...patch };
   writeJSON('exercises.json', exercises);
   res.json(exercises[idx]);
 });
@@ -1850,6 +1870,73 @@ app.delete('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) =
   let exercises = readJSON('exercises.json');
   exercises = exercises.filter(e => e.id !== req.params.id);
   writeJSON('exercises.json', exercises);
+  res.json({ ok: true });
+});
+
+// --- Trilha Skills (competências) ---
+// Etiquetas que agrupam os exercícios em "lanes" no mapa da Trilha. Antes eram
+// 5 competências fixas em código (SKILL_NAMES/SKILL_COLORS no cliente); agora
+// vivem em dados e o admin pode criar, renomear, recolorir e excluir.
+function nextTrilhaSkillId(skills) {
+  return skills.reduce((max, s) => Math.max(max, Number(s.id) || 0), 0) + 1;
+}
+function nextTrilhaSkillOrder(skills) {
+  return skills.reduce((max, s) => Math.max(max, Number(s.order) || 0), 0) + 1;
+}
+function sanitizeSkillColor(v) {
+  const s = String(v == null ? '' : v).trim();
+  return /^#[0-9a-fA-F]{6}$/.test(s) ? s : '#5C8A82';
+}
+
+app.get('/api/trilha-skills', requireAuth, (req, res) => {
+  const skills = readJSON('trilha-skills.json', []);
+  res.json([...skills].sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0)));
+});
+
+app.post('/api/trilha-skills', requireAuth, requireRole('admin'), (req, res) => {
+  const skills = readJSON('trilha-skills.json', []);
+  const name = clampStr(req.body && req.body.name, 60).trim();
+  if (!name) return res.status(400).json({ error: 'Nome é obrigatório' });
+  const skill = {
+    id: nextTrilhaSkillId(skills),
+    name,
+    color: sanitizeSkillColor(req.body && req.body.color),
+    order: nextTrilhaSkillOrder(skills),
+  };
+  skills.push(skill);
+  writeJSON('trilha-skills.json', skills);
+  res.json(skill);
+});
+
+const TRILHA_SKILL_FIELDS = ['name', 'color', 'order'];
+app.put('/api/trilha-skills/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const skills = readJSON('trilha-skills.json', []);
+  const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
+  if (idx === -1) return res.status(404).json({ error: 'Competência não encontrada' });
+  const patch = pickFields(req.body, TRILHA_SKILL_FIELDS);
+  if ('name' in patch) {
+    const name = clampStr(patch.name, 60).trim();
+    if (!name) return res.status(400).json({ error: 'Nome é obrigatório' });
+    patch.name = name;
+  }
+  if ('color' in patch) patch.color = sanitizeSkillColor(patch.color);
+  if ('order' in patch) patch.order = Number.isFinite(Number(patch.order)) ? Number(patch.order) : skills[idx].order;
+  skills[idx] = { ...skills[idx], ...patch };
+  writeJSON('trilha-skills.json', skills);
+  res.json(skills[idx]);
+});
+
+app.delete('/api/trilha-skills/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const skills = readJSON('trilha-skills.json', []);
+  const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
+  if (idx === -1) return res.status(404).json({ error: 'Competência não encontrada' });
+  const skillId = skills[idx].id;
+  const inUse = readJSON('exercises.json', []).filter((e) => String(e.skillId) === String(skillId)).length;
+  if (inUse > 0) {
+    return res.status(409).json({ error: `Existem ${inUse} exercício(s) usando esta competência. Mova-os para outra competência antes de excluir.` });
+  }
+  skills.splice(idx, 1);
+  writeJSON('trilha-skills.json', skills);
   res.json({ ok: true });
 });
 
@@ -2851,8 +2938,10 @@ const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 // TREINAMENTO (freeplay training): GLM 5.2 / high; FALLBACK pra gpt-5.4/medium (o
 // SIM acima) se o GLM falhar. SELETIVO: mesmo par (GLM 5.2 high, fallback 5.4
 // medium), síncrono. COMPETITIVO: gpt-5.5 / high, rodado em BATCH (assíncrono).
-// O 5.5 high é EXCLUSIVO do Competitivo. Env-overridáveis (trocar p/ 'gpt-*'
-// reverte pro OpenAI). Provider é derivado do prefixo do modelo.
+// O 5.5/high também pode ser escolhido por exercício na Trilha (ver
+// TRILHA_EXERCISE_MODELS) — deixou de ser exclusivo do Competitivo. Env-
+// overridáveis (trocar p/ 'gpt-*' reverte pro OpenAI). Provider é derivado do
+// prefixo do modelo.
 const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || 'glm-5.2';
 const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || 'high';
 const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || 'glm-5.2';
@@ -2862,6 +2951,19 @@ const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || 'high';
 function providerForModel(m) {
   return String(m || '').startsWith('glm') ? 'glm' : 'openai';
 }
+
+// Modelo do avaliador ESCOLHIDO POR EXERCÍCIO na Trilha (admin define ao salvar
+// o exercício, ver EXERCISE_FIELDS/evaluatorModel). Três opções fixas — não é o
+// laboratório livre de modelo/effort da Avaliação Independente (AVAL_MODELOS),
+// só um atalho de 3 presets pro uso do dia a dia. GLM roda em modo buffered
+// (chat.completions) com FALLBACK pro mini padrão da Trilha, igual ao par
+// Treinamento/GLM (ver isExerciseGlm em /api/evaluate).
+const TRILHA_EXERCISE_MODEL_DEFAULT = 'gpt-5.4-mini';
+const TRILHA_EXERCISE_MODELS = {
+  'gpt-5.4-mini': { model: OPENAI_EXERCISE_MODEL, provider: 'openai', effort: OPENAI_EXERCISE_EFFORT },
+  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
+  'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'high' },
+};
 
 function getAnthropic() {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -2958,9 +3060,10 @@ function resolveChatSystemPrompt({ context, mode, user }) {
   if (type === 'exercise') {
     const ex = readJSON('exercises.json').find((e) => String(e.id) === String(itemId));
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
-    // Para a simulação (paciente), usamos a persona — o avaliador
-    // customizado entra apenas no /api/evaluate.
-    return { systemPrompt: buildFreeplayPrompt(ex.specificInstruction) };
+    // O exercício nem sempre é uma simulação de paciente — a instrução define
+    // o papel (paciente, colega, escrita livre etc.). O avaliador customizado
+    // entra apenas no /api/evaluate.
+    return { systemPrompt: buildTrilhaExercisePrompt(ex.specificInstruction) };
   }
   if (type === 'freeplay') {
     const c = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
@@ -3140,19 +3243,21 @@ function loadProgressaoPrompt() {
 // Resolve o system prompt do avaliador server-side. Se context.type ===
 // 'exercise' e o exercício tem evaluatorPrompt customizado, usa o customizado
 // (envolvido com FORMATO OBRIGATÓRIO [NOTA:X]). Caso contrário, usa o
-// avaliador global Allos.
+// avaliador global Allos. Para exercícios, também resolve QUAL MODELO roda o
+// avaliador (escolha do admin ao salvar o exercício, ver evaluatorModel).
 function resolveEvaluatorSystemPrompt({ context }) {
   if (context && typeof context === 'object' && context.type === 'exercise' && context.itemId) {
     const ex = readJSON('exercises.json').find((e) => String(e.id) === String(context.itemId));
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
+    const evaluatorModelKey = TRILHA_EXERCISE_MODELS[ex.evaluatorModel] ? ex.evaluatorModel : TRILHA_EXERCISE_MODEL_DEFAULT;
     if (ex.evaluatorPrompt && String(ex.evaluatorPrompt).trim()) {
-      return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt) };
+      return { systemPrompt: wrapCustomEvaluatorPrompt(ex.evaluatorPrompt), evaluatorModelKey };
     }
     // Exercício sem avaliador customizado → avaliador PADRÃO da Trilha (nota
     // 0–100). Não cai mais no avaliador global v16 (que é dos casos clínicos
     // com Bloco 1 e emite notas por critério/saldo ±, incompatível com a régua
     // de 75% por porcentagem da Trilha).
-    return { systemPrompt: buildTrilhaEvaluatorPrompt() };
+    return { systemPrompt: buildTrilhaEvaluatorPrompt(), evaluatorModelKey };
   }
   // Neuroavaliação → avaliador dedicado (sessão única, diagnóstico + testes).
   if (context && typeof context === 'object' && context.type === 'neuro') {
@@ -3271,14 +3376,22 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // usa o mini. O cliente sinaliza via context.mode; sem mode (aba Avaliar Sessão)
   // cai no EVAL.
   const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
-  // Trilha (exercícios): avaliador barato no mini, nota 0–100. Não entra no
-  // progressionMode (que é exclusivo do freeplay/treinamento).
+  // Trilha (exercícios): modelo é ESCOLHIDO POR EXERCÍCIO (admin, ver
+  // TRILHA_EXERCISE_MODELS/evaluatorModel). Não entra no progressionMode (que é
+  // exclusivo do freeplay/treinamento).
   const isExercise = !!(context && context.type === 'exercise');
+  const exerciseModelSpec = isExercise
+    ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
+    : null;
+  // GLM na Trilha roda em modo buffered (chat.completions), igual ao par
+  // Treinamento/GLM — não streama token a token. FALLBACK pro mini padrão da
+  // Trilha se o GLM falhar (rate limit/instabilidade).
+  const isExerciseGlm = isExercise && exerciseModelSpec.provider === 'glm';
   // Neuro roda no 5.4/low (dedicado), fora da régua EVAL/SIM.
   const isNeuroEval = !!(context && context.type === 'neuro');
   let systemPrompt = resolved.systemPrompt;
-  let evalModel = isExercise ? OPENAI_EXERCISE_MODEL : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
-  let evalEffort = isExercise ? OPENAI_EXERCISE_EFFORT : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
+  let evalModel = isExercise ? (isExerciseGlm ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model) : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
+  let evalEffort = isExercise ? (isExerciseGlm ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort) : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
   let inputTurns;
   let progressionMode = false;
   let sidequestActive = false;
@@ -3415,11 +3528,37 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           usage = resp.usage || null;
         }
         if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
+      } else if (isExerciseGlm) {
+        // Exercício da Trilha com GLM 5.2 escolhido pelo admin: mesmo esquema
+        // buffered + fallback do Treinamento, mas o fallback aqui é o MINI
+        // padrão da própria Trilha (evalModel/evalEffort já apontam pra ele).
+        let full = '';
+        const gClient = getClientForProvider('glm');
+        try {
+          if (!gClient) throw new Error('glm indisponível');
+          const body = buildChatBody({
+            provider: 'glm', model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
+            maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
+          });
+          const resp = await gClient.chat.completions.create(body);
+          full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+          if (!full.trim()) throw new Error('resposta vazia');
+          console.log(`Evaluate (${exerciseModelSpec.model} · trilha)`);
+        } catch (glmErr) {
+          console.error(`[evaluate trilha] ${exerciseModelSpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
+          const resp = await openai.responses.create({
+            model: evalModel, reasoning: { effort: evalEffort },
+            max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
+          });
+          full = resp.output_text || '';
+          usage = resp.usage || null;
+        }
+        if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
       } else {
         const stream = await openai.responses.create({
           model: evalModel,
-          // Exercício (mini): só effort, sem summary — o resumo de raciocínio nunca
-          // vai pro aluno e evita qualquer incompatibilidade do mini com summary.
+          // Exercício (mini/5.5): só effort, sem summary — o resumo de raciocínio
+          // nunca vai pro aluno e evita qualquer incompatibilidade do mini com summary.
           reasoning: isExercise ? { effort: evalEffort } : { effort: evalEffort, summary: 'auto' },
           max_output_tokens: 64000,
           instructions: systemPrompt,
