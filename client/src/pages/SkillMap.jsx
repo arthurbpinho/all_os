@@ -41,6 +41,64 @@ function shade(hex, percent) {
 
 const LEVEL_THRESHOLDS = [3, 10, 30, 100]; // níveis 2,3,4,5
 
+// ── Modos e ferramentas dentro da Trilha ──
+// A Trilha virou o hub de tudo que não é Simulação: a tela de Início tem duas
+// portas (Simulação e Treinamento), e "Treinamento" é esta página. Os modos que
+// saíram de lá continuam existindo exatamente como eram — isto é só interface:
+// cada nó abaixo APENAS redireciona pra rota do modo, sem nota, sem trava e sem
+// progresso. Por isso vivem em código e não em trilha-skills.json: não são
+// competências avaliáveis (o admin não teria o que configurar neles) e cada um
+// precisa de uma rota, que o cadastro de exercício não tem.
+//
+// `canOpen` espelha quem acessa cada modo hoje (era o `canPlay` dos cards da
+// Início). Grupo em que o usuário não abre nenhum item simplesmente não aparece.
+const MODE_GROUPS = [
+  {
+    id: 'grp-treinamento',
+    name: 'Treinamento',
+    color: '#B85A40',
+    intro: 'Atender pacientes simulados sem valer ranking — para praticar à vontade, disputar com um colega ou tomar a referência de um caso.',
+    modes: [
+      {
+        id: 'progressao',
+        name: 'Progressão',
+        route: '/progressao',
+        canOpen: () => true,
+        desc: 'Escolha um paciente e conduza o atendimento por mensagens. Ao reatender alguém que você já viu, a avaliação compara a sua evolução com a sessão anterior — e é isso que dá nome ao modo. Quando você tem um objetivo ativo, ele vira o foco do próximo atendimento.',
+      },
+      {
+        id: 'duelo',
+        name: 'Duelo',
+        route: '/duelo',
+        canOpen: (u) => u?.role === 'therapist' || u?.role === 'admin',
+        desc: 'Você e outra pessoa atendem o mesmo paciente, cada um na sua sessão. Quando os dois terminam, um avaliador comparativo lê os dois atendimentos lado a lado, dá uma nota a cada um e aponta o vencedor. O convite sai pelo sistema ou por link.',
+      },
+      {
+        id: 'desafio',
+        name: 'Desafio',
+        route: '/progressao',
+        canOpen: () => true,
+        desc: 'Cada paciente tem uma posição de Titular 👑 — quem detém a referência daquele caso. O Desafio acontece no card do paciente, dentro da Progressão: toque na coroa para reivindicar a posição vazia ou para desafiar o Titular atual. O resultado é só posicional, sem nota numérica.',
+      },
+    ],
+  },
+  {
+    id: 'grp-ferramentas',
+    name: 'Ferramentas',
+    color: '#5C8A82',
+    intro: 'O que não é atendimento simulado: instrumentos para trabalhar os seus pacientes reais.',
+    modes: [
+      {
+        id: 'antessala',
+        name: 'Antessala',
+        route: '/antessala',
+        canOpen: (u) => u?.role === 'therapist' || u?.role === 'admin',
+        desc: 'A pré-supervisão: um espaço para organizar o pensamento sobre um paciente real antes de levá-lo à supervisão. Um wizard de 7 etapas guia você — dos fatos do caso às possíveis condutas — e desenha um mapa visual das relações entre eles. A IA só faz perguntas sobre a forma do seu pensamento, nunca entrega conteúdo. Ao entregar, o rascunho congela e fica disponível para o seu supervisor.',
+      },
+    ],
+  },
+];
+
 // ── Ícones inline ──
 const IconCheck = () => (
   <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
@@ -83,6 +141,9 @@ export default function SkillMap({ user }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedSkill, setSelectedSkill] = useState(null);
+  // Grupo de modos/ferramentas aberto (MODE_GROUPS). Estado separado do
+  // selectedSkill porque a tela é outra: sem trilha sinuosa, sem trava, sem nota.
+  const [selectedGroup, setSelectedGroup] = useState(null);
   const [shakeId, setShakeId] = useState(null);
 
   useEffect(() => {
@@ -178,6 +239,15 @@ export default function SkillMap({ user }) {
     navigate(`/chat/exercise/${node.ex.id}`);
   }
 
+  // Grupos com ao menos um modo que ESTE usuário abre. Visitante, por exemplo,
+  // fica só com Progressão e Desafio — o grupo Ferramentas nem aparece pra ele.
+  const modeGroups = useMemo(
+    () => MODE_GROUPS
+      .map((g) => ({ ...g, modes: g.modes.filter((m) => m.canOpen(user)) }))
+      .filter((g) => g.modes.length > 0),
+    [user],
+  );
+
   // ── Stats da barra superior ──
   const completed = stats?.completed ?? Object.values(progressMap).filter((p) => p && p.passed === true).length;
   const level = stats?.level ?? levelFromCount(completed);
@@ -196,7 +266,13 @@ export default function SkillMap({ user }) {
         </span>
         <div className="trilha-id-text">
           <div className="trilha-hello">Olá, {firstName(user?.name)}</div>
-          <div className="trilha-id-sub">{selectedSkill ? skillsById[selectedSkill]?.name : 'Trilha de competências'}</div>
+          <div className="trilha-id-sub">
+            {selectedSkill
+              ? skillsById[selectedSkill]?.name
+              : selectedGroup
+                ? modeGroups.find((g) => g.id === selectedGroup)?.name
+                : 'Trilha de competências'}
+          </div>
         </div>
       </div>
       <div className="trilha-stats">
@@ -223,6 +299,47 @@ export default function SkillMap({ user }) {
         {TopBar}
         <div className="card" style={{ textAlign: 'center', padding: '60px 24px' }}>
           <span className="spinner" /> <span style={{ marginLeft: 12, color: 'var(--ink-soft)' }}>Carregando trilha…</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Tela de um grupo de modos/ferramentas ──
+  // Sem trilha sinuosa, sem trava e sem nota: são cartões que só abrem o modo.
+  if (selectedGroup) {
+    const group = modeGroups.find((g) => g.id === selectedGroup);
+    if (!group) { setSelectedGroup(null); return null; }
+    return (
+      <div className="trilha-screen">
+        {TopBar}
+        <div className="trilha-view">
+          <button className="trilha-back" onClick={() => setSelectedGroup(null)} title="Voltar à escolha" aria-label="Voltar">
+            <IconArrowLeft />
+          </button>
+
+          <div className="trilha-unit-band" style={{ background: `linear-gradient(135deg, ${group.color}, ${shade(group.color, -0.18)})` }}>
+            <div className="trilha-unit-eyebrow">{group.id === 'grp-ferramentas' ? 'Ferramentas' : 'Modos'}</div>
+            <h3>{group.name}</h3>
+            <p>{group.intro}</p>
+          </div>
+
+          <div className="trilha-modes">
+            {group.modes.map((m, i) => (
+              <button
+                key={m.id}
+                type="button"
+                className="trilha-mode"
+                onClick={() => navigate(m.route)}
+                style={{ '--skill-color': group.color, animationDelay: `${i * 70}ms` }}
+              >
+                <span className="trilha-mode-head">
+                  <span className="trilha-mode-name">{m.name}</span>
+                  <span className="trilha-mode-go" aria-hidden="true"><IconChevron /></span>
+                </span>
+                <span className="trilha-mode-desc">{m.desc}</span>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -275,6 +392,35 @@ export default function SkillMap({ user }) {
             );
           })}
         </div>
+
+        {/* Modos e ferramentas: mesma lista de escolhas, grupo próprio, porque
+            não são competências avaliáveis (não têm fase, nota nem progresso). */}
+        {modeGroups.length > 0 && (
+          <>
+            <div className="trilha-choices-divider">Modos e ferramentas</div>
+            <div className="trilha-choices">
+              {modeGroups.map((group, i) => (
+                <button
+                  key={group.id}
+                  className="trilha-choice is-mode"
+                  onClick={() => setSelectedGroup(group.id)}
+                  style={{ '--skill-color': group.color, animationDelay: `${(skills.length + i) * 70}ms` }}
+                >
+                  <span className="trilha-choice-badge" style={{ background: `linear-gradient(150deg, ${group.color}, ${shade(group.color, -0.22)})` }}>
+                    <IconStar />
+                  </span>
+                  <span className="trilha-choice-body">
+                    <span className="trilha-choice-name">{group.name}</span>
+                    <span className="trilha-choice-meta">
+                      {group.modes.map((m) => m.name).join(' · ')}
+                    </span>
+                  </span>
+                  <span className="trilha-choice-go" aria-hidden="true"><IconChevron /></span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     );
   }

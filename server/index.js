@@ -2779,6 +2779,42 @@ app.get('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) =
   });
 });
 
+// --- Suporte (mensagem do usuário para a administração) ---
+// A pessoa escreve na página /suporte e a mensagem cai no MESMO painel dos Logs
+// de Erro do admin, com `where: 'suporte/mensagem'` — é o único canal de leitura
+// diária que o admin já tem, então a mensagem chega onde ele olha. Não é erro:
+// vai com `status: null` (a tela não mostra "HTTP …" nessas entradas) e o próprio
+// texto do usuário é a mensagem da entrada. Devolvemos o código ao usuário porque é
+// por ele que o admin acha o recado (mesma ponte do `falhou()`).
+//
+// Provisório por decisão do dono ("depois melhoramos isso"): o passo natural é
+// uma caixa de entrada própria, com status de atendido/respondido.
+const SUPORTE_MAX_SUBJECT = 120;
+// 1000 é o teto do campo `message` da entrada de erro (buildErrorEntry corta aí).
+// Manter o limite igual evita truncar o recado sem avisar ninguém — a tela mostra
+// o contador e o servidor recusa acima disso.
+const SUPORTE_MAX_MESSAGE = 1000;
+
+app.post('/api/suporte', requireAuth, writeLimiter, (req, res) => {
+  const body = req.body || {};
+  const subject = clampStr(body.subject, SUPORTE_MAX_SUBJECT).trim();
+  const message = String(body.message == null ? '' : body.message).trim();
+  if (!message) return res.status(400).json({ error: 'Escreva a sua mensagem.' });
+  if (message.length > SUPORTE_MAX_MESSAGE) {
+    return res.status(400).json({ error: `A mensagem passa de ${SUPORTE_MAX_MESSAGE} caracteres. Resuma um pouco.` });
+  }
+
+  // registrarErro aceita qualquer objeto com `message` — reusamos a trilha
+  // inteira (redação de segredo, poda por idade/teto, código curto, stdout).
+  const id = registrarErro(
+    req,
+    { message, name: 'MensagemDeSuporte' },
+    'suporte/mensagem',
+    { status: null, extra: { assunto: subject || '(sem assunto)', autor: req.user.name || req.user.username || '—' } },
+  );
+  res.json({ ok: true, codigo: id });
+});
+
 // Admin: limpa o painel. Útil depois de resolver uma leva de erros, pra a
 // próxima falha não se perder no meio das antigas.
 app.delete('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) => {

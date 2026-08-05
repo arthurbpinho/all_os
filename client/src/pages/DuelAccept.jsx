@@ -82,7 +82,7 @@ export default function DuelAccept({ user }) {
           <div className="ornament" />
         </div>
         <div className="alert error">{error}</div>
-        <button className="btn btn-outline" onClick={() => navigate('/freeplay')}>Voltar</button>
+        <button className="btn btn-outline" onClick={() => navigate('/progressao')}>Voltar</button>
       </div>
     );
   }
@@ -128,7 +128,7 @@ export default function DuelAccept({ user }) {
             <button className="btn btn-primary btn-lg" onClick={accept} disabled={accepting}>
               {accepting ? 'Aceitando…' : 'Aceitar e atender'}
             </button>
-            <button className="btn btn-outline btn-lg" onClick={() => navigate('/freeplay')} disabled={accepting}>
+            <button className="btn btn-outline btn-lg" onClick={() => navigate('/progressao')} disabled={accepting}>
               Agora não
             </button>
           </div>

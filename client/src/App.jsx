@@ -29,6 +29,7 @@ import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
 import ProcessoSeletivo from './pages/ProcessoSeletivo';
 import Antessala from './pages/Antessala';
+import Suporte from './pages/Suporte';
 import SelecaoDashboard from './pages/SelecaoDashboard';
 import SelecaoLogs from './pages/SelecaoLogs';
 import NotificationBell from './components/NotificationBell';
@@ -181,18 +182,15 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <div className="topbar-actions">
-        <ThemeToggle />
-        {/* Notas de versão: só equipe (admin/supervisor). Aluno e visitante não
-            veem — é comunicação interna de desenvolvimento, não conteúdo deles. */}
-        {(isAdmin || isSupervisor) && <SystemUpdates />}
-        {!isVisitor && <NotificationBell user={user} />}
-        {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
-        {isVisitor && (
-          <Link to={LOGIN_PATH} className="topbar-login-btn">Entrar</Link>
-        )}
-      </div>
-      <header className="mobile-topbar">
+      {/* Cabeçalho único do app. As ações (tema, atualizações, sino, "Entrar")
+          vivem DENTRO dele, e não soltas em position:fixed por cima — era isso
+          que fazia elas cobrirem o logo "all_OS" no celular quando o papel do
+          usuário tinha um item a mais (3 ícones no admin/supervisor, a pílula
+          "Entrar" no visitante). Aqui elas são um item da mesma linha flex, então
+          o cabeçalho se reorganiza sozinho, com qualquer combinação de itens.
+          No desktop o cabeçalho encolhe pro canto superior direito e só as ações
+          aparecem — hamburger, logo e avatar são do mobile (ver .app-topbar). */}
+      <header className="app-topbar">
         <button
           className="hamburger-btn"
           onClick={() => setMobileNavOpen((v) => !v)}
@@ -206,6 +204,17 @@ export default function App() {
           </svg>
         </button>
         <div className="mobile-topbar-logo">all<span className="accent">_OS</span></div>
+        <div className="topbar-actions">
+          <ThemeToggle />
+          {/* Notas de versão: só equipe (admin/supervisor). Aluno e visitante não
+              veem — é comunicação interna de desenvolvimento, não conteúdo deles. */}
+          {(isAdmin || isSupervisor) && <SystemUpdates />}
+          {!isVisitor && <NotificationBell user={user} />}
+          {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
+          {isVisitor && (
+            <Link to={LOGIN_PATH} className="topbar-login-btn">Entrar</Link>
+          )}
+        </div>
         {isVisitor ? (
           <span className="mobile-topbar-avatar" aria-label="Visitante">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
@@ -432,15 +441,22 @@ export default function App() {
           <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
           <Route path="/chat/desafio/:id" element={<ChallengeSession user={user} />} />
           <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
-          <Route path="/freeplay" element={<FreePlay user={user} />} />
-          <Route path="/competitivo" element={<Competitive user={user} />} />
+          {/* Nomes visíveis mudaram (Competitivo → Simulação, Treinamento →
+              Progressão) e as rotas acompanharam. As antigas seguem respondendo
+              porque estão em links compartilhados, notificações antigas e no
+              histórico do navegador de quem já usa o app. */}
+          <Route path="/simulacao" element={<Competitive user={user} />} />
+          <Route path="/competitivo" element={<Navigate to="/simulacao" replace />} />
+          <Route path="/progressao" element={<FreePlay user={user} />} />
+          <Route path="/freeplay" element={<Navigate to="/progressao" replace />} />
           <Route path="/duelo" element={<Duelo user={user} />} />
           <Route path="/duelo/logs" element={<LogsSociais user={user} />} />
           <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
           <Route path="/duelo/aceitar/:id" element={<DuelAccept user={user} />} />
           <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
-          {/* Progressão foi integrada ao Treinamento — rota antiga redireciona. */}
-          <Route path="/progression" element={<Navigate to="/freeplay" replace />} />
+          {/* Aba de progressão separada morreu há tempos — hoje a progressão é o
+              próprio modo (reatender o mesmo paciente). */}
+          <Route path="/progression" element={<Navigate to="/progressao" replace />} />
           <Route path="/terapeutas" element={<Terapeutas user={user} />} />
           <Route path="/antessala" element={<Antessala user={user} />} />
           <Route path="/neuro" element={<NeuroEval user={user} />} />
@@ -448,6 +464,7 @@ export default function App() {
           <Route path="/supervisor" element={<Logs user={user} />} />
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
           <Route path="/simulacao-independente" element={<SimulacaoIndependente user={user} />} />
+          <Route path="/suporte" element={<Suporte user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />
           <Route path="/ranking" element={<Ranking user={user} />} />

@@ -194,6 +194,9 @@ export const api = {
   // Feedback (coletado do visitante ao fim da sessão: estrelas 0–5 + mensagem)
   submitFeedback: (data) => request('/feedback', { method: 'POST', body: data }),
   getAdminFeedback: () => request('/admin/feedback'),
+  // Suporte: mensagem do usuário pra administração. Cai no painel de Logs de
+  // Erro do admin; devolve { codigo } pra pessoa guardar. { subject?, message }
+  sendSupportMessage: (data) => request('/suporte', { method: 'POST', body: data }),
   // Avaliação Independente v25 (Opus 4.8, 14 nós): { log, casoId } → 14 partes + nota 0–100.
   // payload: { log, casoId, evaluator, model, effort, batch }. batch:true → { queued, jobId }.
   avaliacaoIndependente: (payload) => request('/avaliacao-independente', { method: 'POST', body: payload }),

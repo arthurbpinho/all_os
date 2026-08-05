@@ -51,6 +51,10 @@
   /* Layout */
   --radius:   4px;
   --radius-lg: 8px;
+  /* Faixa que o cabeçalho flutuante (.app-topbar) ocupa no canto superior direito
+     do DESKTOP. Quem tem conteúdo colado ali reserva este espaço em vez de repetir
+     o número: 3 botões de 42px + 2 gaps de 10px + 22px da borda, com folga. */
+  --topbar-gutter: 180px;
   --shadow:    0 1px 2px rgba(45, 45, 45, 0.04);
   --shadow-md: 0 4px 16px rgba(45, 45, 45, 0.08);
   --shadow-lg: 0 12px 40px rgba(45, 45, 45, 0.12);
@@ -111,7 +115,7 @@
 [data-theme="dark"] .install-banner-btn,
 [data-theme="dark"] .duel-mode-toggle button.active { background: var(--marrs); }
 [data-theme="dark"] .install-banner-btn:hover { background: var(--marrs-soft); }
-[data-theme="dark"] .home-promo--formacao { background: linear-gradient(135deg, var(--marrs), var(--marrs-soft)); }
+[data-theme="dark"] .home-card--cursos { background: linear-gradient(135deg, var(--marrs), var(--marrs-soft)); }
 
 /* Badge "missão não concluída": fundo vinha de --ink-soft (agora claro). */
 [data-theme="dark"] .sidequest-result-badge.incomplete { background: var(--muted); }
@@ -1678,21 +1682,15 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .install-banner-close:hover { background: var(--sand-2); color: var(--ink); }
 
-/* "Como jogar" (FAQ dos modos) na homepage */
-.home-about { margin-top: 4px; max-width: 640px; }
-.home-about-header { margin-bottom: 18px; }
-.home-about-eyebrow {
-  text-transform: uppercase; letter-spacing: 0.28em; font-size: 10.5px;
-  color: var(--marrs-dark); font-weight: 500;
-}
-.home-about-title { font-family: var(--serif); font-size: 25px; color: var(--marrs-deep); margin: 6px 0 0; }
-.home-about-intro { font-size: 13.5px; color: var(--muted); line-height: 1.55; margin: 6px 0 0; max-width: 520px; }
 
 /* Topo da homepage: link do YouTube alinhado à direita */
 .home-topbar {
   display: flex;
   justify-content: flex-end;
   margin-bottom: 20px;
+  /* Mesma reserva do .visitor-banner: no desktop o cabeçalho flutua por cima do
+     conteúdo, e sem isto o link do YouTube ficava debaixo dos botões. */
+  padding-right: var(--topbar-gutter, 180px);
 }
 .home-youtube {
   display: inline-flex;
@@ -1718,116 +1716,175 @@ select option { background: var(--cream); color: var(--ink); }
 }
 
 /* Banners promocionais (processo seletivo / formação): botões-banners gigantes */
-.home-promos {
-  display: flex;
-  flex-direction: column;
+/* ───────── Portas da homepage (mockup .manuais/Simulação.svg) ─────────
+   Simulação e Treinamento lado a lado, grandes; depois Cursos e Processo
+   Seletivo; no rodapé, Suporte e Clínica. */
+.home-doors {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 16px;
-  margin-top: 32px;
   max-width: 640px;
 }
-.home-promo {
+.home-door {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 32px 72px 32px 32px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 26px 24px 54px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--cream);
+  box-shadow: var(--shadow-md);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+/* Faixa de cor no topo — é o que distingue as duas portas sem depender de cor de fundo. */
+.home-door::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 4px;
+  background: var(--door-color, var(--marrs));
+}
+.home-door:hover:not(:disabled), .home-door:focus-visible:not(:disabled) {
+  transform: translateY(-3px);
+  border-color: var(--door-color, var(--marrs));
+  box-shadow: 0 16px 34px -16px var(--door-color, rgba(0, 0, 0, 0.3));
+  outline: none;
+}
+.home-door:active:not(:disabled) { transform: translateY(-1px); }
+/* Visitante não entra na Simulação: fica visível (pra saber que existe) mas apagada. */
+.home-door:disabled { cursor: not-allowed; opacity: 0.62; box-shadow: var(--shadow); }
+.home-door--simulacao { --door-color: var(--terra); }
+.home-door--treinamento { --door-color: var(--marrs); }
+.home-door-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--door-color, var(--marrs));
+  color: var(--on-accent);
+}
+.home-door-icon svg { display: block; }
+.home-door-name {
+  font-family: var(--serif);
+  font-size: 27px;
+  line-height: 1.1;
+  color: var(--marrs-deep);
+}
+.home-door-desc { font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); }
+.home-door-go {
+  position: absolute;
+  left: 24px;
+  bottom: 20px;
+  display: inline-flex;
+  color: var(--door-color, var(--marrs));
+  transition: transform 0.16s ease;
+}
+.home-door:hover:not(:disabled) .home-door-go { transform: translateX(5px); }
+
+.home-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 520px;
+  margin: 22px auto 0;
+}
+.home-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 22px 62px 22px 24px;
   border-radius: var(--radius-lg);
   color: #fff;
   text-decoration: none;
   box-shadow: var(--shadow-md);
   transition: transform 0.15s, box-shadow 0.15s, filter 0.15s;
 }
-.home-promo::after {
+.home-card::after {
   content: '→';
   position: absolute;
-  right: 30px;
+  right: 24px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 30px;
+  font-size: 26px;
   line-height: 1;
   color: rgba(255, 255, 255, 0.92);
   transition: transform 0.15s;
 }
-.home-promo:hover {
+.home-card:hover {
   text-decoration: none;
   transform: translateY(-2px);
   box-shadow: var(--shadow-lg);
   filter: brightness(1.05);
 }
-.home-promo:hover::after { transform: translateY(-50%) translateX(5px); }
-.home-promo--seletivo { background: linear-gradient(135deg, var(--terra), var(--terra-soft)); }
-.home-promo--formacao { background: linear-gradient(135deg, var(--marrs-dark), var(--marrs-soft)); }
-.home-promo-label {
-  text-transform: uppercase; letter-spacing: 0.2em; font-size: 11px;
+.home-card:hover::after { transform: translateY(-50%) translateX(5px); }
+.home-card--cursos { background: linear-gradient(135deg, var(--marrs-dark), var(--marrs-soft)); }
+.home-card--seletivo { background: linear-gradient(135deg, var(--terra), var(--terra-soft)); }
+.home-card-label {
+  text-transform: uppercase; letter-spacing: 0.2em; font-size: 10.5px;
   font-weight: 700; color: rgba(255, 255, 255, 0.85);
 }
-.home-promo-title {
-  font-family: var(--serif); font-size: 24px; font-weight: 500; color: #fff; line-height: 1.25;
+.home-card-title {
+  font-family: var(--serif); font-size: 20px; font-weight: 500; color: #fff; line-height: 1.3;
 }
 
-@media (max-width: 560px) {
-  .home-promo { padding: 24px 56px 24px 22px; }
-  .home-promo::after { right: 22px; font-size: 24px; }
-  .home-promo-title { font-size: 20px; }
-}
-
-.faq-item {
-  border: 1px solid var(--sand);
-  border-radius: var(--radius);
-  background: var(--cream);
-  margin-bottom: 10px;
-  overflow: hidden;
-  transition: box-shadow 0.15s ease;
-}
-.faq-item[open] { box-shadow: var(--shadow-sm, 0 1px 4px rgba(0,0,0,0.08)); }
-.faq-item > summary {
-  list-style: none;
-  cursor: pointer;
+.home-footer {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 15px 18px;
-  font-family: var(--sans);
-  font-weight: 600;
-  font-size: 15px;
-  color: var(--marrs-deep);
-  user-select: none;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 640px;
+  margin-top: 34px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
 }
-.faq-item > summary::-webkit-details-marker { display: none; }
-.faq-item > summary:hover { background: var(--sand-2); }
-.faq-q-icon { display: inline-flex; align-items: center; color: var(--marrs); }
-.faq-q-icon svg { display: block; }
-.faq-chevron {
-  margin-left: auto;
-  color: var(--muted);
-  transition: transform 0.2s ease;
-}
-.faq-item[open] .faq-chevron { transform: rotate(180deg); }
-.faq-a {
-  padding: 2px 18px 16px;
+.home-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  font: inherit;
   font-size: 13.5px;
-  line-height: 1.6;
+  font-weight: 500;
   color: var(--ink-soft);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
-.faq-a p { margin: 0 0 9px; }
-.faq-a p:last-child { margin-bottom: 0; }
-.faq-a strong { color: var(--marrs-deep); font-weight: 600; }
-.faq-a em { font-style: italic; color: var(--ink); }
-.faq-a ul { margin: 0 0 9px; padding-left: 20px; }
-.faq-a li { margin: 4px 0; }
+.home-footer-link svg { display: block; width: 17px; height: 17px; }
+.home-footer-link:hover {
+  color: var(--marrs-deep);
+  background: var(--sand-2);
+  border-color: var(--line);
+  text-decoration: none;
+}
+.home-footer-link--clinica { color: var(--marrs-deep); }
+.home-footer-link--clinica:hover { color: var(--marrs-dark); }
 
-/* Botão "Jogar" no cabeçalho do card + "jogar esse modo" na descrição. */
-.faq-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 10px; }
-.faq-actions .faq-chevron { margin-left: 0; }
-.faq-play-btn {
-  font: inherit; font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em;
-  color: var(--on-accent); background: var(--marrs); border: none; cursor: pointer;
-  padding: 5px 14px; border-radius: 999px; line-height: 1.4;
-  transition: background 0.15s ease, transform 0.12s ease, box-shadow 0.15s ease;
+@media (max-width: 620px) {
+  /* Empilha as portas: em telas estreitas dois cartões grandes lado a lado
+     ficam com o texto comprimido demais. */
+  .home-doors { grid-template-columns: 1fr; }
+  .home-door { padding: 22px 20px 50px; }
+  .home-door-name { font-size: 24px; }
+  .home-card { padding: 20px 52px 20px 20px; }
+  .home-card::after { right: 20px; font-size: 22px; }
+  .home-card-title { font-size: 18px; }
+  .home-footer { flex-direction: column; align-items: stretch; gap: 6px; }
+  .home-footer-link { justify-content: center; }
 }
-.faq-play-btn:hover { background: var(--marrs-soft); transform: translateY(-1px); box-shadow: var(--shadow-marrs); }
-.faq-play-btn:active { transform: translateY(0); }
-.faq-play-inline { margin-top: 12px; }
 
 /* Abas Sessões / Duelos dentro de "Minhas Sessões". */
 .logs-tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -3108,7 +3165,23 @@ select option { background: var(--cream); color: var(--ink); }
    ============================================================ */
 
 /* Top bar e backdrop só aparecem em mobile (≤768px) */
-.mobile-topbar { display: none; }
+/* Cabeçalho único do app (ver <header className="app-topbar"> no App.jsx).
+   DESKTOP: encolhe pro canto superior direito e carrega só as ações; hamburger,
+   logo e avatar são do mobile e ficam escondidos. MOBILE (≤768px): vira a barra
+   sticky do topo, com as ações na MESMA linha flex do logo — é o que impede
+   sobreposição, independente de quantos itens o papel do usuário tem. */
+.app-topbar {
+  position: fixed;
+  top: 16px;
+  right: 22px;
+  z-index: 85;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+.app-topbar > .hamburger-btn,
+.app-topbar > .mobile-topbar-logo,
+.app-topbar > .mobile-topbar-avatar { display: none; }
 .mobile-nav-backdrop { display: none; }
 
 /* TABLET (769–1024px): sidebar colapsada em coluna de ícones */
@@ -3127,8 +3200,12 @@ select option { background: var(--cream); color: var(--ink); }
 
 /* PHONE (≤768px): top bar + drawer off-canvas, layout em coluna */
 @media (max-width: 768px) {
-  /* Top bar fixo */
-  .mobile-topbar {
+  /* Top bar fixo. Aqui o cabeçalho volta a ser uma barra de largura total, com
+     hamburger · logo · ações · avatar na mesma linha. */
+  .app-topbar {
+    position: static;
+    top: auto;
+    right: auto;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -3145,7 +3222,11 @@ select option { background: var(--cream); color: var(--ink); }
     z-index: 80;
     min-height: 56px;
   }
+  .app-topbar > .hamburger-btn,
+  .app-topbar > .mobile-topbar-logo,
+  .app-topbar > .mobile-topbar-avatar { display: flex; }
   .mobile-topbar-logo {
+    flex-shrink: 0;
     font-family: var(--serif);
     font-size: 22px;
     color: var(--marrs-deep);
@@ -3378,9 +3459,11 @@ select option { background: var(--cream); color: var(--ink); }
 /* DUELO + NOTIFICAÇÕES                                          */
 /* ============================================================ */
 
-/* --- Ações do topo (canto superior direito): tema + atualizações + notificações --- */
+/* --- Ações do topo: tema + atualizações + notificações (+ "Entrar", visitante) ---
+   Quem posiciona é o cabeçalho (.app-topbar): aqui só a linha de ícones. Antes
+   isto era position:fixed com `right` chumbado, e por isso passava por cima do
+   logo no celular assim que entrava um item a mais. */
 .topbar-actions {
-  position: fixed; top: 16px; right: 22px; z-index: 85;
   display: flex; align-items: center; gap: 10px;
 }
 
@@ -3650,7 +3733,11 @@ select option { background: var(--cream); color: var(--ink); }
   /* Topbar mobile: hamburger (esq) · logo (centro) · ações + avatar (dir).
      Posiciona as ações à esquerda do avatar do topbar. gap/right ajustados pra
      caberem 3 botões (tema + atualizações + sino) sem cobrir o logo. */
-  .topbar-actions { top: calc(9px + env(safe-area-inset-top, 0px)); right: 58px; gap: 6px; }
+  /* Dentro do cabeçalho, só aperta o gap pra caber com o logo e o avatar. */
+  .topbar-actions { gap: 6px; }
+  /* Ações moram no cabeçalho mobile — o conteúdo não passa por baixo delas. */
+  .home-topbar { padding-right: 0; }
+  .visitor-banner { padding-right: 12px; }
   .notif-bell-btn, .sys-updates-btn, .theme-toggle-btn { width: 38px; height: 38px; box-shadow: none; }
 
   /* Os painéis são ancorados ao botão (right:0), mas no celular o botão fica
@@ -3944,6 +4031,46 @@ select option { background: var(--cream); color: var(--ink); }
 .trilha-choice-bar > span { display: block; height: 100%; border-radius: 999px; transition: width 0.6s ease; }
 .trilha-choice-go { color: var(--muted); display: inline-flex; flex-shrink: 0; transition: transform 0.18s ease, color 0.18s ease; }
 .trilha-choice:hover .trilha-choice-go { color: var(--skill-color, var(--marrs)); transform: translateX(4px); }
+
+/* ── Modos e ferramentas dentro da Trilha ──
+   Mesmos cartões da escolha de competência, mas sem barra de progresso: não são
+   avaliáveis. O divisor separa "o que tem fase e nota" de "o que só abre". */
+.trilha-choices-divider {
+  display: flex; align-items: center; gap: 12px;
+  max-width: 640px; margin: 26px 0 13px;
+  font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--muted); white-space: nowrap;
+}
+.trilha-choices-divider::after {
+  content: ''; flex: 1; height: 1px; background: var(--line);
+}
+.trilha-choice.is-mode .trilha-choice-badge::after { border-style: solid; opacity: 0.55; }
+
+.trilha-modes { display: flex; flex-direction: column; gap: 13px; max-width: 640px; margin-top: 14px; }
+.trilha-mode {
+  display: flex; flex-direction: column; gap: 8px; text-align: left; position: relative;
+  background: var(--cream); border: 1px solid var(--line); border-radius: 16px;
+  padding: 16px 18px; cursor: pointer; font: inherit; color: inherit; overflow: hidden;
+  box-shadow: var(--shadow);
+  opacity: 0; transform: translateY(12px);
+  animation: trilha-choice-in 0.5s cubic-bezier(0.34, 1.4, 0.64, 1) forwards;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.trilha-mode::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--skill-color, var(--marrs)); opacity: 0.7; transition: opacity 0.18s ease, width 0.18s ease;
+}
+.trilha-mode:hover, .trilha-mode:focus-visible {
+  transform: translateY(-3px); border-color: var(--skill-color, var(--marrs));
+  box-shadow: 0 12px 28px -12px var(--skill-color, rgba(0,0,0,0.25)); outline: none;
+}
+.trilha-mode:hover::before, .trilha-mode:focus-visible::before { opacity: 1; width: 6px; }
+.trilha-mode:active { transform: translateY(-1px) scale(0.99); }
+.trilha-mode-head { display: flex; align-items: center; gap: 10px; }
+.trilha-mode-name { font-family: var(--serif); font-size: 20px; color: var(--marrs-deep); }
+.trilha-mode-go { margin-left: auto; color: var(--muted); display: inline-flex; transition: transform 0.18s ease, color 0.18s ease; }
+.trilha-mode:hover .trilha-mode-go { color: var(--skill-color, var(--marrs)); transform: translateX(4px); }
+.trilha-mode-desc { font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); }
 
 /* ── Trilha de uma competência ── */
 .trilha-view { position: relative; }
@@ -4696,6 +4823,10 @@ select option { background: var(--cream); color: var(--ink); }
   font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase;
   color: var(--terra); font-weight: 700;
 }
+/* Recado da página /suporte: não é falha. Muda de cor (marrs, não terra) e ganha
+   uma borda lateral, pra o admin separar "responder" de "consertar" só de olhar. */
+.errlog-card.is-suporte { border-left: 3px solid var(--marrs); }
+.errlog-where.suporte { color: var(--marrs-deep); }
 /* Mensagem longa não pode empurrar a data pra fora do card. */
 .errlog-msg { color: var(--ink); font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .errlog-head-side { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
@@ -4753,10 +4884,15 @@ select option { background: var(--cream); color: var(--ink); }
 .topbar-login-btn:hover { opacity: 0.88; }
 .topbar-login-btn:active { transform: translateY(1px); }
 
-/* Faixa no topo do conteúdo. */
+/* Faixa no topo do conteúdo.
+   O padding-right existe porque no DESKTOP o cabeçalho (.app-topbar) flutua no
+   canto superior direito, por cima do conteúdo — e esta faixa é o primeiro
+   elemento da página, com o link "Entrar na minha conta" justamente à direita.
+   Sem a reserva, o botão "Entrar" do cabeçalho cobria o link. O mobile zera isso
+   (as ações lá estão no cabeçalho, em fluxo). */
 .visitor-banner {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  margin-bottom: 26px; padding: 10px 16px;
+  margin-bottom: 26px; padding: 10px var(--topbar-gutter, 180px) 10px 16px;
   border: 1px dashed var(--sand); border-radius: 10px;
   background: var(--cream-2);
   font-size: 13.5px; color: var(--ink-soft);
