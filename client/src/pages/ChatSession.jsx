@@ -1,10 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import {
-  buildDirectEvaluationPrompt,
-  stripSupervisorBlock,
-} from '../prompts';
+import { stripSupervisorBlock } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
@@ -227,6 +224,55 @@ export default function ChatSession({ user }) {
     setConfirmingFinalize(true);
   }
 
+  // Exercício SEM avaliador (evaluatorPrompt não configurado no admin): não há
+  // avaliação — a sessão só finaliza. Conta como concluída (passed:true,
+  // score:null) pra liberar a próxima fase, já que não há nota a exigir.
+  async function finalizeWithoutEvaluation() {
+    setEvalError('');
+    setEvaluationText('');
+    setScore(null);
+    setPhase(PHASE_CONCLUDED);
+
+    try {
+      await api.saveLog({
+        userId: user.id,
+        userName: user.name,
+        type: 'exercise',
+        itemId: id,
+        itemTitle: item.title,
+        skillId: item.skillId,
+        difficulty: item.difficulty || null,
+        messages: messages.filter((m) => !m.isSystem),
+        durationSeconds: elapsed,
+        score: null,
+        criteriaScores: null,
+        evaluation: '',
+      });
+    } catch (err) {
+      setError('Erro ao salvar log: ' + err.message);
+    }
+
+    try {
+      const current = await api.getProgress(user.id);
+      const existing = current?.[id];
+      if (!existing || existing.passed !== true) {
+        await api.saveProgress(user.id, {
+          [id]: {
+            score: null,
+            skillId: item.skillId,
+            passed: true,
+            difficulty: item.difficulty,
+            completedAt: new Date().toISOString(),
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('Erro ao salvar progresso:', err);
+    }
+
+    clearActiveSession(user.id, 'exercise', id);
+  }
+
   async function doFinalize() {
     setConfirmingFinalize(false);
     if (phase !== PHASE_SIMULATION || isTyping) return;
@@ -240,6 +286,12 @@ export default function ChatSession({ user }) {
     }
 
     if (timerRef.current) clearInterval(timerRef.current);
+
+    if (!item.hasCustomEvaluator) {
+      await finalizeWithoutEvaluation();
+      return;
+    }
+
     setPhase(PHASE_EVALUATING);
     setEvalError('');
 
@@ -247,24 +299,12 @@ export default function ChatSession({ user }) {
     const sessionLabel = `Trilha · ${skillName}`;
     const transcript = buildTranscript();
 
-    let evalMessages;
-
-    if (item.hasCustomEvaluator) {
-      // Avaliador customizado: o servidor já injeta o evaluatorPrompt do
-      // exercício como system prompt — mensagem do usuário fica curta.
-      evalMessages = [{
-        role: 'user',
-        content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
-      }];
-    } else {
-      // Fallback: avaliador global Allos (single-shot). As instruções vão na
-      // mensagem do usuário (não são segredo); o system prompt global é
-      // resolvido no servidor.
-      evalMessages = [{
-        role: 'user',
-        content: buildDirectEvaluationPrompt(sessionLabel, item.title, transcript),
-      }];
-    }
+    // Avaliador customizado do exercício: o servidor já injeta o
+    // evaluatorPrompt como system prompt — mensagem do usuário fica curta.
+    const evalMessages = [{
+      role: 'user',
+      content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
+    }];
 
     let evalContent = '';
     let totalScore = null;
@@ -273,9 +313,9 @@ export default function ChatSession({ user }) {
       const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
       evalContent = typeof reply === 'string' ? reply : reply.content || '';
 
-      // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador (padrão ou
-      // customizado) emite [NOTA:X] com X de 0 a 100. Aceita também
-      // "**Nota: X/100**" e variações "Nota final: X/100" / "X%".
+      // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador
+      // customizado do exercício emite [NOTA:X] com X de 0 a 100. Aceita
+      // também "**Nota: X/100**" e variações "Nota final: X/100" / "X%".
       const m =
         evalContent.match(/\[NOTA:\s*(\d{1,3})\s*\]/i) ||
         evalContent.match(/\*\*\s*Nota:?\s*(\d{1,3})\s*\/\s*100\s*\*\*/i) ||
@@ -515,14 +555,18 @@ export default function ChatSession({ user }) {
       <div className="post-session">
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
-          <h2>Avaliação do <span className="accent">exercício</span></h2>
+          <h2>{item && !item.hasCustomEvaluator ? 'Exercício concluído' : (<>Avaliação do <span className="accent">exercício</span></>)}</h2>
           <p>{item?.title} · {skillsById[item?.skillId]?.name || ''}</p>
           <div className="ornament" />
         </div>
 
         {evalError && <div className="alert error">Falha ao avaliar: {evalError}</div>}
 
-        {score !== null && (
+        {item && !item.hasCustomEvaluator ? (
+          <div className="trilha-result-flag neutral">
+            Este exercício não tem avaliação automática — a sessão foi registrada e a próxima fase foi liberada.
+          </div>
+        ) : score !== null && (
           <div className={`trilha-result-flag ${score >= 75 ? 'pass' : 'fail'}`}>
             {score >= 75
               ? '✓ Aprovado — a próxima fase da trilha foi liberada.'
