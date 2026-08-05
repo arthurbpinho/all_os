@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import { stripSupervisorBlock } from '../prompts';
+import { cleanEvaluationForStudent } from '../prompts';
+import { PatientAvatarButton } from '../components/PatientAvatar';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
@@ -517,7 +518,7 @@ export default function ChatSession({ user }) {
       .join('\n\n---\n\n');
   }
   function chatEvaluationBody() {
-    const clean = stripSupervisorBlock(evaluationText);
+    const clean = cleanEvaluationForStudent(evaluationText);
     const line = score !== null ? `Nota final: ${score}%\n\n` : '';
     return `${line}${clean}`;
   }
@@ -712,14 +713,9 @@ export default function ChatSession({ user }) {
             <div className="post-evaluation">
               <h4>Análise da IA</h4>
               <div className="post-evaluation-body">
-                {evaluationText
-                  .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
-                  .replace(/\[NOTA:[^\]]+\]\s*/g, '')
-                  .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
-                  // v15: bloco [notas-supervisor] (Base64) é só pro supervisor —
-                  // some da visão do aluno, mas continua salvo no log.
-                  .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
-                  .trim()}
+                {/* Blocos de máquina (notas por critério, marcadores de nota)
+                    somem da visão do aluno, mas continuam salvos no log. */}
+                {cleanEvaluationForStudent(evaluationText)}
               </div>
             </div>
           )}
@@ -745,7 +741,7 @@ export default function ChatSession({ user }) {
           )}
 
           {messages.filter((m) => !m.isSystem).length > 0 && (() => {
-            const hasEval = !!stripSupervisorBlock(evaluationText).trim();
+            const hasEval = !!cleanEvaluationForStudent(evaluationText).trim();
             return (
               <div style={{ marginTop: 14 }}>
                 <LogActions
@@ -778,6 +774,8 @@ export default function ChatSession({ user }) {
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
           Voltar
         </button>
+
+        {item?.title && <PatientAvatarButton name={item.title} iconUrl={item.photoIcon} fullUrl={item.photoFull} size={42} className="chat-header-avatar" />}
 
         <div className="chat-title">
           <h3>{item?.title || '...'}</h3>

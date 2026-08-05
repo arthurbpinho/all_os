@@ -1,17 +1,18 @@
 // Cálculo da nota final (0–100) a partir das notas por critério.
 //
-// Por que isto vive em código (e não na IA): os avaliadores (v15, progressão e
-// comparativo) emitem APENAS o bloco [notas-supervisor] com a nota de cada
-// critério (0–10). A nota de cada critério já é a média aritmética dos seus
-// subcritérios — esse passo o avaliador faz. O que a IA NÃO faz mais (porque
+// Por que isto vive em código (e não na IA): os avaliadores emitem APENAS as
+// notas por critério (v18.25: bloco [notas], 15 critérios de 1 a 10 ou NA; logs
+// antigos: [notas-supervisor] com 6 critérios). O que a IA NÃO faz (porque
 // errava com frequência) é a conta da nota final: somar os critérios e
 // converter de base para 0–100. Esse passo é determinístico e fica aqui.
 //
 // Fórmula (decisão do dono): soma das notas dos critérios (base = nº de
-// critérios × 10, ex.: 6 critérios → base 60) convertida para base 100:
+// critérios × 10, ex.: 15 critérios → base 150) convertida para base 100:
 //   nota_final = round( soma / base * 100 )
-// Com 6 critérios isso equivale a (média dos 6) × 10, mas mantemos a forma
-// "soma → base → 100" para ser robusto quando algum critério opcional não vem.
+// Isso equivale à média das notas × 10, mas mantemos a forma "soma → base → 100"
+// porque a base varia: critério NA (10 e 13, quando o caso não dá material) fica
+// FORA da conta — Number('NA') é NaN e o filtro abaixo o descarta —, então um
+// atendimento com 14 critérios avaliados tem base 140, não 150.
 
 function finalScoreFromCriteria(criteria) {
   if (!criteria || typeof criteria !== 'object') return null;
@@ -20,13 +21,15 @@ function finalScoreFromCriteria(criteria) {
     .filter((n) => Number.isFinite(n));
   if (!vals.length) return null;
   const sum = vals.reduce((a, b) => a + b, 0);
-  const base = vals.length * 10; // 6 critérios → base 60
+  const base = vals.length * 10; // 15 critérios → base 150 (14 se um sai NA)
   if (base === 0) return null;
   return Math.round((sum / base) * 100);
 }
 
-// Separa o JSON comparativo (chaves A1..A6 / B1..B6) nas notas de cada aluno e
-// calcula a nota final 0–100 de cada um. Retorna também o vencedor.
+// Separa as notas comparativas (chaves A1..A15 / B1..B15) nas notas de cada aluno
+// e calcula a nota final 0–100 de cada um. Retorna também o vencedor. Como cada
+// nota final é uma média normalizada, os dois lados seguem comparáveis mesmo se
+// um deles tiver um critério NA a mais (o 13 depende do que cada aluno explicitou).
 // Retorna null se não der pra montar as duas notas.
 function comparativeScores(criteria) {
   if (!criteria || typeof criteria !== 'object') return null;

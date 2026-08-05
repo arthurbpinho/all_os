@@ -2,19 +2,20 @@ import { useNavigate } from 'react-router-dom';
 import { ICONS } from '../icons';
 import InstallAppBanner from '../components/InstallAppBanner';
 
-// Homepage (pós-login): o "como jogar" de cada modo no topo, depois os banners
-// de processo seletivo e formação. A missão diária vive só no Treinamento
-// (FreePlay), não aqui. Os ícones dos modos são os mesmos do menu lateral.
-// A ordem coloca o Competitivo primeiro (é o modo base, em torno do qual o app
-// foi desenhado), depois Duelo, Treinamento (modo de treino, sem ranking) e
-// Modo Desafio. Trilha de Competências e Neuroavaliação ficam de fora de
-// propósito (ainda ocultas nesta versão).
+// Homepage (pós-login): "Como jogar" (os 4 modos de prática) e "Como evoluir"
+// (Trilha e Antessala) no topo, depois os banners de processo seletivo e
+// formação. A missão diária vive só no Treinamento (FreePlay), não aqui. Os
+// ícones dos modos são os mesmos do menu lateral. Em "Como jogar", a ordem
+// coloca o Competitivo primeiro (é o modo base, em torno do qual o app foi
+// desenhado), depois Duelo, Treinamento (modo de treino, sem ranking) e Modo
+// Desafio. Neuroavaliação fica de fora de propósito (ainda oculta nesta versão).
 //
-// Estes cards são, agora, a porta de entrada dos modos: Treinamento, Competitivo
-// e Duelo saíram do menu lateral. Cada card tem um botão "Jogar" (no cabeçalho,
-// ao lado da setinha) e um "jogar esse modo" dentro da descrição. `route` é o
-// destino e `canPlay(user)` decide se o botão aparece (respeita o que cada papel
-// acessa — visitante não joga Competitivo nem inicia Duelo).
+// Estes cards são a porta de entrada dos modos: Treinamento, Competitivo,
+// Duelo, Trilha e Antessala saíram do menu lateral. Cada card tem um botão de
+// acesso (no cabeçalho, ao lado da setinha) e um botão equivalente dentro da
+// descrição. `route` é o destino e `canPlay(user)` decide se o botão aparece
+// (respeita o que cada papel acessa — visitante não joga Competitivo nem
+// acessa Trilha/Antessala).
 const FAQ_ITEMS = [
   {
     icon: ICONS.trophy,
@@ -142,12 +143,96 @@ const FAQ_ITEMS = [
   },
 ];
 
+// Trilha e Antessala saíram do menu lateral e ganharam o mesmo tratamento dos
+// modos de prática acima: cards com botão de acesso direto. A diferença é que
+// aqui o eixo não é "jogar" um paciente simulado, e sim evoluir através de
+// supervisão — por isso vivem numa seção própria, "Como evoluir", com o botão
+// "Abrir" no lugar de "Jogar". canPlay espelha o que hoje decide a visibilidade
+// desses itens no menu lateral (App.jsx).
+const SUPERVISION_ITEMS = [
+  {
+    icon: ICONS.skill,
+    q: 'Trilha',
+    route: '/skills',
+    inlineCta: 'Abrir a Trilha',
+    canPlay: (u) => u?.role === 'therapist' || u?.role === 'supervisor' || u?.role === 'admin',
+    a: (
+      <>
+        <p>
+          Um percurso <strong>linear</strong>, estilo trilha de jogo: fases organizadas por
+          dificuldade (verde, laranja, vermelho), cada uma com exercícios que vão sendo
+          destravados conforme você avança.
+        </p>
+        <p>
+          Cada exercício é avaliado por uma <strong>IA</strong> e sua nota em porcentagem —{' '}
+          <strong>75% ou mais</strong> aprova a fase e libera a próxima. A barra superior
+          acompanha sua constância diária, nível e quantos exercícios você já concluiu.
+        </p>
+      </>
+    ),
+  },
+  {
+    icon: ICONS.antessala,
+    q: 'Antessala',
+    route: '/antessala',
+    inlineCta: 'Abrir a Antessala',
+    canPlay: (u) => u?.role === 'therapist' || u?.role === 'admin',
+    a: (
+      <>
+        <p>
+          A <strong>pré-supervisão</strong>: um espaço para organizar o pensamento sobre um
+          paciente real antes de levá-lo à supervisão. Um wizard de 7 etapas guia você — dos
+          fatos do caso às possíveis condutas — e desenha, sozinho, um <strong>mapa</strong>{' '}
+          visual das relações entre eles.
+        </p>
+        <p>
+          A IA só faz <strong>perguntas maiêuticas</strong> sobre a forma do seu pensamento —
+          nunca entrega fato, conduta ou conceito. Ao entregar, o rascunho congela e fica
+          disponível para seu supervisor ler.
+        </p>
+      </>
+    ),
+  },
+];
+
 function Chevron() {
   return (
     <svg className="faq-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <polyline points="6 9 12 15 18 9" />
     </svg>
   );
+}
+
+// Compartilhado pelas seções "Como jogar" e "Como evoluir" — só muda a lista
+// de itens e o texto do botão de acesso ("Jogar" vs "Abrir").
+function ModeAccordion({ items, user, play, actionLabel }) {
+  return items.map((item) => {
+    const canPlay = item.canPlay ? item.canPlay(user) : true;
+    return (
+      <details key={item.q} className="faq-item">
+        <summary>
+          <span className="faq-q-icon" aria-hidden="true">{item.icon}</span>
+          <span>{item.q}</span>
+          <span className="faq-actions">
+            {canPlay && item.route && (
+              <button type="button" className="faq-play-btn" onClick={(e) => play(item.route, e)}>
+                {actionLabel}
+              </button>
+            )}
+            <Chevron />
+          </span>
+        </summary>
+        <div className="faq-a">
+          {item.a}
+          {canPlay && item.route && (
+            <button type="button" className="btn btn-primary faq-play-inline" onClick={(e) => play(item.route, e)}>
+              {item.inlineCta || `${actionLabel} esse modo`} →
+            </button>
+          )}
+        </div>
+      </details>
+    );
+  });
 }
 
 export default function Home({ user }) {
@@ -186,33 +271,19 @@ export default function Home({ user }) {
             Cada modo coloca esse atendimento sob uma luz diferente.
           </p>
         </div>
-        {FAQ_ITEMS.map((item) => {
-          const canPlay = item.canPlay ? item.canPlay(user) : true;
-          return (
-            <details key={item.q} className="faq-item">
-              <summary>
-                <span className="faq-q-icon" aria-hidden="true">{item.icon}</span>
-                <span>{item.q}</span>
-                <span className="faq-actions">
-                  {canPlay && item.route && (
-                    <button type="button" className="faq-play-btn" onClick={(e) => play(item.route, e)}>
-                      Jogar
-                    </button>
-                  )}
-                  <Chevron />
-                </span>
-              </summary>
-              <div className="faq-a">
-                {item.a}
-                {canPlay && item.route && (
-                  <button type="button" className="btn btn-primary faq-play-inline" onClick={(e) => play(item.route, e)}>
-                    {item.inlineCta || 'Jogar esse modo'} →
-                  </button>
-                )}
-              </div>
-            </details>
-          );
-        })}
+        <ModeAccordion items={FAQ_ITEMS} user={user} play={play} actionLabel="Jogar" />
+      </section>
+
+      <section className="home-about" aria-label="Como evoluir">
+        <div className="home-about-header">
+          <div className="home-about-eyebrow">Como evoluir</div>
+          <h3 className="home-about-title">Formas de supervisão</h3>
+          <p className="home-about-intro">
+            Além de atender pacientes simulados, você evolui organizando o próprio
+            pensamento clínico e percorrendo um percurso de exercícios.
+          </p>
+        </div>
+        <ModeAccordion items={SUPERVISION_ITEMS} user={user} play={play} actionLabel="Abrir" />
       </section>
 
       <div className="home-promos">

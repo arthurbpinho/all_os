@@ -164,6 +164,31 @@ describe('sidequests', () => {
       expect(setTitle.status).toBe(403);
     });
 
+    // Formato v18.25 do avaliador de progressão: [notas] no INÍCIO, [feedback] +
+    // corpo, e o [sidequest-resultado] na última linha.
+    it('saída v18.25 (notas no início) conclui a sidequest e limpa os blocos', async () => {
+      const sq = await assignTo3();
+      const aluno = await loginAs('aluno');
+      const notas = Array.from({ length: 15 }, (_, i) => `${i + 1}: 6`).join('\n');
+      const evaluation = [
+        '[notas]', notas, '[feedback]',
+        'Boa sessão, você sustentou o silêncio no momento certo.', '',
+        '[sidequest-resultado]',
+        '{"sidequest_completed": true, "justification": "Sustentou o silêncio e o paciente elaborou."}',
+      ].join('\n');
+      const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
+        type: 'freeplay', mode: 'training', itemId: 'fp-test-1', itemTitle: 'Sofia Test',
+        durationSeconds: 120, messages: [{ role: 'user', content: 'oi' }], evaluation,
+      });
+      expect(saved.status).toBe(200);
+      expect(saved.body.sidequest.completed).toBe(true);
+      expect(saved.body.sidequest.rewardTitleId).toBe(sq.rewardTitleId);
+      expect(saved.body.evaluation).toContain('sustentou o silêncio');
+      expect(saved.body.evaluation).not.toMatch(/\[sidequest-resultado\]|\[notas\]|\[feedback\]/);
+      expect(saved.body.criteriaScores['15']).toBe(6);
+      expect(saved.body.score).toBe(60);
+    });
+
     it('não pode setar título de sidequest que não desbloqueou (403)', async () => {
       const aluno = await loginAs('aluno');
       const res = await request(app).post('/api/me/title').set(authHeader(aluno)).send({ titleId: 'qt-sq-inexistente' });

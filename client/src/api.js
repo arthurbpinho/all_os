@@ -148,6 +148,8 @@ export const api = {
   createExercise: (data) => request('/exercises', { method: 'POST', body: data }),
   updateExercise: (id, data) => request(`/exercises/${id}`, { method: 'PUT', body: data }),
   deleteExercise: (id) => request(`/exercises/${id}`, { method: 'DELETE' }),
+  // Avatar da IA do exercício (a "bolinha" no chat da Trilha): { icon, full } (data URLs) ou { clear: true }.
+  setExercisePhoto: (id, data) => request(`/exercises/${id}/photo`, { method: 'PUT', body: data }),
 
   // Trilha — competências (etiquetas dos exercícios, editáveis pelo admin)
   getTrilhaSkills: () => request('/trilha-skills'),

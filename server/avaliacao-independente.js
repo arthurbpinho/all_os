@@ -5,6 +5,11 @@
 // seletivo. O terceiro avaliador do alternador (v25) é o pipeline de 14 nós, que
 // vive em avaliacao-v25.js — este módulo cobre só os dois de uma chamada.
 //
+// NOTA: o v18-25 lido aqui é o MESMO arquivo que a produção usa como avaliador
+// individual (avaliacao/avaliador 18/avaliador-v18-25.md) — editar aquele .md
+// muda os dois. O v16-2 fica só como linha de base de comparação do laboratório:
+// nenhum modo de produção usa mais a grade de 6 critérios.
+//
 // Diferença crítica entre os dois formatos de saída (por isso parsers distintos):
 //   v16-2  → prosa + bloco `[notas-supervisor]` (JSON, 6 critérios 0–10) NO FIM.
 //   v18-25 → bloco `[notas]` (15 linhas "N: nota|NA", 1–10) NO INÍCIO, depois

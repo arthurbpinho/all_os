@@ -79,43 +79,51 @@ Personagem: ${characterName}
 ${transcript}`;
 }
 
-// Remove o bloco [notas-supervisor] (notas por critério, v15+) do texto do
-// avaliador. Esse bloco é destinado só a supervisor/admin — não deve aparecer
-// pro aluno na tela pós-sessão nem nos downloads que o próprio aluno faz. O
-// texto cru (com o bloco) ainda é enviado ao servidor, que extrai as notas e
-// salva a avaliação já limpa.
-export function stripSupervisorBlock(text) {
-  if (!text) return '';
-  return String(text)
-    // [notas-supervisor] (notas por critério) — só supervisor/admin.
-    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
-    // [sidequest-resultado] (JSON de conclusão da sidequest) — só sistema/supervisor.
-    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
-    .trim();
-}
+// Saudação que abre o feedback do aluno. Os avaliadores v18.25 não a escrevem (a
+// especificação deles diz que "o sistema monta a mensagem"), então ela entra
+// aqui, na hora de mostrar o texto na tela, e no servidor, na hora de salvar o
+// log. ESPELHO de EVAL_GREETING em server/index.js — mudou aqui, mude lá.
+export const EVAL_GREETING = [
+  'Trate este feedback como pré-correção — ponto de partida para conversa com seu supervisor e colegas, não veredicto.',
+  '',
+  'Tenho acesso apenas ao que você escreveu, não ao que você pensou. Use o botão de estrela para descrever seu raciocínio clínico nas falas em que ele importa — isso me ajuda a diferenciar decisões clínicas conscientes de erros por falta de percepção.',
+].join('\n');
 
-// Extrai as notas por critério do bloco [notas-supervisor] (v15) da resposta do
-// avaliador — espelha o extractSupervisorNotes do servidor. Usado SÓ na aba
-// Avaliar Sessão, onde o texto chega cru (com o bloco) e o gate é por role no
-// cliente. Retorna { "1": n, ... } ou null. NÃO mostre o resultado ao aluno.
-export function parseSupervisorCriteria(text) {
-  if (!text) return null;
-  const m = String(text).match(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][^\S\n]*\n?([\s\S]*)$/i);
-  if (!m) return null;
-  let payload = (m[1] || '').trim();
-  payload = payload.replace(/^```[a-z]*[ \t]*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-  try {
-    const obj = JSON.parse(payload);
-    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-      const out = {};
-      for (const [k, v] of Object.entries(obj)) {
-        const n = Number(String(v).replace(',', '.'));
-        if (Number.isFinite(n)) out[String(k)] = n;
-      }
-      if (Object.keys(out).length) return out;
-    }
-  } catch {}
-  return null;
+// Deixa a saída do avaliador no estado em que o ALUNO pode ler: sem nenhum bloco
+// de máquina e com a saudação na frente. Espelha extractSupervisorNotes do
+// servidor (que faz o mesmo com o texto que vai pro log); aqui é para a tela
+// pós-sessão e para os downloads que o próprio aluno faz, porque o texto que
+// chega do /api/evaluate vem cru.
+//
+// Dois formatos de saída convivem:
+//   v18.25 (atual) → `[notas]` (uma linha por critério) no INÍCIO, `[feedback]` e
+//     o corpo depois. Enquanto o `[feedback]` não chegou, não há nada legível
+//     ainda: devolvemos vazio em vez de deixar as notas aparecerem na tela.
+//   v15/v16 (logs antigos) → prosa + `[notas-supervisor]` no fim.
+// Em ambos, os blocos de resultado de missão ([sidequest-resultado],
+// [missao-diaria-resultado]) e os marcadores de nota da Trilha saem também.
+export function cleanEvaluationForStudent(text) {
+  if (!text) return '';
+  let s = String(text);
+  const hasNotas = /(?:^|\n)[^\S\n]*\[notas\][^\S\n]*\n/i.test(s);
+  const fb = s.match(/(?:^|\n)[^\S\n]*\[feedback\][^\S\n]*(?:\n|$)/i);
+  if (fb) {
+    s = `${EVAL_GREETING}\n\n${s.slice(fb.index + fb[0].length)}`;
+  } else if (hasNotas) {
+    return ''; // v18.25 ainda no bloco de notas — nada para o aluno ler
+  }
+  return s
+    // Notas por critério — só supervisor/admin.
+    .replace(/(?:^|\n)[^\S\n]*\[notas\][^\S\n]*\n[\s\S]*$/i, '')
+    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
+    // Resultado de missão (JSON de conclusão) — só sistema/supervisor.
+    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[sidequest-resultado\][\s\S]*$/i, '')
+    .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[missao-diaria-resultado\][\s\S]*$/i, '')
+    // Marcadores de nota (Trilha e avaliadores antigos).
+    .replace(/\[CRITERIOS:[^\]]+\]\s*/g, '')
+    .replace(/\[NOTA:[^\]]+\]\s*/g, '')
+    .replace(/\*\*\s*Nota:\s*\d{1,3}\s*\/\s*100\s*\*\*\s*/i, '')
+    .trim();
 }
 
 // Tenta extrair as notas por critério da resposta da IA
