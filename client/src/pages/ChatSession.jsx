@@ -40,6 +40,21 @@ export default function ChatSession({ user }) {
   const [evaluationText, setEvaluationText] = useState('');
   const [score, setScore] = useState(null);
   const [elapsed, setElapsed] = useState(0);
+  const [imageSchema, setImageSchema] = useState(null);
+  const [imageSchemaError, setImageSchemaError] = useState('');
+  const [imageSchemaUrl, setImageSchemaUrl] = useState(null);
+
+  // O SVG do esquema visual é renderizado via <img src="blob:..."> — nunca
+  // injetado no DOM (dangerouslySetInnerHTML): SVG carregado em contexto de
+  // imagem não executa <script>/eventos, mesmo vindo de uma IA cuja entrada
+  // inclui texto do aluno (não confiável). Blob URL evita o problema de
+  // codificar unicode em base64 (btoa não lida bem com acentos).
+  useEffect(() => {
+    if (!imageSchema) { setImageSchemaUrl(null); return; }
+    const url = URL.createObjectURL(new Blob([imageSchema], { type: 'image/svg+xml' }));
+    setImageSchemaUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageSchema]);
 
   // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
   useWakeLock(phase === PHASE_EVALUATING);
@@ -224,13 +239,38 @@ export default function ChatSession({ user }) {
     setConfirmingFinalize(true);
   }
 
-  // Exercício SEM avaliador (evaluatorPrompt não configurado no admin): não há
-  // avaliação — a sessão só finaliza. Conta como concluída (passed:true,
+  // Marca o exercício como concluído sem nota (score:null, passed:true) — pra
+  // liberar a próxima fase quando não há avaliador (a sessão só finaliza, com
+  // ou sem esquema visual).
+  async function markPassedWithoutScore() {
+    try {
+      const current = await api.getProgress(user.id);
+      const existing = current?.[id];
+      if (!existing || existing.passed !== true) {
+        await api.saveProgress(user.id, {
+          [id]: {
+            score: null,
+            skillId: item.skillId,
+            passed: true,
+            difficulty: item.difficulty,
+            completedAt: new Date().toISOString(),
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('Erro ao salvar progresso:', err);
+    }
+  }
+
+  // Exercício SEM avaliador nem esquema visual: nenhum processamento de IA no
+  // final — a sessão só finaliza. Conta como concluída (passed:true,
   // score:null) pra liberar a próxima fase, já que não há nota a exigir.
-  async function finalizeWithoutEvaluation() {
+  async function finalizeWithoutExtras() {
     setEvalError('');
     setEvaluationText('');
     setScore(null);
+    setImageSchemaError('');
+    setImageSchema(null);
     setPhase(PHASE_CONCLUDED);
 
     try {
@@ -252,24 +292,7 @@ export default function ChatSession({ user }) {
       setError('Erro ao salvar log: ' + err.message);
     }
 
-    try {
-      const current = await api.getProgress(user.id);
-      const existing = current?.[id];
-      if (!existing || existing.passed !== true) {
-        await api.saveProgress(user.id, {
-          [id]: {
-            score: null,
-            skillId: item.skillId,
-            passed: true,
-            difficulty: item.difficulty,
-            completedAt: new Date().toISOString(),
-          },
-        });
-      }
-    } catch (err) {
-      console.warn('Erro ao salvar progresso:', err);
-    }
-
+    await markPassedWithoutScore();
     clearActiveSession(user.id, 'exercise', id);
   }
 
@@ -287,51 +310,76 @@ export default function ChatSession({ user }) {
 
     if (timerRef.current) clearInterval(timerRef.current);
 
-    if (!item.hasCustomEvaluator) {
-      await finalizeWithoutEvaluation();
+    const needsEval = item.hasCustomEvaluator;
+    const needsImage = item.hasImageSchema;
+
+    if (!needsEval && !needsImage) {
+      await finalizeWithoutExtras();
       return;
     }
 
     setPhase(PHASE_EVALUATING);
     setEvalError('');
+    setImageSchemaError('');
+    setImageSchema(null);
 
     const skillName = skillsById[item.skillId]?.name || `Skill ${item.skillId}`;
     const sessionLabel = `Trilha · ${skillName}`;
     const transcript = buildTranscript();
-
-    // Avaliador customizado do exercício: o servidor já injeta o
-    // evaluatorPrompt como system prompt — mensagem do usuário fica curta.
-    const evalMessages = [{
-      role: 'user',
-      content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
-    }];
+    const visibleMessages = messages.filter((m) => !m.isSystem);
 
     let evalContent = '';
     let totalScore = null;
+    let svg = null;
+    const tasks = [];
 
-    try {
-      const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
-      evalContent = typeof reply === 'string' ? reply : reply.content || '';
+    if (needsEval) {
+      // Avaliador customizado do exercício: o servidor já injeta o
+      // evaluatorPrompt como system prompt — mensagem do usuário fica curta.
+      const evalMessages = [{
+        role: 'user',
+        content: `Sessão: ${sessionLabel}\nExercício: ${item.title}\nDificuldade: ${DIFFICULTY_LABEL[item.difficulty] || '—'}\nTerapeuta: ${user.name}\n\n## TRANSCRIÇÃO DA SESSÃO\n\n${transcript}\n\nFaça a avaliação completa neste único turno.`,
+      }];
+      tasks.push((async () => {
+        try {
+          const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
+          evalContent = typeof reply === 'string' ? reply : reply.content || '';
 
-      // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador
-      // customizado do exercício emite [NOTA:X] com X de 0 a 100. Aceita
-      // também "**Nota: X/100**" e variações "Nota final: X/100" / "X%".
-      const m =
-        evalContent.match(/\[NOTA:\s*(\d{1,3})\s*\]/i) ||
-        evalContent.match(/\*\*\s*Nota:?\s*(\d{1,3})\s*\/\s*100\s*\*\*/i) ||
-        evalContent.match(/\bNota\s*(?:final)?\s*[:=]?\s*(\d{1,3})\s*(?:\/\s*100|%)/i);
-      if (m) {
-        const v = Number(m[1]);
-        if (Number.isFinite(v)) totalScore = Math.max(0, Math.min(100, Math.round(v)));
-      }
-
-      setEvaluationText(evalContent);
-      setScore(totalScore);
-    } catch (err) {
-      setEvalError(err.message || 'Erro ao avaliar.');
-    } finally {
-      setPhase(PHASE_CONCLUDED);
+          // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador
+          // customizado do exercício emite [NOTA:X] com X de 0 a 100. Aceita
+          // também "**Nota: X/100**" e variações "Nota final: X/100" / "X%".
+          const m =
+            evalContent.match(/\[NOTA:\s*(\d{1,3})\s*\]/i) ||
+            evalContent.match(/\*\*\s*Nota:?\s*(\d{1,3})\s*\/\s*100\s*\*\*/i) ||
+            evalContent.match(/\bNota\s*(?:final)?\s*[:=]?\s*(\d{1,3})\s*(?:\/\s*100|%)/i);
+          if (m) {
+            const v = Number(m[1]);
+            if (Number.isFinite(v)) totalScore = Math.max(0, Math.min(100, Math.round(v)));
+          }
+          setEvaluationText(evalContent);
+          setScore(totalScore);
+        } catch (err) {
+          setEvalError(err.message || 'Erro ao avaliar.');
+        }
+      })());
     }
+
+    if (needsImage) {
+      // Esquema visual: manda a transcrição crua (user/assistant); a
+      // observação do admin é injetada pelo servidor — nunca sai pro aluno.
+      const imageMessages = visibleMessages.map((m) => ({ role: m.role, content: m.content }));
+      tasks.push((async () => {
+        try {
+          svg = await api.generateImageSchema(id, imageMessages);
+          setImageSchema(svg);
+        } catch (err) {
+          setImageSchemaError(err.message || 'Erro ao gerar o esquema visual.');
+        }
+      })());
+    }
+
+    await Promise.allSettled(tasks);
+    setPhase(PHASE_CONCLUDED);
 
     // Persistir log + progresso
     try {
@@ -343,37 +391,44 @@ export default function ChatSession({ user }) {
         itemTitle: item.title,
         skillId: item.skillId,
         difficulty: item.difficulty || null,
-        messages: messages.filter((m) => !m.isSystem),
+        messages: visibleMessages,
         durationSeconds: elapsed,
         score: totalScore,
         criteriaScores: null,
         evaluation: evalContent,
+        imageSchema: svg || '',
       });
     } catch (err) {
       setError('Erro ao salvar log: ' + err.message);
     }
 
-    if (totalScore !== null) {
-      try {
-        const current = await api.getProgress(user.id);
-        const existing = current?.[id];
-        const shouldUpdate = !existing
-          || existing.score == null
-          || totalScore > existing.score;
-        if (shouldUpdate) {
-          await api.saveProgress(user.id, {
-            [id]: {
-              score: totalScore,
-              skillId: item.skillId,
-              passed: totalScore >= 75,
-              difficulty: item.difficulty,
-              completedAt: new Date().toISOString(),
-            },
-          });
+    if (needsEval) {
+      if (totalScore !== null) {
+        try {
+          const current = await api.getProgress(user.id);
+          const existing = current?.[id];
+          const shouldUpdate = !existing
+            || existing.score == null
+            || totalScore > existing.score;
+          if (shouldUpdate) {
+            await api.saveProgress(user.id, {
+              [id]: {
+                score: totalScore,
+                skillId: item.skillId,
+                passed: totalScore >= 75,
+                difficulty: item.difficulty,
+                completedAt: new Date().toISOString(),
+              },
+            });
+          }
+        } catch (err) {
+          console.warn('Erro ao salvar progresso:', err);
         }
-      } catch (err) {
-        console.warn('Erro ao salvar progresso:', err);
       }
+    } else {
+      // Só tinha esquema visual habilitado, sem avaliador — mesma regra de
+      // "só finaliza" (passed:true, sem nota).
+      await markPassedWithoutScore();
     }
 
     // Sessão finalizada — limpa o autosave ativo
@@ -487,6 +542,18 @@ export default function ChatSession({ user }) {
     URL.revokeObjectURL(url);
   }
 
+  // Baixa o esquema visual (.svg) gerado ao final do exercício.
+  function downloadImageSchema() {
+    if (!imageSchema) return;
+    const blob = new Blob([imageSchema], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `esquema-${(item?.title || 'exercicio').replace(/\s+/g, '_')}-${new Date().toISOString().slice(0, 10)}.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // Carrega um save (.json) e retoma a sessão. Valida o formato, o vínculo com
   // este exercício e o limite de 30 dias.
   function handleLoadSaveFile(e) {
@@ -520,14 +587,26 @@ export default function ChatSession({ user }) {
     reader.readAsText(file);
   }
 
-  // -------- TELA DE LOADING (avaliando) --------
+  // -------- TELA DE LOADING (avaliando / gerando esquema) --------
   if (phase === PHASE_EVALUATING) {
+    const needsEval = item?.hasCustomEvaluator;
+    const needsImage = item?.hasImageSchema;
+    const headline = needsEval && needsImage
+      ? 'Processando seu exercício'
+      : needsImage
+        ? 'Gerando o esquema visual'
+        : 'Avaliando seu exercício';
+    const sub = needsEval && needsImage
+      ? 'A IA está avaliando a sessão e desenhando o esquema visual. Pode levar até um minuto.'
+      : needsImage
+        ? 'A IA está desenhando um esquema a partir da transcrição da sessão. Pode levar alguns segundos.'
+        : 'A IA está analisando a transcrição com o avaliador deste exercício. Pode levar alguns segundos.';
     return (
       <div className="post-session">
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
-          <h2>Avaliando seu <span className="accent">exercício</span></h2>
-          <p>A IA está analisando a transcrição com o avaliador deste exercício. Pode levar alguns segundos.</p>
+          <h2>{headline}</h2>
+          <p>{sub}</p>
           <div className="ornament" />
         </div>
 
@@ -540,9 +619,10 @@ export default function ChatSession({ user }) {
           </div>
           <div className="evaluating-status">
             <div className="evaluating-line"><span className="dot active" /> Construindo transcrição da sessão</div>
-            <div className="evaluating-line"><span className="dot active" /> Aplicando os critérios do exercício</div>
-            <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>
-            <div className="evaluating-line"><span className="dot" /> Calculando a nota final</div>
+            {needsEval && <div className="evaluating-line"><span className="dot active" /> Aplicando os critérios do exercício</div>}
+            {needsEval && <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>}
+            {needsEval && <div className="evaluating-line"><span className="dot" /> Calculando a nota final</div>}
+            {needsImage && <div className="evaluating-line"><span className="dot pulse" /> Desenhando o esquema visual</div>}
           </div>
         </div>
       </div>
@@ -612,6 +692,26 @@ export default function ChatSession({ user }) {
                   .replace(/\n*(?:-{3,}[^\S\n]*\n+)?\[notas-supervisor\][\s\S]*$/i, '')
                   .trim()}
               </div>
+            </div>
+          )}
+
+          {(imageSchemaUrl || imageSchemaError) && (
+            <div className="post-evaluation" style={{ marginTop: 14 }}>
+              <h4>Esquema visual</h4>
+              {imageSchemaError && <div className="alert error">Falha ao gerar o esquema: {imageSchemaError}</div>}
+              {imageSchemaUrl && (
+                <>
+                  <div style={{ background: 'var(--cream-2)', borderRadius: 'var(--radius-lg)', padding: 16, marginTop: 8 }}>
+                    {/* Renderizado como <img> (não injetado no DOM) — SVG em contexto
+                        de imagem não executa script/eventos, mesmo vindo de uma IA
+                        cuja entrada inclui texto do aluno. */}
+                    <img src={imageSchemaUrl} alt="Esquema visual do exercício" style={{ maxWidth: '100%', height: 'auto', display: 'block', margin: '0 auto' }} />
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={downloadImageSchema}>Baixar esquema (.svg)</button>
+                  </div>
+                </>
+              )}
             </div>
           )}
 

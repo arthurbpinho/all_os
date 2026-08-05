@@ -286,6 +286,64 @@ export const api = {
     return { role: 'assistant', content: full, reasoning };
   },
 
+  // Trilha — esquema visual (SVG) opcional ao final do exercício. Mesmo
+  // esquema de stream do /evaluate (SSE com heartbeat), mas só interessa o
+  // resultado final — não há delta pra mostrar token a token.
+  generateImageSchema: async (itemId, messages) => {
+    const token = getToken();
+    const res = await fetch(BASE + '/trilha/image-schema', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ itemId, messages }),
+    });
+    if (res.status === 401) {
+      clearAuth();
+      notifySessionExpired();
+      const err = await res.json().catch(() => ({ error: 'Sessão expirada' }));
+      throw new Error(err.error || 'Sessão expirada');
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Erro ao gerar o esquema visual' }));
+      throw new Error(err.error || 'Erro ao gerar o esquema visual');
+    }
+    const ctype = res.headers.get('content-type') || '';
+    if (!ctype.includes('text/event-stream') || !res.body) {
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      return data.svg || '';
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let svg = '';
+    let streamError = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf('\n\n')) !== -1) {
+        const event = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          let obj;
+          try { obj = JSON.parse(payload); } catch { continue; }
+          if (obj.svg) svg = obj.svg;
+          else if (obj.error) streamError = obj.error;
+        }
+      }
+    }
+    if (streamError) throw new Error(streamError);
+    if (!svg) throw new Error('Não recebi o esquema visual.');
+    return svg;
+  },
+
   // Profile
   getUser: (id) => request(`/users/${id}`),
   updateUser: (id, data) => request(`/users/${id}`, { method: 'PUT', body: data }),
