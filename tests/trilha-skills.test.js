@@ -151,7 +151,7 @@ describe('Exercícios — chatModel (IA que interpreta o papel do exercício)', 
     expect(res2.body.chatModel).toBe('gpt-5.4-mini');
   });
 
-  it('aceita glm-5.2 e gpt-5.5 na criação/edição, independente do evaluatorModel', async () => {
+  it('aceita gpt-5.4, glm-5.2, gpt-5.5 e claude-sonnet-5 na criação/edição, independente do evaluatorModel', async () => {
     const token = await loginAs('admin');
     const created = await request(app).post('/api/exercises').set(authHeader(token)).send({
       title: 'Personagem em GLM', skillId: 1, specificInstruction: 'x',
@@ -166,6 +166,16 @@ describe('Exercícios — chatModel (IA que interpreta o papel do exercício)', 
     expect(updated.status).toBe(200);
     expect(updated.body.chatModel).toBe('gpt-5.5');
     expect(updated.body.evaluatorModel).toBe('gpt-5.5'); // não mexeu no que não foi enviado
+
+    const toHeavy = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      chatModel: 'gpt-5.4',
+    });
+    expect(toHeavy.body.chatModel).toBe('gpt-5.4');
+
+    const toClaude = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      chatModel: 'claude-sonnet-5',
+    });
+    expect(toClaude.body.chatModel).toBe('claude-sonnet-5');
 
     const badUpdate = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
       chatModel: 'bogus',

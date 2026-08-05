@@ -19,12 +19,16 @@ const EVALUATOR_MODEL_OPTIONS = [
 ];
 const EVALUATOR_MODEL_DEFAULT = 'gpt-5.4-mini';
 
-// As 3 opções fixas de modelo do EXERCÍCIO em si (a IA que interpreta o papel
-// — paciente, colega etc.). Espelha TRILHA_CHAT_MODELS no servidor.
+// As opções fixas de modelo do EXERCÍCIO em si (a IA que interpreta o papel —
+// paciente, colega etc.). Espelha TRILHA_CHAT_MODELS no servidor. GLM, GPT-5.4
+// e Claude Sonnet 5 rodam com raciocínio ligado ("high") — personagem mais
+// lento, porém mais nuançado; mini e 5.5 respondem direto, sem "pensar".
 const CHAT_MODEL_OPTIONS = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão)' },
-  { value: 'glm-5.2', label: 'GLM 5.2' },
+  { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
+  { value: 'glm-5.2', label: 'GLM 5.2 (high)' },
   { value: 'gpt-5.5', label: 'GPT-5.5 (melhor qualidade)' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
 ];
 const CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 
