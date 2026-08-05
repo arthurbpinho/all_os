@@ -125,6 +125,45 @@ describe('Exercícios — evaluatorModel (modelo do avaliador por exercício)', 
   });
 });
 
+describe('Exercícios — chatModel (IA que interpreta o papel do exercício)', () => {
+  beforeEach(() => resetData());
+
+  it('defaults pro mini quando ausente ou inválido na criação', async () => {
+    const token = await loginAs('admin');
+    const res = await request(app).post('/api/exercises').set(authHeader(token)).send({
+      title: 'Sem modelo de chat', skillId: 1, specificInstruction: 'x',
+    });
+    expect(res.body.chatModel).toBe('gpt-5.4-mini');
+
+    const res2 = await request(app).post('/api/exercises').set(authHeader(token)).send({
+      title: 'Modelo inválido', skillId: 1, specificInstruction: 'x', chatModel: 'llama-mega',
+    });
+    expect(res2.body.chatModel).toBe('gpt-5.4-mini');
+  });
+
+  it('aceita glm-5.2 e gpt-5.5 na criação/edição, independente do evaluatorModel', async () => {
+    const token = await loginAs('admin');
+    const created = await request(app).post('/api/exercises').set(authHeader(token)).send({
+      title: 'Personagem em GLM', skillId: 1, specificInstruction: 'x',
+      chatModel: 'glm-5.2', evaluatorModel: 'gpt-5.5',
+    });
+    expect(created.body.chatModel).toBe('glm-5.2');
+    expect(created.body.evaluatorModel).toBe('gpt-5.5'); // os dois campos são independentes
+
+    const updated = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      chatModel: 'gpt-5.5',
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.chatModel).toBe('gpt-5.5');
+    expect(updated.body.evaluatorModel).toBe('gpt-5.5'); // não mexeu no que não foi enviado
+
+    const badUpdate = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
+      chatModel: 'bogus',
+    });
+    expect(badUpdate.body.chatModel).toBe('gpt-5.4-mini');
+  });
+});
+
 describe('Avaliador da Trilha é OPCIONAL — sem fallback pro avaliador padrão', () => {
   beforeEach(() => resetData());
 

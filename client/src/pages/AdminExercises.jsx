@@ -8,14 +8,23 @@ const DIFFICULTY_OPTIONS = [
   { value: 'avancado', label: 'Avançado' },
 ];
 
-// As 3 opções fixas de modelo do avaliador (por exercício). Espelha
+// As 3 opções fixas de modelo do AVALIADOR (por exercício). Espelha
 // TRILHA_EXERCISE_MODELS no servidor — mudar lá exige mudar aqui também.
-const EXERCISE_MODEL_OPTIONS = [
+const EVALUATOR_MODEL_OPTIONS = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão — barato, alto volume)' },
   { value: 'glm-5.2', label: 'GLM 5.2 (high)' },
   { value: 'gpt-5.5', label: 'GPT-5.5 (high — melhor qualidade)' },
 ];
-const EXERCISE_MODEL_DEFAULT = 'gpt-5.4-mini';
+const EVALUATOR_MODEL_DEFAULT = 'gpt-5.4-mini';
+
+// As 3 opções fixas de modelo do EXERCÍCIO em si (a IA que interpreta o papel
+// — paciente, colega etc.). Espelha TRILHA_CHAT_MODELS no servidor.
+const CHAT_MODEL_OPTIONS = [
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão)' },
+  { value: 'glm-5.2', label: 'GLM 5.2' },
+  { value: 'gpt-5.5', label: 'GPT-5.5 (melhor qualidade)' },
+];
+const CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 
 const DEFAULT_SKILL_COLOR = '#5C8A82';
 
@@ -25,8 +34,9 @@ const EMPTY_FORM = {
   description: '',
   difficulty: 'iniciante',
   specificInstruction: '',
+  chatModel: CHAT_MODEL_DEFAULT,
   evaluatorPrompt: '',
-  evaluatorModel: EXERCISE_MODEL_DEFAULT,
+  evaluatorModel: EVALUATOR_MODEL_DEFAULT,
 };
 
 function difficultyLabel(value) {
@@ -34,8 +44,8 @@ function difficultyLabel(value) {
   return found ? found.label : '—';
 }
 
-function modelLabel(value) {
-  const found = EXERCISE_MODEL_OPTIONS.find((m) => m.value === value);
+function modelLabel(options, value) {
+  const found = options.find((m) => m.value === value);
   return found ? found.label.split(' (')[0] : value;
 }
 
@@ -89,8 +99,9 @@ export default function AdminExercises() {
       description: exercise.description || '',
       difficulty: exercise.difficulty || 'iniciante',
       specificInstruction: exercise.specificInstruction || '',
+      chatModel: exercise.chatModel || CHAT_MODEL_DEFAULT,
       evaluatorPrompt: exercise.evaluatorPrompt || '',
-      evaluatorModel: exercise.evaluatorModel || EXERCISE_MODEL_DEFAULT,
+      evaluatorModel: exercise.evaluatorModel || EVALUATOR_MODEL_DEFAULT,
     });
     setEditingId(exercise.id);
     setFormError('');
@@ -240,7 +251,7 @@ export default function AdminExercises() {
         <div className="card tight" style={{ padding: 0, overflow: 'auto' }}>
           <table className="admin-table">
             <thead>
-              <tr><th>Competência</th><th>Título</th><th>Dificuldade</th><th>Avaliador</th><th>Ações</th></tr>
+              <tr><th>Competência</th><th>Título</th><th>Dificuldade</th><th>IA do exercício</th><th>Avaliador</th><th>Ações</th></tr>
             </thead>
             <tbody>
               {exercises.map((ex) => (
@@ -253,10 +264,11 @@ export default function AdminExercises() {
                     </span>
                   </td>
                   <td style={{ color: 'var(--ink-soft)', fontSize: 13 }}>
+                    {modelLabel(CHAT_MODEL_OPTIONS, ex.chatModel || CHAT_MODEL_DEFAULT)}
+                  </td>
+                  <td style={{ color: 'var(--ink-soft)', fontSize: 13 }}>
                     {ex.evaluatorPrompt ? (
-                      <>
-                        <span style={{ color: 'var(--marrs-dark)' }}>{modelLabel(ex.evaluatorModel || EXERCISE_MODEL_DEFAULT)}</span>
-                      </>
+                      <span style={{ color: 'var(--marrs-dark)' }}>{modelLabel(EVALUATOR_MODEL_OPTIONS, ex.evaluatorModel || EVALUATOR_MODEL_DEFAULT)}</span>
                     ) : (
                       <em style={{ fontFamily: 'var(--serif-it)' }}>sem avaliador — só finaliza</em>
                     )}
@@ -318,6 +330,14 @@ export default function AdminExercises() {
                 <textarea id="specificInstruction" name="specificInstruction" value={form.specificInstruction} onChange={handleChange} placeholder="Descreva o papel que a IA deve incorporar durante o exercício — um paciente simulado, um colega, uma situação de escrita etc. — e os comportamentos esperados…" style={{ minHeight: 160 }} />
               </div>
               <div>
+                <label htmlFor="chatModel">Modelo do exercício (IA que interpreta o papel)</label>
+                <select id="chatModel" name="chatModel" value={form.chatModel} onChange={handleChange}>
+                  {CHAT_MODEL_OPTIONS.map((m) => (
+                    <option key={m.value} value={m.value}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
                   <label htmlFor="evaluatorPrompt" style={{ margin: 0 }}>
                     Prompt do avaliador <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em>
@@ -339,7 +359,7 @@ export default function AdminExercises() {
                 <div>
                   <label htmlFor="evaluatorModel">Modelo do avaliador</label>
                   <select id="evaluatorModel" name="evaluatorModel" value={form.evaluatorModel} onChange={handleChange}>
-                    {EXERCISE_MODEL_OPTIONS.map((m) => (
+                    {EVALUATOR_MODEL_OPTIONS.map((m) => (
                       <option key={m.value} value={m.value}>{m.label}</option>
                     ))}
                   </select>
