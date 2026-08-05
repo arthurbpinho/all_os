@@ -49,6 +49,10 @@ export default function AdminUsers({ user: currentUser }) {
   const [visitorEval, setVisitorEval] = useState(false);
   const [visitorEvalSaving, setVisitorEvalSaving] = useState(false);
   const [visitorEvalError, setVisitorEvalError] = useState('');
+  // Modelo dessa avaliação (só GLM 5.2 ou GPT-5.5, ambos em effort 'high' — o
+  // visitante roda em baixo volume, então o custo maior não pesa).
+  const [visitorEvalModel, setVisitorEvalModel] = useState('glm-5.2');
+  const [visitorEvalModelSaving, setVisitorEvalModelSaving] = useState(false);
   // Feedback dos usuários (estrelas + mensagem coletadas ao fim das sessões).
   const [feedback, setFeedback] = useState([]);
   const [feedbackLoading, setFeedbackLoading] = useState(true);
@@ -67,8 +71,11 @@ export default function AdminUsers({ user: currentUser }) {
 
   useEffect(() => {
     api.getSettings()
-      .then((s) => setVisitorEval(!!s.visitorEvaluationEnabled))
-      .catch(() => { /* mantém off se falhar */ });
+      .then((s) => {
+        setVisitorEval(!!s.visitorEvaluationEnabled);
+        if (s.visitorEvaluationModel) setVisitorEvalModel(s.visitorEvaluationModel);
+      })
+      .catch(() => { /* mantém off/default se falhar */ });
   }, []);
 
   async function toggleVisitorEval() {
@@ -83,6 +90,23 @@ export default function AdminUsers({ user: currentUser }) {
       setVisitorEvalError(err.message || 'Erro ao salvar configuração.');
     } finally {
       setVisitorEvalSaving(false);
+    }
+  }
+
+  async function changeVisitorEvalModel(e) {
+    const next = e.target.value;
+    const prev = visitorEvalModel;
+    setVisitorEvalModel(next); // otimista
+    setVisitorEvalModelSaving(true);
+    setVisitorEvalError('');
+    try {
+      const s = await api.adminUpdateSettings({ visitorEvaluationModel: next });
+      setVisitorEvalModel(s.visitorEvaluationModel || next);
+    } catch (err) {
+      setVisitorEvalModel(prev);
+      setVisitorEvalError(err.message || 'Erro ao salvar o modelo.');
+    } finally {
+      setVisitorEvalModelSaving(false);
     }
   }
 
@@ -327,9 +351,20 @@ export default function AdminUsers({ user: currentUser }) {
             </span>
           </div>
           <p style={{ margin: 0, fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-            Quando ligada, visitantes recebem avaliação da IA (gpt-5.4, da Simulação Livre) ao
-            final da sessão — para demonstrações em palestras/eventos. Desligada no dia a dia.
+            Quando ligada, visitantes recebem avaliação da IA (da Simulação Livre) ao final da
+            sessão — para demonstrações em palestras/eventos. Desligada no dia a dia.
           </p>
+          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label htmlFor="visitor-eval-model" style={{ fontSize: 13, fontWeight: 500, margin: 0 }}>Modelo:</label>
+            <select
+              id="visitor-eval-model" value={visitorEvalModel} onChange={changeVisitorEvalModel}
+              disabled={visitorEvalModelSaving} style={{ width: 'auto', fontSize: 13 }}
+            >
+              <option value="glm-5.2">GLM 5.2 (high)</option>
+              <option value="gpt-5.5">GPT-5.5 (high)</option>
+            </select>
+            {visitorEvalModelSaving && <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>Salvando…</span>}
+          </div>
           {visitorEvalError && <div className="alert error" style={{ marginTop: 8, marginBottom: 0 }}>{visitorEvalError}</div>}
         </div>
         <button

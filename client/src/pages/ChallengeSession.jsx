@@ -51,6 +51,13 @@ export default function ChallengeSession({ user }) {
   const [newTitular, setNewTitular] = useState(null);
   const [submitError, setSubmitError] = useState('');
 
+  // Visitante que venceu (virou Titular) pode digitar o próprio nome — sem
+  // foto. Incentivo pra visitante topar o Modo Desafio.
+  const [visitorNameInput, setVisitorNameInput] = useState('');
+  const [visitorNameSaving, setVisitorNameSaving] = useState(false);
+  const [visitorNameError, setVisitorNameError] = useState('');
+  const [visitorNameDone, setVisitorNameDone] = useState(false);
+
   // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
   useWakeLock(submitting);
 
@@ -231,6 +238,57 @@ export default function ChallengeSession({ user }) {
     }
   }
 
+  // Formulário "digite seu nome" — só aparece pra visitante que acabou de
+  // virar Titular (reivindicou ou venceu um desafio), uma vez por sessão.
+  function renderVisitorNamePrompt() {
+    if (user?.role !== 'visitor') return null;
+    if (visitorNameDone) {
+      return (
+        <p style={{ fontSize: 13.5, color: 'var(--marrs-deep)', fontWeight: 600, marginTop: 10 }}>
+          ✓ Salvo — agora você aparece como <strong>{newTitular?.name}</strong>.
+        </p>
+      );
+    }
+    return (
+      <div style={{ marginTop: 10, padding: '12px 14px', background: 'var(--cream-2)', borderRadius: 'var(--radius-lg)' }}>
+        <p style={{ margin: '0 0 8px', fontSize: 13.5, color: 'var(--ink-soft)' }}>
+          Quer aparecer com o seu nome em vez de "Um visitante"? (sem foto)
+        </p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            type="text" value={visitorNameInput} maxLength={40}
+            onChange={(e) => setVisitorNameInput(e.target.value)}
+            placeholder="Seu nome…" style={{ flex: '1 1 180px' }}
+            disabled={visitorNameSaving}
+          />
+          <button
+            type="button" className="btn btn-primary btn-sm"
+            onClick={submitVisitorName} disabled={!visitorNameInput.trim() || visitorNameSaving}
+          >
+            {visitorNameSaving ? 'Salvando…' : 'Salvar nome'}
+          </button>
+        </div>
+        {visitorNameError && <div className="alert error" style={{ marginTop: 8 }}>{visitorNameError}</div>}
+      </div>
+    );
+  }
+
+  async function submitVisitorName() {
+    const name = visitorNameInput.trim();
+    if (!name || visitorNameSaving) return;
+    setVisitorNameSaving(true);
+    setVisitorNameError('');
+    try {
+      const res = await api.setDesafioVisitorName(id, name);
+      setNewTitular(res.titular || null);
+      setVisitorNameDone(true);
+    } catch (err) {
+      setVisitorNameError(err.message || 'Erro ao salvar o nome.');
+    } finally {
+      setVisitorNameSaving(false);
+    }
+  }
+
   // ---------- Renderizações ----------
 
   if (stateError) {
@@ -314,6 +372,7 @@ export default function ChallengeSession({ user }) {
                 Você foi marcado como Titular de <strong>{state.character.name}</strong>. Até alguém te desafiar e
                 vencer, esse título fica seu — aparece no seu perfil como <strong>👑 {state.character.name}</strong>.
               </div>
+              {renderVisitorNamePrompt()}
               {evaluationText ? (
                 <div className="post-evaluation">
                   <h4>Avaliação do seu atendimento</h4>
@@ -332,6 +391,7 @@ export default function ChallengeSession({ user }) {
                   ? <>Você superou o Titular e <strong>assumiu a posição</strong> de <strong>{state.character.name}</strong>.</>
                   : <>O Titular <strong>permaneceu</strong> na posição de <strong>{state.character.name}</strong>.</>}
               </div>
+              {outcome === 'desafiante-assume' && renderVisitorNamePrompt()}
               {evaluationText && (
                 <div className="post-evaluation">
                   <h4>Análise comparativa da IA</h4>
