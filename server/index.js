@@ -2902,8 +2902,8 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 //    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
 //    content), o que mantém o Bloco 1 opaco por construção.
-// CHAT_MODEL (Anthropic) ficou legado — getAnthropic não é mais chamado.
-const CHAT_MODEL = process.env.ANTHROPIC_CHAT_MODEL || 'claude-sonnet-4-6';
+// getAnthropic() voltou a ser chamado: Claude Sonnet 5 é uma das opções de
+// evaluatorModel da Trilha (ver TRILHA_EXERCISE_MODELS/buildAnthropicEvalArgs).
 // Modelo dos pacientes (chat de simulação). Mini da família 5.4. O personagem
 // responde direto, SEM reasoning — effort 'none' (o gpt-5.4-mini não aceita
 // 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
@@ -2958,16 +2958,19 @@ function providerForModel(m) {
 }
 
 // Modelo do avaliador ESCOLHIDO POR EXERCÍCIO na Trilha (admin define ao salvar
-// o exercício, ver EXERCISE_FIELDS/evaluatorModel). Três opções fixas — não é o
-// laboratório livre de modelo/effort da Avaliação Independente (AVAL_MODELOS),
-// só um atalho de 3 presets pro uso do dia a dia. GLM roda em modo buffered
-// (chat.completions) com FALLBACK pro mini padrão da Trilha, igual ao par
-// Treinamento/GLM (ver isExerciseGlm em /api/evaluate).
+// o exercício, ver EXERCISE_FIELDS/evaluatorModel). Cinco opções fixas — não é
+// o laboratório livre de modelo/effort da Avaliação Independente (AVAL_MODELOS),
+// só um atalho de presets pro uso do dia a dia. GLM e Claude rodam em modo
+// buffered (sem streaming pro cliente) com FALLBACK pro mini padrão da Trilha
+// se falharem — igual ao par Treinamento/GLM (ver isExerciseAltProvider em
+// /api/evaluate).
 const TRILHA_EXERCISE_MODEL_DEFAULT = 'gpt-5.4-mini';
 const TRILHA_EXERCISE_MODELS = {
   'gpt-5.4-mini': { model: OPENAI_EXERCISE_MODEL, provider: 'openai', effort: OPENAI_EXERCISE_EFFORT },
+  'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
   'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'high' },
+  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
 
 // Modelo do PERSONAGEM/exercício em si (o lado da CONVERSA, não da nota) —
@@ -2989,6 +2992,36 @@ function getAnthropic() {
   if (!apiKey) return null;
   const Anthropic = require('@anthropic-ai/sdk').default || require('@anthropic-ai/sdk');
   return new Anthropic({ apiKey });
+}
+
+// Monta os args da Messages API da Anthropic pro avaliador da Trilha em Claude
+// Sonnet 5 (única chamada de produção que usa Anthropic — a Simulação
+// Independente tem o helper próprio dela, isolado). cache_control no system
+// (reaproveitado entre alunos do mesmo exercício) e no último turno.
+// max_tokens fica alto (igual ao teto do GLM/OpenAI no avaliador) — o
+// feedback pode ser longo.
+function buildAnthropicEvalArgs({ model, effort, systemPrompt, turns, maxTokens }) {
+  const args = {
+    model,
+    max_tokens: maxTokens,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+    messages: turns.map((t, i) => (
+      i === turns.length - 1
+        ? { role: t.role, content: [{ type: 'text', text: t.content, cache_control: { type: 'ephemeral' } }] }
+        : { role: t.role, content: t.content }
+    )),
+  };
+  if (effort === 'disabled') {
+    args.thinking = { type: 'disabled' };
+  } else {
+    args.thinking = { type: 'adaptive' };
+    args.output_config = { effort }; // 'low' | 'medium' | 'high'
+  }
+  return args;
+}
+function extractAnthropicText(resp) {
+  const blocks = (resp && resp.content) || [];
+  return blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('').trim();
 }
 
 function getOpenAI() {
@@ -3432,15 +3465,15 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const exerciseModelSpec = isExercise
     ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
     : null;
-  // GLM na Trilha roda em modo buffered (chat.completions), igual ao par
-  // Treinamento/GLM — não streama token a token. FALLBACK pro mini padrão da
-  // Trilha se o GLM falhar (rate limit/instabilidade).
-  const isExerciseGlm = isExercise && exerciseModelSpec.provider === 'glm';
+  // GLM/Claude na Trilha rodam em modo buffered (sem streaming pro cliente),
+  // igual ao par Treinamento/GLM. FALLBACK pro mini padrão da Trilha se o
+  // provedor alternativo falhar (rate limit/instabilidade/sem API key).
+  const isExerciseAltProvider = isExercise && exerciseModelSpec.provider !== 'openai';
   // Neuro roda no 5.4/low (dedicado), fora da régua EVAL/SIM.
   const isNeuroEval = !!(context && context.type === 'neuro');
   let systemPrompt = resolved.systemPrompt;
-  let evalModel = isExercise ? (isExerciseGlm ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model) : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
-  let evalEffort = isExercise ? (isExerciseGlm ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort) : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
+  let evalModel = isExercise ? (isExerciseAltProvider ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model) : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
+  let evalEffort = isExercise ? (isExerciseAltProvider ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort) : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
   let inputTurns;
   let progressionMode = false;
   let sidequestActive = false;
@@ -3577,24 +3610,35 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           usage = resp.usage || null;
         }
         if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
-      } else if (isExerciseGlm) {
-        // Exercício da Trilha com GLM 5.2 escolhido pelo admin: mesmo esquema
-        // buffered + fallback do Treinamento, mas o fallback aqui é o MINI
-        // padrão da própria Trilha (evalModel/evalEffort já apontam pra ele).
+      } else if (isExerciseAltProvider) {
+        // Exercício da Trilha com GLM 5.2 ou Claude Sonnet 5 escolhido pelo
+        // admin: mesmo esquema buffered + fallback do Treinamento, mas o
+        // fallback aqui é o MINI padrão da própria Trilha (evalModel/evalEffort
+        // já apontam pra ele).
         let full = '';
-        const gClient = getClientForProvider('glm');
+        const altProvider = exerciseModelSpec.provider;
+        const altClient = getClientForProvider(altProvider);
         try {
-          if (!gClient) throw new Error('glm indisponível');
-          const body = buildChatBody({
-            provider: 'glm', model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
-            maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
-          });
-          const resp = await gClient.chat.completions.create(body);
-          full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+          if (!altClient) throw new Error(`${altProvider} indisponível`);
+          if (altProvider === 'anthropic') {
+            const args = buildAnthropicEvalArgs({
+              model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
+              systemPrompt, turns: inputTurns, maxTokens: 64000,
+            });
+            const resp = await altClient.messages.create(args);
+            full = extractAnthropicText(resp);
+          } else {
+            const body = buildChatBody({
+              provider: altProvider, model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
+              maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
+            });
+            const resp = await altClient.chat.completions.create(body);
+            full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+          }
           if (!full.trim()) throw new Error('resposta vazia');
           console.log(`Evaluate (${exerciseModelSpec.model} · trilha)`);
-        } catch (glmErr) {
-          console.error(`[evaluate trilha] ${exerciseModelSpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
+        } catch (altErr) {
+          console.error(`[evaluate trilha] ${exerciseModelSpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, altErr.message);
           const resp = await openai.responses.create({
             model: evalModel, reasoning: { effort: evalEffort },
             max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
@@ -4350,7 +4394,9 @@ function getGLM() {
   return new OpenAI({ apiKey, baseURL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/paas/v4', maxRetries: 5 });
 }
 function getClientForProvider(provider) {
-  return provider === 'glm' ? getGLM() : getOpenAI();
+  if (provider === 'glm') return getGLM();
+  if (provider === 'anthropic') return getAnthropic();
+  return getOpenAI();
 }
 
 // Roda o avaliador escolhido SÍNCRONO e devolve o resultado unificado.
