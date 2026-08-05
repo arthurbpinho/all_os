@@ -267,6 +267,18 @@ export default function ProcessoSeletivo() {
     }
   }
 
+  // Integridade da avaliação: candidatos estavam copiando a fala do paciente,
+  // colando em outra IA e colando a resposta pronta de volta aqui. Bloqueia
+  // copiar (da conversa) e colar (na resposta) — não impede reler/selecionar
+  // pra digitar, só o fluxo de clipboard.
+  function blockCopy(e) {
+    e.preventDefault();
+  }
+  function blockPaste(e) {
+    e.preventDefault();
+    setChatError('Colar texto não é permitido nesta avaliação — escreva sua resposta diretamente.');
+  }
+
   // Passar sessão (time skip). O paciente "volta na semana seguinte". Insere um
   // marcador visual e manda a mensagem oculta de virada de semana ao paciente.
   function handleSkip() {
@@ -540,7 +552,7 @@ export default function ProcessoSeletivo() {
           </div>
         )}
 
-        <div className="chat-messages">
+        <div className="chat-messages" onCopy={blockCopy}>
           {messages.filter((m) => !m.hidden).length === 0 && (
             <div className="empty-chat" style={{ marginTop: 80 }}>
               O paciente vai abrir a conversa. Atenda-o da melhor maneira possível.
@@ -611,6 +623,7 @@ export default function ProcessoSeletivo() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={blockPaste}
             placeholder={timeUp ? 'Tempo esgotado — enviando…' : 'Sua intervenção…  ·  Enter envia · Shift+Enter quebra linha'}
             rows={1}
             disabled={typing || finishing || timeUp}
