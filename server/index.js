@@ -2450,6 +2450,9 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     // Esquema visual (opcional, Trilha): revalida o SVG aqui também (não confia
     // no que o cliente manda) — só persiste um bloco <svg> sanitizado ou null.
     imageSchema: clampStr(extractAndSanitizeSvg(body.imageSchema), LOG_MAX_IMAGE_SCHEMA_LEN) || null,
+    // Custo da Trilha (admin, "Logs da Trilha"): chat/avaliador/esquema visual,
+    // com o MODELO sempre resolvido do exercício (nunca do cliente).
+    cost: buildTrilhaCost(body),
     messages: cleanMessages,
     neuroTests,
     userId: req.user.id,
@@ -3072,6 +3075,115 @@ function extractAndSanitizeSvg(text) {
     .replace(/(xlink:href|href)\s*=\s*'\s*javascript:[^']*'/gi, '');
 }
 
+// ── Custo dos Logs da Trilha (admin) ────────────────────────────────────────
+// Normaliza o `usage` cru de qualquer chamada de IA da Trilha (chat/avaliador/
+// esquema visual, nos 3 provedores) num shape único: {input, cacheRead,
+// cacheWrite, output}. Necessário porque cada provedor/API devolve um formato
+// diferente — OpenAI ainda tem DOIS formatos (Responses API pro avaliador/
+// esquema visual; chat.completions pro chat do personagem via openaiComplete).
+// Espelha normalizeSimUsage (simulacao-independente.js), mas isolado —
+// production não importa os módulos dos laboratórios de pricing.
+function normalizeUsage(provider, usage) {
+  const zero = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+  if (!usage) return zero;
+  if (provider === 'anthropic') {
+    return {
+      input: Math.max(0, usage.input_tokens || 0),
+      cacheRead: usage.cache_read_input_tokens || 0,
+      cacheWrite: usage.cache_creation_input_tokens || 0,
+      output: usage.output_tokens || 0,
+    };
+  }
+  if (provider === 'glm') {
+    const promptTotal = usage.prompt_tokens || 0;
+    const cacheRead = (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0;
+    const completion = usage.completion_tokens || 0;
+    const total = usage.total_tokens || 0;
+    // GOTCHA GLM: completion_tokens sub-reporta o thinking; usa total-prompt
+    // como piso da saída.
+    const output = Math.max(completion, total > promptTotal ? total - promptTotal : 0);
+    return { input: Math.max(0, promptTotal - cacheRead), cacheRead, cacheWrite: 0, output };
+  }
+  // OpenAI — Responses API (avaliador/esquema visual): input_tokens/output_tokens.
+  if (usage.input_tokens != null || usage.output_tokens != null) {
+    const cacheRead = (usage.input_tokens_details && usage.input_tokens_details.cached_tokens) || 0;
+    return { input: Math.max(0, (usage.input_tokens || 0) - cacheRead), cacheRead, cacheWrite: 0, output: usage.output_tokens || 0 };
+  }
+  // OpenAI — chat.completions (chat do personagem via openaiComplete).
+  const cacheRead = (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0;
+  return { input: Math.max(0, (usage.prompt_tokens || 0) - cacheRead), cacheRead, cacheWrite: 0, output: usage.completion_tokens || 0 };
+}
+
+// Preços em USD por 1 MILHÃO de tokens. Chaves = alias curto (sem data de
+// pin) — resolveTrilhaPrices casa pelo PREFIXO mais longo do model id real,
+// então sobrevive a troca de pin (ex.: 'gpt-5.4-mini-2026-03-17' → chave
+// 'gpt-5.4-mini'). Mesmos números de V25_PRICES/SIM_PRICES (docs dos
+// provedores, jul/2026) — sem importar esses módulos (isolados dos labs).
+const TRILHA_COST_PRICES = {
+  'gpt-5.4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, output: 4.5 },
+  'gpt-5.4': { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15 },
+  'gpt-5.5': { input: 5, cacheRead: 0.5, cacheWrite: 5, output: 30 },
+  'glm-5.2': { input: 1.4, cacheRead: 0.26, cacheWrite: 1.4, output: 4.4 },
+  'claude-sonnet-5': { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
+};
+function resolveTrilhaPrices(model) {
+  const s = String(model || '');
+  let best = null;
+  for (const key of Object.keys(TRILHA_COST_PRICES)) {
+    if (s.startsWith(key) && (!best || key.length > best.length)) best = key;
+  }
+  return best ? TRILHA_COST_PRICES[best] : null;
+}
+// Custo em USD de um usage já normalizado. null = modelo fora da tabela (a UI
+// mostra tokens, nunca um dólar errado).
+function computeTrilhaCost(model, usage) {
+  const p = resolveTrilhaPrices(model);
+  if (!p || !usage) return null;
+  return (usage.input * p.input + usage.cacheRead * p.cacheRead + usage.cacheWrite * p.cacheWrite + usage.output * p.output) / 1e6;
+}
+
+// Sanitiza o usage que o cliente manda ao salvar o log (acumulado do lado
+// dele, turno a turno) — não é fronteira de segurança (só afeta o dashboard
+// de custo do admin), mas garante números finitos e não-negativos.
+function sanitizeUsageInput(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const num = (v) => (Number.isFinite(v) && v >= 0 ? v : 0);
+  return { input: num(raw.input), cacheRead: num(raw.cacheRead), cacheWrite: num(raw.cacheWrite), output: num(raw.output) };
+}
+
+// Monta o breakdown de custo de um log de exercício da Trilha: chat
+// (personagem, sempre) + avaliador (só se o exercício tiver evaluatorPrompt) +
+// esquema visual (só se imageSchemaEnabled). Os MODELOS vêm sempre do
+// EXERCÍCIO (server-side, nunca do cliente) — só o usage (tokens) é
+// client-supplied, o resto (preço, qual modelo rodou) é recalculado aqui.
+function buildTrilhaCost(body) {
+  if (body.type !== 'exercise' || !body.itemId) return null;
+  const ex = readJSON('exercises.json').find((e) => String(e.id) === String(body.itemId));
+  if (!ex) return null;
+
+  const parts = {};
+  let totalUsd = 0;
+  let anyPriced = false;
+  const addPart = (key, spec, rawUsage) => {
+    const usage = sanitizeUsageInput(rawUsage);
+    if (!usage) return;
+    const usd = computeTrilhaCost(spec.model, usage);
+    parts[key] = { model: spec.model, usage, usd };
+    if (usd != null) { totalUsd += usd; anyPriced = true; }
+  };
+
+  addPart('chat', TRILHA_CHAT_MODELS[ex.chatModel] || TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT], body.chatUsage);
+  if (ex.evaluatorPrompt && String(ex.evaluatorPrompt).trim()) {
+    addPart('evaluator', TRILHA_EXERCISE_MODELS[ex.evaluatorModel] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT], body.evaluatorUsage);
+  }
+  if (ex.imageSchemaEnabled) {
+    addPart('imageSchema', TRILHA_IMAGE_MODELS[ex.imageSchemaModel] || TRILHA_IMAGE_MODELS[TRILHA_IMAGE_MODEL_DEFAULT], body.imageSchemaUsage);
+  }
+
+  if (!Object.keys(parts).length) return null;
+  return { ...parts, totalUsd: anyPriced ? totalUsd : null };
+}
+
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
@@ -3279,6 +3391,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       try {
         if (!altClient) throw new Error(`${altProvider} indisponível`);
         let text;
+        let rawUsage;
         if (altProvider === 'anthropic') {
           const args = buildAnthropicArgs({
             model: chatModelSpec.model, effort: chatModelSpec.effort,
@@ -3287,6 +3400,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
           });
           const resp = await altClient.messages.create(args);
           text = extractAnthropicText(resp);
+          rawUsage = resp.usage || null;
         } else {
           const body = buildChatBody({
             provider: altProvider, model: chatModelSpec.model, effort: chatModelSpec.effort,
@@ -3294,9 +3408,12 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
           });
           const resp = await altClient.chat.completions.create(body);
           text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+          rawUsage = resp.usage || null;
         }
         if (!text.trim()) throw new Error('resposta vazia');
-        return res.json({ role: 'assistant', content: text });
+        // Custo dos Logs da Trilha: usage normalizado por provedor (ver
+        // normalizeUsage) — o cliente só acumula e repassa, nunca calcula preço.
+        return res.json({ role: 'assistant', content: text, usage: normalizeUsage(altProvider, rawUsage) });
       } catch (altErr) {
         console.error(`[chat trilha] ${chatModelSpec.model} falhou → fallback ${PATIENT_MODEL}:`, altErr.message);
         const { text, usage } = await openaiComplete({
@@ -3304,7 +3421,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
           systemPrompt: resolved.systemPrompt, messages, maxCompletionTokens: tokenCap + 2000,
         });
         logOpenAIUsage('Chat paciente (fallback)', PATIENT_MODEL, usage);
-        return res.json({ role: 'assistant', content: text });
+        return res.json({ role: 'assistant', content: text, usage: normalizeUsage('openai', usage) });
       }
     }
 
@@ -3318,7 +3435,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       maxCompletionTokens: tokenCap + 2000,
     });
     logOpenAIUsage('Chat paciente', chatModelSpec.model, usage);
-    res.json({ role: 'assistant', content: text });
+    res.json({ role: 'assistant', content: text, usage: normalizeUsage('openai', usage) });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'chat/paciente',
       { extra: { modelo: chatModelSpec.model } }));
@@ -3642,6 +3759,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     }, 15000);
 
     let usage = null;
+    let usageProvider = 'openai'; // provedor do usage capturado — pra normalizar certo
+    let usageModel = evalModel; // modelo que efetivamente rodou (pode virar o fallback)
     try {
       if (isFreeSim) {
         // TREINAMENTO → GLM 5.2 (buffered: a UI já mostra a tela "avaliando", não
@@ -3660,6 +3779,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           const resp = await tClient.chat.completions.create(body);
           full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
           if (!full.trim()) throw new Error('resposta vazia');
+          usage = resp.usage || null;
+          usageProvider = tProvider;
+          usageModel = TRAINING_EVAL_MODEL;
           console.log(`Evaluate (${TRAINING_EVAL_MODEL} · treino${progressionMode ? '+progressão' : ''})`);
         } catch (glmErr) {
           console.error(`[evaluate treino] ${TRAINING_EVAL_MODEL} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
@@ -3669,6 +3791,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           });
           full = resp.output_text || '';
           usage = resp.usage || null;
+          usageProvider = 'openai';
+          usageModel = evalModel;
         }
         if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
       } else if (isExerciseAltProvider) {
@@ -3688,6 +3812,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
             });
             const resp = await altClient.messages.create(args);
             full = extractAnthropicText(resp);
+            usage = resp.usage || null;
           } else {
             const body = buildChatBody({
               provider: altProvider, model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
@@ -3695,8 +3820,11 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
             });
             const resp = await altClient.chat.completions.create(body);
             full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+            usage = resp.usage || null;
           }
           if (!full.trim()) throw new Error('resposta vazia');
+          usageProvider = altProvider;
+          usageModel = exerciseModelSpec.model;
           console.log(`Evaluate (${exerciseModelSpec.model} · trilha)`);
         } catch (altErr) {
           console.error(`[evaluate trilha] ${exerciseModelSpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, altErr.message);
@@ -3706,6 +3834,8 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           });
           full = resp.output_text || '';
           usage = resp.usage || null;
+          usageProvider = 'openai';
+          usageModel = evalModel;
         }
         if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
       } else {
@@ -3728,15 +3858,22 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
             usage = ev.response?.usage || null;
           }
         }
+        usageProvider = 'openai';
+        usageModel = evalModel;
       }
     } finally {
       clearInterval(heartbeat);
     }
+    let normalizedUsage = null;
     if (usage) {
+      normalizedUsage = normalizeUsage(usageProvider, usage);
       console.log(
-        `Evaluate (${evalModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : (isFreeSim ? ' · treino' : ''))}): cached=${usage.input_tokens_details?.cached_tokens || 0} reasoning=${usage.output_tokens_details?.reasoning_tokens || 0} in=${usage.input_tokens || 0} out=${usage.output_tokens || 0}`,
+        `Evaluate (${usageModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : (isFreeSim ? ' · treino' : ''))}): cached=${normalizedUsage.cacheRead} in=${normalizedUsage.input} out=${normalizedUsage.output}`,
       );
     }
+    // Custo dos Logs da Trilha: só relevante quando isExercise (o cliente
+    // acumula e repassa ao salvar o log; fora da Trilha o campo é ignorado).
+    if (normalizedUsage) res.write(`data: ${JSON.stringify({ usage: normalizedUsage })}\n\n`);
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
   } catch (err) {
@@ -3807,21 +3944,26 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, async (req, res) =>
 
   try {
     let raw = '';
+    let rawUsage = null;
     if (spec.provider === 'anthropic') {
       const args = buildAnthropicArgs({ model: spec.model, effort: spec.effort, systemPrompt, turns, maxTokens: 8000 });
       const resp = await client.messages.create(args);
       raw = extractAnthropicText(resp);
+      rawUsage = resp.usage || null;
     } else {
       const resp = await client.responses.create({
         model: spec.model, reasoning: { effort: spec.effort },
         max_output_tokens: 16000, instructions: systemPrompt, input: turns,
       });
       raw = resp.output_text || '';
+      rawUsage = resp.usage || null;
     }
     const svg = extractAndSanitizeSvg(raw);
     if (!svg) throw new Error('esquema visual sem SVG válido na resposta');
-    console.log(`Image schema (${spec.model} · trilha): ok`);
-    res.write(`data: ${JSON.stringify({ svg })}\n\n`);
+    // Custo dos Logs da Trilha: usage normalizado — o cliente só acumula/repassa.
+    const usage = normalizeUsage(spec.provider, rawUsage);
+    console.log(`Image schema (${spec.model} · trilha): cached=${usage.cacheRead} in=${usage.input} out=${usage.output}`);
+    res.write(`data: ${JSON.stringify({ svg, usage })}\n\n`);
   } catch (err) {
     const corpo = falhou(req, err, 'trilha/esquema-visual', { extra: { modelo: spec.model } });
     try { res.write(`data: ${JSON.stringify(corpo)}\n\n`); } catch {}

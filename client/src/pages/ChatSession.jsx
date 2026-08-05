@@ -69,6 +69,10 @@ export default function ChatSession({ user }) {
   const finishedRef = useRef(false);
   const sessionDataRef = useRef(null);
   const fileInputRef = useRef(null);
+  // Custo dos Logs da Trilha (admin): acumula o usage de CADA turno do chat
+  // com o personagem (soma ao longo de toda a sessão) — o servidor devolve o
+  // usage já normalizado por provedor em cada resposta (ver /api/chat).
+  const chatUsageRef = useRef({ input: 0, cacheRead: 0, cacheWrite: 0, output: 0 });
 
   // Limite de 30 dias para saves de sessão (alinhado à expiração de logs).
   const SAVE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -174,9 +178,20 @@ export default function ChatSession({ user }) {
     return `${m}:${s}`;
   }
 
+  function accumulateUsage(ref, usage) {
+    if (!usage) return;
+    ref.current = {
+      input: ref.current.input + (usage.input || 0),
+      cacheRead: ref.current.cacheRead + (usage.cacheRead || 0),
+      cacheWrite: ref.current.cacheWrite + (usage.cacheWrite || 0),
+      output: ref.current.output + (usage.output || 0),
+    };
+  }
+
   async function sendToAI(allMessages) {
     const apiMessages = allMessages.map((m) => ({ role: m.role, content: m.content }));
     const data = await api.chat(apiMessages, { type: 'exercise', itemId: id });
+    accumulateUsage(chatUsageRef, data && data.usage);
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 
@@ -287,6 +302,9 @@ export default function ChatSession({ user }) {
         score: null,
         criteriaScores: null,
         evaluation: '',
+        // Custo dos Logs da Trilha: o personagem sempre custa, mesmo sem
+        // avaliador/esquema visual habilitados.
+        chatUsage: chatUsageRef.current,
       });
     } catch (err) {
       setError('Erro ao salvar log: ' + err.message);
@@ -330,7 +348,9 @@ export default function ChatSession({ user }) {
 
     let evalContent = '';
     let totalScore = null;
+    let evaluatorUsage = null;
     let svg = null;
+    let imageSchemaUsage = null;
     const tasks = [];
 
     if (needsEval) {
@@ -344,6 +364,7 @@ export default function ChatSession({ user }) {
         try {
           const reply = await api.evaluate(evalMessages, { type: 'exercise', itemId: id });
           evalContent = typeof reply === 'string' ? reply : reply.content || '';
+          evaluatorUsage = (reply && reply.usage) || null;
 
           // Nota da Trilha = PORCENTAGEM de domínio (0–100). O avaliador
           // customizado do exercício emite [NOTA:X] com X de 0 a 100. Aceita
@@ -370,7 +391,9 @@ export default function ChatSession({ user }) {
       const imageMessages = visibleMessages.map((m) => ({ role: m.role, content: m.content }));
       tasks.push((async () => {
         try {
-          svg = await api.generateImageSchema(id, imageMessages);
+          const result = await api.generateImageSchema(id, imageMessages);
+          svg = result.svg;
+          imageSchemaUsage = result.usage || null;
           setImageSchema(svg);
         } catch (err) {
           setImageSchemaError(err.message || 'Erro ao gerar o esquema visual.');
@@ -397,6 +420,11 @@ export default function ChatSession({ user }) {
         criteriaScores: null,
         evaluation: evalContent,
         imageSchema: svg || '',
+        // Custo dos Logs da Trilha (admin): usage acumulado/normalizado; o
+        // servidor resolve os MODELOS a partir do exercício e calcula o preço.
+        chatUsage: chatUsageRef.current,
+        evaluatorUsage,
+        imageSchemaUsage,
       });
     } catch (err) {
       setError('Erro ao salvar log: ' + err.message);
@@ -511,6 +539,7 @@ export default function ChatSession({ user }) {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     if (timerRef.current) clearInterval(timerRef.current);
     sessionDataRef.current = null;
+    chatUsageRef.current = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
     clearActiveSession(user.id, 'exercise', id);
     setMessages([]);
     setInput('');
