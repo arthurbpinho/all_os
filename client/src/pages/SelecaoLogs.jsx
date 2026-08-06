@@ -72,6 +72,43 @@ function buildSummaryCsv(list) {
   return '\uFEFF' + [header.map(csvField).join(','), ...rows].join('\r\n');
 }
 
+// Rótulos dos 6 critérios do avaliador (avaliacao/avaliador-processo-seletivo-v1.md,
+// bloco [notas-supervisor], chaves "1".."6") — pra virar coluna própria no CSV
+// completo em vez do JSON crú de criteriaScores.
+const CRITERIA_LABELS = {
+  1: 'Construção linguística',
+  2: 'Relação terapêutica',
+  3: 'Confiança transmitida',
+  4: 'Priorização',
+  5: 'Aprofundamento',
+  6: 'Flexibilidade e criatividade',
+};
+
+// CSV completo pra análise de dados externa: uma linha por candidato/avaliação,
+// com todos os campos estruturados (sem a transcrição, que é texto livre e não
+// tabular — essa segue disponível por log individual via LogActions).
+function buildFullCsv(list) {
+  const header = [
+    'Nome completo', 'E-mail', 'WhatsApp', 'Faculdade', 'Período',
+    'Paciente (caso)', 'Sessões', 'Duração (s)',
+    'Status', 'Nota final (0-100)',
+    ...Object.values(CRITERIA_LABELS).map((l) => `Critério: ${l}`),
+    'Avaliação (texto)', 'Data/hora (ISO)', 'Expira em (ISO)',
+  ];
+  const rows = list.map((l) => {
+    const c = l.candidate || {};
+    const crit = l.criteriaScores || {};
+    return [
+      c.nome || '', c.email || '', c.whatsapp || '', c.faculdade || '', c.periodo || '',
+      l.characterName || '', l.sessionCount || 1, Math.round(Number(l.durationSeconds) || 0),
+      STATUS_LABEL[l.status] || l.status || '', l.score == null ? '' : l.score,
+      ...Object.keys(CRITERIA_LABELS).map((k) => (crit[k] == null ? '' : crit[k])),
+      l.evaluation || '', l.timestamp || '', l.expiresAt || '',
+    ].map(csvField).join(',');
+  });
+  return '\uFEFF' + [header.map(csvField).join(','), ...rows].join('\r\n');
+}
+
 function fmtDate(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return '';
@@ -166,6 +203,12 @@ export default function SelecaoLogs() {
     downloadText(`sumario-processo-seletivo-${date}.csv`, csv, 'text/csv;charset=utf-8');
   }
 
+  function downloadFull() {
+    const csv = buildFullCsv(visibleLogs);
+    const date = new Date().toISOString().slice(0, 10);
+    downloadText(`processo-seletivo-completo-${date}.csv`, csv, 'text/csv;charset=utf-8');
+  }
+
   return (
     <div>
       <div className="page-header with-action">
@@ -218,6 +261,14 @@ export default function SelecaoLogs() {
               title="Nome completo + paciente atendido + nota final, em .csv (abre no Excel/Sheets e é fácil de processar)"
             >
               Baixar sumário (.csv)
+            </button>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={downloadFull}
+              disabled={visibleLogs.length === 0}
+              title="Todos os dados estruturados (candidato, caso, duração, status, nota, cada critério da avaliação e o texto da avaliação) em .csv, uma linha por avaliação — pronto pra importar numa ferramenta de análise de dados. Não inclui a transcrição da sessão."
+            >
+              Exportar tudo (.csv)
             </button>
           </div>
         </div>
