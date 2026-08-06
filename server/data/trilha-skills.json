@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "name": "Hermenêutica",
+    "color": "#008f8f",
+    "order": 1
+  },
+  {
+    "id": 5,
+    "name": "Personalidade",
+    "color": "#A07845",
+    "order": 2
+  },
+  {
+    "id": 2,
+    "name": "Estrutura",
+    "color": "#B85A40",
+    "order": 3
+  },
+  {
+    "id": 4,
+    "name": "Especificidade do caso",
+    "color": "#5C8A82",
+    "order": 4
+  },
+  {
+    "id": 3,
+    "name": "Empatia",
+    "color": "#1A7A6D",
+    "order": 5
+  }
+]
