@@ -57,6 +57,47 @@ describe('Processo Seletivo', () => {
     expect(ok.body.ok).toBe(true);
   });
 
+  it('senha-config: avaliador troca a senha; senha antiga para de funcionar, nova passa a valer', async () => {
+    const create = await request(app)
+      .post('/api/admin/users')
+      .set(authHeader(await loginAs('admin')))
+      .send({ username: 'aval2', name: 'Avaliador Dois', role: 'evaluator', password: 'avalpass123' });
+    expect(create.status).toBe(200);
+    const avalToken = await loginAs('aval2', 'avalpass123');
+
+    const before = await request(app).get('/api/selecao/senha-config').set(authHeader(avalToken));
+    expect(before.status).toBe(200);
+    expect(before.body.password).toBe(SENHA);
+    expect(before.body.updatedBy).toBeFalsy();
+
+    const curta = await request(app).put('/api/selecao/senha-config').set(authHeader(avalToken)).send({ password: 'ab' });
+    expect(curta.status).toBe(400);
+
+    const troca = await request(app).put('/api/selecao/senha-config').set(authHeader(avalToken)).send({ password: 'novaSenha22' });
+    expect(troca.status).toBe(200);
+    expect(troca.body.password).toBe('novaSenha22');
+    expect(troca.body.updatedBy).toBe('Avaliador Dois');
+
+    // Senha antiga não abre mais o formulário do candidato; a nova sim.
+    const antiga = await request(app).post('/api/selecao/senha').send({ password: SENHA });
+    expect(antiga.status).toBe(401);
+    const nova = await request(app).post('/api/selecao/senha').send({ password: 'novaSenha22' });
+    expect(nova.status).toBe(200);
+
+    // A troca persiste e aparece pra quem consultar depois (auditoria simples).
+    const after = await request(app).get('/api/selecao/senha-config').set(authHeader(avalToken));
+    expect(after.body.updatedBy).toBe('Avaliador Dois');
+    expect(typeof after.body.updatedAt).toBe('string');
+  });
+
+  it('senha-config: aluno não acessa (só evaluator/admin)', async () => {
+    const alunoToken = await loginAs('aluno');
+    const get = await request(app).get('/api/selecao/senha-config').set(authHeader(alunoToken));
+    expect(get.status).toBe(403);
+    const put = await request(app).put('/api/selecao/senha-config').set(authHeader(alunoToken)).send({ password: 'novaSenha22' });
+    expect(put.status).toBe(403);
+  });
+
   it('iniciar: valida campos/termo e devolve token + personagem SEM prompt secreto', async () => {
     const semCampos = await request(app).post('/api/selecao/iniciar').send({ password: SENHA, consent: true });
     expect(semCampos.status).toBe(400);

@@ -142,6 +142,8 @@ export const api = {
   // Processo Seletivo — avaliador/admin (auth global normal)
   selecaoLogs: () => request('/selecao/logs'),
   selecaoDashboard: (range) => request(`/selecao/dashboard?range=${encodeURIComponent(range || 'month')}`),
+  selecaoSenhaConfig: () => request('/selecao/senha-config'),
+  selecaoTrocarSenha: (password) => request('/selecao/senha-config', { method: 'PUT', body: { password } }),
 
   // Exercises
   getExercises: () => request('/exercises'),
