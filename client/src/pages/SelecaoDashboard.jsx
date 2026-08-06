@@ -61,6 +61,8 @@ export default function SelecaoDashboard() {
         </button>
       </div>
 
+      <SenhaAcesso />
+
       <div className="selecao-range">
         {RANGES.map((r) => (
           <button
@@ -108,6 +110,70 @@ export default function SelecaoDashboard() {
           {tri && <TriPanel tri={tri} />}
         </>
       )}
+    </div>
+  );
+}
+
+function fmtWhen(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// Senha de acesso do candidato (destrava o formulário público, não protege
+// dado sensível — por isso é mostrada em texto puro). Qualquer avaliador/admin
+// pode ler e trocar; fica salva no servidor (settings.json), então continua
+// valendo mesmo depois de um redeploy.
+function SenhaAcesso() {
+  const [info, setInfo] = useState(null);
+  const [novaSenha, setNovaSenha] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    api.selecaoSenhaConfig().then(setInfo).catch((err) => setError(err.message || 'Erro ao carregar a senha.'));
+  }, []);
+
+  function salvar() {
+    const pw = novaSenha.trim();
+    if (pw.length < 4) { setError('A senha precisa ter pelo menos 4 caracteres.'); return; }
+    setSaving(true);
+    setError('');
+    api.selecaoTrocarSenha(pw)
+      .then((res) => {
+        setInfo(res);
+        setNovaSenha('');
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1800);
+      })
+      .catch((err) => setError(err.message || 'Erro ao trocar a senha.'))
+      .finally(() => setSaving(false));
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 16, marginBottom: 16 }}>
+      <strong>Senha de acesso do candidato</strong>
+      <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
+        Senha atual: <code>{info ? info.password : '…'}</code>
+        {info?.updatedBy && (
+          <> · trocada por {info.updatedBy}{info.updatedAt ? ` em ${fmtWhen(info.updatedAt)}` : ''}</>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <input
+          type="text"
+          placeholder="Nova senha"
+          value={novaSenha}
+          onChange={(e) => setNovaSenha(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') salvar(); }}
+          style={{ maxWidth: 220 }}
+        />
+        <button className="btn btn-outline btn-sm" onClick={salvar} disabled={saving || !novaSenha.trim()}>
+          {saved ? '✓ Senha trocada' : saving ? 'Salvando…' : 'Trocar senha'}
+        </button>
+      </div>
+      {error && <div className="alert error" style={{ marginTop: 8 }}>{error}</div>}
     </div>
   );
 }

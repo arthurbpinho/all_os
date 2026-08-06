@@ -4230,13 +4230,20 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, async (req, res) =>
 // Senha do processo seletivo. É deliberadamente fácil — vai por WhatsApp pro
 // candidato e só destrava um formulário público; não protege dado sensível.
 // O que a protege de força bruta é o selecaoLimiter (agora chaveado por IP real).
-const SELECAO_PASSWORD = process.env.SELECAO_PASSWORD || 'allos01';
+// Default vem da env var (compat com quem nunca trocou); qualquer avaliador/admin
+// pode trocar em runtime pela tela (fica salva em settings.json, sobrevive a
+// redeploy — env var nunca é regravada em disco).
+const SELECAO_PASSWORD_DEFAULT = process.env.SELECAO_PASSWORD || 'allos01';
+function selecaoPasswordAtual() {
+  const s = readSettings();
+  return typeof s.selecaoPassword === 'string' && s.selecaoPassword ? s.selecaoPassword : SELECAO_PASSWORD_DEFAULT;
+}
 
 // Comparação em tempo constante: com `!==`, o tempo de resposta vaza quantos
 // caracteres iniciais bateram. Não é o vetor mais provável aqui, mas custa 4 linhas.
 function senhaSelecaoConfere(entrada) {
   const a = Buffer.from(String(entrada == null ? '' : entrada), 'utf8');
-  const b = Buffer.from(SELECAO_PASSWORD, 'utf8');
+  const b = Buffer.from(selecaoPasswordAtual(), 'utf8');
   // timingSafeEqual exige buffers do mesmo tamanho; compara contra si mesmo
   // pra não responder mais rápido só porque o comprimento difere.
   if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
@@ -4964,6 +4971,30 @@ app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
 
   // Dispara o batch já (submete este log). O collect roda no boot + intervalo.
   sweepSelectionBatches().catch(() => {});
+});
+
+// 4b) Senha de acesso — avaliador/admin vê a senha atual + quem trocou por
+// último, e pode trocá-la (fica salva em settings.json, sem precisar reiniciar
+// o servidor). Rota própria (não é a /senha pública do candidato).
+app.get('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+  const s = readSettings();
+  res.json({
+    password: selecaoPasswordAtual(),
+    updatedBy: s.selecaoPasswordUpdatedBy || null,
+    updatedAt: s.selecaoPasswordUpdatedAt || null,
+  });
+});
+app.put('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+  const novaSenha = clampStr((req.body && req.body.password) || '', 60).trim();
+  if (novaSenha.length < 4) {
+    return res.status(400).json({ error: 'A senha precisa ter pelo menos 4 caracteres.' });
+  }
+  const cur = readSettings();
+  cur.selecaoPassword = novaSenha;
+  cur.selecaoPasswordUpdatedBy = req.user.name || req.user.username || 'Avaliador';
+  cur.selecaoPasswordUpdatedAt = new Date().toISOString();
+  writeJSON('settings.json', cur);
+  res.json({ ok: true, password: novaSenha, updatedBy: cur.selecaoPasswordUpdatedBy, updatedAt: cur.selecaoPasswordUpdatedAt });
 });
 
 // 5) Logs de avaliações — avaliador/admin. Poda os expirados (15d) e lista todos.
