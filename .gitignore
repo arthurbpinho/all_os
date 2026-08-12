@@ -26,9 +26,21 @@ server/data/error-logs.json
 server/data/tmp_audio.webm
 server/data/tmp_audio_*.webm
 
-# Backups locais
-entrevistador/promptentrevistadoroldbackup.md
-
 # Fotos de paciente enviadas em runtime (ficam no volume DATA_DIR, não no repo)
 server/data/patient-photos/
 server/data/avaliacao-v25.json
+
+# Prompts do avaliador/entrevistador — dados sensíveis (critérios de nota,
+# gabaritos). Fora do git; vivem só no volume persistente (server/paths.js
+# PROMPTS_DIR), semeados uma vez a partir destas pastas e atualizados depois
+# via /api/admin/prompts (não por git push).
+avaliacao/
+entrevistador/
+
+# JSONs de dados com conteúdo clínico/pedagógico sensível (gabarito de
+# neuropsicológica, evaluatorPrompt por exercício, prompts dos pacientes
+# simulados). Produção já lê exclusivamente do volume (DATA_DIR) para estes
+# arquivos — ver server/index.js (seed só copia se o arquivo não existir lá).
+server/data/exercises.json
+server/data/freeplay-characters.json
+server/data/neuro-characters.json

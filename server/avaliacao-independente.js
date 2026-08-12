@@ -21,8 +21,9 @@ const fs = require('fs');
 const path = require('path');
 const { finalScoreFromCriteria } = require('./scoring');
 const { resolvePrices, buildChatBody } = require('./avaliacao-v25');
+const { PROMPTS_DIR } = require('./paths');
 
-const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
+const AVALIACAO_DIR = path.join(PROMPTS_DIR, 'avaliacao');
 // TETO de tokens (reasoning oculto + saída visível) — só paga o gerado. Folga
 // generosa pro v16-2, cuja prosa é longa; se curto, o modelo devolve vazio.
 const SINGLE_MAX_TOKENS = Number(process.env.AVALIACAO_SINGLE_MAX_TOKENS || 64000);

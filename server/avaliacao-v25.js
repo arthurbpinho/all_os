@@ -25,8 +25,9 @@
 
 const fs = require('fs');
 const path = require('path');
+const { PROMPTS_DIR } = require('./paths');
 
-const DIR = path.join(__dirname, '..', 'avaliacao', 'nova avaliacao');
+const DIR = path.join(PROMPTS_DIR, 'avaliacao', 'nova avaliacao');
 
 // Modelo dos nós e do sintetizador (GPT-5.x). Var própria do v25 — independente
 // do OPENAI_EVAL_MODEL dos outros modos, que continuam intocados.
