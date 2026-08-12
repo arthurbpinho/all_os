@@ -16,6 +16,7 @@ const {
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
+const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
 const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
 const simIndependente = require('./simulacao-independente');
@@ -167,10 +168,7 @@ if (fs.existsSync(PROFILES_DIR)) {
 
 // DATA_DIR pode ser sobrescrito via env (Railway: aponta para volume persistente).
 // Se não existir, copia o conteúdo seed embutido no repositório (server/data) na primeira execução.
-const SEED_DATA_DIR = path.join(__dirname, 'data');
-const DATA_DIR = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : SEED_DATA_DIR;
+// (DATA_DIR/SEED_DATA_DIR vêm de ./paths, compartilhado com avaliacao-independente.js e avaliacao-v25.js.)
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
   for (const f of fs.readdirSync(SEED_DATA_DIR)) {
@@ -180,6 +178,20 @@ if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
     if (!fs.statSync(src).isFile()) continue;
     const dst = path.join(DATA_DIR, f);
     if (!fs.existsSync(dst)) fs.copyFileSync(src, dst);
+  }
+}
+
+// PROMPTS_DIR guarda os .md do avaliador/entrevistador — dados sensíveis
+// (critérios de nota, gabaritos), por isso NÃO ficam versionados no git.
+// Semeia UMA VEZ a partir da cópia local em avaliacao/ e entrevistador/ (que
+// continuam existindo em disco, só não versionadas); depois disso o volume
+// persistente é a fonte e sobrevive a redeploys mesmo sem os arquivos no git.
+// Atualizações subsequentes vão pelas rotas /api/admin/prompts, não por git push.
+if (!fs.existsSync(PROMPTS_DIR)) {
+  fs.mkdirSync(PROMPTS_DIR, { recursive: true });
+  for (const name of ['avaliacao', 'entrevistador']) {
+    const src = path.join(__dirname, '..', name);
+    if (fs.existsSync(src)) fs.cpSync(src, path.join(PROMPTS_DIR, name), { recursive: true });
   }
 }
 
@@ -1733,7 +1745,7 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
 // --- Entrevistador (prompt para construção de personagem) ---
 // Admin-only: o prompt do entrevistador é IP da Allos. Antes era acessível
 // por qualquer usuário autenticado (incluindo visitante).
-const ENTREVISTADOR_DIR = path.join(__dirname, '..', 'entrevistador');
+const ENTREVISTADOR_DIR = path.join(PROMPTS_DIR, 'entrevistador');
 
 function loadEntrevistadorPrompt() {
   const promptFile = path.join(ENTREVISTADOR_DIR, 'promptentrevistador.md');
@@ -1745,6 +1757,49 @@ app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, re
   const content = loadEntrevistadorPrompt();
   if (!content) return res.status(404).json({ error: 'Prompt do entrevistador não encontrado.' });
   res.json({ prompt: content });
+});
+
+// --- Administração dos prompts (PROMPTS_DIR) ---
+// Os .md de avaliacao/ e entrevistador/ saíram do git (dados sensíveis: critérios
+// de nota, gabaritos) e passaram a viver só no volume persistente (PROMPTS_DIR).
+// Essas rotas substituem o antigo fluxo "edita o .md → git push → deploy": agora
+// a atualização é feita por aqui (admin-only), com o conteúdo indo direto pro
+// volume. Caminho validado contra path traversal e restrito a .md.
+function resolvePromptPath(relPath) {
+  const clean = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const resolved = path.resolve(PROMPTS_DIR, clean);
+  if (resolved !== PROMPTS_DIR && !resolved.startsWith(PROMPTS_DIR + path.sep)) return null;
+  if (!resolved.toLowerCase().endsWith('.md')) return null;
+  return resolved;
+}
+
+app.get('/api/admin/prompts', requireAuth, requireRole('admin'), (req, res) => {
+  function walk(dir) {
+    if (!fs.existsSync(dir)) return [];
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walk(full);
+      if (entry.name.toLowerCase().endsWith('.md')) return [path.relative(PROMPTS_DIR, full).split(path.sep).join('/')];
+      return [];
+    });
+  }
+  res.json({ files: walk(PROMPTS_DIR).sort() });
+});
+
+app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+  const target = resolvePromptPath(req.params[0]);
+  if (!target || !fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado.' });
+  res.json({ path: req.params[0], content: fs.readFileSync(target, 'utf-8') });
+});
+
+app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+  const target = resolvePromptPath(req.params[0]);
+  if (!target) return res.status(400).json({ error: 'Caminho inválido.' });
+  if (!fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado — crie a estrutura antes de sobrescrever.' });
+  const { content } = req.body || {};
+  if (typeof content !== 'string' || !content.trim()) return res.status(400).json({ error: 'Conteúdo vazio.' });
+  fs.writeFileSync(target, content, 'utf-8');
+  res.json({ ok: true });
 });
 
 // Lista de fotos de perfil disponíveis (a partir da pasta profiles_icon na raiz do projeto)
@@ -3670,7 +3725,7 @@ function sanitizeAssistantId(input) {
 // 1–10 ou NA) no início, `[feedback]` + corpo depois — exceto o Desafio, que é
 // opaco (nenhuma nota na saída). Os prompts v15/v16 continuam em `avaliacao/`
 // só como referência e para o laboratório da Avaliação Independente.
-const AVALIACAO_DIR = path.join(__dirname, '..', 'avaliacao');
+const AVALIACAO_DIR = path.join(PROMPTS_DIR, 'avaliacao');
 const AVALIACAO_18_DIR = path.join(AVALIACAO_DIR, 'avaliador 18');
 
 function loadEvaluatorFile(fileName) {
