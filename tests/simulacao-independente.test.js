@@ -59,6 +59,49 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     expect(sim.computeSimCost('modelo-inexistente', sim.normalizeSimUsage('openai', null))).toBe(null);
   });
 
+  // Família 5.6 no laboratório do paciente: Terra e Luna (o Sol não entra — o
+  // interesse aqui é descer de preço, não subir). Os números são os da doc oficial
+  // da OpenAI, ago/2026; um blog agregador publicou outros valores que não batem.
+  it('preços do 5.6: Terra abaixo do 5.4 e Luna abaixo do mini de produção', () => {
+    const terra = sim.resolveSimPrices('gpt-5.6-terra');
+    const luna = sim.resolveSimPrices('gpt-5.6-luna');
+    expect(terra).toEqual({ input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 });
+    expect(luna).toEqual({ input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 });
+
+    // O ponto do teste: Luna é mais barato que o paciente de produção nas DUAS
+    // pontas — é o que justifica testá-lo como substituto do mini.
+    const mini = sim.resolveSimPrices('gpt-5.4-mini');
+    expect(luna.input).toBeLessThan(mini.input);
+    expect(luna.output).toBeLessThan(mini.output);
+    // E Terra fica abaixo do 5.4 cheio.
+    expect(terra.input).toBeLessThan(sim.resolveSimPrices('gpt-5.4').input);
+    expect(terra.output).toBeLessThan(sim.resolveSimPrices('gpt-5.4').output);
+  });
+
+  // cacheWrite a 1,25× o input vale pra OpenAI também (docs, ago/2026) — a tabela
+  // registra o preço certo mesmo o usage da OpenAI não separando esses tokens
+  // hoje, pra o cálculo já ficar correto se um dia passar a separar.
+  it('cacheWrite é 1,25× o input em todos os modelos OpenAI da tabela', () => {
+    for (const key of ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      const p = sim.resolveSimPrices(key);
+      expect(p.cacheWrite).toBeCloseTo(p.input * 1.25, 10);
+      expect(p.cacheRead).toBeCloseTo(p.input * 0.1, 10);
+    }
+  });
+
+  // Paciente tem de poder rodar SEM raciocínio (é como produção roda): se 'none'
+  // sair da lista, o laboratório deixa de comparar maçã com maçã.
+  it('Terra e Luna oferecem effort none (comparável ao paciente de produção)', () => {
+    for (const key of ['gpt-5.6-terra', 'gpt-5.6-luna']) {
+      const m = sim.simModelInfo(key);
+      expect(m).toBeTruthy();
+      expect(m.provider).toBe('openai');
+      expect(m.efforts).toContain('none');
+      expect(m.efforts[0]).toBe('none'); // default do seletor
+    }
+    expect(sim.simModelInfo('gpt-5.6-sol')).toBeNull(); // flagship fora deste lab
+  });
+
   it('normalizeTurns colapsa turnos consecutivos do mesmo papel (Anthropic exige alternância)', () => {
     const turns = sim.normalizeTurns([
       { role: 'user', content: 'oi' },
@@ -152,6 +195,8 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     const cat = sim.simCatalogo();
     expect(cat.map((m) => `${m.key}:${m.efforts.join(',')}`)).toEqual([
       'gpt-5.4-mini:none',
+      'gpt-5.6-luna:none,medium,high',
+      'gpt-5.6-terra:none,medium,high',
       'gpt-5.4:medium,high',
       'gpt-5.5:medium,high',
       'glm-5.2:high',
@@ -192,8 +237,12 @@ describe('Simulação Independente — endpoint', () => {
     const post = (body) => request(app).post('/api/simulacao-independente/chat').set(authHeader(token)).send(body);
 
     expect((await post({ ...base, model: 'gpt-9', effort: 'none' })).status).toBe(400);
+    // tier de 5.6 que não existe / que não entrou neste laboratório
+    expect((await post({ ...base, model: 'gpt-5.6-nova', effort: 'none' })).status).toBe(400);
+    expect((await post({ ...base, model: 'gpt-5.6-sol', effort: 'none' })).status).toBe(400);
     // effort que existe em outro modelo, mas não neste
     expect((await post({ ...base, model: 'claude-sonnet-5', effort: 'medium' })).status).toBe(400);
+    expect((await post({ ...base, model: 'gpt-5.6-luna', effort: 'xhigh' })).status).toBe(400);
     expect((await post({ ...base, model: 'glm-5.2', effort: 'disabled' })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.4-mini', effort: 'none', messages: [] })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.4-mini', effort: 'none', casoId: '' })).status).toBe(400);

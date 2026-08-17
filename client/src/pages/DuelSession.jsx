@@ -138,7 +138,7 @@ export default function DuelSession({ user }) {
     const apiMessages = [...currentMessages, { role: 'user', content: text }]
       .filter((m) => m && m.role)
       .map((m) => ({ role: m.role, content: m.content }));
-    const data = await api.chat(apiMessages, { type: 'freeplay', itemId: character.id });
+    const data = await api.chat(apiMessages, { type: 'freeplay', itemId: character.id, category: 'duelo' });
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 

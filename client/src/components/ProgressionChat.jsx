@@ -42,7 +42,7 @@ export default function ProgressionChat({ patient, user, onEvaluationComplete, o
 
       try {
         const apiMessages = [{ role: 'user', content: 'Iniciar' }];
-        const response = await api.chat(apiMessages, { type: 'freeplay', itemId: patient.characterId });
+        const response = await api.chat(apiMessages, { type: 'freeplay', itemId: patient.characterId, category: 'treinamento' });
         const assistantContent = typeof response === 'string' ? response : (response.content || response.message || '');
 
         if (assistantContent) {
@@ -78,7 +78,7 @@ export default function ProgressionChat({ patient, user, onEvaluationComplete, o
         .filter((m) => m && m.role)
         .map((m) => ({ role: m.role, content: m.content }));
 
-      const response = await api.chat(apiMessages, { type: 'freeplay', itemId: patient.characterId });
+      const response = await api.chat(apiMessages, { type: 'freeplay', itemId: patient.characterId, category: 'treinamento' });
       const assistantContent = typeof response === 'string' ? response : (response.content || response.message || '');
 
       if (assistantContent) {

@@ -97,7 +97,7 @@ export default function ChallengeSession({ user }) {
     const apiMessages = [...currentMessages, { role: 'user', content: text }]
       .filter((m) => m && m.role)
       .map((m) => ({ role: m.role, content: m.content }));
-    const data = await api.chat(apiMessages, { type: 'freeplay', itemId: id });
+    const data = await api.chat(apiMessages, { type: 'freeplay', itemId: id, category: 'desafio' });
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 

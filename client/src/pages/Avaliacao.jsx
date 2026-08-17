@@ -15,23 +15,36 @@ const EVALUATORS = [
   { id: 'v16-2', label: 'v16.2 · 6 critérios' },
   { id: 'v18-25', label: 'v18.25 · 15 critérios' },
 ];
+// `efforts` só aparece no modelo que FOGE do padrão do provedor. A família 5.6
+// aceita dois degraus a mais (xhigh, max) — por isso a lista de effort virou
+// por modelo, e não só por provedor. Precisa espelhar AVAL_MODELOS no servidor,
+// que é quem valida (o cliente aqui só evita oferecer combinação que dá 400).
+const EFFORTS_5_6 = ['low', 'medium', 'high', 'xhigh', 'max'];
 const MODELS = [
+  { key: 'gpt-5.6-sol', label: 'GPT 5.6 Sol', provider: 'openai', efforts: EFFORTS_5_6 },
+  { key: 'gpt-5.6-terra', label: 'GPT 5.6 Terra', provider: 'openai', efforts: EFFORTS_5_6 },
+  { key: 'gpt-5.6-luna', label: 'GPT 5.6 Luna', provider: 'openai', efforts: EFFORTS_5_6 },
   { key: 'gpt-5.5', label: 'GPT 5.5', provider: 'openai' },
   { key: 'gpt-5.4', label: 'GPT 5.4', provider: 'openai' },
   { key: 'gpt-5.4-mini', label: 'GPT 5.4 mini', provider: 'openai' },
   { key: 'glm-5.2', label: 'GLM 5.2 (z.ai)', provider: 'glm' },
 ];
-// O "effort" muda por provedor: GPT usa low/medium/high; GLM (z.ai) usa
-// disabled (thinking off) / high / max.
+// Padrão por provedor: GPT usa low/medium/high; GLM (z.ai) usa disabled
+// (thinking off) / high / max.
 const EFFORTS_BY_PROVIDER = {
   openai: ['low', 'medium', 'high'],
   glm: ['disabled', 'high', 'max'],
 };
+function modelOf(modelKey) {
+  return MODELS.find((x) => x.key === modelKey) || null;
+}
 function providerOf(modelKey) {
-  const m = MODELS.find((x) => x.key === modelKey);
+  const m = modelOf(modelKey);
   return m ? m.provider : 'openai';
 }
 function effortsFor(modelKey) {
+  const m = modelOf(modelKey);
+  if (m && m.efforts) return m.efforts;
   return EFFORTS_BY_PROVIDER[providerOf(modelKey)] || EFFORTS_BY_PROVIDER.openai;
 }
 

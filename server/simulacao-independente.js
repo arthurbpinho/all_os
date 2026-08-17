@@ -37,6 +37,21 @@ const SIM_MODELOS = {
     id: 'gpt-5.4-mini-2026-03-17', provider: 'openai', label: 'GPT 5.4 mini',
     efforts: ['none'], nota: 'modelo do paciente em produção hoje (sem raciocínio)',
   },
+  // Família 5.6 (lançada 09/07/2026), os dois tiers ABAIXO do flagship. O Sol não
+  // entra aqui de propósito: paciente é alto volume e resposta direta, então o
+  // topo de linha não é candidato — o interesse é o contrário, descer de preço.
+  // 'none' primeiro porque é a configuração comparável à de produção (personagem
+  // responde direto); medium/high ficam pra testar um paciente mais nuançado,
+  // igual ao que o 5.4/5.5 já oferecem aqui.
+  'gpt-5.6-luna': {
+    id: 'gpt-5.6-luna', provider: 'openai', label: 'GPT 5.6 Luna',
+    efforts: ['none', 'medium', 'high'],
+    nota: 'mais barato que o mini de produção ($0,20 vs $0,75 input)',
+  },
+  'gpt-5.6-terra': {
+    id: 'gpt-5.6-terra', provider: 'openai', label: 'GPT 5.6 Terra',
+    efforts: ['none', 'medium', 'high'],
+  },
   'gpt-5.4': {
     id: 'gpt-5.4-2026-03-05', provider: 'openai', label: 'GPT 5.4',
     efforts: ['medium', 'high'],
@@ -57,17 +72,33 @@ const SIM_MODELOS = {
 
 // Preços em USD por 1 MILHÃO de tokens. Quatro colunas porque os provedores
 // cobram cache de formas diferentes:
-//   cacheRead  = ler um prefixo já cacheado (OpenAI ~0,1× do input; Anthropic 0,1×)
-//   cacheWrite = GRAVAR o prefixo no cache. OpenAI/GLM não cobram prêmio (a
-//                gravação já sai no bucket de input, então cacheWrite fica 0 tokens
-//                e o preço aqui é só simetria); a Anthropic cobra 1,25× o input
-//                (TTL de 5 min) e devolve isso em cache_creation_input_tokens.
+//   cacheRead  = ler um prefixo já cacheado (OpenAI 0,1× do input; Anthropic 0,1×)
+//   cacheWrite = GRAVAR o prefixo no cache, a 1,25× o input na OpenAI E na
+//                Anthropic (conferido em developers.openai.com/api/docs/pricing,
+//                ago/2026 — a tabela de lá tem coluna própria de cache write).
+//                DIFERENÇA que importa: a Anthropic REPORTA esses tokens em
+//                cache_creation_input_tokens, então na Anthropic o custo sai
+//                exato; a OpenAI não os separa no usage (vêm dentro do input),
+//                então normalizeSimUsage deixa cacheWrite em 0 e o preço da coluna
+//                fica inerte para OpenAI. Consequência: o custo OpenAI mostrado
+//                aqui é um PISO, subestimado em até 25% sobre a parcela de prefixo
+//                NOVO (só o 1º turno de cada conversa; do 2º em diante é leitura,
+//                que é medida certo). O erro é igual em todos os modelos OpenAI,
+//                então a comparação entre eles segue justa. O preço já está certo
+//                na tabela pra valer sozinho se um dia a OpenAI reportar o campo.
+//                GLM: não verifiquei se a z.ai cobra prêmio — mantido igual ao
+//                input, como estava.
 // Modelo fora da tabela → custo null (a tela mostra tokens, nunca um dólar errado).
 const SIM_PRICES = {
   // OpenAI (docs, jul/2026) — mesmas referências da Avaliação Independente.
-  'gpt-5.5': { input: 5, cacheRead: 0.5, cacheWrite: 5, output: 30 },
-  'gpt-5.4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, output: 4.5 },
-  'gpt-5.4': { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15 },
+  'gpt-5.5': { input: 5, cacheRead: 0.5, cacheWrite: 6.25, output: 30 },
+  'gpt-5.4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0.9375, output: 4.5 },
+  'gpt-5.4': { input: 2.5, cacheRead: 0.25, cacheWrite: 3.125, output: 15 },
+  // Família 5.6 (docs OpenAI, conferido ago/2026). Tier padrão (<272K tokens/req);
+  // acima disso a OpenAI dobra o input e faz 1,5× o output, mas um turno de
+  // paciente fica muito longe desse limite.
+  'gpt-5.6-terra': { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 12 },
+  'gpt-5.6-luna': { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
   // GLM-5.2 (docs.z.ai, jul/2026). Reasoning cobrado como output.
   'glm-5.2': { input: 1.4, cacheRead: 0.26, cacheWrite: 1.4, output: 4.4 },
   // Anthropic (docs, jul/2026). Sonnet 5 tem preço promocional de lançamento

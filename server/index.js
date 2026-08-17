@@ -20,6 +20,7 @@ const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
 const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
 const simIndependente = require('./simulacao-independente');
+const aiModels = require('./ai-models');
 const errorLog = require('./error-log');
 const { buildReflectionPrompt: buildAntessalaReflection } = require('./antessala');
 const { finalScoreFromCriteria, comparativeScores } = require('./scoring');
@@ -3016,30 +3017,33 @@ app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, re
 });
 
 // --- Configurações globais da plataforma (settings.json) ---
-// Flags controladas pelo admin. Hoje: visitorEvaluationEnabled — liga a avaliação
-// para VISITANTES (via Simulação Livre, o único modo que o visitante acessa).
-// Default FALSE: no dia a dia o visitante joga sem avaliação (não queima
-// tokens nem expõe a IA). O dono liga durante palestras/eventos pra deixar as
-// pessoas testarem e verem a avaliação funcionando, e desliga depois.
-// visitorEvaluationModel: QUAL modelo roda essa avaliação (ver VISITOR_EVAL_MODELS)
-// — só importa enquanto a flag acima está ligada.
+// Chaves controladas pelo admin (tela Administração → Modelos de IA):
+//   visitorEvaluationEnabled — liga a avaliação para VISITANTES (via Simulação
+//     Livre, o único modo que o visitante acessa). Default FALSE: no dia a dia o
+//     visitante joga sem avaliação (não queima tokens nem expõe a IA). O dono
+//     liga durante palestras/eventos e desliga depois.
+//   aiModels — modelo do avaliador e do paciente POR CATEGORIA do app (ver
+//     server/ai-models.js e aiCategoryDefaults). Categoria sem escolha usa o
+//     padrão do sistema.
+//   visitorEvaluationModel — LEGADO da época em que só o visitante escolhia
+//     modelo (a escolha morava na aba Contas). Continua sendo lido como PADRÃO da
+//     categoria "visitante" pra não perder o que já estava configurado.
 function readSettings() {
   return readJSON('settings.json', {});
 }
 function visitorEvaluationEnabled() {
   return readSettings().visitorEvaluationEnabled === true;
 }
-function visitorEvaluationModelKey() {
-  const v = readSettings().visitorEvaluationModel;
-  return VISITOR_EVAL_MODELS[v] ? v : VISITOR_EVAL_MODEL_DEFAULT;
-}
 
 // Configurações visíveis ao cliente — QUALQUER usuário autenticado (inclusive
 // visitante: o EchoSession precisa saber se deve rodar a avaliação do visitante).
+// visitorEvaluationModel é LEGADO: a escolha do modelo virou a categoria
+// "Visitante" em Administração → Modelos de IA. Continua sendo respondido (e
+// dizendo a verdade sobre o que roda) pra não quebrar cliente antigo em cache.
 app.get('/api/settings', requireAuth, (req, res) => {
   res.json({
     visitorEvaluationEnabled: visitorEvaluationEnabled(),
-    visitorEvaluationModel: visitorEvaluationModelKey(),
+    visitorEvaluationModel: evaluatorSpecFor('visitante').preset || VISITOR_EVAL_MODEL_DEFAULT,
   });
 });
 
@@ -3061,6 +3065,26 @@ app.put('/api/admin/settings', requireAuth, requireRole('admin'), (req, res) => 
     visitorEvaluationEnabled: cur.visitorEvaluationEnabled === true,
     visitorEvaluationModel: VISITOR_EVAL_MODELS[cur.visitorEvaluationModel] ? cur.visitorEvaluationModel : VISITOR_EVAL_MODEL_DEFAULT,
   });
+});
+
+// --- Modelos de IA por categoria (admin-only) -------------------------------
+// GET devolve as opções + o que cada categoria está rodando agora (spec efetivo,
+// já resolvido: escolha do admin ou padrão do sistema). PUT grava UMA categoria
+// por vez; `null` em um campo limpa a escolha e volta ao padrão.
+app.get('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) => {
+  res.json(aiModels.catalogo({ settings: readSettings(), fallbacks: aiCategoryDefaults() }));
+});
+
+app.put('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) => {
+  const { categoria, evaluator, patient } = req.body || {};
+  const cur = readSettings();
+  const aplicado = aiModels.applyCategoryChoice(cur, categoria, { evaluator, patient });
+  if (!aplicado.ok) return res.status(400).json({ error: aplicado.error });
+  cur.aiModels = aplicado.aiModels;
+  writeJSON('settings.json', cur);
+  const ev = evaluatorSpecFor(categoria);
+  console.log(`[admin] modelos de IA (${categoria}) por ${req.user.username}: avaliador=${ev.model}/${ev.effort}${ev.batch ? ' (batch)' : ''}`);
+  res.json(aiModels.catalogo({ settings: cur, fallbacks: aiCategoryDefaults() }));
 });
 
 // DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
@@ -3196,44 +3220,51 @@ const OPENAI_EXERCISE_EFFORT = process.env.OPENAI_EXERCISE_EFFORT || 'low';
 const OPENAI_NEURO_MODEL = process.env.OPENAI_NEURO_MODEL || 'gpt-5.4-2026-03-05';
 const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 
-// --- Avaliadores de PRODUÇÃO trocados por decisão do dono (2026-07) ---
-// TREINAMENTO (freeplay training): GLM 5.2 / high; FALLBACK pra gpt-5.4/medium (o
-// SIM acima) se o GLM falhar. SELETIVO: gpt-5.5/high, rodado em BATCH — igual ao
-// Competitivo (o candidato nunca vê a nota, então pode esperar; e GPT como
-// avaliador SEMPRE vai de Batch, decisão do dono). COMPETITIVO: gpt-5.5 / high,
-// rodado em BATCH (assíncrono). O 5.5/high também pode ser escolhido por
-// exercício na Trilha (ver TRILHA_EXERCISE_MODELS) — deixou de ser exclusivo do
-// Competitivo. Env-overridáveis, mas SELECAO_EVAL_MODEL precisa continuar
-// apontando pra um modelo OpenAI — o pipeline de batch (submitSelectionBatches)
-// não tem caminho pra GLM (z.ai não tem Batch API). Provider é derivado do
-// prefixo do modelo.
+// --- PADRÕES dos avaliadores de produção (escolhidos pelo dono em 2026-07) ---
+// ATENÇÃO (2026-08): estas consts deixaram de ser a palavra final. Hoje elas são
+// o PADRÃO de cada categoria (ver aiCategoryDefaults) e o admin pode sobrepor
+// cada uma na tela Administração → Modelos de IA, em runtime. Ou seja: as regras
+// abaixo descrevem o default, não uma garantia.
+//
+// O que MUDOU de invariante para default (não confie mais nisso como absoluto):
+//   - "GPT como avaliador sempre vai de Batch" virou escolha: o admin pode pôr
+//     GPT num modo síncrono (Treinamento, Visitante, Duelo, Desafio, Neuro), e aí
+//     roda a preço cheio, sem os 50% do batch. A tela avisa disso.
+//   - "SELECAO_EVAL_MODEL precisa apontar pra OpenAI" não vale mais: escolher GLM
+//     no Seletivo/Competitivo desliga o batch e a avaliação vai pelo caminho
+//     síncrono em background (runSelectionEvalsWithoutBatch / o do Competitivo).
+//   - Duelo e Desafio continuam SEM fallback pro GPT no caminho de FALHA (isso
+//     segue valendo), mas o admin pode escolher GPT como primário deles.
+//
+// TREINAMENTO (freeplay training): GLM 5.2/high; FALLBACK pra gpt-5.4/medium (o
+// SIM acima) se o primário falhar. SELETIVO e COMPETITIVO: gpt-5.5/high em BATCH
+// (ninguém espera a nota na tela). Provider é derivado do prefixo do modelo.
 const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || 'glm-5.2';
 const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || 'high';
 const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || 'gpt-5.5-2026-04-23';
 const SELECAO_EVAL_EFFORT = process.env.SELECAO_EVAL_EFFORT || 'high';
 const OPENAI_COMP_MODEL = process.env.OPENAI_COMP_MODEL || 'gpt-5.5-2026-04-23';
 const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || 'high';
-// DUELO (avaliação comparativa): GLM 5.2/high, sem fallback pra GPT — decisão do
-// dono pra manter o avaliador fora do GPT (que exigiria Batch e quebraria o
-// resultado na hora que o Duelo mostra ao final). z.ai não tem Batch API.
+// DUELO (avaliação comparativa): GLM 5.2/high por padrão. O resultado sai na hora
+// pros dois alunos, então esta categoria nunca vai de batch, qualquer que seja o
+// modelo — e não há fallback pro GPT quando o primário falha.
 const DUEL_EVAL_MODEL = process.env.DUEL_EVAL_MODEL || 'glm-5.2';
 const DUEL_EVAL_EFFORT = process.env.DUEL_EVAL_EFFORT || 'high';
 // MODO DESAFIO / King of the Hill (reivindicar + desafiar o Titular): mesma
-// lógica do Duelo — GLM 5.2/high, sem fallback pra GPT, pelo mesmo motivo
-// (resultado sai na hora pro aluno/visitante; Batch não serve aqui).
+// lógica do Duelo — GLM 5.2/high por padrão, resultado na hora (nunca batch), sem
+// fallback pro GPT no caminho de falha.
 const DESAFIO_EVAL_MODEL = process.env.DESAFIO_EVAL_MODEL || 'glm-5.2';
 const DESAFIO_EVAL_EFFORT = process.env.DESAFIO_EVAL_EFFORT || 'high';
 function providerForModel(m) {
   return String(m || '').startsWith('glm') ? 'glm' : 'openai';
 }
 
-// Modelo do avaliador de VISITANTES — admin escolhe em Gestão de Contas (ver
-// visitorEvaluationModel em settings.json), só entra quando
-// visitorEvaluationEnabled está ligado (eventos/palestras). Duas opções fixas,
-// ambas em effort 'high' (o visitante roda em baixo volume, então o custo
-// mais alto não pesa) — reaproveita o mesmo esquema buffered do Treinamento/
-// GLM (ver isFreeSim em /api/evaluate), com FALLBACK pro SIM (gpt-5.4/medium)
-// se o modelo escolhido falhar.
+// LEGADO: as duas opções de avaliador de visitante da época em que essa escolha
+// morava na aba Contas (chave visitorEvaluationModel em settings.json). Hoje a
+// escolha é a categoria "visitante" em Administração → Modelos de IA, com as 3
+// opções de sempre; isto sobrevive só para (a) traduzir a escolha antiga no
+// PADRÃO daquela categoria (ver aiCategoryDefaults) e (b) manter o contrato do
+// PUT /api/admin/settings pra cliente antigo em cache. Não usar em código novo.
 const VISITOR_EVAL_MODEL_DEFAULT = 'glm-5.2';
 const VISITOR_EVAL_MODELS = {
   'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
@@ -3271,6 +3302,62 @@ const TRILHA_CHAT_MODELS = {
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'none' },
   'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
+
+// --- Modelos por CATEGORIA (tela Administração → Modelos de IA) -------------
+// O admin escolhe, por categoria do app, qual IA avalia e qual interpreta o
+// paciente (ver server/ai-models.js). Enquanto ele NÃO escolhe, vale o padrão
+// abaixo — que é exatamente o comportamento das consts de env de sempre, modelo
+// E effort. Ligar a tela, por si só, não muda nada.
+//
+// A Trilha fica FORA disto: lá a escolha é por exercício
+// (TRILHA_EXERCISE_MODELS/TRILHA_CHAT_MODELS acima) e é controle próprio do
+// editor de exercícios.
+function patientDefaultSpec() {
+  return { model: PATIENT_MODEL, provider: 'openai', effort: PATIENT_EFFORT };
+}
+
+// Padrão de cada categoria. Lido a cada chamada (não no boot) porque o padrão do
+// Visitante ainda considera a escolha ANTIGA de modelo (visitorEvaluationModel,
+// que vivia na aba Contas) — quem já tinha configurado ali não perde a escolha.
+function aiCategoryDefaults() {
+  const legadoVisitante = VISITOR_EVAL_MODELS[readSettings().visitorEvaluationModel]
+    || VISITOR_EVAL_MODELS[VISITOR_EVAL_MODEL_DEFAULT];
+  const paciente = patientDefaultSpec();
+  const ev = (model, effort) => ({ model, provider: providerForModel(model), effort });
+  return {
+    treinamento: { evaluator: ev(TRAINING_EVAL_MODEL, TRAINING_EVAL_EFFORT), patient: paciente },
+    competitivo: { evaluator: ev(OPENAI_COMP_MODEL, OPENAI_COMP_EFFORT), patient: paciente },
+    seletivo: { evaluator: ev(SELECAO_EVAL_MODEL, SELECAO_EVAL_EFFORT), patient: paciente },
+    visitante: { evaluator: { ...legadoVisitante }, patient: paciente },
+    duelo: { evaluator: ev(DUEL_EVAL_MODEL, DUEL_EVAL_EFFORT), patient: paciente },
+    desafio: { evaluator: ev(DESAFIO_EVAL_MODEL, DESAFIO_EVAL_EFFORT), patient: paciente },
+    neuro: { evaluator: ev(OPENAI_NEURO_MODEL, OPENAI_NEURO_EFFORT), patient: paciente },
+    avaliacaoManual: { evaluator: ev(OPENAI_EVAL_MODEL, OPENAI_EVAL_EFFORT), patient: paciente },
+  };
+}
+
+// Spec do AVALIADOR da categoria: { preset, label, model, provider, effort,
+// batch, fonte }. `batch` só vem true onde a categoria comporta assincronia E o
+// provedor tem Batch API — então escolher GLM no Competitivo/Seletivo desliga o
+// batch em vez de bloquear a opção (aí a avaliação roda síncrona em background).
+function evaluatorSpecFor(categoria) {
+  return aiModels.resolveEvaluator(categoria, readSettings(), aiCategoryDefaults()[categoria].evaluator);
+}
+
+// Spec do PACIENTE simulado da categoria (conversa ao vivo, nunca batch).
+function patientSpecFor(categoria) {
+  return aiModels.resolvePatient(categoria, readSettings(), aiCategoryDefaults()[categoria].patient);
+}
+
+// Rede de segurança OpenAI pro avaliador: quando o modelo escolhido é de outro
+// provedor e a chamada falha (rate limit/instabilidade/sem key), refaz aqui pra
+// o aluno nunca ficar sem nota. Se o padrão da categoria já é OpenAI, usa ele;
+// senão cai no SIM (gpt-5.4/medium), que é o fallback histórico do Treinamento.
+function evaluatorOpenaiFallback(categoria) {
+  const padrao = aiCategoryDefaults()[categoria].evaluator;
+  if (padrao.provider === 'openai') return { model: padrao.model, effort: padrao.effort };
+  return { model: OPENAI_SIM_MODEL, effort: OPENAI_SIM_EFFORT };
+}
 
 // Esquema visual (SVG) OPCIONAL ao final do exercício — admin liga por
 // exercício (imageSchemaEnabled) e escreve a observação (imageSchemaPrompt, ver
@@ -3511,6 +3598,65 @@ function normalizeMessagesForAnthropic(messages) {
   return cleaned;
 }
 
+// Um turno do PACIENTE simulado, no modelo que a categoria manda (ver
+// patientSpecFor). Concentra aqui o que difere entre provedores pra as duas
+// rotas de paciente (/api/chat e /api/selecao/chat) não duplicarem a lógica:
+//   OpenAI    → chat.completions com reasoning_effort
+//   GLM       → chat.completions com thinking/reasoning_effort (via buildChatBody)
+//   Anthropic → Messages API, com cache_control explícito (não é automático lá)
+// FALLBACK pro paciente padrão (gpt-5.4-mini) sempre que o provedor alternativo
+// falhar: numa conversa ao vivo, ficar sem resposta é pior que trocar de modelo.
+// Devolve o provedor/modelo que REALMENTE respondeu, pra o usage ser normalizado
+// e logado certo.
+async function runPatientTurn({ spec, systemPrompt, messages, maxTokens, label }) {
+  const fallback = async () => {
+    const openai = getOpenAI();
+    if (!openai) throw new Error('OpenAI indisponível');
+    const { text, usage } = await openaiComplete({
+      openai, model: PATIENT_MODEL, effort: PATIENT_EFFORT,
+      systemPrompt, messages, maxCompletionTokens: maxTokens,
+    });
+    return { text, usage, provider: 'openai', model: PATIENT_MODEL };
+  };
+
+  if (spec.provider === 'openai') {
+    const openai = getOpenAI();
+    if (!openai) throw new Error('OpenAI indisponível');
+    const { text, usage } = await openaiComplete({
+      openai, model: spec.model, effort: spec.effort,
+      systemPrompt, messages, maxCompletionTokens: maxTokens,
+    });
+    return { text, usage, provider: 'openai', model: spec.model };
+  }
+
+  try {
+    const client = getClientForProvider(spec.provider);
+    if (!client) throw new Error(`${spec.provider} indisponível`);
+    let text;
+    let usage;
+    if (spec.provider === 'anthropic') {
+      const resp = await client.messages.create(buildAnthropicArgs({
+        model: spec.model, effort: spec.effort, systemPrompt,
+        turns: normalizeMessagesForAnthropic(messages), maxTokens,
+      }));
+      text = extractAnthropicText(resp);
+      usage = resp.usage || null;
+    } else {
+      const resp = await client.chat.completions.create(buildChatBody({
+        provider: spec.provider, model: spec.model, effort: spec.effort,
+        maxTokens, messages: buildOpenAIMessages(systemPrompt, messages),
+      }));
+      text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+      usage = resp.usage || null;
+    }
+    if (!String(text || '').trim()) throw new Error('resposta vazia');
+    return { text, usage, provider: spec.provider, model: spec.model };
+  } catch (err) {
+    console.error(`[${label}] ${spec.model} falhou → fallback ${PATIENT_MODEL}:`, err.message);
+    return fallback();
+  }
+}
+
 // Resolve o system prompt server-side a partir de context/mode enviados pelo
 // cliente. Nunca confia em systemPrompt vindo do body. Retorna { systemPrompt,
 // status, error } onde status é o HTTP code apropriado em caso de erro.
@@ -3618,19 +3764,35 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     }
   }
 
-  // --- Paciente/Personagem → OpenAI (gpt-5.4-mini, effort none) por padrão.
-  // Na Trilha, o admin pode escolher outra IA por exercício (chatModel, ver
-  // TRILHA_CHAT_MODELS) — freeplay/neuro continuam fixos no PATIENT_MODEL.
-  // O personagem responde direto, SEM reasoning. Prompt caching da OpenAI é
-  // automático no prefixo (>1024 tokens), então o system + histórico (chat de
-  // 50-100 turnos) é cacheado sozinho a partir do 2º turno.
+  // --- Paciente/Personagem ---------------------------------------------------
+  // Duas origens de escolha, que não se misturam:
+  //   TRILHA  → por EXERCÍCIO (chatModel, ver TRILHA_CHAT_MODELS). Controle
+  //             próprio do editor de exercícios; a tela de Modelos de IA não
+  //             mexe nele.
+  //   O RESTO → por CATEGORIA (Administração → Modelos de IA). O cliente manda a
+  //             dica em context.category, e ela passa por
+  //             isClientPatientCategory: aceita só os modos que o usuário de fato
+  //             inicia na interface (treino/competitivo/duelo/desafio).
+  //             'seletivo' fica de fora de propósito — senão um aluno poderia
+  //             rodar o paciente daquela categoria (possivelmente mais caro) nos
+  //             treinos dele. Visitante e neuro são derivados AQUI: role e
+  //             context.type são fatos, não dica do cliente.
+  // O personagem responde direto, SEM reasoning (menos no preset GLM). Prompt
+  // caching da OpenAI é automático no prefixo (>1024 tokens), então o system +
+  // histórico (chat de 50-100 turnos) é cacheado sozinho a partir do 2º turno.
   const isExerciseChat = !!(context && context.type === 'exercise');
+  const patientCategory = req.user.role === 'visitor' ? 'visitante'
+    : (context && context.type === 'neuro') ? 'neuro'
+      : aiModels.isClientPatientCategory(context && context.category) ? context.category
+        : 'treinamento';
   const chatModelSpec = isExerciseChat
     ? (TRILHA_CHAT_MODELS[resolved.chatModelKey] || TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT])
-    : TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT];
+    : patientSpecFor(patientCategory);
 
-  const openai = getOpenAI();
-  if (!openai) {
+  // Modo demonstração: sem cliente pro provedor escolhido E sem OpenAI (que é o
+  // fallback de qualquer paciente), não há como responder — devolve a fala
+  // padrão em vez de estourar 500.
+  if (!getClientForProvider(chatModelSpec.provider) && !getOpenAI()) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?'
@@ -3646,61 +3808,22 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   }
 
   try {
-    if (chatModelSpec.provider !== 'openai') {
-      // Exercício da Trilha com GLM 5.2 ou Claude Sonnet 5 escolhido pelo
-      // admin: chamada direta (/api/chat não streama pro cliente). FALLBACK
-      // pro mini padrão se o provedor alternativo falhar (rate limit/
-      // instabilidade/sem API key) — o aluno sempre recebe resposta.
-      const altProvider = chatModelSpec.provider;
-      const altClient = getClientForProvider(altProvider);
-      try {
-        if (!altClient) throw new Error(`${altProvider} indisponível`);
-        let text;
-        let rawUsage;
-        if (altProvider === 'anthropic') {
-          const args = buildAnthropicArgs({
-            model: chatModelSpec.model, effort: chatModelSpec.effort,
-            systemPrompt: resolved.systemPrompt, turns: normalizeMessagesForAnthropic(messages),
-            maxTokens: tokenCap + 2000,
-          });
-          const resp = await altClient.messages.create(args);
-          text = extractAnthropicText(resp);
-          rawUsage = resp.usage || null;
-        } else {
-          const body = buildChatBody({
-            provider: altProvider, model: chatModelSpec.model, effort: chatModelSpec.effort,
-            maxTokens: tokenCap + 2000, messages: buildOpenAIMessages(resolved.systemPrompt, messages),
-          });
-          const resp = await altClient.chat.completions.create(body);
-          text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-          rawUsage = resp.usage || null;
-        }
-        if (!text.trim()) throw new Error('resposta vazia');
-        // Custo dos Logs da Trilha: usage normalizado por provedor (ver
-        // normalizeUsage) — o cliente só acumula e repassa, nunca calcula preço.
-        return res.json({ role: 'assistant', content: text, usage: normalizeUsage(altProvider, rawUsage) });
-      } catch (altErr) {
-        console.error(`[chat trilha] ${chatModelSpec.model} falhou → fallback ${PATIENT_MODEL}:`, altErr.message);
-        const { text, usage } = await openaiComplete({
-          openai, model: PATIENT_MODEL, effort: PATIENT_EFFORT,
-          systemPrompt: resolved.systemPrompt, messages, maxCompletionTokens: tokenCap + 2000,
-        });
-        logOpenAIUsage('Chat paciente (fallback)', PATIENT_MODEL, usage);
-        return res.json({ role: 'assistant', content: text, usage: normalizeUsage('openai', usage) });
-      }
-    }
-
-    // effort 'none' = sem reasoning → resposta direta e rápida.
-    const { text, usage } = await openaiComplete({
-      openai,
-      model: chatModelSpec.model,
-      effort: chatModelSpec.effort,
+    const turno = await runPatientTurn({
+      spec: chatModelSpec,
       systemPrompt: resolved.systemPrompt,
       messages,
-      maxCompletionTokens: tokenCap + 2000,
+      maxTokens: tokenCap + 2000,
+      label: isExerciseChat ? 'chat trilha' : `chat ${patientCategory}`,
     });
-    logOpenAIUsage('Chat paciente', chatModelSpec.model, usage);
-    res.json({ role: 'assistant', content: text, usage: normalizeUsage('openai', usage) });
+    // Custo dos Logs da Trilha: usage normalizado por provedor (ver
+    // normalizeUsage) — o cliente só acumula e repassa, nunca calcula preço.
+    // O log usa o normalizado (e não logOpenAIUsage) porque aqui pode ter
+    // respondido GLM ou Anthropic, cujos campos de usage têm outros nomes.
+    const uso = normalizeUsage(turno.provider, turno.usage);
+    console.log(
+      `Chat paciente (${turno.model} · ${isExerciseChat ? 'trilha' : patientCategory}): cached=${uso.cacheRead} in=${uso.input} out=${uso.output}`,
+    );
+    res.json({ role: 'assistant', content: turno.text, usage: uso });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'chat/paciente',
       { extra: { modelo: chatModelSpec.model } }));
@@ -3897,28 +4020,43 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const resolved = resolveEvaluatorSystemPrompt({ context });
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-  // Split de modelo: Treinamento simples (1º atendimento, sem sidequest) roda no
-  // avaliador barato (SIM/5.4). Competitivo, Duelo e (avaliação manual) ficam no
-  // melhor (EVAL/5.5); Neuro tem régua própria (5.4/low, ver isNeuroEval); Trilha
-  // usa o mini. O cliente sinaliza via context.mode; sem mode (aba Avaliar Sessão)
-  // cai no EVAL.
+  // Fora da Trilha, o modelo vem da CATEGORIA (Administração → Modelos de IA):
+  // treino/progressão, visitante, neuro ou avaliação manual. O cliente sinaliza
+  // o modo em context.mode; sem mode (aba Avaliar Sessão) cai em avaliacaoManual.
   const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
   // Trilha (exercícios): modelo é ESCOLHIDO POR EXERCÍCIO (admin, ver
-  // TRILHA_EXERCISE_MODELS/evaluatorModel). Não entra no progressionMode (que é
-  // exclusivo do freeplay/treinamento).
+  // TRILHA_EXERCISE_MODELS/evaluatorModel) e NÃO passa pelas categorias — é
+  // controle próprio do editor de exercícios. Não entra no progressionMode (que
+  // é exclusivo do freeplay/treinamento).
   const isExercise = !!(context && context.type === 'exercise');
   const exerciseModelSpec = isExercise
     ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
     : null;
-  // GLM/Claude na Trilha rodam em modo buffered (sem streaming pro cliente),
-  // igual ao par Treinamento/GLM. FALLBACK pro mini padrão da Trilha se o
-  // provedor alternativo falhar (rate limit/instabilidade/sem API key).
-  const isExerciseAltProvider = isExercise && exerciseModelSpec.provider !== 'openai';
-  // Neuro roda no 5.4/low (dedicado), fora da régua EVAL/SIM.
+  // Neuro tem categoria própria, fora da régua do treino.
   const isNeuroEval = !!(context && context.type === 'neuro');
+  const evalCategory = isExercise ? null
+    : req.user.role === 'visitor' ? 'visitante'
+      : isNeuroEval ? 'neuro'
+        : isFreeSim ? 'treinamento' : 'avaliacaoManual';
+  // Spec efetivo da categoria (escolha do admin ou padrão do sistema).
+  const categorySpec = evalCategory ? evaluatorSpecFor(evalCategory) : null;
+  // Provedor que não é OpenAI (GLM hoje; Claude só via Trilha) roda BUFFERED:
+  // uma chamada chat.completions, resposta escrita de uma vez no SSE — a UI já
+  // mostra a tela "avaliando", então não perde nada, e o heartbeat segura a
+  // conexão. Vale pra Trilha (escolha por exercício) e pra qualquer categoria em
+  // que o admin escolheu GLM. FALLBACK pro OpenAI se o provedor falhar.
+  const isExerciseAltProvider = isExercise && exerciseModelSpec.provider !== 'openai';
+  const isCategoryAltProvider = !!(categorySpec && categorySpec.provider !== 'openai');
+  // evalModel/evalEffort = o caminho OpenAI. Quando o primário já é OpenAI, é o
+  // próprio primário; quando é GLM, é a rede de segurança do fallback.
+  const categoryFallback = evalCategory ? evaluatorOpenaiFallback(evalCategory) : null;
   let systemPrompt = resolved.systemPrompt;
-  let evalModel = isExercise ? (isExerciseAltProvider ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model) : isNeuroEval ? OPENAI_NEURO_MODEL : (isFreeSim ? OPENAI_SIM_MODEL : OPENAI_EVAL_MODEL);
-  let evalEffort = isExercise ? (isExerciseAltProvider ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort) : isNeuroEval ? OPENAI_NEURO_EFFORT : (isFreeSim ? OPENAI_SIM_EFFORT : OPENAI_EVAL_EFFORT);
+  let evalModel = isExercise
+    ? (isExerciseAltProvider ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model)
+    : (isCategoryAltProvider ? categoryFallback.model : categorySpec.model);
+  let evalEffort = isExercise
+    ? (isExerciseAltProvider ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort)
+    : (isCategoryAltProvider ? categoryFallback.effort : categorySpec.effort);
   let inputTurns;
   let progressionMode = false;
   let sidequestActive = false;
@@ -4054,25 +4192,22 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     let usageProvider = 'openai'; // provedor do usage capturado — pra normalizar certo
     let usageModel = evalModel; // modelo que efetivamente rodou (pode virar o fallback)
     try {
-      if (isFreeSim) {
-        // TREINAMENTO → GLM 5.2 (buffered: a UI já mostra a tela "avaliando", não
-        // streama token a token; o heartbeat acima segura a conexão). VISITANTE
-        // usa o modelo escolhido pelo admin em Gestão de Contas (ver
-        // VISITOR_EVAL_MODELS) — só 2 opções, ambas 'high'. FALLBACK em ambos os
-        // casos: se o modelo escolhido falhar (rate limit/instabilidade), refaz
-        // no gpt-5.4/medium (evalModel/evalEffort do SIM). O aluno/visitante
-        // sempre recebe nota+feedback.
-        const isVisitorReq = req.user.role === 'visitor';
-        const primarySpec = isVisitorReq
-          ? VISITOR_EVAL_MODELS[visitorEvaluationModelKey()]
-          : { model: TRAINING_EVAL_MODEL, provider: providerForModel(TRAINING_EVAL_MODEL), effort: TRAINING_EVAL_EFFORT };
+      if (isCategoryAltProvider) {
+        // Categoria com avaliador de OUTRO provedor (GLM 5.2 — o único fora da
+        // OpenAI nas opções de avaliador). Roda BUFFERED: uma chamada
+        // chat.completions e a resposta inteira de uma vez no SSE. A UI já mostra
+        // a tela "avaliando", então não perde nada, e o heartbeat acima segura a
+        // conexão. É o padrão histórico do Treinamento, agora valendo pra
+        // qualquer categoria onde o admin escolheu GLM. FALLBACK: se falhar
+        // (rate limit/instabilidade/sem key), refaz no OpenAI de segurança
+        // (evalModel/evalEffort) — o aluno sempre recebe nota+feedback.
         let full = '';
-        const tProvider = primarySpec.provider;
+        const tProvider = categorySpec.provider;
         const tClient = getClientForProvider(tProvider);
         try {
           if (!tClient) throw new Error(`${tProvider} indisponível`);
           const body = buildChatBody({
-            provider: tProvider, model: primarySpec.model, effort: primarySpec.effort,
+            provider: tProvider, model: categorySpec.model, effort: categorySpec.effort,
             maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
           });
           const resp = await tClient.chat.completions.create(body);
@@ -4080,10 +4215,10 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
           if (!full.trim()) throw new Error('resposta vazia');
           usage = resp.usage || null;
           usageProvider = tProvider;
-          usageModel = primarySpec.model;
-          console.log(`Evaluate (${primarySpec.model} · ${isVisitorReq ? 'visitante' : 'treino'}${progressionMode ? '+progressão' : ''})`);
+          usageModel = categorySpec.model;
+          console.log(`Evaluate (${categorySpec.model} · ${evalCategory}${progressionMode ? '+progressão' : ''})`);
         } catch (glmErr) {
-          console.error(`[evaluate ${isVisitorReq ? 'visitante' : 'treino'}] ${primarySpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
+          console.error(`[evaluate ${evalCategory}] ${categorySpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
           const resp = await openai.responses.create({
             model: evalModel, reasoning: { effort: evalEffort },
             max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
@@ -4167,7 +4302,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     if (usage) {
       normalizedUsage = normalizeUsage(usageProvider, usage);
       console.log(
-        `Evaluate (${usageModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : (isFreeSim ? ' · treino' : ''))}): cached=${normalizedUsage.cacheRead} in=${normalizedUsage.input} out=${normalizedUsage.output}`,
+        `Evaluate (${usageModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : ` · ${evalCategory}`)}): cached=${normalizedUsage.cacheRead} in=${normalizedUsage.input} out=${normalizedUsage.output}`,
       );
     }
     // Custo dos Logs da Trilha: só relevante quando isExercise (o cliente
@@ -4437,31 +4572,68 @@ function toBatchFile(jsonl) {
   return toFile(Buffer.from(jsonl, 'utf-8'), 'selecao-batch.jsonl', { type: 'application/jsonl' });
 }
 
-// Avaliação do Seletivo em BATCH (gpt-5.5/high) — igual ao Competitivo: o
-// candidato nunca vê nota nem raciocínio (o /finish já respondeu só o
-// agradecimento), então pode esperar as até 24h do batch. z.ai/GLM não tem
-// Batch API — por isso o Seletivo saiu do GLM (era síncrono antes).
-function buildSelectionEvalBody(log) {
+// Avaliação do Seletivo em BATCH — o candidato nunca vê nota nem raciocínio (o
+// /finish já respondeu só o agradecimento), então pode esperar as até 24h do
+// batch e ganhar os 50% de desconto. Só vale para modelo OpenAI: quando o admin
+// escolhe GLM na categoria, `spec.batch` vem false e a avaliação vai pelo
+// caminho síncrono em background (ver runPendingEvalsWithoutBatch).
+function buildSelectionEvalBody(log, spec) {
   const { prompt, inputTurns } = selectionEvalParts(log);
   return {
-    model: SELECAO_EVAL_MODEL,
-    reasoning_effort: SELECAO_EVAL_EFFORT,
+    model: spec.model,
+    reasoning_effort: spec.effort,
     max_completion_tokens: 64000,
     messages: buildOpenAIMessages(prompt, inputTurns),
   };
 }
 
+// Avaliação SÍNCRONA de um item pendente, para quando o modelo escolhido não tem
+// Batch API (GLM). Roda em background no mesmo sweep: nada na UX muda — quem
+// finalizou já saiu sem nota e ela entra no log quando chegar; por este caminho
+// só chega mais rápido, sem o desconto do batch.
+async function runEvalWithoutBatch({ spec, systemPrompt, inputTurns }) {
+  // Só chat.completions aqui (OpenAI e GLM). A Anthropic usa a Messages API, com
+  // outra forma — se algum dia Claude entrar em EVALUATOR_PRESETS, este caminho
+  // precisa do buildAnthropicArgs (como runPatientTurn faz). Falha explícita em
+  // vez de um TypeError obscuro em `client.chat`.
+  if (spec.provider === 'anthropic') {
+    throw new Error('avaliação sem batch não suporta Anthropic (usaria a Messages API)');
+  }
+  const client = getClientForProvider(spec.provider);
+  if (!client) throw new Error(`${spec.provider} indisponível`);
+  const resp = await client.chat.completions.create(buildChatBody({
+    provider: spec.provider, model: spec.model, effort: spec.effort,
+    maxTokens: 64000, messages: buildOpenAIMessages(systemPrompt, inputTurns),
+  }));
+  const text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
+  if (!String(text).trim()) throw new Error('resposta vazia');
+  // normalizeUsage (e não logOpenAIUsage): este caminho roda GLM, cujo usage tem
+  // outros nomes de campo e sub-reporta o thinking em completion_tokens.
+  const uso = normalizeUsage(spec.provider, resp.usage || null);
+  console.log(`Avaliação sem batch (${spec.model}): cached=${uso.cacheRead} in=${uso.input} out=${uso.output}`);
+  return text;
+}
+
+// Quantas vezes tentamos o caminho síncrono antes de desistir e marcar erro.
+// Batch que falha marca erro na hora; aqui a falha costuma ser transitória
+// (rate limit da z.ai, instabilidade), então vale retentar nos sweeps seguintes.
+const EVAL_SYNC_MAX_ATTEMPTS = 3;
+
 let selectionSweepRunning = false;
 
 // Submete os logs do seletivo pendentes (status 'pending' && !evalBatchId).
+// Só roda quando o avaliador da categoria tem Batch API; com GLM escolhido, quem
+// avalia é runSelectionEvalsWithoutBatch.
 async function submitSelectionBatches(openai) {
+  const spec = evaluatorSpecFor('seletivo');
+  if (!spec.batch) return;
   const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
   if (!pending.length) return;
   const lines = [];
   const ids = [];
   for (const log of pending) {
     let body;
-    try { body = buildSelectionEvalBody(log); } catch (e) { console.error('[selecao-batch] corpo:', e.message); continue; }
+    try { body = buildSelectionEvalBody(log, spec); } catch (e) { console.error('[selecao-batch] corpo:', e.message); continue; }
     lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
     ids.push(log.id);
   }
@@ -4478,10 +4650,84 @@ async function submitSelectionBatches(openai) {
   console.log(`[selecao-batch] submetidos ${ids.length} candidato(s) no batch ${batch.id}`);
 }
 
-// Coleta os batches prontos: grava status/score/criteriaScores/evaluation no
-// log + append no selection-stats.json + TRI (mesma régua de antes). O
-// raciocínio fica vazio — GPT via chat.completions não devolve o texto do
-// reasoning (só a contagem de tokens; era um extra que só o GLM dava de graça).
+// Fecha os logs do seletivo com o texto do avaliador: status/score/
+// criteriaScores/evaluation no log + append no selection-stats.json + TRI. É o
+// MESMO caminho para batch e para o síncrono (só muda de onde veio o texto), pra
+// não existirem duas versões da régua ativo/rejeitado.
+//
+// `ids` = os logs que estavam nesta rodada; quem não tem texto em `results` é
+// marcado com erro usando a mensagem `motivoSemResultado`. O raciocínio fica
+// vazio — chat.completions não devolve o texto do reasoning (só a contagem).
+async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
+  const alvo = new Set(ids.map(String));
+  const appendedList = [];
+  const triList = [];
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    for (const l of arr) {
+      if (!alvo.has(String(l.id)) || l.status !== 'pending') continue;
+      if (results.has(l.id) && results.get(l.id)) {
+        const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
+        const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
+        l.status = st;
+        l.score = score;
+        l.criteriaScores = criteriaScores;
+        l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
+        l.reasoning = '';
+        if (score != null) {
+          appendedList.push({ timestamp: l.timestamp, score, status: st });
+          triList.push({ characterId: l.characterId, score });
+        }
+      } else {
+        l.status = 'erro'; l.evalError = motivoSemResultado;
+      }
+    }
+    writeJSON('selection-logs.json', arr);
+  });
+  if (appendedList.length) {
+    await withFileLock('selection-stats.json', async () => {
+      const stats = readJSON('selection-stats.json');
+      stats.push(...appendedList);
+      writeJSON('selection-stats.json', stats);
+    });
+  }
+  // TRI: o candidato entra com rating fixo 50 e o personagem aprende. Só
+  // com nota válida — avaliação com erro não é sinal.
+  for (const t of triList) {
+    await registrarTriAnonimo('selecao', t.characterId, t.score);
+  }
+}
+
+// Seletivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
+// background. Falha transitória não queima o candidato — conta a tentativa e
+// tenta de novo no próximo sweep, marcando erro só depois de EVAL_SYNC_MAX_ATTEMPTS.
+async function runSelectionEvalsWithoutBatch() {
+  const spec = evaluatorSpecFor('seletivo');
+  if (spec.batch) return;
+  const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
+  for (const log of pending) {
+    try {
+      const { prompt, inputTurns } = selectionEvalParts(log);
+      const text = await runEvalWithoutBatch({ spec, systemPrompt: prompt, inputTurns });
+      await finalizeSelectionEvals([log.id], new Map([[log.id, text]]), 'sem resultado');
+      console.log(`[selecao-sync] candidato ${log.id} avaliado em ${spec.model} (sem batch)`);
+    } catch (e) {
+      const tentativas = (Number(log.evalAttempts) || 0) + 1;
+      const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
+      await withFileLock('selection-logs.json', async () => {
+        const arr = readJSON('selection-logs.json');
+        const alvo = arr.find((l) => String(l.id) === String(log.id) && l.status === 'pending');
+        if (!alvo) return;
+        alvo.evalAttempts = tentativas;
+        if (desistiu) { alvo.status = 'erro'; alvo.evalError = `avaliação síncrona falhou: ${e.message}`; }
+        writeJSON('selection-logs.json', arr);
+      });
+      console.error(`[selecao-sync] ${log.id} falhou (tentativa ${tentativas}/${EVAL_SYNC_MAX_ATTEMPTS})${desistiu ? ' — marcado com erro' : ''}:`, e.message);
+    }
+  }
+}
+
+// Coleta os batches prontos e fecha os logs (ver finalizeSelectionEvals).
 async function collectSelectionBatches(openai) {
   const withBatch = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && l.evalBatchId);
   if (!withBatch.length) return;
@@ -4503,42 +4749,8 @@ async function collectSelectionBatches(openai) {
           } catch {}
         }
       }
-      const appendedList = [];
-      const triList = [];
-      await withFileLock('selection-logs.json', async () => {
-        const arr = readJSON('selection-logs.json');
-        for (const l of arr) {
-          if (l.evalBatchId !== bid || l.status !== 'pending') continue;
-          if (results.has(l.id) && results.get(l.id)) {
-            const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
-            const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
-            l.status = st;
-            l.score = score;
-            l.criteriaScores = criteriaScores;
-            l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
-            l.reasoning = '';
-            if (score != null) {
-              appendedList.push({ timestamp: l.timestamp, score, status: st });
-              triList.push({ characterId: l.characterId, score });
-            }
-          } else {
-            l.status = 'erro'; l.evalError = 'sem resultado no batch';
-          }
-        }
-        writeJSON('selection-logs.json', arr);
-      });
-      if (appendedList.length) {
-        await withFileLock('selection-stats.json', async () => {
-          const stats = readJSON('selection-stats.json');
-          stats.push(...appendedList);
-          writeJSON('selection-stats.json', stats);
-        });
-      }
-      // TRI: o candidato entra com rating fixo 50 e o personagem aprende. Só
-      // com nota válida — avaliação com erro não é sinal.
-      for (const t of triList) {
-        await registrarTriAnonimo('selecao', t.characterId, t.score);
-      }
+      const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
+      await finalizeSelectionEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[selecao-batch] batch ${bid} completo: ${results.size} candidato(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
       await withFileLock('selection-logs.json', async () => {
@@ -4551,14 +4763,22 @@ async function collectSelectionBatches(openai) {
   }
 }
 
+// Um sweep cobre os dois caminhos: coleta/submete batches (quando o avaliador é
+// OpenAI) e avalia os pendentes de forma síncrona (quando é GLM). A parte de
+// batch exige a chave da OpenAI; a síncrona não — daí o `if` só em volta dela, e
+// não em volta do sweep inteiro (senão trocar pra GLM sem OPENAI_API_KEY deixaria
+// os candidatos pendentes pra sempre). Coletar SEMPRE roda quando há chave, pra
+// fechar batch antigo mesmo depois de o admin trocar o modelo pra GLM.
 async function sweepSelectionBatches() {
   if (selectionSweepRunning) return;
-  const openai = getOpenAI();
-  if (!openai) return;
   selectionSweepRunning = true;
   try {
-    await collectSelectionBatches(openai);
-    await submitSelectionBatches(openai);
+    const openai = getOpenAI();
+    if (openai) {
+      await collectSelectionBatches(openai);
+      await submitSelectionBatches(openai);
+    }
+    await runSelectionEvalsWithoutBatch();
   } catch (e) {
     console.error('[selecao-batch] sweep erro:', e.message);
   } finally {
@@ -4572,32 +4792,42 @@ async function sweepSelectionBatches() {
 // log dele em até 24h. O log aparece JÁ como 'pendente' em Minhas Sessões (fica em
 // logs.json com evaluationPending:true) e é o próprio "job" do batch.
 // ============================================================================
-function buildCompetitiveEvalBody(log) {
+// Partes do input da avaliação do competitivo (prompt + Bloco 1 + transcrição) —
+// compartilhado pelo batch e pelo caminho síncrono.
+function competitiveEvalParts(log) {
   const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.itemId));
   const patientName = log.itemTitle || (char && char.name) || 'Paciente';
   const transcript = transcriptFromMessages(log.messages || [], log.userName || 'Aluno', patientName);
   const evalUser = { role: 'user', content: `[LOG DO ATENDIMENTO]\nSessão: Competitivo\nPersonagem: ${patientName}\n\n${transcript}` };
   const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: log.itemId } });
-  const inputTurns = withBloco1([evalUser], bloco1);
+  return { prompt: loadAvaliacaoPrompt(), inputTurns: withBloco1([evalUser], bloco1) };
+}
+
+function buildCompetitiveEvalBody(log, spec) {
+  const { prompt, inputTurns } = competitiveEvalParts(log);
   return {
-    model: OPENAI_COMP_MODEL,
-    reasoning_effort: OPENAI_COMP_EFFORT,
+    model: spec.model,
+    reasoning_effort: spec.effort,
     max_completion_tokens: 64000,
-    messages: buildOpenAIMessages(loadAvaliacaoPrompt(), inputTurns),
+    messages: buildOpenAIMessages(prompt, inputTurns),
   };
 }
 
 let competitiveSweepRunning = false;
 
 // Submete os logs competitivos pendentes (evaluationPending && !evalBatchId).
+// Só quando o avaliador da categoria tem Batch API — com GLM escolhido quem
+// avalia é runCompetitiveEvalsWithoutBatch.
 async function submitCompetitiveBatches(openai) {
+  const spec = evaluatorSpecFor('competitivo');
+  if (!spec.batch) return;
   const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
   if (!pending.length) return;
   const lines = [];
   const ids = [];
   for (const log of pending) {
     let body;
-    try { body = buildCompetitiveEvalBody(log); } catch (e) { console.error('[comp-batch] corpo:', e.message); continue; }
+    try { body = buildCompetitiveEvalBody(log, spec); } catch (e) { console.error('[comp-batch] corpo:', e.message); continue; }
     lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
     ids.push(log.id);
   }
@@ -4614,7 +4844,69 @@ async function submitCompetitiveBatches(openai) {
   console.log(`[comp-batch] submetidos ${ids.length} competitivo(s) no batch ${batch.id}`);
 }
 
-// Coleta os batches prontos: grava nota/feedback no log, zera o pending e aplica o MMR.
+// Fecha os logs competitivos com o texto do avaliador: nota/feedback no log,
+// zera o pending e aplica o MMR. MESMO caminho para batch e para o síncrono, pra
+// o gate do MMR existir num só lugar.
+async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
+  const alvo = new Set(ids.map(String));
+  await withFileLock('logs.json', async () => {
+    const arr = readJSON('logs.json');
+    let mmr = null; let mmrChanged = false;
+    for (const l of arr) {
+      if (!alvo.has(String(l.id)) || !l.evaluationPending) continue;
+      if (results.has(l.id) && results.get(l.id)) {
+        const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
+        l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
+        l.criteriaScores = criteriaScores;
+        l.score = score;
+        l.evaluationPending = false;
+        // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
+        if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
+          if (!mmr) mmr = readMMR();
+          const { player, character, result } = mmrEngine.updateMatch(mmr.players[l.userId], mmr.characters[l.itemId], score);
+          mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
+          if (!result.calibratingBefore) bumpTriFonte(mmr, l.itemId, 'competitivo');
+          l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
+        }
+      } else {
+        l.evaluationPending = false; l.evalError = motivoSemResultado;
+      }
+    }
+    writeJSON('logs.json', arr);
+    if (mmrChanged) writeMMR(mmr);
+  });
+}
+
+// Competitivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
+// background. O aluno já viu "nota em até 24h", então por aqui só chega antes.
+// Falha transitória retenta no próximo sweep (ver EVAL_SYNC_MAX_ATTEMPTS).
+async function runCompetitiveEvalsWithoutBatch() {
+  const spec = evaluatorSpecFor('competitivo');
+  if (spec.batch) return;
+  const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
+  for (const log of pending) {
+    try {
+      const { prompt, inputTurns } = competitiveEvalParts(log);
+      const text = await runEvalWithoutBatch({ spec, systemPrompt: prompt, inputTurns });
+      await finalizeCompetitiveEvals([log.id], new Map([[log.id, text]]), 'sem resultado');
+      console.log(`[comp-sync] log ${log.id} avaliado em ${spec.model} (sem batch)`);
+    } catch (e) {
+      const tentativas = (Number(log.evalAttempts) || 0) + 1;
+      const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
+      await withFileLock('logs.json', async () => {
+        const arr = readJSON('logs.json');
+        const alvo = arr.find((l) => String(l.id) === String(log.id) && l.evaluationPending);
+        if (!alvo) return;
+        alvo.evalAttempts = tentativas;
+        if (desistiu) { alvo.evaluationPending = false; alvo.evalError = `avaliação síncrona falhou: ${e.message}`; }
+        writeJSON('logs.json', arr);
+      });
+      console.error(`[comp-sync] ${log.id} falhou (tentativa ${tentativas}/${EVAL_SYNC_MAX_ATTEMPTS})${desistiu ? ' — marcado com erro' : ''}:`, e.message);
+    }
+  }
+}
+
+// Coleta os batches prontos e fecha os logs (ver finalizeCompetitiveEvals).
 async function collectCompetitiveBatches(openai) {
   const withBatch = readJSON('logs.json').filter((l) => l && l.evaluationPending && l.evalBatchId);
   if (!withBatch.length) return;
@@ -4636,32 +4928,8 @@ async function collectCompetitiveBatches(openai) {
           } catch {}
         }
       }
-      await withFileLock('logs.json', async () => {
-        const arr = readJSON('logs.json');
-        let mmr = null; let mmrChanged = false;
-        for (const l of arr) {
-          if (l.evalBatchId !== bid || !l.evaluationPending) continue;
-          if (results.has(l.id) && results.get(l.id)) {
-            const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
-            l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
-            l.criteriaScores = criteriaScores;
-            l.score = score;
-            l.evaluationPending = false;
-            // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
-            if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
-              if (!mmr) mmr = readMMR();
-              const { player, character, result } = mmrEngine.updateMatch(mmr.players[l.userId], mmr.characters[l.itemId], score);
-              mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
-              if (!result.calibratingBefore) bumpTriFonte(mmr, l.itemId, 'competitivo');
-              l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
-            }
-          } else {
-            l.evaluationPending = false; l.evalError = 'sem resultado no batch';
-          }
-        }
-        writeJSON('logs.json', arr);
-        if (mmrChanged) writeMMR(mmr);
-      });
+      const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
+      await finalizeCompetitiveEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[comp-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
       await withFileLock('logs.json', async () => {
@@ -4674,14 +4942,18 @@ async function collectCompetitiveBatches(openai) {
   }
 }
 
+// Mesma estrutura do sweep do Seletivo: batch só com chave da OpenAI, síncrono
+// sempre (senão trocar pra GLM deixaria os pendentes parados pra sempre).
 async function sweepCompetitiveBatches() {
   if (competitiveSweepRunning) return;
-  const openai = getOpenAI();
-  if (!openai) return;
   competitiveSweepRunning = true;
   try {
-    await collectCompetitiveBatches(openai);
-    await submitCompetitiveBatches(openai);
+    const openai = getOpenAI();
+    if (openai) {
+      await collectCompetitiveBatches(openai);
+      await submitCompetitiveBatches(openai);
+    }
+    await runCompetitiveEvalsWithoutBatch();
   } catch (e) {
     console.error('[comp-batch] sweep erro:', e.message);
   } finally {
@@ -4937,8 +5209,9 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
   }
   const c = readJSON('freeplay-characters.json').find((x) => String(x.id) === String(req.candidate.characterId));
   if (!c) return res.status(404).json({ error: 'Personagem não encontrado' });
-  const openai = getOpenAI();
-  if (!openai) {
+  // Paciente do Seletivo: modelo da categoria (Administração → Modelos de IA).
+  const spec = patientSpecFor('seletivo');
+  if (!getClientForProvider(spec.provider) && !getOpenAI()) {
     return res.json({
       role: 'assistant',
       content: '[Modo demonstração — API Key não configurada] Olá, sou o personagem desta simulação. Como posso ajudá-lo nesta sessão?',
@@ -4952,19 +5225,19 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
   }
   try {
-    const { text, usage } = await openaiComplete({
-      openai,
-      model: PATIENT_MODEL,
-      effort: PATIENT_EFFORT,
+    const turno = await runPatientTurn({
+      spec,
       systemPrompt: buildFreeplayPrompt(c.specificInstruction),
       messages,
-      maxCompletionTokens: 1500 + 2000,
+      maxTokens: 1500 + 2000,
+      label: 'seletivo/paciente',
     });
-    logOpenAIUsage('Seleção paciente', PATIENT_MODEL, usage);
-    res.json({ role: 'assistant', content: text });
+    const uso = normalizeUsage(turno.provider, turno.usage);
+    console.log(`Seleção paciente (${turno.model}): cached=${uso.cacheRead} in=${uso.input} out=${uso.output}`);
+    res.json({ role: 'assistant', content: turno.text });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'seletivo/chat-paciente',
-      { extra: { modelo: PATIENT_MODEL } }));
+      { extra: { modelo: spec.model } }));
   }
 });
 
@@ -5159,6 +5432,21 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 // válidos daquele modelo + se suporta Batch API. GLM (z.ai) só na Independente,
 // síncrono (z.ai não expõe Batch API); o caching por prefixo funciona igual.
 const AVAL_MODELOS = {
+  // GPT-5.6 Sol (família 5.6, lançada 09/07/2026) — SÓ neste laboratório por
+  // enquanto, pra medir billing × benefício junto com os outros antes de cogitar
+  // produção. `id` sem data: a OpenAI não publica snapshot pinado deste modelo
+  // (ao contrário do 5.4/5.5), então o alias é o que existe. Reasoning vai até
+  // 'max' — dois degraus acima do 5.5. 'none' fica FORA de propósito: avaliador
+  // sem canal de raciocínio oculto externaliza o cruzamento com o Bloco 1 na
+  // prosa (foi a causa-raiz do vazamento do v15 no Opus) e não serve pra medir
+  // qualidade. Batch: suportado (50% off).
+  'gpt-5.6-sol': { id: 'gpt-5.6-sol', provider: 'openai', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], batch: true },
+  // Terra e Luna: mesma escada de reasoning do Sol (a doc lista none/low/medium/
+  // high/xhigh/max nos três) e Batch suportado igual. 'none' fora pelo mesmo
+  // motivo do Sol. O que muda entre eles é só preço — é isso que o laboratório
+  // mede: se Luna, 25× mais barato que o Sol, já avalia bem o bastante.
+  'gpt-5.6-terra': { id: 'gpt-5.6-terra', provider: 'openai', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], batch: true },
+  'gpt-5.6-luna': { id: 'gpt-5.6-luna', provider: 'openai', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], batch: true },
   'gpt-5.5': { id: 'gpt-5.5-2026-04-23', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
   'gpt-5.4': { id: 'gpt-5.4-2026-03-05', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
   'gpt-5.4-mini': { id: 'gpt-5.4-mini-2026-03-17', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
@@ -5438,7 +5726,9 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
     if (!casoId) return res.status(400).json({ error: 'Selecione um caso (necessário para o Bloco 1).' });
     if (!aiIndependente.isValidEvaluator(evaluator)) return res.status(400).json({ error: 'Avaliador inválido.' });
     const modelInfo = AVAL_MODELOS[modelKey];
-    if (!modelInfo) return res.status(400).json({ error: 'Modelo inválido (gpt-5.5 | gpt-5.4 | gpt-5.4-mini | glm-5.2).' });
+    // Lista montada do próprio registro — a mensagem não envelhece quando entra
+    // ou sai um modelo do laboratório.
+    if (!modelInfo) return res.status(400).json({ error: `Modelo inválido (${Object.keys(AVAL_MODELOS).join(' | ')}).` });
     const model = modelInfo.id;
     const provider = modelInfo.provider;
     if (!modelInfo.efforts.includes(effort)) {
@@ -5948,7 +6238,9 @@ async function runComparativeEvaluation(duel) {
   const logA = transcriptFromMessages(duel.challenger.messages, challengerName, duel.character.name);
   const logB = transcriptFromMessages(duel.opponent.messages, opponentName, duel.character.name);
 
-  const provider = providerForModel(DUEL_EVAL_MODEL);
+  // Avaliador da categoria "Duelo" (Administração → Modelos de IA).
+  const spec = evaluatorSpecFor('duelo');
+  const provider = spec.provider;
   const client = getClientForProvider(provider);
 
   if (!client) {
@@ -5968,16 +6260,17 @@ async function runComparativeEvaluation(duel) {
     `[LOG DO ALUNO A — ${challengerName}]\n${logA || '(sem mensagens)'}\n\n---\n\n` +
     `[LOG DO ALUNO B — ${opponentName}]\n${logB || '(sem mensagens)'}`;
 
-  // Avaliador comparativo no GLM 5.2/high (reasoning oculto → Bloco 1 não vaza).
-  // z.ai não tem Batch API — por isso o Duelo saiu do GPT (que teria de ir de batch).
+  // Avaliador comparativo em chat.completions (reasoning oculto → Bloco 1 não
+  // vaza). Sempre SÍNCRONO, qualquer que seja o modelo: o resultado do duelo
+  // aparece na hora, para os dois alunos, então batch está fora de questão aqui.
   const body = buildChatBody({
-    provider, model: DUEL_EVAL_MODEL, effort: DUEL_EVAL_EFFORT, maxTokens: 64000,
+    provider, model: spec.model, effort: spec.effort, maxTokens: 64000,
     messages: buildOpenAIMessages(loadComparativoPrompt(), [{ role: 'user', content: userContent }]),
   });
   const resp = await client.chat.completions.create(body);
   const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
   const text = msg.content || '';
-  logOpenAIUsage('Duel evaluate', DUEL_EVAL_MODEL, resp.usage || null);
+  logOpenAIUsage('Duel evaluate', spec.model, resp.usage || null);
   // Sem saudação: a análise do Duelo é comparativa, escrita para os dois alunos
   // (a saudação em segunda pessoa do singular não cabe aqui).
   const { clean, criteria } = extractSupervisorNotes(text, { greeting: false });
@@ -7033,12 +7326,13 @@ app.get('/api/desafio/state/:characterId', requireAuth, (req, res) => {
 // só então rodamos a avaliação — assim a avaliação demorada não abre janela de
 // race com outro reivindicante. Responde em SSE (mesmo padrão de /api/evaluate
 // e /desafio/desafiar) por causa do timeout de 100s do Cloudflare; cai pra JSON
-// quando não há avaliador (visitante sem toggle, ou GLM indisponível). Avaliador
-// em GLM 5.2/high (buffered) — sem Batch API pro z.ai, e sem fallback pro GPT
-// porque isso reabriria a obrigação de rodar em Batch (ver DESAFIO_EVAL_MODEL).
+// quando não há avaliador (visitante sem toggle, ou o provedor indisponível).
+// Avaliador da categoria "Modo Desafio" (Administração → Modelos de IA), sempre
+// buffered e SÍNCRONO: o resultado sai na hora, então batch está fora daqui.
 app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) => {
   const body = req.body || {};
-  const desafioProvider = providerForModel(DESAFIO_EVAL_MODEL);
+  const desafioSpec = evaluatorSpecFor('desafio');
+  const desafioProvider = desafioSpec.provider;
   const desafioClient = getClientForProvider(desafioProvider);
   const characters = readJSON('freeplay-characters.json');
   const char = characters.find((c) => String(c.id) === String(body.characterId));
@@ -7131,12 +7425,12 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
 
   try {
     const evalBody = buildChatBody({
-      provider: desafioProvider, model: DESAFIO_EVAL_MODEL, effort: DESAFIO_EVAL_EFFORT,
+      provider: desafioProvider, model: desafioSpec.model, effort: desafioSpec.effort,
       maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
     });
     const resp = await desafioClient.chat.completions.create(evalBody);
     const fullText = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-    logOpenAIUsage('Reivindicar (v18.25 opaco)', DESAFIO_EVAL_MODEL, resp.usage || null);
+    logOpenAIUsage('Reivindicar (v18.25 opaco)', desafioSpec.model, resp.usage || null);
     const { clean } = extractSupervisorNotes(fullText);
     clearInterval(heartbeat);
     if (clean) res.write(`data: ${JSON.stringify({ delta: clean })}\n\n`);
@@ -7175,7 +7469,8 @@ app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) =>
 // evento final `data:{done, outcome}` com o resultado.
 app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
   const body = req.body || {};
-  const desafioProvider = providerForModel(DESAFIO_EVAL_MODEL);
+  const desafioSpec = evaluatorSpecFor('desafio');
+  const desafioProvider = desafioSpec.provider;
   const desafioClient = getClientForProvider(desafioProvider);
 
   const characters = readJSON('freeplay-characters.json');
@@ -7241,12 +7536,12 @@ app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
   let fullText = '';
   try {
     const evalBody = buildChatBody({
-      provider: desafioProvider, model: DESAFIO_EVAL_MODEL, effort: DESAFIO_EVAL_EFFORT,
+      provider: desafioProvider, model: desafioSpec.model, effort: desafioSpec.effort,
       maxTokens: 64000, messages: [{ role: 'developer', content: loadTitularDesafiantePrompt() }, { role: 'user', content: userContent }],
     });
     const resp = await desafioClient.chat.completions.create(evalBody);
     fullText = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-    logOpenAIUsage('Desafio (titular-desafiante)', DESAFIO_EVAL_MODEL, resp.usage || null);
+    logOpenAIUsage('Desafio (titular-desafiante)', desafioSpec.model, resp.usage || null);
   } catch (err) {
     clearInterval(heartbeat);
     try { res.write(`data: ${JSON.stringify(falhou(req, err, 'desafio/avaliação'))}\n\n`); } catch {}

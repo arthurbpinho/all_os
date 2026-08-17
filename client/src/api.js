@@ -224,6 +224,12 @@ export const api = {
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
   // context: { type, itemId } — NUNCA mande systemPrompt do cliente
   // (o backend rejeita com 400). maxTokens só é honrado em mode 'entrevistador'.
+  //
+  // context.category (opcional) diz de qual MODO a conversa é — 'competitivo',
+  // 'duelo', 'desafio', 'treinamento' — pra o servidor escolher o modelo do
+  // paciente configurado naquela categoria (Administração → Modelos de IA). É só
+  // uma dica: o servidor valida a categoria, e visitante/neuro ele deriva por
+  // conta própria (role e context.type são fatos, não dica do cliente).
   chat: (messages, context, maxTokens) =>
     request('/chat', { method: 'POST', body: { messages, context, maxTokens } }),
 
@@ -408,6 +414,13 @@ export const api = {
   // adminUpdateSettings: toggle admin-only (ex.: { visitorEvaluationEnabled: true }).
   getSettings: () => request('/settings'),
   adminUpdateSettings: (data) => request('/admin/settings', { method: 'PUT', body: data }),
+
+  // Modelos de IA por categoria (admin-only). getAiModels devolve as opções +
+  // o que cada categoria roda hoje; setAiModel grava UMA categoria por vez
+  // ({ categoria, evaluator?, patient? }) e responde o catálogo já atualizado.
+  // Passar null num campo limpa a escolha e volta ao padrão do sistema.
+  getAiModels: () => request('/admin/ai-models'),
+  setAiModel: (data) => request('/admin/ai-models', { method: 'PUT', body: data }),
 
   // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
   listActiveSessions: () => request('/active-sessions'),
