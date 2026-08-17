@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizeV25 } = require('../server/avaliacao-v25');
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -124,6 +124,88 @@ describe('Avaliação Independente — parsers e pricing', () => {
   });
 });
 
+// As duas variantes do pipeline v25 (com feedback × só nota) saem do MESMO
+// prompt-no-v25-montado.md, por blocos `@variante`. O que estes testes protegem:
+// a seleção não vaza o texto da outra variante, o arquivo sem marcador falha alto
+// (em vez de rodar a variante errada em silêncio) e a só-nota não chama o
+// sintetizador.
+describe('Avaliação Independente — variantes do v25', () => {
+  it('selectVariant mantém só os blocos da variante e exige marcadores', () => {
+    const md = 'topo\n<!-- @variante:com-feedback -->\nCOM\n<!-- /@variante -->\n<!-- @variante:so-nota -->\nSO\n<!-- /@variante -->\nfim';
+    expect(selectVariant(md, 'com-feedback')).toContain('COM');
+    expect(selectVariant(md, 'com-feedback')).not.toContain('SO');
+    expect(selectVariant(md, 'so-nota')).toContain('SO');
+    expect(selectVariant(md, 'so-nota')).not.toContain('COM');
+    // .md antigo (sem marcador) → erro claro, não a variante errada em silêncio.
+    expect(() => selectVariant('sem marcador nenhum', 'so-nota')).toThrow(/@variante/);
+  });
+
+  it('loadAssets: com-feedback pede ANÁLISE/CONFIANÇA; so-nota pede só a NOTA', () => {
+    const comFb = loadAssets('com-feedback');
+    const soNota = loadAssets('so-nota');
+
+    expect(comFb.blockA).toMatch(/ANÁLISE:/);
+    expect(comFb.blockA).toMatch(/CONFIANÇA:/);
+    expect(comFb.blockC).toMatch(/ANÁLISE/);
+
+    expect(soNota.blockA).not.toMatch(/ANÁLISE:/);
+    expect(soNota.blockA).not.toMatch(/CONFIANÇA:/);
+    expect(soNota.blockA).toMatch(/NOTA: <inteiro/);
+
+    // O resto (critérios, slots, sintetizador) é compartilhado.
+    for (const a of [comFb, soNota]) {
+      expect(a.criteria.length).toBe(14);
+      expect(a.blockB).toContain('{{BLOCO_1}}');
+      expect(a.blockB).toContain('{{LOG}}');
+      expect(a.blockC).toContain('{{CRITÉRIO}}');
+    }
+    expect(() => loadAssets('nao-existe')).toThrow(/Variante/);
+  });
+
+  it('registry: v25 e v25-nota são pipeline, com variantes distintas', () => {
+    expect(ai.isValidEvaluator('v25-nota')).toBe(true);
+    expect(ai.isPipeline('v25')).toBe(true);
+    expect(ai.isPipeline('v25-nota')).toBe(true);
+    expect(ai.isPipeline('v18-25')).toBe(false);
+    expect(ai.variantFor('v25')).toBe('com-feedback');
+    expect(ai.variantFor('v25-nota')).toBe('so-nota');
+    expect(ai.variantFor('v16-2')).toBe(null);
+  });
+
+  it('finalizeV25 só-nota: agrega a nota e não chama o sintetizador', async () => {
+    // Nós devolvem só "NOTA: n" → sem análise, o sintetizador é pulado. Se ele
+    // fosse chamado, este cliente falso estouraria.
+    const openai = { chat: { completions: { create: () => { throw new Error('sintetizador não deveria rodar'); } } } };
+    const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({ num: i + 1, text: 'NOTA: 8', usage: null }));
+    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'so-nota', nodeOutputs });
+    expect(r.variant).toBe('so-nota');
+    expect(r.notaFinal).toBe(80); // média 8 → 80/100
+    expect(r.considerados).toBe(14);
+    expect(r.feedbackAluno).toBe(null);
+    expect(r.corpoSintetizador).toBe(null);
+    expect(r.partes.every((p) => p.incluido && p.analise === '')).toBe(true);
+  });
+
+  it('finalizeV25 com feedback: análise dos nós vira corpo do sintetizador', async () => {
+    let userPrompt = '';
+    const openai = {
+      chat: { completions: { create: async (body) => {
+        userPrompt = body.messages[1].content;
+        return { choices: [{ message: { content: 'Corpo do feedback.' } }], usage: null };
+      } } },
+    };
+    const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
+      num: i + 1, text: `ANÁLISE: ok. Fez bem no critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
+    }));
+    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs });
+    expect(r.notaFinal).toBe(80);
+    expect(r.corpoSintetizador).toBe('Corpo do feedback.');
+    expect(r.feedbackAluno).toMatch(/^Nota: 80\/100/);
+    expect(userPrompt).toContain('Fez bem no critério 14.');
+    expect(userPrompt).not.toMatch(/NOTA: 8/); // o sintetizador não vê números
+  });
+});
+
 describe('Avaliação Independente — endpoint', () => {
   beforeEach(() => resetData());
 
@@ -136,6 +218,10 @@ describe('Avaliação Independente — endpoint', () => {
     expect(bad2.status).toBe(400);
     const bad3 = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator: 'v25', model: 'gpt-5.5', effort: 'ultra' });
     expect(bad3.status).toBe(400);
+    // v25-nota (mesmo pipeline, variante só-nota) passa pela validação de
+    // avaliador — o 400 que sobra é o do caso de teste sem Bloco 1.
+    const soNota = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator: 'v25-nota', model: 'gpt-5.5', effort: 'medium' });
+    expect(soNota.body.error).toMatch(/Bloco 1/i);
   });
 
   // GPT 5.6 Sol: entrou só neste laboratório, com dois degraus de reasoning acima

@@ -13,6 +13,14 @@
 //      números, sem Bloco 1) e devolve o corpo do feedback do aluno.
 //   4) Montagem final (código): cola "Nota: X/100" + saudação fixa + corpo.
 //
+// Duas VARIANTES do nó (ver V25_VARIANTS), escolhidas no alternador da tela:
+//   com-feedback → o nó devolve ANÁLISE + NOTA + CONFIANÇA (pipeline completo,
+//                  com sintetizador e feedback do aluno);
+//   so-nota      → o nó devolve só a NOTA (sem análise, o passo 3 é pulado e não
+//                  há feedback do aluno; nota final e partes saem iguais). Roda
+//                  mais barato — some o texto por critério do billing.
+// As duas moram no MESMO prompt-no-v25-montado.md, em blocos `@variante`.
+//
 // Prompt caching: a OpenAI cacheia o maior prefixo comum automaticamente
 // (>~1024 tokens, sem marcação manual). Por isso o bloco estático + o caso vão
 // na mensagem `developer` (o prefixo), e só o critério/as análises na `user` (o
@@ -128,15 +136,47 @@ const SAUDACAO_FIXA = `Trate este feedback como pré-correção, um ponto de par
 
 Eu só tenho acesso ao que você escreveu, não ao que você pensou. Quando o raciocínio por trás de uma fala importar, descreva-o no botão de estrela. Isso me ajuda a separar uma decisão clínica consciente de um erro por falta de percepção.`;
 
-let _assets = null;
+// Variantes de saída do NÓ, marcadas no próprio prompt-no-v25-montado.md com
+// blocos `<!-- @variante:X -->…<!-- /@variante -->`:
+//   com-feedback → ANÁLISE + NOTA + CONFIANÇA (o pipeline inteiro: agregador +
+//                  sintetizador + feedback do aluno);
+//   so-nota      → só a NOTA (sem análise ⇒ sem sintetizador ⇒ sem feedback do
+//                  aluno; nota final e partes seguem iguais). Mais barato: o
+//                  texto por critério some do billing, o reasoning fica.
+// O resto do prompt é compartilhado — editar fora dos blocos muda as duas.
+const V25_VARIANTS = ['com-feedback', 'so-nota'];
+const V25_DEFAULT_VARIANT = 'com-feedback';
+
+function isValidVariant(v) {
+  return V25_VARIANTS.includes(v);
+}
+
+// Mantém os blocos da variante escolhida e apaga os das outras. Se o arquivo não
+// tiver marcador nenhum (versão antiga do .md, ainda no volume de produção),
+// falha em vez de rodar silenciosamente a variante errada.
+function selectVariant(text, variant) {
+  const re = /[ \t]*<!--\s*@variante:([a-z0-9-]+)\s*-->\r?\n?([\s\S]*?)[ \t]*<!--\s*\/@variante\s*-->\r?\n?/g;
+  let found = false;
+  const out = String(text).replace(re, (_m, v, inner) => {
+    found = true;
+    return v === variant ? inner : '';
+  });
+  if (!found) {
+    throw new Error(`prompt-no-v25-montado.md sem os blocos <!-- @variante:… --> (variante "${variant}"). Atualize o .md pelo painel de prompts (Administração → Prompts).`);
+  }
+  return out;
+}
+
+const _assetsByVariant = new Map();
 
 // Lê e fatia o prompt montado nos três blocos (A estático, B do caso, C do nó),
 // usando os comentários de CACHE BREAKPOINT como divisores, e parseia os 14
-// critérios. Memoizado.
-function loadAssets() {
-  if (_assets) return _assets;
+// critérios. Memoizado por variante.
+function loadAssets(variant = V25_DEFAULT_VARIANT) {
+  if (!isValidVariant(variant)) throw new Error('Variante v25 inválida: ' + variant);
+  if (_assetsByVariant.has(variant)) return _assetsByVariant.get(variant);
 
-  const montado = fs.readFileSync(path.join(DIR, 'prompt-no-v25-montado.md'), 'utf8');
+  const montado = selectVariant(fs.readFileSync(path.join(DIR, 'prompt-no-v25-montado.md'), 'utf8'), variant);
   const criteriosRaw = fs.readFileSync(path.join(DIR, 'criterios-no-v25.md'), 'utf8');
 
   const start = montado.indexOf('## [METACOMANDO]');
@@ -176,8 +216,9 @@ function loadAssets() {
     if (!synthVariable.includes(slot)) throw new Error(`Sintetizador v25 não contém o slot ${slot}.`);
   }
 
-  _assets = { blockA, blockB, blockC, criteria, synthStatic, synthVariable };
-  return _assets;
+  const assets = { variant, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
+  _assetsByVariant.set(variant, assets);
+  return assets;
 }
 
 // Extrai, de criterios-no-v25.md: a descrição completa de cada critério (o bloco
@@ -408,8 +449,8 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
 // os outros 13 em paralelo — assim o prefixo A+B (com o log) é cobrado cheio uma
 // vez e lido barato pelos demais. O sintetizador roda por último.
-async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai' }) {
-  const assets = loadAssets();
+async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT }) {
+  const assets = loadAssets(variant);
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
 
@@ -449,15 +490,15 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
 
   const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, false);
 
-  return { evaluator: 'v25', notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+  return { evaluator: 'v25', variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
 }
 
 // --- Suporte a BATCH API (14 nós num lote; sintetizador roda síncrono no coletor) ---
 
 // Corpos /v1/chat/completions dos 14 nós (mesmo developer cacheável + user do
 // critério). O caller monta o custom_id (ex.: `${jobId}::${num}`) e o JSONL.
-function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai' }) {
-  const assets = loadAssets();
+function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT }) {
+  const assets = loadAssets(variant);
   const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
   return assets.criteria.map((criterio) => ({
     num: criterio.num,
@@ -476,8 +517,8 @@ function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFF
 
 // Finaliza a partir das saídas dos nós do batch. `nodeOutputs` = [{ num, text, usage }].
 // Roda o agregador, o sintetizador (síncrono, 1 chamada) e a instrumentação.
-async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', nodeOutputs, batch = false }) {
-  const assets = loadAssets();
+async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT, nodeOutputs, batch = false }) {
+  const assets = loadAssets(variant);
   const weights = assets.criteria.map(() => 1);
   const byNum = new Map((nodeOutputs || []).map((o) => [o.num, o]));
   const results = assets.criteria
@@ -506,12 +547,16 @@ async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT
   }
 
   const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);
-  return { evaluator: 'v25', notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+  return { evaluator: 'v25', variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
 }
 
 module.exports = {
   runAvaliacaoIndependente,
   buildChatBody,
+  V25_VARIANTS,
+  V25_DEFAULT_VARIANT,
+  isValidVariant,
+  selectVariant,
   // Batch API (Avaliação Independente):
   buildV25NodeRequests,
   finalizeV25,
