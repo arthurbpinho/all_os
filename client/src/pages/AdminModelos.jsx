@@ -2,11 +2,13 @@ import { useState, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 
-// Administração → Modelos de IA. Duas coisas nesta tela:
+// Administração → Modelos de IA. Três coisas nesta tela:
 //   1. o toggle "Avaliação para visitantes" (veio da aba Contas, onde não tinha
 //      muito a ver com gestão de usuários);
-//   2. por CATEGORIA do app, qual IA avalia a sessão e qual interpreta o
-//      paciente simulado.
+//   2. o PADRÃO GLOBAL — avaliador e paciente de todas as categorias de uma vez,
+//      pra não ter de configurar uma por uma;
+//   3. por CATEGORIA do app, qual IA avalia a sessão e qual interpreta o
+//      paciente simulado (a escolha da categoria vence o padrão global).
 //
 // A Trilha NÃO aparece aqui de propósito: lá a escolha é por exercício, no
 // editor de Exercícios da Trilha. Duplicar aqui criaria duas fontes de verdade
@@ -35,7 +37,7 @@ function Chip({ children, tone = 'neutro', title }) {
 // Uma linha de escolha (avaliador ou paciente) dentro do cartão da categoria.
 // `spec` é o que o servidor diz que está rodando agora — inclusive quando não há
 // escolha salva (aí fonte === 'padrão' e mostramos o modelo real, com effort).
-function EscolhaModelo({ titulo, ajuda, spec, opcoes, valor, onChange, salvando }) {
+function EscolhaModelo({ titulo, ajuda, spec, opcoes, valor, onChange, salvando, padraoLabel = 'Padrão do sistema' }) {
   return (
     <div style={{ minWidth: 260, flex: '1 1 280px' }}>
       <label style={{ fontSize: 13, fontWeight: 600, margin: 0, display: 'block', marginBottom: 4 }}>
@@ -49,9 +51,10 @@ function EscolhaModelo({ titulo, ajuda, spec, opcoes, valor, onChange, salvando 
           style={{ width: 'auto', fontSize: 13, minWidth: 190 }}
         >
           {/* Sempre presente, pra dar caminho de volta: escolher isto limpa a
-              escolha e devolve a categoria ao padrão do sistema (que pode ter
-              effort diferente dos presets, como o neuro em 'low'). */}
-          <option value="">Padrão do sistema</option>
+              escolha da categoria e a devolve ao padrão vigente — o global, se
+              houver, senão o do sistema (que pode ter effort diferente dos
+              presets, como o neuro em 'low'). */}
+          <option value="">{padraoLabel}</option>
           {opcoes.map((o) => (
             <option key={o.key} value={o.key}>{o.label}</option>
           ))}
@@ -64,6 +67,7 @@ function EscolhaModelo({ titulo, ajuda, spec, opcoes, valor, onChange, salvando 
           Rodando agora: <code style={{ fontSize: 11.5 }}>{spec.model}</code>
           {spec.effort ? <> · effort <code style={{ fontSize: 11.5 }}>{spec.effort}</code></> : null}
           {spec.fonte === 'padrao' && <> · <span style={{ fontStyle: 'italic' }}>padrão do sistema</span></>}
+          {spec.fonte === 'global' && <> · <span style={{ fontStyle: 'italic' }}>padrão global</span></>}
         </div>
       </div>
     </div>
@@ -128,6 +132,24 @@ export default function AdminModelos() {
     }
   }
 
+  // Padrão global: mesma rota, escopo global. Vale para toda categoria que não
+  // tenha escolha própria — trocar aqui troca o app inteiro de uma vez (menos a
+  // Trilha, que tem controle por exercício).
+  async function salvarGlobal(campo, valor) {
+    const chave = `global:${campo}`;
+    setSalvando(chave);
+    setError('');
+    try {
+      const payload = { global: true };
+      payload[campo === 'avaliador' ? 'evaluator' : 'patient'] = valor === '' ? null : valor;
+      setCatalogo(await api.setAiModelGlobal(payload));
+    } catch (err) {
+      setError(err.message || 'Erro ao salvar o padrão global.');
+    } finally {
+      setSalvando('');
+    }
+  }
+
   if (loading) return <div className="card">Carregando…</div>;
 
   return (
@@ -170,6 +192,60 @@ export default function AdminModelos() {
         </button>
       </div>
 
+      {/* Padrão global: troca todas as categorias de uma vez. Fica antes da
+          lista porque é o controle mais grosso — quem quiser afinar desce. */}
+      {catalogo && (
+        <div className="card" style={{ marginBottom: 16, borderColor: 'var(--marrs)' }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Padrão do sistema (todas as categorias)</div>
+          <p style={{ margin: '0 0 12px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+            Vale para <strong>toda categoria que não tenha escolha própria</strong> — assim dá pra trocar o app
+            inteiro de uma vez, sem passar de uma em uma. Uma categoria configurada abaixo continua com o modelo
+            dela; para devolvê-la a este padrão, escolha "Seguir o padrão" no seletor dela. A Trilha fica de fora
+            (escolha por exercício).
+          </p>
+          <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 260, flex: '1 1 280px' }}>
+              <label style={{ fontSize: 13, fontWeight: 600, margin: 0, display: 'block', marginBottom: 4 }}>Avaliador</label>
+              <select
+                value={catalogo.padraoGlobal.evaluator}
+                onChange={(e) => salvarGlobal('avaliador', e.target.value)}
+                disabled={salvando === 'global:avaliador'}
+                style={{ width: 'auto', fontSize: 13, minWidth: 190 }}
+              >
+                <option value="">Padrão de cada modo (env/código)</option>
+                {catalogo.avaliadorOpcoes.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+              </select>
+              {salvando === 'global:avaliador' && <span style={{ fontSize: 12, color: 'var(--ink-soft)', marginLeft: 8 }}>Salvando…</span>}
+            </div>
+            <div style={{ minWidth: 260, flex: '1 1 280px' }}>
+              <label style={{ fontSize: 13, fontWeight: 600, margin: 0, display: 'block', marginBottom: 4 }}>Paciente simulado</label>
+              <select
+                value={catalogo.padraoGlobal.patient}
+                onChange={(e) => salvarGlobal('paciente', e.target.value)}
+                disabled={salvando === 'global:paciente'}
+                style={{ width: 'auto', fontSize: 13, minWidth: 190 }}
+              >
+                <option value="">Padrão de cada modo (env/código)</option>
+                {catalogo.pacienteOpcoes.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+              </select>
+              {salvando === 'global:paciente' && <span style={{ fontSize: 12, color: 'var(--ink-soft)', marginLeft: 8 }}>Salvando…</span>}
+            </div>
+          </div>
+          <div style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginTop: 10, lineHeight: 1.5 }}>
+            Seguindo este padrão agora:{' '}
+            <strong>
+              {catalogo.categorias.filter((c) => c.avaliador.fonte !== 'admin').length} de {catalogo.categorias.length}
+            </strong>{' '}
+            categorias no avaliador ·{' '}
+            <strong>
+              {catalogo.categorias.filter((c) => c.temPaciente && c.paciente.fonte !== 'admin').length} de{' '}
+              {catalogo.categorias.filter((c) => c.temPaciente).length}
+            </strong>{' '}
+            no paciente.
+          </div>
+        </div>
+      )}
+
       {catalogo && catalogo.categorias.map((cat) => (
         <div className="card" key={cat.key} style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
@@ -202,6 +278,9 @@ export default function AdminModelos() {
               valor={cat.avaliador.fonte === 'admin' ? cat.avaliador.preset : ''}
               onChange={(v) => salvar(cat.key, 'avaliador', v)}
               salvando={salvando === `${cat.key}:avaliador`}
+              padraoLabel={catalogo.padraoGlobal.evaluatorLabel
+                ? `Seguir o padrão (${catalogo.padraoGlobal.evaluatorLabel})`
+                : 'Seguir o padrão do sistema'}
             />
             {cat.temPaciente && (
               <EscolhaModelo
@@ -212,6 +291,9 @@ export default function AdminModelos() {
                 valor={cat.paciente.fonte === 'admin' ? cat.paciente.preset : ''}
                 onChange={(v) => salvar(cat.key, 'paciente', v)}
                 salvando={salvando === `${cat.key}:paciente`}
+                padraoLabel={catalogo.padraoGlobal.patientLabel
+                  ? `Seguir o padrão (${catalogo.padraoGlobal.patientLabel})`
+                  : 'Seguir o padrão do sistema'}
               />
             )}
           </div>

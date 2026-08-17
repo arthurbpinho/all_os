@@ -28,13 +28,20 @@
 // UX (quem finaliza já vê só o agradecimento; a nota entra no log quando
 // chegar), só que mais rápido e sem o desconto.
 const EVALUATOR_PRESETS = {
+  // Família 5.6 (ago/2026): Sol é o topo (mesmo preço do 5.5) e Luna é o tier
+  // barato — 25× abaixo do Sol por token. Ambos em high pelo mesmo motivo dos
+  // outros: avaliar é a parte densa.
+  'gpt-5.6-sol': {
+    label: 'GPT 5.6 Sol high',
+    model: 'gpt-5.6-sol', provider: 'openai', effort: 'high', batch: true,
+  },
+  'gpt-5.6-luna': {
+    label: 'GPT 5.6 Luna high',
+    model: 'gpt-5.6-luna', provider: 'openai', effort: 'high', batch: true,
+  },
   'gpt-5.5': {
     label: 'GPT 5.5 high',
     model: 'gpt-5.5-2026-04-23', provider: 'openai', effort: 'high', batch: true,
-  },
-  'gpt-5.4': {
-    label: 'GPT 5.4 high',
-    model: 'gpt-5.4-2026-03-05', provider: 'openai', effort: 'high', batch: true,
   },
   'glm-5.2': {
     label: 'GLM 5.2 high',
@@ -53,6 +60,19 @@ const EVALUATOR_PRESETS = {
 //               esse é o único preset de paciente COM raciocínio: mais nuançado,
 //               porém mais lento e com o reasoning cobrado como saída.
 const PATIENT_PRESETS = {
+  // Sol e Luna entram COM raciocínio (high), a pedido do dono — são, junto do
+  // GLM, as únicas opções de paciente que pensam antes de falar. Custam mais
+  // tempo de turno; a comparação de naturalidade é o ponto.
+  'gpt-5.6-sol': {
+    label: 'GPT 5.6 Sol high',
+    model: 'gpt-5.6-sol', provider: 'openai', effort: 'high',
+    nota: 'paciente com raciocínio — turno mais lento',
+  },
+  'gpt-5.6-luna': {
+    label: 'GPT 5.6 Luna high',
+    model: 'gpt-5.6-luna', provider: 'openai', effort: 'high',
+    nota: 'paciente com raciocínio, no tier mais barato da tabela',
+  },
   'gpt-5.4-mini': {
     label: 'GPT 5.4 mini',
     model: 'gpt-5.4-mini-2026-03-17', provider: 'openai', effort: 'none',
@@ -178,6 +198,37 @@ function readCategoryChoices(settings) {
   return out;
 }
 
+// PADRÃO GLOBAL (settings.aiModelsGlobal): uma escolha que vale para TODAS as
+// categorias de uma vez, para o dono não ter de trocar oito categorias à mão
+// quando quer experimentar um modelo novo no app inteiro. Precedência:
+//   escolha da categoria  >  padrão global  >  padrão do sistema (env/código)
+// Ou seja, o global não atropela quem tem escolha própria — e limpar a escolha
+// de uma categoria a devolve ao global, não direto ao padrão do sistema.
+// A Trilha continua fora (escolha por exercício), como o resto desta tela.
+function readGlobalChoice(settings) {
+  const raw = (settings && settings.aiModelsGlobal) || {};
+  const out = {};
+  if (isEvaluatorPreset(raw.evaluator)) out.evaluator = raw.evaluator;
+  if (isPatientPreset(raw.patient)) out.patient = raw.patient;
+  return out;
+}
+
+// Grava/limpa o padrão global. `null`/'' limpa aquele campo.
+function applyGlobalChoice(settings, { evaluator, patient } = {}) {
+  const atual = readGlobalChoice(settings);
+  if (evaluator !== undefined) {
+    if (evaluator === null || evaluator === '') delete atual.evaluator;
+    else if (!isEvaluatorPreset(evaluator)) return { ok: false, error: 'Modelo de avaliador inválido.' };
+    else atual.evaluator = evaluator;
+  }
+  if (patient !== undefined) {
+    if (patient === null || patient === '') delete atual.patient;
+    else if (!isPatientPreset(patient)) return { ok: false, error: 'Modelo de paciente inválido.' };
+    else atual.patient = patient;
+  }
+  return { ok: true, aiModelsGlobal: atual };
+}
+
 // Aplica uma escolha do admin sobre o mapa atual, devolvendo o mapa novo.
 // `null`/'' em qualquer campo LIMPA a escolha (volta ao padrão do sistema).
 function applyCategoryChoice(settings, categoria, { evaluator, patient } = {}) {
@@ -203,20 +254,24 @@ function applyCategoryChoice(settings, categoria, { evaluator, patient } = {}) {
   return { ok: true, aiModels: atual };
 }
 
-// Resolve o spec que vai rodar. `fallback` é o padrão do sistema (as consts de
-// env/código de sempre) e é o que vale quando o admin não escolheu nada — assim
-// ligar esta tela não muda comportamento nenhum até alguém mexer.
+// Resolve o spec que vai rodar, na ordem: escolha da categoria → padrão global
+// → `fallback` (as consts de env/código de sempre). O fallback é o que vale
+// quando ninguém escolheu nada — assim ligar esta tela não muda comportamento
+// nenhum até alguém mexer.
 //
 // Devolve, além do spec: `preset` (chave do preset equivalente, pra UI casar o
-// select) e `fonte` ('admin' | 'padrao' — sem acento: o front compara com a
-// string crua, então nada de caractere que dependa de encoding no caminho).
-function resolveSpec({ presets, choice, fallback, batchCapable }) {
-  if (choice && Object.prototype.hasOwnProperty.call(presets, choice)) {
-    const p = presets[choice];
+// select) e `fonte` ('admin' | 'global' | 'padrao' — sem acento: o front compara
+// com a string crua, então nada de caractere que dependa de encoding no caminho).
+function resolveSpec({ presets, choice, global, fallback, batchCapable }) {
+  const escolhido = [[choice, 'admin'], [global, 'global']]
+    .find(([k]) => k && Object.prototype.hasOwnProperty.call(presets, k));
+  if (escolhido) {
+    const [key, fonte] = escolhido;
+    const p = presets[key];
     return {
-      preset: choice, label: p.label, model: p.model, provider: p.provider, effort: p.effort,
+      preset: key, label: p.label, model: p.model, provider: p.provider, effort: p.effort,
       batch: !!batchCapable && p.batch === true,
-      fonte: 'admin',
+      fonte,
     };
   }
   // Sem escolha: usa o fallback como está. O preset "equivalente" é só rótulo
@@ -239,6 +294,7 @@ function resolveEvaluator(categoria, settings, fallback) {
   return resolveSpec({
     presets: EVALUATOR_PRESETS,
     choice: choices[cat.key] && choices[cat.key].evaluator,
+    global: readGlobalChoice(settings).evaluator,
     fallback,
     batchCapable: cat.batchCapable,
   });
@@ -253,6 +309,7 @@ function resolvePatient(categoria, settings, fallback) {
   return resolveSpec({
     presets: PATIENT_PRESETS,
     choice: choices[cat.key] && choices[cat.key].patient,
+    global: readGlobalChoice(settings).patient,
     fallback,
     batchCapable: false,
   });
@@ -261,7 +318,16 @@ function resolvePatient(categoria, settings, fallback) {
 // Catálogo pra tela do admin: as opções + o que cada categoria está rodando
 // AGORA (spec efetivo, já com o padrão aplicado quando não há escolha).
 function catalogo({ settings, fallbacks }) {
+  const global = readGlobalChoice(settings);
   return {
+    // Padrão global: as chaves escolhidas (ou '' quando não há) + o rótulo, pra
+    // a tela mostrar "seguindo o padrão global (X)" nas categorias sem escolha.
+    padraoGlobal: {
+      evaluator: global.evaluator || '',
+      patient: global.patient || '',
+      evaluatorLabel: global.evaluator ? EVALUATOR_PRESETS[global.evaluator].label : '',
+      patientLabel: global.patient ? PATIENT_PRESETS[global.patient].label : '',
+    },
     avaliadorOpcoes: Object.entries(EVALUATOR_PRESETS).map(([key, p]) => ({
       key, label: p.label, provider: p.provider, effort: p.effort, batch: p.batch, nota: p.nota || '',
     })),
@@ -291,6 +357,8 @@ module.exports = {
   isPatientPreset,
   readCategoryChoices,
   applyCategoryChoice,
+  readGlobalChoice,
+  applyGlobalChoice,
   resolveEvaluator,
   resolvePatient,
   catalogo,
