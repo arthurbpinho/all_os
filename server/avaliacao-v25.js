@@ -167,17 +167,13 @@ function selectVariant(text, variant) {
   return out;
 }
 
-const _assetsByVariant = new Map();
-
-// Lê e fatia o prompt montado nos três blocos (A estático, B do caso, C do nó),
-// usando os comentários de CACHE BREAKPOINT como divisores, e parseia os 14
-// critérios. Memoizado por variante.
-function loadAssets(variant = V25_DEFAULT_VARIANT) {
+// Fatia o prompt do nó nos três blocos (A estático, B do caso, C do nó), pelos
+// comentários de CACHE BREAKPOINT, já com a variante escolhida aplicada. PURO
+// (recebe o texto, não lê disco) para o editor de prompts poder validar um
+// rascunho com exatamente o mesmo parser que a produção usa.
+function parseMontado(raw, variant = V25_DEFAULT_VARIANT) {
   if (!isValidVariant(variant)) throw new Error('Variante v25 inválida: ' + variant);
-  if (_assetsByVariant.has(variant)) return _assetsByVariant.get(variant);
-
-  const montado = selectVariant(fs.readFileSync(path.join(DIR, 'prompt-no-v25-montado.md'), 'utf8'), variant);
-  const criteriosRaw = fs.readFileSync(path.join(DIR, 'criterios-no-v25.md'), 'utf8');
+  const montado = selectVariant(raw, variant);
 
   const start = montado.indexOf('## [METACOMANDO]');
   const bpA = montado.indexOf('<!-- ===== CACHE BREAKPOINT A');
@@ -195,15 +191,13 @@ function loadAssets(variant = V25_DEFAULT_VARIANT) {
   for (const [name, blk, slot] of [['B', blockB, '{{BLOCO_1}}'], ['B', blockB, '{{LOG}}'], ['C', blockC, '{{CRITÉRIO}}']]) {
     if (!blk.includes(slot)) throw new Error(`Bloco ${name} do prompt v25 não contém o slot ${slot}.`);
   }
+  return { blockA, blockB, blockC };
+}
 
-  const criteria = parseCriteria(criteriosRaw);
-  if (criteria.length !== 14) {
-    throw new Error(`Esperava 14 critérios em criterios-no-v25.md, encontrei ${criteria.length}.`);
-  }
-
-  // Sintetizador: bloco estático (do METACOMANDO até o breakpoint) vira o
-  // `developer` cacheável; o resto ({{LOG}} + {{ANALISES}} + tarefa) vira `user`.
-  const sint = fs.readFileSync(path.join(DIR, 'sintetizador-v25.md'), 'utf8');
+// Sintetizador: bloco estático (do METACOMANDO até o breakpoint) vira o
+// `developer` cacheável; o resto ({{LOG}} + {{ANALISES}} + tarefa) vira `user`.
+// Puro, pelo mesmo motivo do parseMontado.
+function parseSintetizador(sint) {
   const sStart = sint.indexOf('## [METACOMANDO]');
   const sBp = sint.indexOf('<!-- CACHE BREAKPOINT');
   if (sStart === -1 || sBp === -1) {
@@ -215,6 +209,32 @@ function loadAssets(variant = V25_DEFAULT_VARIANT) {
   for (const slot of ['{{LOG}}', '{{ANALISES}}']) {
     if (!synthVariable.includes(slot)) throw new Error(`Sintetizador v25 não contém o slot ${slot}.`);
   }
+  return { synthStatic, synthVariable };
+}
+
+const _assetsByVariant = new Map();
+
+// Esquece os prompts memoizados. Chamado quando um .md do v25 é salvo ou
+// restaurado pelo editor de prompts — sem isto o servidor seguiria servindo a
+// versão antiga até o próximo restart.
+function clearAssetsCache() {
+  _assetsByVariant.clear();
+}
+
+// Lê os .md do volume e devolve os blocos + os 14 critérios. Memoizado por
+// variante (invalidado por clearAssetsCache).
+function loadAssets(variant = V25_DEFAULT_VARIANT) {
+  if (!isValidVariant(variant)) throw new Error('Variante v25 inválida: ' + variant);
+  if (_assetsByVariant.has(variant)) return _assetsByVariant.get(variant);
+
+  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(DIR, 'prompt-no-v25-montado.md'), 'utf8'), variant);
+
+  const criteria = parseCriteria(fs.readFileSync(path.join(DIR, 'criterios-no-v25.md'), 'utf8'));
+  if (criteria.length !== 14) {
+    throw new Error(`Esperava 14 critérios em criterios-no-v25.md, encontrei ${criteria.length}.`);
+  }
+
+  const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(DIR, 'sintetizador-v25.md'), 'utf8'));
 
   const assets = { variant, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
   _assetsByVariant.set(variant, assets);
@@ -260,6 +280,68 @@ function fill(str, slot, value) {
 // Concorrência do fan-out dos nós no GLM (z.ai). Conta nova tem rate limit
 // apertado; 14 requisições de uma vez estouram 429. Roda em lotes pequenos.
 const GLM_V25_CONCURRENCY = Number(process.env.GLM_V25_CONCURRENCY || 3);
+// Concorrência do fan-out no GPT (OpenAI). O limite que estoura primeiro NÃO é
+// requisições por minuto, é TOKENS por minuto: o contador de TPM da OpenAI
+// RESERVA o max_completion_tokens de cada chamada, então cada nó pesa
+// ~input + 16k ≈ 20k tokens. Num tier de 200k TPM cabem ~10 nós por minuto —
+// os 13 do fan-out de uma vez pedem ~270k e tomam 429 na cara ("Limit 200000,
+// Used 200000"). Em lotes de 4 a run inteira fica dentro do teto. Não custa
+// tempo de parede proporcional: o gargalo já era o rate limit, não o paralelismo
+// (e a run é um job em background, sem timeout de HTTP para respeitar).
+const OPENAI_V25_CONCURRENCY = Number(process.env.AVALIACAO_V25_CONCURRENCY || 4);
+
+// Retentativas por chamada, acima das do SDK. O SDK da OpenAI retenta 429/5xx só
+// 2× com backoff de ~0,5s/1s — curto demais quando o Retry-After é de segundos
+// (o TPM só libera na virada da janela de 1 minuto). Aqui esperamos o que o
+// provedor pedir, com backoff exponencial como piso.
+const V25_MAX_RETRIES = Number(process.env.AVALIACAO_V25_MAX_RETRIES || 6);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 429 (rate limit), 5xx e quedas de conexão valem retentar; 4xx de request
+// inválido (400/401/404) não — retentar não conserta e só atrasa o erro.
+function isRetryableAIError(err) {
+  const status = err && (err.status || err.statusCode);
+  if (status === 429 || status === 408 || (status >= 500 && status < 600)) return true;
+  if (status) return false;
+  const code = String((err && (err.code || (err.cause && err.cause.code))) || '');
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN'].includes(code)
+    || (err && err.name === 'APIConnectionError')
+    || (err && err.name === 'APIConnectionTimeoutError');
+}
+
+// Quanto esperar: Retry-After do provedor quando existe (header ou o "try again
+// in 6.116s" da mensagem), senão backoff exponencial 2s→30s. Sempre com jitter,
+// senão os nós do lote acordam todos juntos e estouram o limite de novo.
+function retryDelayMs(err, attempt) {
+  const h = (err && err.headers) || {};
+  const get = (k) => (typeof h.get === 'function' ? h.get(k) : h[k]);
+  const afterMs = Number(get('retry-after-ms'));
+  const afterS = Number(get('retry-after'));
+  let base = null;
+  if (Number.isFinite(afterMs) && afterMs > 0) base = afterMs;
+  else if (Number.isFinite(afterS) && afterS > 0) base = afterS * 1000;
+  else {
+    const m = String((err && err.message) || '').match(/try again in ([\d.]+)\s*(ms|s)\b/i);
+    if (m) base = Number(m[1]) * (m[2].toLowerCase() === 'ms' ? 1 : 1000);
+  }
+  if (base == null) base = Math.min(30000, 2000 * Math.pow(2, attempt));
+  return Math.min(60000, Math.round(base * 1.25) + Math.floor(Math.random() * 1000));
+}
+
+// Executa `fn` retentando erros transitórios. `rotulo` só aparece no log.
+async function withRetry(rotulo, fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (attempt >= V25_MAX_RETRIES || !isRetryableAIError(e)) throw e;
+      const wait = retryDelayMs(e, attempt);
+      console.warn(`[v25-retry] ${rotulo}: ${e.status || e.code || e.name} — nova tentativa em ${Math.round(wait / 100) / 10}s (${attempt + 1}/${V25_MAX_RETRIES})`);
+      await sleep(wait);
+    }
+  }
+}
 
 // Map com concorrência limitada (mantém a ordem no array de saída).
 async function mapLimit(items, limit, fn) {
@@ -278,8 +360,8 @@ async function mapLimit(items, limit, fn) {
 // Chamada não-streaming ao GPT (reasoning model). `developer` = prefixo
 // estático/do-caso (cacheado automaticamente pela OpenAI); `user` = a parte que
 // varia. Sem cache_control manual — não existe na OpenAI.
-async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
-  const resp = await openai.chat.completions.create(buildChatBody({
+async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', rotulo = 'chamada') {
+  const resp = await withRetry(rotulo, () => openai.chat.completions.create(buildChatBody({
     provider,
     model,
     maxTokens,
@@ -288,7 +370,7 @@ async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL
       { role: 'developer', content: developer },
       { role: 'user', content: user },
     ],
-  }));
+  })));
   return { text: resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content || '' : '', usage: resp.usage || null };
 }
 
@@ -317,7 +399,7 @@ async function runNode(openai, assets, bloco1, log, criterio, model = V25_MODEL,
   // (logo, cacheado). user = C com o critério → o que varia por nó.
   const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const { text, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider);
+  const { text, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`);
   const parsed = parseNodeOutput(text);
   return {
     num: criterio.num,
@@ -360,7 +442,7 @@ function buildAnalises(results) {
 // avaliações); user = log + análises. Devolve só o corpo (sem nota, sem saudação).
 async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   const user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
-  const { text, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider);
+  const { text, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider, 'sintetizador');
   return { corpo: (text || '').trim(), usage };
 }
 
@@ -447,17 +529,19 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
 
 // Executa o pipeline completo: 14 nós → agregador → sintetizador → montagem.
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
-// os outros 13 em paralelo — assim o prefixo A+B (com o log) é cobrado cheio uma
-// vez e lido barato pelos demais. O sintetizador roda por último.
+// os outros 13 em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) —
+// assim o prefixo A+B (com o log) é cobrado cheio uma vez e lido barato pelos
+// demais. O sintetizador roda por último.
 async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT }) {
   const assets = loadAssets(variant);
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
 
   const first = await runNode(openai, assets, bloco1, log, criteria[0], model, effort, provider);
-  // GLM (z.ai) tem rate limit apertado em conta nova → limita a concorrência do
-  // fan-out; OpenAI aguenta os 13 restantes de uma vez.
-  const conc = provider === 'glm' ? GLM_V25_CONCURRENCY : criteria.length;
+  // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
+  // nova, e na OpenAI os 13 de uma vez estouram o TPM (cada nó reserva ~20k
+  // tokens; ver OPENAI_V25_CONCURRENCY).
+  const conc = provider === 'glm' ? GLM_V25_CONCURRENCY : OPENAI_V25_CONCURRENCY;
   const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, bloco1, log, c, model, effort, provider));
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
@@ -560,6 +644,10 @@ module.exports = {
   // Batch API (Avaliação Independente):
   buildV25NodeRequests,
   finalizeV25,
+  // usados pelo editor de prompts (validação com o parser da produção):
+  parseMontado,
+  parseSintetizador,
+  clearAssetsCache,
   // exportados para teste:
   loadAssets,
   parseCriteria,
@@ -569,4 +657,6 @@ module.exports = {
   montarFeedback,
   buildInstrumentacao,
   resolvePrices,
+  isRetryableAIError,
+  retryDelayMs,
 };

@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizeV25 } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizeV25, isRetryableAIError, retryDelayMs } = require('../server/avaliacao-v25');
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -203,6 +203,75 @@ describe('Avaliação Independente — variantes do v25', () => {
     expect(r.feedbackAluno).toMatch(/^Nota: 80\/100/);
     expect(userPrompt).toContain('Fez bem no critério 14.');
     expect(userPrompt).not.toMatch(/NOTA: 8/); // o sintetizador não vê números
+  });
+});
+
+// Rate limit (429) do v25. O contador de TPM da OpenAI reserva o
+// max_completion_tokens de cada chamada (~20k por nó), então o fan-out estoura o
+// teto da organização e volta 429 com "try again in Xs". O que estes testes
+// protegem: o 429 é retentado (não vira erro do job), a espera respeita o que o
+// provedor pede e request inválido (400) NÃO é retentado.
+describe('Avaliação Independente — retry de rate limit (v25)', () => {
+  it('classifica o que vale retentar', () => {
+    expect(isRetryableAIError({ status: 429 })).toBe(true);
+    expect(isRetryableAIError({ status: 503 })).toBe(true);
+    expect(isRetryableAIError({ code: 'ECONNRESET' })).toBe(true);
+    expect(isRetryableAIError({ status: 400 })).toBe(false);
+    expect(isRetryableAIError({ status: 401 })).toBe(false);
+  });
+
+  it('espera o Retry-After do provedor (header ou mensagem), com teto de 60s', () => {
+    // header em segundos
+    expect(retryDelayMs({ status: 429, headers: { 'retry-after': '6' } }, 0)).toBeGreaterThanOrEqual(7500);
+    // header em ms vence o em segundos
+    expect(retryDelayMs({ status: 429, headers: { 'retry-after-ms': '2000' } }, 0)).toBeLessThan(4000);
+    // sem header: lê o "try again in 6.116s" da mensagem da OpenAI
+    const msg = { status: 429, message: 'Rate limit reached ... Please try again in 6.116s.' };
+    expect(retryDelayMs(msg, 0)).toBeGreaterThanOrEqual(7645);
+    expect(retryDelayMs(msg, 0)).toBeLessThan(9000);
+    // sem pista nenhuma: backoff exponencial, nunca acima de 60s
+    expect(retryDelayMs({ status: 500 }, 0)).toBeLessThan(4000);
+    expect(retryDelayMs({ status: 500 }, 10)).toBeLessThanOrEqual(60000);
+  });
+
+  it('finalizeV25: 429 no sintetizador é retentado e a avaliação conclui', async () => {
+    let calls = 0;
+    const openai = {
+      chat: { completions: { create: async () => {
+        calls++;
+        if (calls === 1) {
+          const e = new Error('Rate limit reached ... Please try again in 0.01s.');
+          e.status = 429;
+          e.headers = { 'retry-after-ms': '5' };
+          throw e;
+        }
+        return { choices: [{ message: { content: 'Corpo do feedback.' } }], usage: null };
+      } } },
+    };
+    const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
+      num: i + 1, text: `ANÁLISE: ok. Critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
+    }));
+    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs });
+    expect(calls).toBe(2);
+    expect(r.corpoSintetizador).toBe('Corpo do feedback.');
+  });
+
+  it('finalizeV25: 400 (request inválido) sobe na hora, sem retentar', async () => {
+    let calls = 0;
+    const openai = {
+      chat: { completions: { create: async () => {
+        calls++;
+        const e = new Error('Invalid value for reasoning_effort');
+        e.status = 400;
+        throw e;
+      } } },
+    };
+    const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
+      num: i + 1, text: `ANÁLISE: ok. Critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
+    }));
+    await expect(finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs }))
+      .rejects.toThrow(/reasoning_effort/);
+    expect(calls).toBe(1);
   });
 });
 

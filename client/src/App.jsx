@@ -16,6 +16,7 @@ import AdminFreeplay from './pages/AdminFreeplay';
 import AdminNeuro from './pages/AdminNeuro';
 import AdminEntrevistador from './pages/AdminEntrevistador';
 import AdminModelos from './pages/AdminModelos';
+import AdminPrompts from './pages/AdminPrompts';
 import AdminErrorLogs from './pages/AdminErrorLogs';
 import Avaliacao from './pages/Avaliacao'
 import SimulacaoIndependente from './pages/SimulacaoIndependente'
@@ -367,6 +368,11 @@ export default function App() {
               <Link to="/admin/modelos" className={isActive('/admin/modelos') ? 'active' : ''}>
                 {ICONS.evaluate}<span>Modelos de IA</span>
               </Link>
+              {/* Os .md do avaliador/entrevistador vivem no volume, fora do
+                  git — este é o único caminho de edição pela interface. */}
+              <Link to="/admin/prompts" className={isActive('/admin/prompts') ? 'active' : ''}>
+                {ICONS.log}<span>Prompts</span>
+              </Link>
               <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
                 {ICONS.log}<span>Todos os Logs</span>
               </Link>
@@ -482,6 +488,7 @@ export default function App() {
           <Route path="/admin/neuro" element={<AdminNeuro />} />
           <Route path="/admin/entrevistador" element={<AdminEntrevistador user={user} />} />
           <Route path="/admin/modelos" element={<AdminModelos />} />
+          <Route path="/admin/prompts" element={<AdminPrompts />} />
           <Route path="/admin/erros" element={<AdminErrorLogs />} />
           <Route path="*" element={<Navigate to={defaultRoute(user)} />} />
         </Routes>

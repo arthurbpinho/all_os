@@ -29,6 +29,12 @@ function notifySessionExpired() {
   }
 }
 
+// Caminho de prompt na URL: encoda cada segmento (há espaço em "nova
+// avaliacao/") mas preserva as barras, que fazem parte da rota curinga.
+function encodePromptPath(p) {
+  return String(p).split('/').map(encodeURIComponent).join('/');
+}
+
 async function request(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -421,6 +427,17 @@ export const api = {
   // Passar null num campo limpa a escolha e volta ao padrão do sistema.
   getAiModels: () => request('/admin/ai-models'),
   setAiModel: (data) => request('/admin/ai-models', { method: 'PUT', body: data }),
+
+  // Prompts do avaliador/entrevistador (admin-only). Vivem no volume, fora do
+  // git — por isso toda gravação passa por validação + backup no servidor, e há
+  // histórico de versões para restaurar. O caminho tem espaços ("nova
+  // avaliacao/"), daí o encode por segmento.
+  adminListPrompts: () => request('/admin/prompts'),
+  adminGetPrompt: (p) => request('/admin/prompts/' + encodePromptPath(p)),
+  adminSavePrompt: (p, content) => request('/admin/prompts/' + encodePromptPath(p), { method: 'PUT', body: { content } }),
+  adminGetPromptVersion: (p, id) => request(`/admin/prompt-versions/${encodeURIComponent(id)}?path=${encodeURIComponent(p)}`),
+  adminRestorePromptVersion: (p, id) =>
+    request(`/admin/prompt-versions/${encodeURIComponent(id)}/restaurar`, { method: 'POST', body: { path: p } }),
 
   // Sessões ativas (não finalizadas) — sobreviver F5/sair e voltar
   listActiveSessions: () => request('/active-sessions'),

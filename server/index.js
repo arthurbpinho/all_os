@@ -17,8 +17,9 @@ const {
 } = require('./prompts');
 const mmrEngine = require('./mmr');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody } = require('./avaliacao-v25');
+const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody, clearAssetsCache } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
+const promptFiles = require('./prompt-files');
 const simIndependente = require('./simulacao-independente');
 const aiModels = require('./ai-models');
 const errorLog = require('./error-log');
@@ -1764,43 +1765,89 @@ app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, re
 // Os .md de avaliacao/ e entrevistador/ saíram do git (dados sensíveis: critérios
 // de nota, gabaritos) e passaram a viver só no volume persistente (PROMPTS_DIR).
 // Essas rotas substituem o antigo fluxo "edita o .md → git push → deploy": agora
-// a atualização é feita por aqui (admin-only), com o conteúdo indo direto pro
-// volume. Caminho validado contra path traversal e restrito a .md.
-function resolvePromptPath(relPath) {
-  const clean = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
-  const resolved = path.resolve(PROMPTS_DIR, clean);
-  if (resolved !== PROMPTS_DIR && !resolved.startsWith(PROMPTS_DIR + path.sep)) return null;
-  if (!resolved.toLowerCase().endsWith('.md')) return null;
-  return resolved;
-}
-
+// a atualização é feita por aqui (admin-only, tela Administração → Prompts ou
+// scripts/upload-prompt.js), com o conteúdo indo direto pro volume.
+//
+// Como o git deixou de ser o histórico desses arquivos, toda gravação passa por
+// duas travas de server/prompt-files.js: VALIDAÇÃO (o rascunho tem de passar no
+// mesmo parser que a produção usa) e BACKUP (a versão anterior é copiada, e dá
+// pra restaurar). Caminho validado contra traversal e restrito a .md.
 app.get('/api/admin/prompts', requireAuth, requireRole('admin'), (req, res) => {
-  function walk(dir) {
-    if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) return walk(full);
-      if (entry.name.toLowerCase().endsWith('.md')) return [path.relative(PROMPTS_DIR, full).split(path.sep).join('/')];
-      return [];
-    });
-  }
-  res.json({ files: walk(PROMPTS_DIR).sort() });
+  const files = promptFiles.listPromptFiles().map((f) => ({ ...f, validado: promptFiles.hasValidator(f.path) }));
+  res.json({
+    // `files` como lista de objetos; `paths` mantém o formato antigo (só os
+    // caminhos) para quem já consumia esta rota.
+    files,
+    paths: files.map((f) => f.path),
+  });
 });
 
 app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
-  const target = resolvePromptPath(req.params[0]);
+  const rel = req.params[0];
+  const target = promptFiles.resolvePromptPath(rel);
   if (!target || !fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado.' });
-  res.json({ path: req.params[0], content: fs.readFileSync(target, 'utf-8') });
+  const st = fs.statSync(target);
+  res.json({
+    path: rel,
+    content: fs.readFileSync(target, 'utf-8'),
+    updatedAt: st.mtime.toISOString(),
+    validado: promptFiles.hasValidator(rel),
+    versoes: promptFiles.listBackups(rel),
+  });
 });
 
 app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
-  const target = resolvePromptPath(req.params[0]);
+  const rel = req.params[0];
+  const target = promptFiles.resolvePromptPath(rel);
   if (!target) return res.status(400).json({ error: 'Caminho inválido.' });
   if (!fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado — crie a estrutura antes de sobrescrever.' });
   const { content } = req.body || {};
-  if (typeof content !== 'string' || !content.trim()) return res.status(400).json({ error: 'Conteúdo vazio.' });
+
+  // Valida ANTES de tocar no arquivo: prompt quebrado é recusado aqui, não na
+  // hora em que um aluno rodar uma avaliação.
+  const v = promptFiles.validatePromptContent(rel, content);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+
+  const versaoAnterior = promptFiles.backupPrompt(rel);
   fs.writeFileSync(target, content, 'utf-8');
-  res.json({ ok: true });
+  clearAssetsCache(); // o v25 memoiza os .md — sem isto o servidor serviria a versão velha
+  console.log(`[prompts] ${rel} atualizado por ${req.user.username} (backup: ${versaoAnterior || 'nenhum'})`);
+  res.json({ ok: true, validado: !!v.validado, versaoAnterior, versoes: promptFiles.listBackups(rel) });
+});
+
+// Histórico de versões de um arquivo (as MAX_BACKUPS últimas gravações).
+app.get('/api/admin/prompt-versions', requireAuth, requireRole('admin'), (req, res) => {
+  const rel = String(req.query.path || '');
+  if (!promptFiles.resolvePromptPath(rel)) return res.status(400).json({ error: 'Caminho inválido.' });
+  res.json({ path: rel, versoes: promptFiles.listBackups(rel) });
+});
+
+// Conteúdo de uma versão antiga (para conferir antes de restaurar).
+app.get('/api/admin/prompt-versions/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const rel = String(req.query.path || '');
+  if (!promptFiles.resolvePromptPath(rel)) return res.status(400).json({ error: 'Caminho inválido.' });
+  const content = promptFiles.readBackup(rel, req.params.id);
+  if (content == null) return res.status(404).json({ error: 'Versão não encontrada.' });
+  res.json({ path: rel, id: req.params.id, content });
+});
+
+// Restaura uma versão antiga. A versão ATUAL vira backup antes — restaurar por
+// engano também tem volta.
+app.post('/api/admin/prompt-versions/:id/restaurar', requireAuth, requireRole('admin'), (req, res) => {
+  const rel = String((req.body && req.body.path) || '');
+  const target = promptFiles.resolvePromptPath(rel);
+  if (!target || !fs.existsSync(target)) return res.status(400).json({ error: 'Caminho inválido.' });
+  const content = promptFiles.readBackup(rel, req.params.id);
+  if (content == null) return res.status(404).json({ error: 'Versão não encontrada.' });
+
+  const v = promptFiles.validatePromptContent(rel, content);
+  if (!v.ok) return res.status(400).json({ error: `A versão guardada não passa na validação atual: ${v.error}` });
+
+  promptFiles.backupPrompt(rel);
+  fs.writeFileSync(target, content, 'utf-8');
+  clearAssetsCache();
+  console.log(`[prompts] ${rel} restaurado para a versão ${req.params.id} por ${req.user.username}`);
+  res.json({ ok: true, content, versoes: promptFiles.listBackups(rel) });
 });
 
 // Lista de fotos de perfil disponíveis (a partir da pasta profiles_icon na raiz do projeto)
