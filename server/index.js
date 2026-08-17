@@ -3123,8 +3123,20 @@ app.get('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) =>
 });
 
 app.put('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) => {
-  const { categoria, evaluator, patient } = req.body || {};
+  const { categoria, evaluator, patient, global: escopoGlobal } = req.body || {};
   const cur = readSettings();
+
+  // `global: true` grava o PADRÃO DE TODAS as categorias de uma vez (quem tem
+  // escolha própria continua com ela — ver precedência em ai-models.js).
+  if (escopoGlobal === true) {
+    const g = aiModels.applyGlobalChoice(cur, { evaluator, patient });
+    if (!g.ok) return res.status(400).json({ error: g.error });
+    cur.aiModelsGlobal = g.aiModelsGlobal;
+    writeJSON('settings.json', cur);
+    console.log(`[admin] padrão global de modelos por ${req.user.username}: avaliador=${cur.aiModelsGlobal.evaluator || '—'} paciente=${cur.aiModelsGlobal.patient || '—'}`);
+    return res.json(aiModels.catalogo({ settings: cur, fallbacks: aiCategoryDefaults() }));
+  }
+
   const aplicado = aiModels.applyCategoryChoice(cur, categoria, { evaluator, patient });
   if (!aplicado.ok) return res.status(400).json({ error: aplicado.error });
   cur.aiModels = aplicado.aiModels;
@@ -3669,11 +3681,24 @@ async function runPatientTurn({ spec, systemPrompt, messages, maxTokens, label }
   if (spec.provider === 'openai') {
     const openai = getOpenAI();
     if (!openai) throw new Error('OpenAI indisponível');
+    // Paciente COM raciocínio (Sol/Luna em high): max_completion_tokens é teto
+    // de reasoning + fala, e o teto do paciente é curto (~3,5k). Sem folga, o
+    // modelo pensa até o limite e devolve content vazio — o aluno veria uma
+    // resposta em branco. A folga não custa nada quando não é usada (só se paga
+    // o gerado); com effort 'none' o teto continua o de sempre.
+    const semRaciocinio = spec.effort === 'none' || spec.effort === 'disabled' || !spec.effort;
     const { text, usage } = await openaiComplete({
       openai, model: spec.model, effort: spec.effort,
-      systemPrompt, messages, maxCompletionTokens: maxTokens,
+      systemPrompt, messages, maxCompletionTokens: semRaciocinio ? maxTokens : maxTokens + 8000,
     });
-    return { text, usage, provider: 'openai', model: spec.model };
+    if ((text && text.trim()) || spec.model === PATIENT_MODEL) {
+      return { text, usage, provider: 'openai', model: spec.model };
+    }
+    // Vazio mesmo com folga (ou recusa silenciosa): cai no paciente padrão em
+    // vez de entregar uma fala em branco na conversa. (Se o modelo JÁ era o
+    // padrão, repetir a mesma chamada não ajudaria — devolve o que veio.)
+    console.warn(`[paciente] ${label || 'chat'}: ${spec.model} devolveu vazio — caindo no ${PATIENT_MODEL}`);
+    return fallback();
   }
 
   try {

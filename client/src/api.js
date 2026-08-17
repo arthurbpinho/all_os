@@ -427,6 +427,9 @@ export const api = {
   // Passar null num campo limpa a escolha e volta ao padrão do sistema.
   getAiModels: () => request('/admin/ai-models'),
   setAiModel: (data) => request('/admin/ai-models', { method: 'PUT', body: data }),
+  // Padrão global (todas as categorias sem escolha própria): mesma rota, com
+  // { global: true }. Devolve o catálogo já atualizado, como o setAiModel.
+  setAiModelGlobal: (data) => request('/admin/ai-models', { method: 'PUT', body: { ...data, global: true } }),
 
   // Prompts do avaliador/entrevistador (admin-only). Vivem no volume, fora do
   // git — por isso toda gravação passa por validação + backup no servidor, e há
