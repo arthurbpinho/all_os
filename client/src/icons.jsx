@@ -104,14 +104,6 @@ export const ICONS = {
       <line x1="3" y1="19" x2="5" y2="21" />
     </svg>
   ),
-  // Modo Desafio (Titular): não tem item no menu — o app representa por 👑.
-  // Versão em linha pra casar com os demais ícones do "Como jogar".
-  crown: (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" strokeLinecap="round">
-      <path d="M3 8l4.5 3.5L12 5l4.5 6.5L21 8l-1.7 10H4.7z" />
-      <line x1="4.7" y1="21" x2="19.3" y2="21" />
-    </svg>
-  ),
   progression: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />

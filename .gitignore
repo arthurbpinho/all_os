@@ -14,8 +14,7 @@ server/data/migrations.json
 server/data/mmr.json
 server/data/duels.json
 server/data/notifications.json
-server/data/desafio.json
-server/data/desafio-history.json
+server/data/character-records.json
 server/data/selection-logs.json
 server/data/selection-stats.json
 server/data/avaliacao-fila.json

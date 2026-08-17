@@ -8,6 +8,19 @@
 
 export const CHANGELOG = [
   {
+    date: '2026-08-17',
+    title: 'Modo Desafio sai; entram o recorde 👑 e o Paciente em Destaque',
+    body: `🔹 O Modo Desafio acabou:
+• A disputa de "titularidade" (reivindicar/desafiar a coroa de um paciente) foi removida. Os títulos 👑 de Titular saíram do perfil e da barra lateral, e as conquistas ligadas ao modo (Rei, Vingança, Destronador) deixaram de existir.
+
+🔹 A coroa virou recorde:
+• No Competitivo, cada card de paciente mostra 👑 com a MAIOR nota que alguém já tirou naquele paciente, e o nome de quem tirou. Enquanto ninguém pontuar, o recorde fica "em aberto".
+• O recorde é permanente: ele não some quando o log de 30 dias expira. Empate não troca o dono — quem chegou primeiro fica com a coroa.
+
+🔹 Paciente em Destaque:
+• Ainda no Competitivo, o personagem mais recente do acervo aparece com fundo amarelo e o selo "Paciente em destaque". Atender esse paciente ajuda a calibrar a dificuldade dele mais rápido.`,
+  },
+  {
     date: '2026-07-31',
     title: 'Uma missão por vez: sidequest OU missão diária',
     body: `🔹 Missão do Treinamento:

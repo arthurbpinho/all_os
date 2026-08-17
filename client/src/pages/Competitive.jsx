@@ -9,6 +9,16 @@ import { PatientAvatar } from '../components/PatientAvatar';
 // partida finalizada alimenta o MMR (rating). A dificuldade de cada personagem é
 // aberta e exibida no card. O MMR fica oculto até a 4ª partida (calibração de 3).
 //
+// Dois enfeites de card vivem SÓ aqui (o servidor manda ambos em /api/freeplay):
+//   - record   → 👑 com a maior nota já tirada naquele paciente no Competitivo e
+//                quem a tirou. Substituiu o antigo Modo Desafio: virou recorde,
+//                não uma disputa à parte.
+//   - featured → "Paciente em Destaque", o ÚLTIMO personagem cadastrado. Ganha
+//                fundo amarelo E vai pro começo da lista, pra puxar atendimentos
+//                e calibrar o TRI dele mais rápido. Puro truque visual, nenhuma
+//                regra depende disso — e o reordenamento é SÓ desta tela: as
+//                outras (Progressão, Duelo, admin) mantêm a ordem de cadastro.
+//
 // O componente segue chamado Competitive e a rota antiga /competitivo continua
 // respondendo (redireciona pra /simulacao): o identificador interno do modo é
 // 'competitive' em log.mode, MMR e Duelo, e renomeá-lo migraria dados por
@@ -23,7 +33,10 @@ export default function Competitive({ user }) {
   useEffect(() => {
     Promise.all([api.getFreeplay(), api.getMyMmr().catch(() => null)])
       .then(([chars, myMmr]) => {
-        setCharacters(chars || []);
+        // Destaque primeiro; o resto mantém a ordem de cadastro que veio do
+        // servidor (sort estável).
+        const list = [...(chars || [])].sort((a, b) => (b.featured ? 1 : 0) - (a.featured ? 1 : 0));
+        setCharacters(list);
         setMmr(myMmr);
       })
       .catch((err) => setError(err.message || 'Erro ao carregar personagens'))
@@ -73,27 +86,59 @@ export default function Competitive({ user }) {
         </div>
       ) : (
         <div className="card-grid">
-          {characters.map((char) => (
-            <div
-              key={char.id}
-              className="character-card"
-              onClick={() => navigate(`/chat/freeplay/${char.id}?mode=competitive`)}
-            >
-              <div className="character-card-top">
-                <PatientAvatar name={char.name} iconUrl={char.photoIcon} size={72} className="character-card-photo" />
-                <div className="character-card-meta">
-                  <div className="character-card-header">
-                    <h3>{char.name}</h3>
+          {characters.map((char) => {
+            const record = char.record;
+            return (
+              <div
+                key={char.id}
+                className={`character-card${char.featured ? ' featured-card' : ''}`}
+                onClick={() => navigate(`/chat/freeplay/${char.id}?mode=competitive`)}
+              >
+                <div className="character-card-top">
+                  <PatientAvatar name={char.name} iconUrl={char.photoIcon} size={72} className="character-card-photo" />
+                  <div className="character-card-meta">
+                    <div className="character-card-header">
+                      <h3>{char.name}</h3>
+                    </div>
+                    <div className="age">{char.age} anos</div>
                   </div>
-                  <div className="age">{char.age} anos</div>
                 </div>
+                <p>{char.description}</p>
+                <div className="difficulty-tag" title="Dificuldade atual deste personagem (1–100), ajustada pelo desempenho coletivo">
+                  DIFICULDADE: <strong>{Number.isFinite(char.difficulty) ? char.difficulty : '—'}</strong>
+                </div>
+                {/* Paciente em Destaque: o personagem mais novo do acervo. Fundo
+                    amarelo + selo pra puxar atendimentos e calibrar o TRI dele. */}
+                {char.featured && (
+                  <div className="featured-badge" title="Personagem recém-adicionado — atenda para ajudar a calibrar a dificuldade dele">
+                    <span aria-hidden>★</span> Paciente em destaque
+                  </div>
+                )}
+                {/* Recorde 👑: maior nota que alguém já tirou neste paciente no
+                    Competitivo. Só informativo — não é clicável. */}
+                {record ? (
+                  <div
+                    className="record-footer"
+                    title={`Recorde deste paciente: ${record.score} — ${record.userName}`}
+                  >
+                    <span className="crown-emoji" aria-hidden>👑</span>
+                    <span className="record-avatar">
+                      {record.userPhoto
+                        ? <img src={record.userPhoto} alt="" />
+                        : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>}
+                    </span>
+                    <span className="record-score">{record.score}</span>
+                    <span className="record-name">{record.userName}</span>
+                  </div>
+                ) : (
+                  <div className="record-footer record-empty" title="Ninguém pontuou neste paciente ainda — o recorde está em aberto">
+                    <span className="crown-emoji" aria-hidden>👑</span>
+                    <span className="record-name">Recorde em aberto</span>
+                  </div>
+                )}
               </div>
-              <p>{char.description}</p>
-              <div className="difficulty-tag" title="Dificuldade atual deste personagem (1–100), ajustada pelo desempenho coletivo">
-                DIFICULDADE: <strong>{Number.isFinite(char.difficulty) ? char.difficulty : '—'}</strong>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

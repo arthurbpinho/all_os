@@ -190,26 +190,6 @@ export default function Profile({ user, onUpdate }) {
 
       {error && <div className="alert error">{error}</div>}
 
-      {/* Coroas (modo Desafio): personagens onde o usuário é Titular atual.
-          O título "👑 <personagem>" é temporário — some quando alguém o
-          desafiar e vencer. Visitantes nunca aparecem aqui (user.crowns=[]). */}
-      {Array.isArray(user.crowns) && user.crowns.length > 0 && (
-        <section className="profile-section" style={{ marginBottom: 24 }}>
-          <h3 className="section-title">Títulos de Titular · modo Desafio</h3>
-          <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12 }}>
-            Você detém a posição de referência destes pacientes no momento. O título cai automaticamente
-            assim que alguém te desafiar e vencer.
-          </p>
-          <div className="crown-chips">
-            {user.crowns.map((c) => (
-              <span key={c.characterId} className="crown-chip" title={`Titular atual de ${c.characterName}`}>
-                {c.label}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
-
       {(streak?.status === 'monthly' || streak?.status === 'weekly' || earnedBadges.length > 0) && (
         <section className="profile-section" style={{ marginBottom: 24 }}>
           <h3 className="section-title">Metas alcançadas</h3>

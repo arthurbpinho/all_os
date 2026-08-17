@@ -23,7 +23,7 @@ essa lacuna.
 - **Seguir uma trilha de exercícios** organizada por dificuldade, no formato
   de mapa de fases.
 - **Competir**: ranking geral com sistema de rating, duelos entre alunos no
-  mesmo caso, e desafios por posição no ranking.
+  mesmo caso, e o recorde 👑 de cada paciente no modo competitivo.
 - **Praticar antes da supervisão**: um modo guiado por IA ajuda o aluno a
   montar o mapa do caso com perguntas socráticas antes de levar para o
   supervisor humano.
