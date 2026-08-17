@@ -5,16 +5,26 @@ import { useWakeLock } from '../useWakeLock';
 import { downloadText } from '../logFiles';
 
 // Avaliação Independente — laboratório de PRICING (supervisor/admin). Alterna o
-// PROMPT (v16-2 / v18-25 / pipeline v25), o MODELO (GPT 5.5 / 5.4 / 5.4-mini) e o
+// PROMPT (v16-2 / v18-25 / pipeline v25 com feedback ou só nota), o MODELO e o
 // EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH (50% off) com uma fila.
 // Mostra a nota + o CUSTO EXATO (tokens × preço do modelo) e permite baixar um
 // relatório com tudo. Isolado do avaliador de produção e da simulação.
 
+// Precisa espelhar o registry EVALUATORS do servidor (server/avaliacao-independente.js),
+// que é quem valida. As duas entradas v25 são o MESMO pipeline de 14 nós: em
+// 'v25' o nó devolve ANÁLISE+NOTA+CONFIANÇA e o sintetizador escreve o feedback
+// do aluno; em 'v25-nota' o nó devolve só a nota — sai a mesma nota final, sem
+// feedback e mais barato (o texto por critério some do billing).
 const EVALUATORS = [
-  { id: 'v25', label: 'v25 · pipeline (14 nós)' },
+  { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback' },
+  { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota' },
   { id: 'v16-2', label: 'v16.2 · 6 critérios' },
   { id: 'v18-25', label: 'v18.25 · 15 critérios' },
 ];
+// Avaliadores que rodam o pipeline v25 (qualquer variante).
+function isPipelineId(id) {
+  return id === 'v25' || id === 'v25-nota';
+}
 // `efforts` só aparece no modelo que FOGE do padrão do provedor. A família 5.6
 // aceita dois degraus a mais (xhigh, max) — por isso a lista de effort virou
 // por modelo, e não só por provedor. Precisa espelhar AVAL_MODELOS no servidor,
@@ -322,7 +332,7 @@ export default function Avaliacao({ user }) {
 
   // ── Tela de carregamento (sync) ──
   if (loading) {
-    const isPipe = evaluator === 'v25';
+    const isPipe = isPipelineId(evaluator);
     return (
       <div>
         <div className="post-session">
@@ -339,7 +349,7 @@ export default function Avaliacao({ user }) {
             <div className="evaluating-status">
               <div className="evaluating-line"><span className="dot active" /> Lendo o Bloco 1 do caso e o log</div>
               <div className="evaluating-line"><span className="dot active" /> {isPipe ? '14 nós avaliando, um por critério' : 'Avaliando os critérios'}</div>
-              <div className="evaluating-line"><span className="dot pulse" /> Calculando a nota e o feedback</div>
+              <div className="evaluating-line"><span className="dot pulse" /> {evaluator === 'v25-nota' ? 'Calculando a nota (esta variante não gera feedback)' : 'Calculando a nota e o feedback'}</div>
             </div>
           </div>
         </div>
@@ -463,7 +473,9 @@ export default function Avaliacao({ user }) {
           <div className="card v25-feedback">
             {result.feedbackAluno
               ? <div className="v25-feedback-text">{result.feedbackAluno}</div>
-              : <div className="v25-feedback-empty">Sem feedback gerado. Veja as notas por critério.</div>}
+              : (result.variant === 'so-nota' || result.evaluator === 'v25-nota')
+                ? <div className="v25-feedback-empty">A variante <strong>só nota</strong> não gera feedback: os nós devolvem apenas a nota de cada critério, sem análise, e o sintetizador não roda. Para o feedback do aluno, rode em <strong>v25 · com feedback</strong>.</div>
+                : <div className="v25-feedback-empty">Sem feedback gerado. Veja as notas por critério.</div>}
           </div>
         )}
         {filaUI}
@@ -491,6 +503,13 @@ export default function Avaliacao({ user }) {
             <select id="ev-select" value={evaluator} onChange={(e) => setEvaluator(e.target.value)} style={{ width: '100%' }}>
               {EVALUATORS.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
             </select>
+            {isPipelineId(evaluator) && (
+              <div className="aval-ev-hint">
+                {evaluator === 'v25'
+                  ? <>Os 14 nós devolvem análise + nota + confiança, e o sintetizador escreve o feedback do aluno.</>
+                  : <>Os 14 nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
+              </div>
+            )}
           </div>
           <div>
             <label htmlFor="md-select">Modelo</label>

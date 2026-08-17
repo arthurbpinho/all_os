@@ -5472,8 +5472,10 @@ function getClientForProvider(provider) {
 
 // Roda o avaliador escolhido SÍNCRONO e devolve o resultado unificado.
 async function runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log }) {
-  if (evaluator === 'v25') {
-    return runAvaliacaoIndependente({ openai: client, provider, bloco1, log, model, effort });
+  if (aiIndependente.isPipeline(evaluator)) {
+    // v25 (com feedback) e v25-nota (só nota) são o MESMO pipeline; o que muda é
+    // a variante do prompt do nó, que o registry resolve.
+    return runAvaliacaoIndependente({ openai: client, provider, bloco1, log, model, effort, variant: aiIndependente.variantFor(evaluator) });
   }
   // GLM (z.ai): chat.completions — devolve o raciocínio em message.reasoning_content.
   if (provider === 'glm') {
@@ -5526,6 +5528,7 @@ function buildAvalResponse(entry, result) {
     id: entry ? entry.id : null,
     casoNome: entry ? entry.casoNome : '',
     evaluator: result.evaluator,
+    variant: result.variant || null, // v25: 'com-feedback' | 'so-nota'
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
     partes: result.partes || null,
@@ -5546,6 +5549,7 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
     userId: user.id,
     userName: user.name || '',
     casoId, casoNome, evaluator, model, effort, batch: !!batch,
+    variant: result.variant || null,
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
     partes: result.partes || null,
@@ -5569,8 +5573,8 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
 async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome }) {
   const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
   let requests;
-  if (evaluator === 'v25') {
-    requests = buildV25NodeRequests({ bloco1, log, model, effort, provider }).map((n) => ({
+  if (aiIndependente.isPipeline(evaluator)) {
+    requests = buildV25NodeRequests({ bloco1, log, model, effort, provider, variant: aiIndependente.variantFor(evaluator) }).map((n) => ({
       custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body,
     }));
   } else {
@@ -5681,10 +5685,13 @@ async function sweepAvaliacaoBatches() {
         }
         try {
           let result;
-          if (job.evaluator === 'v25') {
+          if (aiIndependente.isPipeline(job.evaluator)) {
             const nodeOutputs = [];
             for (const [suffix, out] of outputs) nodeOutputs.push({ num: Number(suffix), text: out.text, usage: out.usage });
-            result = await finalizeV25({ openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort, nodeOutputs, batch: true });
+            result = await finalizeV25({
+              openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort,
+              variant: aiIndependente.variantFor(job.evaluator), nodeOutputs, batch: true,
+            });
           } else {
             const out = outputs.get('0') || { text: '', usage: null };
             result = aiIndependente.finalizeSingle({ evaluatorId: job.evaluator, text: out.text, reasoning: out.reasoning, usage: out.usage, model: job.model, effort: job.effort, batch: true });

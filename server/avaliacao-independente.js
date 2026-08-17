@@ -3,7 +3,8 @@
 // Ferramenta de teste de pricing (supervisor/admin). ISOLADO: só LÊ os .md dos
 // prompts; não altera os avaliadores de produção, a simulação nem o processo
 // seletivo. O terceiro avaliador do alternador (v25) é o pipeline de 14 nós, que
-// vive em avaliacao-v25.js — este módulo cobre só os dois de uma chamada.
+// vive em avaliacao-v25.js (nas variantes 'v25' e 'v25-nota') — este módulo
+// cobre só os dois de uma chamada.
 //
 // NOTA: o v18-25 lido aqui é o MESMO arquivo que a produção usa como avaliador
 // individual (avaliacao/avaliador 18/avaliador-v18-25.md) — editar aquele .md
@@ -45,16 +46,34 @@ const CRIT_V1825 = {
   14: 'Flexibilidade', 15: 'Criatividade',
 };
 
-// Registry dos avaliadores do alternador. 'v25' é `kind:'pipeline'` (roda em
-// avaliacao-v25.js) — aqui só declaramos o rótulo pra UI/validação.
+// Registry dos avaliadores do alternador. Os dois `kind:'pipeline'` rodam em
+// avaliacao-v25.js — aqui só declaramos rótulo, `variant` (qual saída o nó
+// produz) e validação. As duas entradas v25 compartilham prompt, critérios,
+// agregador e código: a única diferença é a variante do nó.
+//   v25       → nó devolve ANÁLISE+NOTA+CONFIANÇA → sintetizador → feedback.
+//   v25-nota  → nó devolve só a NOTA → sem sintetizador, sem feedback (barato).
 const EVALUATORS = {
   'v16-2': { id: 'v16-2', label: 'v16.2 · 6 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador-v16-2.md'), criterios: CRIT_V162 },
   'v18-25': { id: 'v18-25', label: 'v18.25 · 15 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador 18', 'avaliador-v18-25.md'), criterios: CRIT_V1825 },
-  'v25': { id: 'v25', label: 'v25 · pipeline (14 nós)', kind: 'pipeline', criterios: null },
+  'v25': { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback', kind: 'pipeline', variant: 'com-feedback', criterios: null },
+  'v25-nota': { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota', kind: 'pipeline', variant: 'so-nota', criterios: null },
 };
 
 function isValidEvaluator(id) {
   return Object.prototype.hasOwnProperty.call(EVALUATORS, id);
+}
+
+// true para os avaliadores que rodam o pipeline de 14 nós (v25 em qualquer
+// variante). Use isto em vez de comparar com a string 'v25'.
+function isPipeline(id) {
+  const ev = EVALUATORS[id];
+  return !!ev && ev.kind === 'pipeline';
+}
+
+// Variante do nó v25 para um avaliador do registry (null se não for pipeline).
+function variantFor(id) {
+  const ev = EVALUATORS[id];
+  return ev && ev.kind === 'pipeline' ? ev.variant : null;
 }
 
 function loadEvaluatorPrompt(evaluatorId) {
@@ -256,6 +275,8 @@ function finalizeSingle({ evaluatorId, text, usage, model, effort, batch, reason
 module.exports = {
   EVALUATORS,
   isValidEvaluator,
+  isPipeline,
+  variantFor,
   loadEvaluatorPrompt,
   buildSingleEvalBody,
   buildSingleEvalResponsesArgs,
