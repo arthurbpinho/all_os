@@ -134,12 +134,6 @@ const AI_CATEGORIES = [
     patient: true, batchCapable: false,
   },
   {
-    key: 'desafio',
-    label: 'Modo Desafio',
-    descricao: 'Titular × desafiante. Saída opaca (sem nota na tela), mas o resultado sai na hora.',
-    patient: true, batchCapable: false,
-  },
-  {
     key: 'neuro',
     label: 'Neuroavaliação',
     descricao: 'Bateria de testes neuropsicológicos. Sessão única e mais delimitada que o processo clínico completo.',
@@ -172,7 +166,7 @@ function isPatientCategory(key) {
 //   - 'visitante' → derivado do ROLE no servidor, não é dica;
 //   - 'neuro'     → derivado do context.type no servidor;
 //   - 'avaliacaoManual' → não tem paciente.
-const CLIENT_PATIENT_CATEGORIES = new Set(['treinamento', 'competitivo', 'duelo', 'desafio']);
+const CLIENT_PATIENT_CATEGORIES = new Set(['treinamento', 'competitivo', 'duelo']);
 function isClientPatientCategory(key) {
   return CLIENT_PATIENT_CATEGORIES.has(String(key));
 }

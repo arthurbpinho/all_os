@@ -1,5 +1,5 @@
 // Limite duro de tempo de sessão, válido em TODOS os modos (Treinamento,
-// Modo Desafio, Competitivo, Duelo e Trilha).
+// Competitivo, Duelo e Trilha).
 //
 // Regra do tempo: o cronômetro só corre quando a pessoa ESTÁ NO CHAT — ou seja,
 // a aba/app precisa estar VISÍVEL e a tela de sessão montada. Tempo gasto com o

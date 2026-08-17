@@ -266,7 +266,7 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
 
     it('categoria que mostra a nota na hora nunca vai de batch, nem em GPT', async () => {
       const admin = await loginAs('admin');
-      for (const categoria of ['treinamento', 'visitante', 'duelo', 'desafio', 'neuro', 'avaliacaoManual']) {
+      for (const categoria of ['treinamento', 'visitante', 'duelo', 'neuro', 'avaliacaoManual']) {
         const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
           .send({ categoria, evaluator: 'gpt-5.5' });
         expect(cat(res.body, categoria).avaliador.batch).toBe(false);
@@ -382,7 +382,6 @@ describe('ai-models (resolve puro)', () => {
     expect(aiModels.isClientPatientCategory('treinamento')).toBe(true);
     expect(aiModels.isClientPatientCategory('competitivo')).toBe(true);
     expect(aiModels.isClientPatientCategory('duelo')).toBe(true);
-    expect(aiModels.isClientPatientCategory('desafio')).toBe(true);
     // Derivadas no servidor ou de rota própria — nunca vindas do cliente.
     expect(aiModels.isClientPatientCategory('seletivo')).toBe(false);
     expect(aiModels.isClientPatientCategory('visitante')).toBe(false);

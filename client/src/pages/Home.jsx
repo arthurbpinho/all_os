@@ -11,7 +11,7 @@ import InstallAppBanner from '../components/InstallAppBanner';
 //
 // A ideia por trás: a SIMULAÇÃO é o modo base (é em torno dela que o app foi
 // desenhado) e ganhou peso visual próprio; TREINAMENTO é a Trilha, e todo o
-// resto — Progressão, Duelo, Desafio, Antessala — passou a viver lá dentro, como
+// resto — Progressão, Duelo, Antessala — passou a viver lá dentro, como
 // competências. Nada foi removido: é reorganização de interface, com o objetivo
 // declarado de puxar mais gente para a Simulação.
 //
@@ -86,7 +86,7 @@ export default function Home({ user }) {
           <span className="home-door-desc">
             {isVisitor
               ? 'Pratique sem valer nota: escolha um paciente simulado e conduza o atendimento.'
-              : 'A trilha de exercícios e todos os modos de prática livre: Progressão, Duelo, Desafio e a Antessala.'}
+              : 'A trilha de exercícios e todos os modos de prática livre: Progressão, Duelo e a Antessala.'}
           </span>
           <span className="home-door-go" aria-hidden="true"><ArrowIcon /></span>
         </button>

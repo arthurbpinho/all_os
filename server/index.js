@@ -597,14 +597,12 @@ if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
   writeJSON('sidequests.json', { bank: [], active: {}, completed: {} });
 }
 
-// Modo Desafio (titular-desafiante): mapa { <characterId>: { titular, log } }.
-// Vive dentro do Treinamento como aba paralela — não toca em logs.json,
-// progressão, sidequests nem MMR. Quando o aluno clica no rosto do Titular
-// atual entra como Desafiante; quando ninguém é Titular, clicar no 👑 inicia
-// uma reivindicação (vira Titular ao final, independente da nota). Visitantes
-// podem ser Titular, mas ficam como "Um visitante" (sem persistência de ID).
-if (!fs.existsSync(path.join(DATA_DIR, 'desafio.json'))) {
-  writeJSON('desafio.json', { titulares: {} });
+// Recordes por paciente (👑): mapa { <characterId>: { score, userId, userName,
+// userPhoto, at } } com a MAIOR nota já tirada naquele paciente no modo
+// COMPETITIVO. Vive fora de logs.json de propósito: os logs expiram em 30 dias
+// e o recorde é permanente. Só leitura no front — escrito em POST /api/logs.
+if (!fs.existsSync(path.join(DATA_DIR, 'character-records.json'))) {
+  writeJSON('character-records.json', {});
 }
 
 // Feedback de visitantes: coletado num popup ao fim de uma sessão em modo
@@ -752,12 +750,6 @@ function publicUser(u) {
       if (teacher && teacher.name) safe.teacherName = teacher.name;
     } catch {}
   }
-  // Coroas (modo Desafio): lista de personagens onde o usuário é Titular atual.
-  // Visitante recebe [] — id efêmero, não persistimos titularidade dele em
-  // termos de identidade. getUserCrowns lê desafio.json e filtra por userId.
-  try {
-    safe.crowns = getUserCrowns(safe.id);
-  } catch { safe.crowns = []; }
   return safe;
 }
 
@@ -1312,17 +1304,14 @@ const ACHIEVEMENT_DEFS = [
   { id: 'centena',      icon: '∞', title: 'Centena',      description: 'Concluiu 100 sessões em qualquer modo.',                               tier: 'silver', target: 100 },
   { id: 'persistencia', icon: '❖', title: 'Persistência', description: 'Manteve constância por 20 semanas.',                                   tier: 'silver', target: 20 },
   { id: 'duelista',     icon: '⚔', title: 'Duelista',     description: 'Venceu 10 duelos ranqueados.',                                         tier: 'silver', target: 10 },
-  { id: 'vinganca',     icon: '⚡', title: 'Vingança',     description: 'No Modo Desafio, roubou um paciente de quem já tinha roubado um seu.', tier: 'silver' },
 
   // ---------- OURO (valem título de perfil) ----------
   { id: 'consistente',        icon: '≡', title: 'Consistente',        description: 'Jogou uma partida ranqueada sem alterar o seu MMR.',                      tier: 'gold' },
-  { id: 'destronador',        icon: '⇅', title: 'Destronador',        description: 'No Modo Desafio, retomou um paciente que acabou de perder.',              tier: 'gold' },
   { id: 'simulacao_complete', icon: '◇', title: 'Repertório Clínico', description: 'Concluiu todos os personagens da Simulação.',                             tier: 'gold' },
   { id: 'excelencia',         icon: '★', title: 'Excelência Técnica', description: 'Atingiu pontuação maior ou igual a 90 em uma sessão.',                    tier: 'gold' },
   { id: 'perfeicao',          icon: '✪', title: 'Perfeição',          description: 'Tirou nota 100 em uma sessão.',                                           tier: 'gold' },
   { id: 'meteu_o_lacan',      icon: '⊛', title: 'Meteu o Lacan',      description: 'Tirou 80 ou mais em uma sessão com até 10 mensagens.',                    tier: 'gold' },
   { id: 'estrelinha',         icon: '✶', title: 'Estrelinha',         description: 'Marcou 1000 mensagens como destaque.',                                    tier: 'gold', target: 1000 },
-  { id: 'rei',                icon: '♛', title: 'Rei',                description: 'Foi Titular de 7 pacientes ao mesmo tempo.',                              tier: 'gold', target: 7 },
   { id: 'invicto',            icon: '⚑', title: 'Invicto',            description: 'Venceu 5 duelos ranqueados consecutivos.',                                tier: 'gold', target: 5 },
   { id: 'davi_golias',        icon: '◭', title: 'Davi e Golias',      description: 'Venceu um duelo ranqueado contra alguém com 30+ de MMR a mais que você.', tier: 'gold' },
 ];
@@ -1506,16 +1495,6 @@ function updateDailyMissionStreak(userId, userLogs) {
   writeJSON('daily-missions.json', store);
 }
 
-// --- Histórico de trocas de titularidade do Modo Desafio (Vingança/Destronador) ---
-// Cada entrada: { characterId, characterName, fromUserId, toUserId, reason, at }.
-// fromUserId null = posição estava vaga (reivindicação inicial).
-function appendDesafioHistory(entry) {
-  const hist = readJSON('desafio-history.json', []);
-  hist.push({ ...entry, at: new Date().toISOString() });
-  if (hist.length > 5000) hist.splice(0, hist.length - 5000); // teto defensivo
-  writeJSON('desafio-history.json', hist);
-}
-
 // --- Helpers de duelo (conquistas competitivas) ---
 // Visão do usuário num duelo ranqueado concluído, ou null se não se aplica.
 function duelUserView(duel, userId) {
@@ -1544,44 +1523,11 @@ function userRankedDuelViews(duels, userId) {
     .sort((a, b) => new Date(a.at) - new Date(b.at));
 }
 
-// --- Helpers de Modo Desafio sobre o histórico de trocas ---
-// Vingança: alguém roubou um paciente meu e, depois, eu roubei um paciente dele.
-function desafioRevenge(history, userId) {
-  const evts = [...(history || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
-  const tookFromMeAt = {}; // X -> instante em que X me roubou um paciente
-  for (const e of evts) {
-    if (e.fromUserId === userId && e.toUserId && e.toUserId !== userId && !tookFromMeAt[e.toUserId]) {
-      tookFromMeAt[e.toUserId] = e.at;
-    }
-    if (e.toUserId === userId && e.fromUserId && tookFromMeAt[e.fromUserId] &&
-        new Date(tookFromMeAt[e.fromUserId]) < new Date(e.at)) {
-      return true;
-    }
-  }
-  return false;
-}
-// Destronador: retomei um paciente logo após perdê-lo (troca consecutiva na
-// mesma posição: eu perdi e a mudança seguinte daquele personagem é eu de volta).
-function desafioRetake(history, userId) {
-  const byChar = {};
-  for (const e of (history || [])) {
-    if (!byChar[e.characterId]) byChar[e.characterId] = [];
-    byChar[e.characterId].push(e);
-  }
-  for (const cid of Object.keys(byChar)) {
-    const evts = byChar[cid].sort((a, b) => new Date(a.at) - new Date(b.at));
-    for (let i = 1; i < evts.length; i++) {
-      if (evts[i].toUserId === userId && evts[i - 1].fromUserId === userId) return true;
-    }
-  }
-  return false;
-}
-
 // Cálculo unificado das conquistas. Retorna { unlocked:Set, progress:{} }.
 // `unlocked` = critério cumprido (resgatável); `progress[id]` = valor atual das
 // que têm meta (barra de progresso no front).
 function computeAchievements(ctx) {
-  const { userLogs, streak, freeplay, duels, crownsCount, micUses, desafioHistory, profilePhoto, dailyStreakBest, userId } = ctx;
+  const { userLogs, streak, freeplay, duels, micUses, profilePhoto, dailyStreakBest, userId } = ctx;
   const unlocked = new Set();
   const progress = {};
   const add = (id) => unlocked.add(id);
@@ -1607,8 +1553,6 @@ function computeAchievements(ctx) {
   progress.papagaio = micUses || 0;
   if ((micUses || 0) >= 100) add('papagaio');
 
-  if (desafioRetake(desafioHistory, userId)) add('destronador');
-
   progress.bom_garoto = dailyStreakBest || 0;
   if ((dailyStreakBest || 0) >= 7) add('bom_garoto');
 
@@ -1632,9 +1576,6 @@ function computeAchievements(ctx) {
   progress.persistencia = streak.longest;
   if (streak.longest >= 20) add('persistencia');
 
-  progress.rei = crownsCount || 0;
-  if ((crownsCount || 0) >= 7) add('rei');
-
   const views = userRankedDuelViews(duels, userId);
   const rankedWins = views.filter((v) => v.won).length;
   progress.duelista = rankedWins;
@@ -1647,22 +1588,18 @@ function computeAchievements(ctx) {
 
   if (views.some((v) => v.won && Number.isFinite(v.oppBefore) && Number.isFinite(v.myBefore) && (v.oppBefore - v.myBefore) >= 30)) add('davi_golias');
 
-  if (desafioRevenge(desafioHistory, userId)) add('vinganca');
-
   return { unlocked, progress };
 }
 
 // Monta o contexto e roda computeAchievements para um usuário. Centraliza a
-// leitura das várias fontes (logs, duelos, coroas, contadores, histórico).
+// leitura das várias fontes (logs, duelos, contadores, foto de perfil).
 function achievementsForUser(userId, userLogs, streak, freeplay) {
   return computeAchievements({
     userLogs,
     streak,
     freeplay,
     duels: readDuels(),
-    crownsCount: getUserCrowns(userId).length,
     micUses: getMicUses(userId),
-    desafioHistory: readJSON('desafio-history.json', []),
     profilePhoto: (readJSON('users.json').find((u) => u.id === userId) || {}).profilePhoto,
     dailyStreakBest: getDailyMissionStreak(userId).best || 0,
     userId,
@@ -2116,18 +2053,95 @@ function sanitizeCharacterPayload(body) {
   return out;
 }
 
+// --- Recorde 👑 por paciente (maior nota do Competitivo) ---
+// Substituiu o Modo Desafio: o 👑 no card não é mais uma disputa à parte, é só a
+// MAIOR nota que alguém já tirou naquele paciente no modo Competitivo. Mora fora
+// de logs.json porque os logs expiram em 30 dias e o recorde é permanente.
+function readCharacterRecords() {
+  const data = readJSON('character-records.json', {});
+  return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+}
+function writeCharacterRecords(data) {
+  writeJSON('character-records.json', data);
+}
+// Snapshot público: nota + quem tirou. Sem userId — o card não precisa e não vale
+// expor id de aluno pra turma inteira.
+function publicRecord(r) {
+  if (!r || !Number.isFinite(r.score)) return null;
+  return {
+    score: r.score,
+    userName: r.userName || 'Aluno',
+    userPhoto: r.userPhoto || null,
+    at: r.at || null,
+  };
+}
+// Registra a nota como recorde do paciente se ela superar a atual. Empate NÃO
+// troca o dono (quem chegou primeiro fica com o 👑). `holder` é { userId, userName }
+// — a foto é buscada em users.json na hora (visitante não tem, e nem entra aqui).
+function updateCharacterRecord(characterId, score, holder) {
+  if (!characterId || !Number.isFinite(score) || !holder || !holder.userId) return null;
+  const records = readCharacterRecords();
+  const cur = records[characterId];
+  if (cur && Number.isFinite(cur.score) && cur.score >= score) return null;
+  const photo = (readJSON('users.json').find((u) => u.id === holder.userId) || {}).profilePhoto || null;
+  records[characterId] = {
+    score,
+    userId: holder.userId,
+    userName: holder.userName || 'Aluno',
+    userPhoto: photo,
+    at: new Date().toISOString(),
+  };
+  writeCharacterRecords(records);
+  return records[characterId];
+}
+
+// Backfill one-shot: semeia os recordes com as notas competitivas que já estão
+// em logs.json (antes desta funcionalidade existir). Idempotente via marker.
+(function migrateCharacterRecords() {
+  const migrations = readJSON('migrations.json', {});
+  if (migrations.character_records_backfill) return;
+  const records = readCharacterRecords();
+  let seeded = 0;
+  for (const l of readJSON('logs.json')) {
+    if (l.type !== 'freeplay' || l.mode !== 'competitive') continue;
+    if (!l.itemId || !Number.isFinite(l.score)) continue;
+    const cur = records[l.itemId];
+    if (cur && Number.isFinite(cur.score) && cur.score >= l.score) continue;
+    records[l.itemId] = {
+      score: l.score,
+      userId: l.userId || null,
+      userName: l.userName || 'Aluno',
+      userPhoto: null,
+      at: l.timestamp || null,
+    };
+    seeded++;
+  }
+  if (seeded > 0) writeCharacterRecords(records);
+  migrations.character_records_backfill = new Date().toISOString();
+  writeJSON('migrations.json', migrations);
+  console.log(`[migration] recordes 👑 semeados a partir de ${seeded} log(s) competitivo(s).`);
+})();
+
 app.get('/api/freeplay', requireAuth, (req, res) => {
   const list = readJSON('freeplay-characters.json');
   const mmr = readMMR();
+  const records = readCharacterRecords();
+  // "Paciente em Destaque": o ÚLTIMO personagem cadastrado (a lista é gravada em
+  // ordem de inserção). É só um truque de front — o card ganha fundo amarelo no
+  // Competitivo pra puxar atenção e calibrar o TRI do personagem novo, que ainda
+  // tem poucas partidas. Nada de regra de jogo depende disso.
+  const featuredId = list.length ? list[list.length - 1].id : null;
   // Dificuldade do MMR é aberta (alunos + admin) — exibida nos cards do modo
   // competitivo e no painel admin. Personagem nunca jogado mostra a baseline 50.
-  const withDifficulty = (base, c) => ({
+  const withExtras = (base, c) => ({
     ...base,
     difficulty: mmrEngine.characterDifficulty(mmr.characters[c.id]),
     competitiveMatches: (mmr.characters[c.id] && mmr.characters[c.id].n_D) || 0,
+    record: publicRecord(records[c.id]),
+    featured: c.id === featuredId,
   });
   res.json(
-    list.map((c) => withDifficulty(isAdmin(req.user) ? c : publicFreeplayChar(c), c)),
+    list.map((c) => withExtras(isAdmin(req.user) ? c : publicFreeplayChar(c), c)),
   );
 });
 
@@ -2726,6 +2740,14 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     log.mmrBefore = Math.round(result.P_before);
     log.mmrAfter = Math.round(result.P_after);
     writeJSON('logs.json', logs);
+
+    // Recorde 👑 do paciente: mesma porta de entrada do MMR (competitivo, nota
+    // numérica, usuário real). Best-effort — nada aqui derruba a submissão.
+    try {
+      updateCharacterRecord(log.itemId, log.score, { userId: req.user.id, userName: req.user.name });
+    } catch (err) {
+      console.error('updateCharacterRecord falhou:', err.message);
+    }
   }
 
   // TRI do visitante — desligada por padrão (VISITOR_TRI=1 liga).
@@ -3059,7 +3081,9 @@ app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, re
   }
   writeJSON('logs.json', logs);
   writeJSON('progress.json', {});
-  console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), progresso limpo.`);
+  // Os recordes 👑 dos pacientes são notas do avaliador antigo — caem junto.
+  writeCharacterRecords({});
+  console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), progresso e recordes limpos.`);
   res.json({ ok: true, clearedScores });
 });
 
@@ -3287,13 +3311,13 @@ const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 //
 // O que MUDOU de invariante para default (não confie mais nisso como absoluto):
 //   - "GPT como avaliador sempre vai de Batch" virou escolha: o admin pode pôr
-//     GPT num modo síncrono (Treinamento, Visitante, Duelo, Desafio, Neuro), e aí
+//     GPT num modo síncrono (Treinamento, Visitante, Duelo, Neuro), e aí
 //     roda a preço cheio, sem os 50% do batch. A tela avisa disso.
 //   - "SELECAO_EVAL_MODEL precisa apontar pra OpenAI" não vale mais: escolher GLM
 //     no Seletivo/Competitivo desliga o batch e a avaliação vai pelo caminho
 //     síncrono em background (runSelectionEvalsWithoutBatch / o do Competitivo).
-//   - Duelo e Desafio continuam SEM fallback pro GPT no caminho de FALHA (isso
-//     segue valendo), mas o admin pode escolher GPT como primário deles.
+//   - O Duelo continua SEM fallback pro GPT no caminho de FALHA (isso segue
+//     valendo), mas o admin pode escolher GPT como primário dele.
 //
 // TREINAMENTO (freeplay training): GLM 5.2/high; FALLBACK pra gpt-5.4/medium (o
 // SIM acima) se o primário falhar. SELETIVO e COMPETITIVO: gpt-5.5/high em BATCH
@@ -3309,11 +3333,6 @@ const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || 'high';
 // modelo — e não há fallback pro GPT quando o primário falha.
 const DUEL_EVAL_MODEL = process.env.DUEL_EVAL_MODEL || 'glm-5.2';
 const DUEL_EVAL_EFFORT = process.env.DUEL_EVAL_EFFORT || 'high';
-// MODO DESAFIO / King of the Hill (reivindicar + desafiar o Titular): mesma
-// lógica do Duelo — GLM 5.2/high por padrão, resultado na hora (nunca batch), sem
-// fallback pro GPT no caminho de falha.
-const DESAFIO_EVAL_MODEL = process.env.DESAFIO_EVAL_MODEL || 'glm-5.2';
-const DESAFIO_EVAL_EFFORT = process.env.DESAFIO_EVAL_EFFORT || 'high';
 function providerForModel(m) {
   return String(m || '').startsWith('glm') ? 'glm' : 'openai';
 }
@@ -3389,7 +3408,6 @@ function aiCategoryDefaults() {
     seletivo: { evaluator: ev(SELECAO_EVAL_MODEL, SELECAO_EVAL_EFFORT), patient: paciente },
     visitante: { evaluator: { ...legadoVisitante }, patient: paciente },
     duelo: { evaluator: ev(DUEL_EVAL_MODEL, DUEL_EVAL_EFFORT), patient: paciente },
-    desafio: { evaluator: ev(DESAFIO_EVAL_MODEL, DESAFIO_EVAL_EFFORT), patient: paciente },
     neuro: { evaluator: ev(OPENAI_NEURO_MODEL, OPENAI_NEURO_EFFORT), patient: paciente },
     avaliacaoManual: { evaluator: ev(OPENAI_EVAL_MODEL, OPENAI_EVAL_EFFORT), patient: paciente },
   };
@@ -3844,7 +3862,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   //   O RESTO → por CATEGORIA (Administração → Modelos de IA). O cliente manda a
   //             dica em context.category, e ela passa por
   //             isClientPatientCategory: aceita só os modos que o usuário de fato
-  //             inicia na interface (treino/competitivo/duelo/desafio).
+  //             inicia na interface (treino/competitivo/duelo).
   //             'seletivo' fica de fora de propósito — senão um aluno poderia
   //             rodar o paciente daquela categoria (possivelmente mais caro) nos
   //             treinos dele. Visitante e neuro são derivados AQUI: role e
@@ -3917,8 +3935,8 @@ function sanitizeAssistantId(input) {
 // FAMÍLIA v18.25: todos os avaliadores de produção vivem em
 // `avaliacao/avaliador 18/`, derivados do mesmo base (avaliador-v18-25.md) com a
 // adaptação de cada modo. Saída única em todos: bloco `[notas]` (15 critérios,
-// 1–10 ou NA) no início, `[feedback]` + corpo depois — exceto o Desafio, que é
-// opaco (nenhuma nota na saída). Os prompts v15/v16 continuam em `avaliacao/`
+// 1–10 ou NA) no início, `[feedback]` + corpo depois. Os prompts v15/v16
+// continuam em `avaliacao/`
 // só como referência e para o laboratório da Avaliação Independente.
 const AVALIACAO_DIR = path.join(PROMPTS_DIR, 'avaliacao');
 const AVALIACAO_18_DIR = path.join(AVALIACAO_DIR, 'avaliador 18');
@@ -3931,8 +3949,8 @@ function loadEvaluatorFile(fileName) {
   return fs.readFileSync(promptFile, 'utf-8');
 }
 
-// Avaliador individual (Treinamento sem progressão, Competitivo, Reivindicar,
-// avaliação manual): 15 critérios em 6 grupos, nota final calculada no
+// Avaliador individual (Treinamento sem progressão, Competitivo, avaliação
+// manual): 15 critérios em 6 grupos, nota final calculada no
 // scoring.js a partir do bloco [notas].
 function loadAvaliacaoPrompt() {
   return loadEvaluatorFile('avaliador-v18-25.md');
@@ -4939,6 +4957,13 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
           mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
           if (!result.calibratingBefore) bumpTriFonte(mmr, l.itemId, 'competitivo');
           l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
+          // Recorde 👑 do paciente — mesmo gate do MMR. Este é o caminho normal
+          // do Competitivo (a nota só existe depois da avaliação assíncrona).
+          try {
+            updateCharacterRecord(l.itemId, score, { userId: l.userId, userName: l.userName });
+          } catch (err) {
+            console.error('updateCharacterRecord (batch) falhou:', err.message);
+          }
         }
       } else {
         l.evaluationPending = false; l.evalError = motivoSemResultado;
@@ -7217,516 +7242,6 @@ app.post('/api/notifications/read-all', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ============================================================================
-// MODO DESAFIO (titular-desafiante) — aba paralela dentro do Treinamento
-// ============================================================================
-// Sistema isolado: NÃO toca em logs.json, progressão, sidequests nem MMR.
-// Cada paciente tem no máximo um Titular por vez; quem clica no rosto do
-// Titular atual entra como Desafiante (avaliador titular-desafiante decide se
-// assume); quando ninguém é Titular, clicar no 👑 reivindica a posição (vira
-// Titular ao final, independente da nota). Visitantes podem ser Titular e,
-// ao vencer (reivindicar ou desafiar com sucesso), podem digitar o PRÓPRIO
-// NOME pra aparecer no lugar de "Um visitante" — sem foto, e só a MESMA sessão
-// de visitante que venceu pode nomear (visitorSessionId trava isso; ver
-// POST /api/desafio/nome-visitante). Incentivo pra visitante topar o Modo
-// Desafio (decisão do dono — antes era o oposto: "Um visitante" de propósito
-// pra puxar usuário real a substituir).
-
-const DESAFIO_MAX_MESSAGES = 500;
-const DESAFIO_MAX_MESSAGE_LEN = 20000;
-
-function readDesafio() {
-  const data = readJSON('desafio.json', { titulares: {} });
-  if (!data.titulares || typeof data.titulares !== 'object') data.titulares = {};
-  return data;
-}
-function writeDesafio(data) { writeJSON('desafio.json', data); }
-
-// Snapshot público de um Titular pra cards do FreePlay. Não inclui o log do
-// titular (esse fica server-side, só vai pro avaliador) nem visitorSessionId
-// (token interno de autorização, não é pra exibir). Visitante SEM nome
-// próprio vira "Um visitante"; se venceu e nomeou a si mesmo (ver
-// POST /api/desafio/nome-visitante), aparece com esse nome — mas nunca com
-// foto.
-function publicTitular(t) {
-  if (!t) return null;
-  if (t.isVisitor) {
-    return {
-      isVisitor: true,
-      name: (t.visitorDisplayName && String(t.visitorDisplayName).trim()) || 'Um visitante',
-      profilePhoto: '',
-      claimedAt: t.claimedAt || null,
-      lastDefendedAt: t.lastDefendedAt || null,
-    };
-  }
-  return {
-    isVisitor: false,
-    userId: t.userId || null,
-    name: t.userName || 'Terapeuta',
-    profilePhoto: t.userPhoto || '',
-    claimedAt: t.claimedAt || null,
-    lastDefendedAt: t.lastDefendedAt || null,
-  };
-}
-
-// Lista de coroas (títulos temporários "👑 <personagem>") de um usuário real.
-// Atravessa todos os titulares e devolve os personagens onde o userId é
-// Titular. Visitante nunca tem coroa persistente (id efêmero).
-function getUserCrowns(userId) {
-  if (!userId || String(userId).startsWith('visitor-')) return [];
-  const { titulares } = readDesafio();
-  const out = [];
-  for (const [characterId, t] of Object.entries(titulares)) {
-    if (!t || t.isVisitor) continue;
-    if (t.userId === userId) {
-      out.push({
-        characterId,
-        characterName: t.characterName || 'Paciente',
-        label: `👑 ${t.characterName || 'Paciente'}`,
-      });
-    }
-  }
-  return out;
-}
-
-// Sanitiza mensagens enviadas pelo cliente ao concluir um desafio.
-function cleanDesafioMessages(rawMessages) {
-  const arr = Array.isArray(rawMessages) ? rawMessages.slice(0, DESAFIO_MAX_MESSAGES) : [];
-  return arr
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && !m.isSystem)
-    .map((m) => ({
-      role: m.role,
-      content: clampStr(m.content, DESAFIO_MAX_MESSAGE_LEN),
-      highlighted: !!m.highlighted,
-      comment: clampStr(m.comment, 2000),
-    }));
-}
-
-// Avaliador titular-desafiante: mesma família v18.25 dos demais. Comparativo, mas
-// com resultado binário (Titular permanece ou Desafiante assume) decidido por
-// contagem de critérios vencidos — empate no critério vai pro Desafiante. Output
-// OPACO: nenhuma nota numérica, nem bloco [notas]; só a linha de resultado, a
-// prosa e o bloco [titular-desafiante-resultado] com
-// {"desafiante_assume": bool, "justification": "..."}.
-function loadTitularDesafiantePrompt() {
-  return loadEvaluatorFile('avaliador-v18-25-desafio.md');
-}
-
-// Extrai o bloco [titular-desafiante-resultado] do output do avaliador.
-// Mesma forma do [sidequest-resultado] — JSON cru após marcador. Retorna
-// { clean, result } onde result = { desafianteAssume, justification } ou null.
-function extractTitularDesafianteResult(evaluation) {
-  const text = typeof evaluation === 'string' ? evaluation : '';
-  const markerMatch = text.match(/\[titular-desafiante-resultado\]/i);
-  if (!markerMatch) return { clean: text, result: null };
-  const markerIdx = markerMatch.index;
-  const after = text.slice(markerIdx);
-  const jsonMatch = after.match(/\{[\s\S]*?\}/);
-  let result = null;
-  let blockEnd = markerIdx + (after.match(/\[titular-desafiante-resultado\][^\n]*/i)[0].length);
-  if (jsonMatch) {
-    blockEnd = markerIdx + jsonMatch.index + jsonMatch[0].length;
-    try {
-      const obj = JSON.parse(jsonMatch[0]);
-      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        const v = obj.desafiante_assume;
-        result = {
-          desafianteAssume: v === true || String(v).toLowerCase() === 'true',
-          justification: typeof obj.justification === 'string' ? obj.justification : '',
-        };
-      }
-    } catch {}
-  }
-  // Remove também um separador "---" imediatamente antes do marcador.
-  const before = text.slice(0, markerIdx);
-  const sep = before.match(/\n*-{3,}[^\S\n]*\n*$/);
-  const start = sep ? before.length - sep[0].length : markerIdx;
-  const clean = (text.slice(0, start) + text.slice(blockEnd)).replace(/\n{3,}/g, '\n\n').trim();
-  return { clean, result };
-}
-
-// Resolve o "lado" titular pro card (usado tanto na lista pública quanto no
-// estado de início de uma sessão de desafio).
-app.get('/api/desafio/titulares', requireAuth, (req, res) => {
-  const { titulares } = readDesafio();
-  const out = {};
-  for (const [characterId, t] of Object.entries(titulares)) {
-    out[characterId] = publicTitular(t);
-  }
-  res.json(out);
-});
-
-// Coroas do usuário logado (lista de personagens onde ele é Titular).
-// Visitante recebe [] — não tem coroa persistente.
-app.get('/api/me/crowns', requireAuth, (req, res) => {
-  if (req.user.role === 'visitor') return res.json([]);
-  res.json(getUserCrowns(req.user.id));
-});
-
-// Estado inicial pra uma sessão de Desafio. Antes de começar o atendimento, o
-// cliente bate aqui pra saber se vai entrar como Reivindicante (sem Titular
-// atual) ou Desafiante (há Titular). Validamos que o personagem existe.
-app.get('/api/desafio/state/:characterId', requireAuth, (req, res) => {
-  const characters = readJSON('freeplay-characters.json');
-  const char = characters.find((c) => String(c.id) === String(req.params.characterId));
-  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
-  const { titulares } = readDesafio();
-  const t = titulares[char.id];
-  if (!t) {
-    return res.json({
-      mode: 'reivindicar',
-      character: { id: char.id, name: char.name },
-      titular: null,
-    });
-  }
-  // Bloqueio: usuário não pode "desafiar a si mesmo" — já é Titular.
-  if (!t.isVisitor && req.user.role !== 'visitor' && t.userId === req.user.id) {
-    return res.json({
-      mode: 'auto-titular',
-      character: { id: char.id, name: char.name },
-      titular: publicTitular(t),
-    });
-  }
-  return res.json({
-    mode: 'desafiar',
-    character: { id: char.id, name: char.name },
-    titular: publicTitular(t),
-  });
-});
-
-// Reivindica um Titular (não há Titular atual). O aluno vira Titular ao final,
-// SEMPRE — independente da nota; reivindicar nunca "falha". Mas, como todo
-// atendimento do Treinamento, agora recebe avaliação clínica: rodamos o
-// avaliador individual (v18.25) sobre o log do reivindicante e devolvemos a prosa
-// de feedback. Por viver no Modo Desafio, a avaliação é OPACA — o bloco oculto
-// [notas] é stripado server-side ANTES de qualquer byte chegar ao
-// cliente (a nota nunca aparece, nem ao aluno nem ao supervisor; ver opacidade
-// do titular-desafiante). Reivindicamos PRIMEIRO (write atômico instantâneo) e
-// só então rodamos a avaliação — assim a avaliação demorada não abre janela de
-// race com outro reivindicante. Responde em SSE (mesmo padrão de /api/evaluate
-// e /desafio/desafiar) por causa do timeout de 100s do Cloudflare; cai pra JSON
-// quando não há avaliador (visitante sem toggle, ou o provedor indisponível).
-// Avaliador da categoria "Modo Desafio" (Administração → Modelos de IA), sempre
-// buffered e SÍNCRONO: o resultado sai na hora, então batch está fora daqui.
-app.post('/api/desafio/reivindicar', requireAuth, aiLimiter, async (req, res) => {
-  const body = req.body || {};
-  const desafioSpec = evaluatorSpecFor('desafio');
-  const desafioProvider = desafioSpec.provider;
-  const desafioClient = getClientForProvider(desafioProvider);
-  const characters = readJSON('freeplay-characters.json');
-  const char = characters.find((c) => String(c.id) === String(body.characterId));
-  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
-
-  const messages = cleanDesafioMessages(body.messages);
-  if (!messages.length) {
-    return res.status(400).json({ error: 'A sessão precisa ter ao menos uma mensagem.' });
-  }
-
-  const isVisitor = req.user.role === 'visitor';
-
-  // Reivindica sob lock: read-check-write serializado (vira Titular se a posição
-  // estiver vaga). Sem await dentro do lock — a avaliação demorada roda depois.
-  const claim = await withFileLock('desafio.json', () => {
-    const data = readDesafio();
-    if (data.titulares[char.id]) {
-      return { conflict: true, titular: publicTitular(data.titulares[char.id]) };
-    }
-    const now = new Date().toISOString();
-    data.titulares[char.id] = {
-      characterName: char.name,
-      isVisitor,
-      userId: isVisitor ? null : req.user.id,
-      userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
-      userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
-      // Trava de quem pode nomear (só a MESMA sessão de visitante que venceu).
-      visitorSessionId: isVisitor ? req.user.id : null,
-      visitorDisplayName: null,
-      logMessages: messages,
-      durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
-      claimedAt: now,
-      lastDefendedAt: now,
-    };
-    writeDesafio(data);
-    // Histórico de titularidade (conquistas Vingança/Destronador). Reivindicação =
-    // posição estava vaga → fromUserId null. Visitante não entra no histórico.
-    if (!isVisitor) {
-      appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: null, toUserId: req.user.id, reason: 'reivindicar' });
-    }
-    return { conflict: false, titular: publicTitular(data.titulares[char.id]) };
-  });
-
-  if (claim.conflict) {
-    return res.status(409).json({
-      error: 'Alguém já reivindicou este Titular enquanto você atendia. Vá pra desafiar.',
-      titular: claim.titular,
-    });
-  }
-
-  const titularPublic = claim.titular;
-
-  // Sem avaliador disponível (visitante com toggle off, ou GLM indisponível):
-  // reivindica sem avaliação e devolve JSON (o cliente trata os dois formatos).
-  const skipEval = (isVisitor && !visitorEvaluationEnabled()) || !desafioClient;
-  if (skipEval) {
-    return res.json({
-      ok: true,
-      kind: 'claimed',
-      character: { id: char.id, name: char.name },
-      titular: titularPublic,
-      isVisitor,
-      evaluation: '',
-    });
-  }
-
-  // Avaliação individual (v18.25) do log do reivindicante, em GLM 5.2/high
-  // (buffered — sem chamada em stream token a token; o heartbeat abaixo segura
-  // a conexão). Opaca: o texto bruto nunca é escrito na resposta — só o
-  // `clean` (pós extractSupervisorNotes) sai, então o bloco [notas] com as notas
-  // por critério jamais chega ao cliente.
-  const context = { type: 'freeplay', itemId: char.id };
-  const systemPrompt = loadAvaliacaoPrompt();
-  const bloco1 = resolveBloco1({ context });
-  const evalMessages = messages.map((m) => ({ role: m.role, content: m.content }));
-  const inputTurns = withBloco1(evalMessages, bloco1)
-    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
-    .filter((m) => m.content);
-
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  if (res.flushHeaders) res.flushHeaders();
-  res.write(': ok\n\n');
-  const heartbeat = setInterval(() => {
-    try { res.write(': keepalive\n\n'); } catch {}
-  }, 15000);
-
-  try {
-    const evalBody = buildChatBody({
-      provider: desafioProvider, model: desafioSpec.model, effort: desafioSpec.effort,
-      maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
-    });
-    const resp = await desafioClient.chat.completions.create(evalBody);
-    const fullText = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-    logOpenAIUsage('Reivindicar (v18.25 opaco)', desafioSpec.model, resp.usage || null);
-    const { clean } = extractSupervisorNotes(fullText);
-    clearInterval(heartbeat);
-    if (clean) res.write(`data: ${JSON.stringify({ delta: clean })}\n\n`);
-    res.write(`data: ${JSON.stringify({
-      done: true,
-      kind: 'claimed',
-      evaluation: clean,
-      titular: titularPublic,
-      character: { id: char.id, name: char.name },
-    })}\n\n`);
-    res.end();
-  } catch (err) {
-    clearInterval(heartbeat);
-    const { error: msgFalha } = falhou(req, err, 'desafio/reivindicar');
-    // A reivindicação já foi gravada; só sinaliza que a avaliação falhou.
-    try {
-      res.write(`data: ${JSON.stringify({
-        done: true,
-        kind: 'claimed',
-        evaluation: '',
-        error: `A reivindicação foi registrada, mas a avaliação falhou. ${msgFalha}`,
-        titular: titularPublic,
-        character: { id: char.id, name: char.name },
-      })}\n\n`);
-    } catch {}
-    res.end();
-  }
-});
-
-// Desafia o Titular atual: o cliente envia seu log; o servidor carrega o log
-// do Titular, monta o contexto pro avaliador titular-desafiante, roda GLM
-// 5.2/high (buffered — sem stream token a token; o heartbeat SSE segura a
-// conexão pelo timeout de 100s do Cloudflare), parseia o bloco
-// [titular-desafiante-resultado] no final, e atualiza o Titular se o
-// Desafiante assumiu. O cliente recebe o texto limpo num único delta + um
-// evento final `data:{done, outcome}` com o resultado.
-app.post('/api/desafio/desafiar', requireAuth, aiLimiter, async (req, res) => {
-  const body = req.body || {};
-  const desafioSpec = evaluatorSpecFor('desafio');
-  const desafioProvider = desafioSpec.provider;
-  const desafioClient = getClientForProvider(desafioProvider);
-
-  const characters = readJSON('freeplay-characters.json');
-  const char = characters.find((c) => String(c.id) === String(body.characterId));
-  if (!char) return res.status(404).json({ error: 'Personagem não encontrado.' });
-
-  const data = readDesafio();
-  const titular = data.titulares[char.id];
-  if (!titular) {
-    return res.status(409).json({
-      error: 'Não há Titular para este caso. Reivindique a posição em vez de desafiar.',
-    });
-  }
-  // Bloqueio: não pode desafiar a si mesmo.
-  if (!titular.isVisitor && req.user.role !== 'visitor' && titular.userId === req.user.id) {
-    return res.status(409).json({ error: 'Você já é o Titular deste caso — não pode se desafiar.' });
-  }
-
-  if (req.user.role === 'visitor' && !visitorEvaluationEnabled()) {
-    return res.status(403).json({ error: 'A avaliação não está disponível para visitantes no momento.' });
-  }
-
-  const desafianteMessages = cleanDesafioMessages(body.messages);
-  if (!desafianteMessages.length) {
-    return res.status(400).json({ error: 'A sessão do Desafiante precisa ter ao menos uma mensagem.' });
-  }
-
-  if (!desafioClient) {
-    // GLM indisponível: não dá pra rodar avaliador comparativo. Mantém o
-    // Titular atual e devolve mensagem de erro pro cliente (sem trocar nada).
-    return res.json({
-      ok: true,
-      kind: 'challenge',
-      outcome: 'titular-permanece',
-      evaluation: `[Modo demonstração — ${desafioProvider} indisponível] O avaliador titular-desafiante não pôde rodar; o Titular permanece.`,
-      titular: publicTitular(titular),
-    });
-  }
-
-  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: char.id } });
-  const titularName = titular.isVisitor
-    ? ((titular.visitorDisplayName && String(titular.visitorDisplayName).trim()) || 'Titular (visitante)')
-    : (titular.userName || 'Titular');
-  const desafianteName = req.user.role === 'visitor' ? 'Desafiante (visitante)' : (req.user.name || req.user.username || 'Desafiante');
-  const logTitular = transcriptFromMessages(titular.logMessages || [], titularName, char.name);
-  const logDesafiante = transcriptFromMessages(desafianteMessages, desafianteName, char.name);
-
-  const userContent =
-    (bloco1 ? `[BLOCO 1 DO CASO] (referência interna do avaliador — gabarito)\n${bloco1}\n\n---\n\n` : '') +
-    `[LOG DO TITULAR — ${titularName} com ${char.name}]\n${logTitular || '(sem mensagens)'}\n\n---\n\n` +
-    `[LOG DO DESAFIANTE — ${desafianteName} com ${char.name}]\n${logDesafiante || '(sem mensagens)'}`;
-
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  if (res.flushHeaders) res.flushHeaders();
-  res.write(': ok\n\n');
-  const heartbeat = setInterval(() => {
-    try { res.write(': keepalive\n\n'); } catch {}
-  }, 15000);
-
-  let fullText = '';
-  try {
-    const evalBody = buildChatBody({
-      provider: desafioProvider, model: desafioSpec.model, effort: desafioSpec.effort,
-      maxTokens: 64000, messages: [{ role: 'developer', content: loadTitularDesafiantePrompt() }, { role: 'user', content: userContent }],
-    });
-    const resp = await desafioClient.chat.completions.create(evalBody);
-    fullText = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-    logOpenAIUsage('Desafio (titular-desafiante)', desafioSpec.model, resp.usage || null);
-  } catch (err) {
-    clearInterval(heartbeat);
-    try { res.write(`data: ${JSON.stringify(falhou(req, err, 'desafio/avaliação'))}\n\n`); } catch {}
-    res.end();
-    return;
-  }
-  clearInterval(heartbeat);
-
-  // Parse do bloco [titular-desafiante-resultado] + atualização de estado.
-  // Se o desafiante assume, troca o Titular. Read-modify-write atômico no
-  // mesmo request — improvável ter race aqui (avaliação demora minutos).
-  const { clean: cleanResult, result } = extractTitularDesafianteResult(fullText);
-  // Defesa da opacidade do Desafio: o prompt v18.25 deste modo proíbe qualquer
-  // nota na saída, mas se o modelo escorregar e emitir o bloco [notas] (o base
-  // do qual ele deriva emite), ele não pode chegar ao cliente. O parse preserva
-  // a linha de resultado e a prosa; só o bloco de notas cai.
-  const { clean } = extractSupervisorNotes(cleanResult, { greeting: false });
-  let outcome = 'titular-permanece';
-  let newTitular = titular;
-  // Atualização de estado sob lock: a IA (demorada) já rodou FORA do lock; aqui
-  // só o trecho rápido re-lê→aplica→grava o desafio.json.
-  newTitular = await withFileLock('desafio.json', () => {
-    if (result && result.desafianteAssume) {
-      outcome = 'desafiante-assume';
-      const fresh = readDesafio();
-      const isVisitor = req.user.role === 'visitor';
-      const now = new Date().toISOString();
-      fresh.titulares[char.id] = {
-        characterName: char.name,
-        isVisitor,
-        userId: isVisitor ? null : req.user.id,
-        userName: isVisitor ? null : (req.user.name || req.user.username || 'Terapeuta'),
-        userPhoto: isVisitor ? '' : (req.user.profilePhoto || ''),
-        visitorSessionId: isVisitor ? req.user.id : null,
-        visitorDisplayName: null,
-        logMessages: desafianteMessages,
-        durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
-        claimedAt: now,
-        lastDefendedAt: now,
-      };
-      writeDesafio(fresh);
-      // Histórico de titularidade (Vingança/Destronador): desafiante tomou a
-      // posição do titular anterior. Visitante não entra no histórico.
-      if (!isVisitor) {
-        appendDesafioHistory({ characterId: char.id, characterName: char.name, fromUserId: titular.userId || null, toUserId: req.user.id, reason: 'desafio' });
-      }
-      return fresh.titulares[char.id];
-    }
-    // Titular permaneceu: só atualiza lastDefendedAt.
-    const fresh = readDesafio();
-    if (fresh.titulares[char.id]) {
-      fresh.titulares[char.id].lastDefendedAt = new Date().toISOString();
-      writeDesafio(fresh);
-      return fresh.titulares[char.id];
-    }
-    return titular;
-  });
-
-  // Avaliação é buffered (GLM), então manda o texto limpo como um único delta
-  // antes do payload final — o cliente concatena os deltas pra exibir a prosa.
-  if (clean) res.write(`data: ${JSON.stringify({ delta: clean })}\n\n`);
-
-  // Sinaliza fim com payload final (cliente já remontou a prosa via deltas).
-  // Mandamos `clean` também porque o cliente exibe o texto sem o bloco JSON.
-  res.write(`data: ${JSON.stringify({
-    done: true,
-    outcome,
-    evaluation: clean,
-    justification: result ? result.justification : '',
-    titular: publicTitular(newTitular),
-    character: { id: char.id, name: char.name },
-  })}\n\n`);
-  res.end();
-});
-
-// Visitante que ACABOU de virar Titular (reivindicando ou vencendo um desafio)
-// pode digitar o próprio nome, sem foto — incentivo pra topar o Modo Desafio.
-// Só a MESMA sessão de visitante que venceu pode nomear: visitorSessionId foi
-// gravado com o req.user.id (efêmero, do JWT de visitante) no momento da
-// vitória, e aqui exigimos que bata — outro visitante não pode sequestrar o
-// nome de quem já é Titular.
-app.post('/api/desafio/nome-visitante', requireAuth, writeLimiter, async (req, res) => {
-  if (req.user.role !== 'visitor') {
-    return res.status(403).json({ error: 'Só visitantes podem usar este recurso.' });
-  }
-  const body = req.body || {};
-  const characterId = String(body.characterId || '').trim();
-  const name = clampStr(body.name, 40).trim();
-  if (!characterId) return res.status(400).json({ error: 'characterId é obrigatório.' });
-  if (!name) return res.status(400).json({ error: 'Digite um nome.' });
-
-  const result = await withFileLock('desafio.json', () => {
-    const data = readDesafio();
-    const t = data.titulares[characterId];
-    if (!t) return { status: 404, error: 'Não há Titular para este personagem.' };
-    if (!t.isVisitor || t.visitorSessionId !== req.user.id) {
-      return { status: 403, error: 'Você não pode nomear este Titular.' };
-    }
-    t.visitorDisplayName = name;
-    writeDesafio(data);
-    return { titular: publicTitular(t) };
-  });
-
-  if (result.error) return res.status(result.status || 400).json({ error: result.error });
-  res.json({ ok: true, titular: result.titular });
-});
 
 // Digital Asset Links — vincula o app Android (TWA) a esta origem pra que o
 // WebView abra em tela cheia, sem a barra do navegador. Dirigido por env vars

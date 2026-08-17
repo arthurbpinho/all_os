@@ -73,13 +73,6 @@ const MODE_GROUPS = [
         canOpen: (u) => u?.role === 'therapist' || u?.role === 'admin',
         desc: 'Você e outra pessoa atendem o mesmo paciente, cada um na sua sessão. Quando os dois terminam, um avaliador comparativo lê os dois atendimentos lado a lado, dá uma nota a cada um e aponta o vencedor. O convite sai pelo sistema ou por link.',
       },
-      {
-        id: 'desafio',
-        name: 'Desafio',
-        route: '/progressao',
-        canOpen: () => true,
-        desc: 'Cada paciente tem uma posição de Titular 👑 — quem detém a referência daquele caso. O Desafio acontece no card do paciente, dentro da Progressão: toque na coroa para reivindicar a posição vazia ou para desafiar o Titular atual. O resultado é só posicional, sem nota numérica.',
-      },
     ],
   },
   {
@@ -240,7 +233,7 @@ export default function SkillMap({ user }) {
   }
 
   // Grupos com ao menos um modo que ESTE usuário abre. Visitante, por exemplo,
-  // fica só com Progressão e Desafio — o grupo Ferramentas nem aparece pra ele.
+  // fica só com a Progressão — o grupo Ferramentas nem aparece pra ele.
   const modeGroups = useMemo(
     () => MODE_GROUPS
       .map((g) => ({ ...g, modes: g.modes.filter((m) => m.canOpen(user)) }))
