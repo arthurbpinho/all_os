@@ -50,7 +50,30 @@ const V25_SYNTH_MAX_TOKENS = Number(process.env.AVALIACAO_V25_SYNTH_MAX_TOKENS |
 // por env (AVALIACAO_V25_PRICE_INPUT/_CACHED/_OUTPUT, em USD por MTok).
 // Preços (docs OpenAI, jul/2026). resolvePrices casa pelo prefixo mais LONGO,
 // então 'gpt-5.4-mini' vence 'gpt-5.4' para os ids do mini.
+//
+// CAVEAT de precisão (vale pra TODOS os modelos OpenAI daqui, não só o 5.6):
+// a OpenAI cobra ESCRITA de cache a 1,25× o input, mas o usage da API não separa
+// os tokens de escrita — eles vêm dentro do bucket de input, que contamos a 1×.
+// Ou seja: o custo OpenAI calculado aqui é um PISO, subestimado em até 25% sobre
+// a parcela de prefixo novo (só a 1ª chamada de cada prefixo; da 2ª em diante é
+// leitura de cache, que é medida certo). O erro é o mesmo em todos os modelos
+// OpenAI, então a COMPARAÇÃO entre eles continua justa — que é pra isso que o
+// laboratório existe. Fonte: developers.openai.com/api/docs/pricing (ago/2026).
 const V25_PRICES = {
+  // GPT-5.6 Sol — flagship da família 5.6 (lançada 09/07/2026). Mesmo preço do
+  // 5.5 ($5/$0,50/$30), então aqui a comparação é de QUALIDADE por dólar: se ele
+  // entregar mais que o 5.5 pelo mesmo preço, a troca é de graça. Aceita dois
+  // degraus de reasoning acima do 5.5 (xhigh e max) — que custam mais só por
+  // gerarem mais tokens de raciocínio, não por preço de tabela diferente.
+  // Fonte: developers.openai.com/api/docs/models/gpt-5.6-sol (conferido ago/2026).
+  'gpt-5.6-sol': { input: 5, cached: 0.5, output: 30 },
+  // Os dois tiers abaixo do Sol, mesma família. Terra fica ~20% ABAIXO do 5.4
+  // ($2 vs $2,50 input; $12 vs $15 output) e Luna é o mais barato de toda a
+  // tabela — 3,75× abaixo do 5.4-mini. Fonte: developers.openai.com/api/docs/
+  // pricing (conferido ago/2026; um blog agregador publicou $2,50/$15 e $1/$6
+  // para estes dois, que NÃO bate com a doc oficial — valem os números daqui).
+  'gpt-5.6-terra': { input: 2, cached: 0.2, output: 12 },
+  'gpt-5.6-luna': { input: 0.2, cached: 0.02, output: 1.2 },
   'gpt-5.5': { input: 5, cached: 0.5, output: 30 },
   'gpt-5.4-mini': { input: 0.75, cached: 0.075, output: 4.5 },
   'gpt-5.4': { input: 2.5, cached: 0.25, output: 15 },

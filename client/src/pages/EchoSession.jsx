@@ -376,7 +376,12 @@ export default function EchoSession({ user, sessionType }) {
     const apiMessages = [...currentMessages, { role: 'user', content: text }]
       .filter((m) => m && m.role) // markers visuais (separadores de sessão) não têm role
       .map((m) => ({ role: m.role, content: m.content }));
-    const data = await api.chat(apiMessages, { type: sessionType, itemId: id });
+    // category define o modelo do paciente (Administração → Modelos de IA).
+    // Neuro e visitante o servidor deriva sozinho — aqui só distinguimos
+    // Competitivo de Treinamento, que compartilham esta mesma tela.
+    const data = await api.chat(apiMessages, {
+      type: sessionType, itemId: id, category: isCompetitive ? 'competitivo' : 'treinamento',
+    });
     return typeof data === 'string' ? data : data.content || data.message || '';
   }
 

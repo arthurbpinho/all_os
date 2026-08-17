@@ -35,11 +35,28 @@ describe('Avaliação Independente — parsers e pricing', () => {
     expect(finalScoreFromCriteria({ 1: 8, 2: 'NA', 3: 6 })).toBe(70);
   });
 
-  it('resolvePrices resolve os 4 modelos (mini antes de 5.4; glm)', () => {
+  it('resolvePrices resolve os 7 modelos (mini antes de 5.4; glm; os três 5.6)', () => {
     expect(resolvePrices('gpt-5.5-2026-04-23')).toMatchObject({ input: 5, cached: 0.5, output: 30 });
     expect(resolvePrices('gpt-5.4-2026-03-05')).toMatchObject({ input: 2.5, cached: 0.25, output: 15 });
     expect(resolvePrices('gpt-5.4-mini-2026-03-17')).toMatchObject({ input: 0.75, cached: 0.075, output: 4.5 });
     expect(resolvePrices('glm-5.2')).toMatchObject({ input: 1.4, cached: 0.26, output: 4.4 });
+    // Família 5.6 (docs OpenAI, ago/2026): Sol empata com o 5.5, Terra fica abaixo
+    // do 5.4 e Luna é o mais barato da tabela.
+    expect(resolvePrices('gpt-5.6-sol')).toMatchObject({ input: 5, cached: 0.5, output: 30 });
+    expect(resolvePrices('gpt-5.6-terra')).toMatchObject({ input: 2, cached: 0.2, output: 12 });
+    expect(resolvePrices('gpt-5.6-luna')).toMatchObject({ input: 0.2, cached: 0.02, output: 1.2 });
+  });
+
+  // O resolve casa por PREFIXO mais longo, então os três tiers do 5.6 precisam
+  // resolver cada um no SEU preço — trocar Luna por Sol aqui erraria o custo por
+  // 25×. E um 5.6 que não esteja na tabela tem de dar null: melhor a UI mostrar
+  // tokens sem custo do que exibir um dólar errado.
+  it('resolvePrices separa os tiers do 5.6 e não chuta tier desconhecido', () => {
+    expect(resolvePrices('gpt-5.6-sol').input).toBe(5);
+    expect(resolvePrices('gpt-5.6-terra').input).toBe(2);
+    expect(resolvePrices('gpt-5.6-luna').input).toBe(0.2);
+    expect(resolvePrices('gpt-5.6-nova')).toBeNull();
+    expect(resolvePrices('gpt-5.6')).toBeNull();
   });
 
   it('extractReasoning: GLM reasoning_content; fallback reasoning e <think>', () => {
@@ -119,6 +136,58 @@ describe('Avaliação Independente — endpoint', () => {
     expect(bad2.status).toBe(400);
     const bad3 = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator: 'v25', model: 'gpt-5.5', effort: 'ultra' });
     expect(bad3.status).toBe(400);
+  });
+
+  // GPT 5.6 Sol: entrou só neste laboratório, com dois degraus de reasoning acima
+  // do 5.5. O que este teste protege é o ALLOWLIST de effort/batch, então olhamos
+  // a MENSAGEM e não o status: o personagem de teste não tem Bloco 1, então todo
+  // caminho válido termina em 400 ali — o que importa é que não seja o 400 de
+  // "effort inválido"/"batch não disponível", provando que passou por eles.
+  it('GPT 5.6 Sol: aceita xhigh/max, recusa none e não empresta effort ao 5.5', async () => {
+    const t = await loginAs('prof');
+    const base = { log: 'x', casoId: 'fp-test-1', evaluator: 'v25' };
+
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      const res = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+        .send({ ...base, model: 'gpt-5.6-sol', effort });
+      expect(res.body.error).toMatch(/Bloco 1/i); // passou do allowlist
+    }
+
+    // Batch é suportado — não pode cair no 400 de "provedor sem Batch API".
+    const batch = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+      .send({ ...base, model: 'gpt-5.6-sol', effort: 'high', batch: true });
+    expect(batch.body.error).toMatch(/Bloco 1/i);
+
+    // 'none' fica fora de propósito: avaliador sem raciocínio oculto vaza o Bloco 1.
+    const none = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+      .send({ ...base, model: 'gpt-5.6-sol', effort: 'none' });
+    expect(none.status).toBe(400);
+    expect(none.body.error).toMatch(/effort inválido/i);
+
+    // Os degraus novos são só do 5.6 — o 5.5 continua em low/medium/high.
+    const emprestado = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+      .send({ ...base, model: 'gpt-5.5', effort: 'max' });
+    expect(emprestado.status).toBe(400);
+    expect(emprestado.body.error).toMatch(/effort inválido/i);
+
+    // Terra e Luna entraram no mesmo laboratório, com a mesma escada de effort.
+    for (const model of ['gpt-5.6-terra', 'gpt-5.6-luna']) {
+      for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+        const res = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+          .send({ ...base, model, effort });
+        expect(res.body.error).toMatch(/Bloco 1/i);
+      }
+      const none = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+        .send({ ...base, model, effort: 'none' });
+      expect(none.body.error).toMatch(/effort inválido/i);
+    }
+
+    // Tier que não existe continua barrado, com a lista montada do AVAL_MODELOS.
+    const inexistente = await request(app).post('/api/avaliacao-independente').set(authHeader(t))
+      .send({ ...base, model: 'gpt-5.6-nova', effort: 'high' });
+    expect(inexistente.status).toBe(400);
+    expect(inexistente.body.error).toMatch(/gpt-5\.6-sol/);
+    expect(inexistente.body.error).toMatch(/gpt-5\.6-luna/);
   });
 
   it('GLM: effort medium é inválido; batch é bloqueado', async () => {

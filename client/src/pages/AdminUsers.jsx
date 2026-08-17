@@ -45,14 +45,6 @@ export default function AdminUsers({ user: currentUser }) {
   const [resetError, setResetError] = useState('');
   const [resetSuccess, setResetSuccess] = useState('');
   const [exporting, setExporting] = useState(false);
-  // Toggle de avaliação para visitantes (eventos/palestras). Default off.
-  const [visitorEval, setVisitorEval] = useState(false);
-  const [visitorEvalSaving, setVisitorEvalSaving] = useState(false);
-  const [visitorEvalError, setVisitorEvalError] = useState('');
-  // Modelo dessa avaliação (só GLM 5.2 ou GPT-5.5, ambos em effort 'high' — o
-  // visitante roda em baixo volume, então o custo maior não pesa).
-  const [visitorEvalModel, setVisitorEvalModel] = useState('glm-5.2');
-  const [visitorEvalModelSaving, setVisitorEvalModelSaving] = useState(false);
   // Feedback dos usuários (estrelas + mensagem coletadas ao fim das sessões).
   const [feedback, setFeedback] = useState([]);
   const [feedbackLoading, setFeedbackLoading] = useState(true);
@@ -68,47 +60,6 @@ export default function AdminUsers({ user: currentUser }) {
   const [updSending, setUpdSending] = useState(false);
   const [updResult, setUpdResult] = useState('');
   const [updError, setUpdError] = useState('');
-
-  useEffect(() => {
-    api.getSettings()
-      .then((s) => {
-        setVisitorEval(!!s.visitorEvaluationEnabled);
-        if (s.visitorEvaluationModel) setVisitorEvalModel(s.visitorEvaluationModel);
-      })
-      .catch(() => { /* mantém off/default se falhar */ });
-  }, []);
-
-  async function toggleVisitorEval() {
-    if (visitorEvalSaving) return;
-    const next = !visitorEval;
-    setVisitorEvalSaving(true);
-    setVisitorEvalError('');
-    try {
-      const s = await api.adminUpdateSettings({ visitorEvaluationEnabled: next });
-      setVisitorEval(!!s.visitorEvaluationEnabled);
-    } catch (err) {
-      setVisitorEvalError(err.message || 'Erro ao salvar configuração.');
-    } finally {
-      setVisitorEvalSaving(false);
-    }
-  }
-
-  async function changeVisitorEvalModel(e) {
-    const next = e.target.value;
-    const prev = visitorEvalModel;
-    setVisitorEvalModel(next); // otimista
-    setVisitorEvalModelSaving(true);
-    setVisitorEvalError('');
-    try {
-      const s = await api.adminUpdateSettings({ visitorEvaluationModel: next });
-      setVisitorEvalModel(s.visitorEvaluationModel || next);
-    } catch (err) {
-      setVisitorEvalModel(prev);
-      setVisitorEvalError(err.message || 'Erro ao salvar o modelo.');
-    } finally {
-      setVisitorEvalModelSaving(false);
-    }
-  }
 
   useEffect(() => {
     api.getAdminFeedback()
@@ -338,47 +289,10 @@ export default function AdminUsers({ user: currentUser }) {
 
       {error && <div className="alert error">{error}</div>}
 
-      <div className="card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ maxWidth: 620 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            Avaliação para visitantes
-            <span style={{
-              marginLeft: 10, fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 999,
-              background: visitorEval ? 'var(--success, #1f8a4c)' : 'var(--sand, #e7e2d8)',
-              color: visitorEval ? '#fff' : 'var(--ink-soft)',
-            }}>
-              {visitorEval ? 'LIGADA' : 'DESLIGADA'}
-            </span>
-          </div>
-          <p style={{ margin: 0, fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-            Quando ligada, visitantes recebem avaliação da IA (da Simulação Livre) ao final da
-            sessão — para demonstrações em palestras/eventos. Desligada no dia a dia.
-          </p>
-          <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <label htmlFor="visitor-eval-model" style={{ fontSize: 13, fontWeight: 500, margin: 0 }}>Modelo:</label>
-            <select
-              id="visitor-eval-model" value={visitorEvalModel} onChange={changeVisitorEvalModel}
-              disabled={visitorEvalModelSaving} style={{ width: 'auto', fontSize: 13 }}
-            >
-              <option value="glm-5.2">GLM 5.2 (high)</option>
-              <option value="gpt-5.5">GPT-5.5 (high)</option>
-            </select>
-            {visitorEvalModelSaving && <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>Salvando…</span>}
-          </div>
-          {visitorEvalError && <div className="alert error" style={{ marginTop: 8, marginBottom: 0 }}>{visitorEvalError}</div>}
-        </div>
-        <button
-          className={`btn ${visitorEval ? 'btn-outline' : 'btn-primary'}`}
-          onClick={toggleVisitorEval}
-          disabled={visitorEvalSaving}
-          title={visitorEval ? 'Desligar avaliação para visitantes' : 'Ligar avaliação para visitantes'}
-        >
-          {visitorEvalSaving ? 'Salvando…' : (visitorEval ? 'Desligar' : 'Ligar')}
-        </button>
-      </div>
-
       {/* Feedback dos usuários — avaliações que os usuários/visitantes deixam ao
-          fim da sessão (estrelas + mensagem). É outra coisa que o toggle acima. */}
+          fim da sessão (estrelas + mensagem). O toggle de "avaliação para
+          visitantes" e a escolha de modelos saíram daqui: viraram a tela
+          Administração → Modelos de IA. */}
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ fontWeight: 600, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
           Feedback dos usuários
