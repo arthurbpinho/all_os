@@ -4529,6 +4529,30 @@ function senhaSelecaoConfere(entrada) {
   if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
   return crypto.timingSafeEqual(a, b);
 }
+// Secret de M2M pro backup externo (Google Apps Script) puxar os logs antes da
+// poda de 15 dias. Deliberadamente separado do JWT: quem chama é um script
+// agendado, sem sessão de usuário — não faz sentido reautenticar a cada corrida.
+// Vazio = endpoint desligado (nenhum backup configurado ainda).
+const SELECAO_EXPORT_SECRET = process.env.SELECAO_EXPORT_SECRET || '';
+function selecaoExportSecretConfere(informado) {
+  if (!SELECAO_EXPORT_SECRET) return false;
+  const a = Buffer.from(String(informado == null ? '' : informado), 'utf8');
+  const b = Buffer.from(SELECAO_EXPORT_SECRET, 'utf8');
+  if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
+  return crypto.timingSafeEqual(a, b);
+}
+function requireSelecaoExportSecret(req, res, next) {
+  if (!SELECAO_EXPORT_SECRET) return res.status(503).json({ error: 'Backup do Processo Seletivo não configurado (SELECAO_EXPORT_SECRET ausente).' });
+  if (!selecaoExportSecretConfere(req.get('X-Export-Secret'))) return res.status(401).json({ error: 'Não autorizado.' });
+  next();
+}
+// Slug de nome de arquivo (mesmo padrão do buildDuelExport).
+function selecaoExportSlug(nome) {
+  return String(nome || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+}
+
 const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
 const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 junto com a
@@ -4624,6 +4648,38 @@ function buildSelectionTranscript(messages, patientName) {
     rows.push(`[${author}${star}]\n${m.content}${comment}`);
   }
   return rows.join('\n\n---\n\n');
+}
+
+const SELECAO_STATUS_LABEL = { ativo: 'Ativo', rejeitado: 'Rejeitado', pending: 'Em avaliação (lote)', erro: 'Erro' };
+
+// Texto completo (log + avaliação) de um candidato, no MESMO formato que o
+// avaliador já baixa em "Tudo" na tela de Logs (client/SelecaoLogs.jsx). Usado
+// pelo backup externo (Google Apps Script), que salva isto num .txt no Drive
+// antes do TTL de 15 dias apagar o log original.
+function buildSelectionExportText(log) {
+  const c = log.candidate || {};
+  const transcript = buildSelectionTranscript(log.messages, log.characterName);
+  const logStr = [
+    'PROCESSO SELETIVO — LOG DO ATENDIMENTO', '',
+    `Candidato: ${c.nome || '—'}`,
+    `E-mail: ${c.email || '—'}`,
+    `WhatsApp: ${c.whatsapp || '—'}`,
+    `Faculdade: ${c.faculdade || '—'}`,
+    `Período: ${c.periodo || '—'}`,
+    `Caso: ${log.characterName || '—'}`,
+    `Data: ${log.timestamp ? new Date(log.timestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '—'}`, '',
+    transcript || '(sem mensagens)',
+  ].join('\n');
+
+  const hasEval = log.status === 'ativo' || log.status === 'rejeitado' || log.score != null;
+  if (!hasEval) return logStr;
+
+  const evalBody = [
+    `Nota final: ${log.score == null ? '—' : `${log.score}/100`}`,
+    `Status: ${SELECAO_STATUS_LABEL[log.status] || log.status}`, '',
+    (log.evaluation || '').trim() || '(sem texto de avaliação)',
+  ].join('\n');
+  return `${logStr}\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalBody}`;
 }
 
 // Partes do input da avaliação do seletivo: o prompt enxuto + o turno do usuário
@@ -5431,6 +5487,31 @@ app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), (re
     ...l,
     expiresAt: l.timestamp ? new Date(new Date(l.timestamp).getTime() + SELECTION_LOG_TTL_MS).toISOString() : null,
   })));
+});
+
+// 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +
+// avaliação, já formatados como .txt) pra salvar no Drive antes da poda de 15
+// dias. M2M por secret fixo no header (X-Export-Secret), não JWT: quem chama é
+// um script agendado, sem sessão de usuário. Idempotência de gravação fica a
+// cargo de quem chama (o script decide o que já salvou, pelo nome do arquivo).
+app.get('/api/selecao/export-all', requireSelecaoExportSecret, (req, res) => {
+  pruneExpiredSelectionLogs();
+  const logs = readJSON('selection-logs.json');
+  const sorted = [...logs].sort((a, c) => new Date(a.timestamp || 0) - new Date(c.timestamp || 0));
+  const items = sorted.map((log) => {
+    const stamp = log.timestamp ? new Date(log.timestamp).toISOString().slice(0, 10) : 'sem-data';
+    const slug = selecaoExportSlug(log.candidate && log.candidate.nome) || 'candidato';
+    const shortId = String(log.id || '').slice(-8) || 'semid';
+    return {
+      id: log.id,
+      filename: `processo-seletivo-${slug}-${stamp}-${shortId}.txt`,
+      timestamp: log.timestamp,
+      status: log.status,
+      score: log.score,
+      content: buildSelectionExportText(log),
+    };
+  });
+  res.json({ generatedAt: new Date().toISOString(), count: items.length, logs: items });
 });
 
 // 6) Dashboard — avaliador/admin. Agrega selection-stats.json (anônimo, permanente)

@@ -193,6 +193,29 @@ describe('Processo Seletivo', () => {
     expect(other.status).toBe(200);
   });
 
+  it('export-all: exige o secret certo (M2M, sem JWT) e devolve log+avaliação em texto por candidato', async () => {
+    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    await request(app).post('/api/selecao/finish').set(authHeader(start.body.token))
+      .send({ messages: [{ role: 'assistant', content: 'Oi.' }, { role: 'user', content: 'Tudo bem?' }], durationSeconds: 60 });
+
+    const semHeader = await request(app).get('/api/selecao/export-all');
+    expect(semHeader.status).toBe(401);
+
+    const secretErrado = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'chute-errado');
+    expect(secretErrado.status).toBe(401);
+
+    const ok = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'test-export-secret');
+    expect(ok.status).toBe(200);
+    expect(ok.body.count).toBe(1);
+    const item = ok.body.logs[0];
+    expect(item.filename).toMatch(/^processo-seletivo-ana-silva-\d{4}-\d{2}-\d{2}-[0-9a-f-]+\.txt$/);
+    expect(item.content).toMatch(/Candidato: Ana Silva/);
+    expect(item.content).toMatch(/E-mail: ana@exemplo\.com/);
+    expect(item.content).toMatch(/Tudo bem\?/);
+    // Sem avaliação ainda (modo demo/pending) — não deve aparecer a seção de avaliação.
+    expect(item.content).not.toMatch(/AVALIAÇÃO DA IA/);
+  });
+
   it('requireCandidate: token de usuário normal não acessa o chat do candidato', async () => {
     const adminToken = await loginAs('admin');
     const chat = await request(app).post('/api/selecao/chat').set(authHeader(adminToken)).send({ messages: [] });
