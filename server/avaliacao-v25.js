@@ -373,12 +373,40 @@ const GLM_V25_CONCURRENCY = Number(process.env.GLM_V25_CONCURRENCY || 3);
 // Concorrência do fan-out no GPT (OpenAI). O limite que estoura primeiro NÃO é
 // requisições por minuto, é TOKENS por minuto: o contador de TPM da OpenAI
 // RESERVA o max_completion_tokens de cada chamada, então cada nó pesa
-// ~input + 16k ≈ 20k tokens. Num tier de 200k TPM cabem ~10 nós por minuto —
-// os 13 do fan-out de uma vez pedem ~270k e tomam 429 na cara ("Limit 200000,
-// Used 200000"). Em lotes de 4 a run inteira fica dentro do teto. Não custa
-// tempo de parede proporcional: o gargalo já era o rate limit, não o paralelismo
-// (e a run é um job em background, sem timeout de HTTP para respeitar).
+// input + o teto de saída — e não o que ele de fato gerar.
+//
+// Este número é o TETO da concorrência; quem decide de verdade é
+// concorrenciaPorTPM(), que mede a chamada real. Um número fixo aqui envelhece
+// mal: com prompt e log pequenos, cada nó pesava ~20k e 4 em paralelo cabiam
+// nos 200k; com o v28 (prompt maior) e um log longo, o mesmo nó pesa ~32k e os
+// mesmos 4 pedem ~130k de uma vez, o que estoura a janela junto com o que ainda
+// está pendurado nela ("Limit 200000, Used 184969, Requested 32528").
 const OPENAI_V25_CONCURRENCY = Number(process.env.AVALIACAO_V25_CONCURRENCY || 4);
+// Teto de TPM da organização (o do erro 429). Serve para dimensionar o fan-out;
+// mude por env se o seu tier for outro.
+const OPENAI_V25_TPM = Number(process.env.AVALIACAO_V25_TPM || 200000);
+// Que fração do teto um ÚNICO lote pode pedir. Não é 1 nem perto disso porque a
+// janela é DESLIZANTE: quando o lote novo sai, o anterior ainda está contando
+// nela. Em 0,5 dois lotes seguidos cabem juntos no minuto. Foi exatamente esse o
+// erro visto em produção — o lote pedia 130k "sozinho", mas chegou numa janela
+// que já tinha 185k dentro.
+const OPENAI_V25_TPM_FATOR = Number(process.env.AVALIACAO_V25_TPM_FATOR || 0.5);
+
+// Tokens estimados de um texto. Heurística grosseira e de propósito PESSIMISTA
+// (3,5 chars/token; português com acento rende menos que os 4 do inglês):
+// superestimar reduz a concorrência, que é o lado seguro do erro.
+function estimarTokens(str) {
+  return Math.ceil(String(str || '').length / 3.5);
+}
+
+// Quantos nós disparar juntos sem estourar o TPM. Cada chamada RESERVA
+// input + maxTokens na janela, então o que cabe é orçamento / reserva. Nunca
+// abaixo de 1: aí vira serial, e o que sobrar o retry cobre.
+function concorrenciaPorTPM(reservaPorChamada, tetoConfigurado) {
+  if (!Number.isFinite(reservaPorChamada) || reservaPorChamada <= 0) return tetoConfigurado;
+  const cabem = Math.floor((OPENAI_V25_TPM * OPENAI_V25_TPM_FATOR) / reservaPorChamada);
+  return Math.max(1, Math.min(tetoConfigurado, cabem));
+}
 
 // Retentativas por chamada, acima das do SDK. O SDK da OpenAI retenta 429/5xx só
 // 2× com backoff de ~0,5s/1s — curto demais quando o Retry-After é de segundos
@@ -547,10 +575,10 @@ function parseNodeOutput(text) {
   return { nota, confianca, analise };
 }
 
-async function runNode(openai, assets, bloco1, log, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
-  // developer = A (estático) + B (Bloco 1 + log) → idêntico em todos os nós deste
-  // caso (logo, cacheado). user = C com o critério → o que varia por nó.
-  const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
+// `developer` (bloco estático + caso) vem pronto do caller: é idêntico em todos
+// os nós — é justamente o prefixo que a OpenAI cacheia — e montá-lo uma vez só
+// evita refazer a concatenação grande a cada nó. Ver buildDeveloper.
+async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
   const captura = !!(assets.cfg && assets.cfg.capturaReasoning);
   const { text, reasoning, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
@@ -751,6 +779,11 @@ function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, ba
   return L.join('\n');
 }
 
+// Prefixo cacheável de um caso: bloco estático (A) + Bloco 1 e log (B).
+function buildDeveloper(assets, bloco1, log) {
+  return assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
+}
+
 // Executa o pipeline completo: nós → agregador → sintetizador → montagem.
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
 // os demais em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) — assim
@@ -761,12 +794,23 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
 
-  const first = await runNode(openai, assets, bloco1, log, criteria[0], model, effort, provider);
+  const developer = buildDeveloper(assets, bloco1, log);
+
+  const first = await runNode(openai, assets, developer, criteria[0], model, effort, provider);
   // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
-  // nova, e na OpenAI todos de uma vez estouram o TPM (cada nó reserva ~20k
-  // tokens; ver OPENAI_V25_CONCURRENCY).
-  const conc = provider === 'glm' ? GLM_V25_CONCURRENCY : OPENAI_V25_CONCURRENCY;
-  const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, bloco1, log, c, model, effort, provider));
+  // nova, e na OpenAI o que estoura é o TPM. Lá o lote é dimensionado pelo peso
+  // REAL desta run (prompt + Bloco 1 + log + teto de saída), porque o mesmo nó
+  // pesa muito diferente com um log curto ou com uma sessão inteira colada.
+  let conc;
+  if (provider === 'glm') {
+    conc = GLM_V25_CONCURRENCY;
+  } else {
+    const maiorCriterio = criteria.reduce((a, c) => Math.max(a, (c.descricao || '').length), 0);
+    const reserva = estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
+    conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
+    console.log(`[v25-fanout] ${criteria.length} nós · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
+  }
+  const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, developer, c, model, effort, provider));
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
   return finishPipeline({
@@ -885,6 +929,8 @@ module.exports = {
   finalizePipeline,
   buildReasoningTxt,
   modelEmiteResumo,
+  estimarTokens,
+  concorrenciaPorTPM,
   // usados pelo editor de prompts (validação com o parser da produção):
   parseMontado,
   parseSintetizador,
