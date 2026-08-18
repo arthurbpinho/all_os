@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens } = require('../server/avaliacao-v25');
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -487,6 +487,35 @@ describe('Avaliação Independente — captura do raciocínio (v28)', () => {
 // protegem: o 429 é retentado (não vira erro do job), a espera respeita o que o
 // provedor pede e request inválido (400) NÃO é retentado.
 describe('Avaliação Independente — retry de rate limit (pipeline)', () => {
+  // O 429 de TPM não é sobre requisições por minuto: cada chamada RESERVA
+  // input + o TETO de saída na janela, e a janela é deslizante (o lote anterior
+  // ainda conta quando o próximo sai). Um número fixo de concorrência envelhece
+  // porque o peso da chamada muda com o tamanho do log — foi o que aconteceu:
+  // 4 nós de ~32,5k pediram 130k numa janela que já tinha 185k.
+  it('concorrência cai quando a chamada fica pesada (TPM)', () => {
+    // Chamada leve: usa o teto configurado.
+    expect(concorrenciaPorTPM(12000, 4)).toBe(4);
+    // O caso do erro real: 4 não cabem mais, 3 cabem.
+    expect(concorrenciaPorTPM(32528, 4)).toBe(3);
+    expect(32528 * concorrenciaPorTPM(32528, 4)).toBeLessThanOrEqual(100000);
+    // Chamada enorme (log gigante): serial, nunca zero.
+    expect(concorrenciaPorTPM(500000, 4)).toBe(1);
+    // Dois lotes seguidos precisam caber no minuto, porque a janela desliza.
+    for (const reserva of [12000, 20000, 32528, 50000]) {
+      expect(reserva * concorrenciaPorTPM(reserva, 4) * 2).toBeLessThanOrEqual(200000);
+    }
+    // Sem estimativa utilizável, mantém o teto (não trava o fan-out).
+    expect(concorrenciaPorTPM(0, 4)).toBe(4);
+    expect(concorrenciaPorTPM(NaN, 4)).toBe(4);
+  });
+
+  it('estimarTokens é pessimista (erra para menos concorrência)', () => {
+    // ~3,5 chars/token: 3500 chars → 1000 tokens. Superestimar é o lado seguro.
+    expect(estimarTokens('x'.repeat(3500))).toBe(1000);
+    expect(estimarTokens('')).toBe(0);
+    expect(estimarTokens(null)).toBe(0);
+  });
+
   it('classifica o que vale retentar', () => {
     expect(isRetryableAIError({ status: 429 })).toBe(true);
     expect(isRetryableAIError({ status: 503 })).toBe(true);
