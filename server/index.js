@@ -17,7 +17,7 @@ const {
 } = require('./prompts');
 const mmrEngine = require('./mmr');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { runAvaliacaoIndependente, buildV25NodeRequests, finalizeV25, buildChatBody, clearAssetsCache } = require('./avaliacao-v25');
+const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody, clearAssetsCache } = require('./avaliacao-v25');
 const aiIndependente = require('./avaliacao-independente');
 const promptFiles = require('./prompt-files');
 const simIndependente = require('./simulacao-independente');
@@ -191,7 +191,7 @@ if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
 // Atualizações subsequentes vão pelas rotas /api/admin/prompts, não por git push.
 if (!fs.existsSync(PROMPTS_DIR)) {
   fs.mkdirSync(PROMPTS_DIR, { recursive: true });
-  for (const name of ['avaliacao', 'entrevistador']) {
+  for (const name of promptFiles.PROMPT_ROOTS) {
     const src = path.join(__dirname, '..', name);
     if (fs.existsSync(src)) fs.cpSync(src, path.join(PROMPTS_DIR, name), { recursive: true });
   }
@@ -1733,23 +1733,44 @@ app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) =>
   });
 });
 
+// `criar:true` no corpo CRIA um .md que ainda não existe no volume (e a pasta
+// dele). Sem isso não havia como levar uma versão nova de prompt para produção:
+// os .md saíram do git, o volume não é semeado depois do primeiro boot, e esta
+// rota só sabia sobrescrever — o que obrigava a rodar script de terminal a cada
+// versão nova de avaliador.
+//
+// As duas intenções são separadas de propósito, e nenhuma faz o trabalho da
+// outra por engano:
+//   sem a flag  → é EDIÇÃO. Caminho que não existe dá 404 (um erro de digitação
+//                 não vira arquivo órfão que ninguém lê).
+//   criar:true  → é CRIAÇÃO. Caminho que já existe dá 409 em vez de sobrescrever
+//                 (um caminho novo que colide com um prompt no ar não o apaga),
+//                 e o caminho passa pela política de validateNewPromptPath.
 app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
   const rel = req.params[0];
   const target = promptFiles.resolvePromptPath(rel);
   if (!target) return res.status(400).json({ error: 'Caminho inválido.' });
-  if (!fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado — crie a estrutura antes de sobrescrever.' });
-  const { content } = req.body || {};
+  const { content, criar } = req.body || {};
+  const existe = fs.existsSync(target);
+  if (criar === true) {
+    if (existe) return res.status(409).json({ error: 'Já existe um arquivo nesse caminho — abra-o na lista para editar.' });
+    const politica = promptFiles.validateNewPromptPath(rel);
+    if (!politica.ok) return res.status(400).json({ error: politica.error });
+  } else if (!existe) {
+    return res.status(404).json({ error: 'Arquivo não encontrado — use "Novo arquivo" para criá-lo no volume.' });
+  }
 
   // Valida ANTES de tocar no arquivo: prompt quebrado é recusado aqui, não na
   // hora em que um aluno rodar uma avaliação.
   const v = promptFiles.validatePromptContent(rel, content);
   if (!v.ok) return res.status(400).json({ error: v.error });
 
-  const versaoAnterior = promptFiles.backupPrompt(rel);
+  const versaoAnterior = promptFiles.backupPrompt(rel); // null quando é criação
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, content, 'utf-8');
-  clearAssetsCache(); // o v25 memoiza os .md — sem isto o servidor serviria a versão velha
-  console.log(`[prompts] ${rel} atualizado por ${req.user.username} (backup: ${versaoAnterior || 'nenhum'})`);
-  res.json({ ok: true, validado: !!v.validado, versaoAnterior, versoes: promptFiles.listBackups(rel) });
+  clearAssetsCache(); // o pipeline memoiza os .md — sem isto o servidor serviria a versão velha
+  console.log(`[prompts] ${rel} ${existe ? 'atualizado' : 'CRIADO'} por ${req.user.username} (backup: ${versaoAnterior || 'nenhum'})`);
+  res.json({ ok: true, criado: !existe, validado: !!v.validado, versaoAnterior, versoes: promptFiles.listBackups(rel) });
 });
 
 // Histórico de versões de um arquivo (as MAX_BACKUPS últimas gravações).
@@ -5601,7 +5622,7 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 // ============================================================================
 // AVALIAÇÃO INDEPENDENTE — laboratório de pricing (supervisor/admin)
 // ----------------------------------------------------------------------------
-// Alterna PROMPT (v16-2 / v18-25 / pipeline v25), MODELO (5.5 / 5.4 / 5.4-mini) e
+// Alterna PROMPT (v16-2 / v18-25 / pipeline v28 ou v25), MODELO (5.5 / 5.4 / 5.4-mini) e
 // EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH API (50% off) com fila.
 // Isolado: só LÊ os prompts; não toca simulação, processo seletivo nem os
 // avaliadores de produção. Resultado unificado + instrumentação de custo.
@@ -5651,9 +5672,15 @@ function getClientForProvider(provider) {
 // Roda o avaliador escolhido SÍNCRONO e devolve o resultado unificado.
 async function runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log }) {
   if (aiIndependente.isPipeline(evaluator)) {
-    // v25 (com feedback) e v25-nota (só nota) são o MESMO pipeline; o que muda é
-    // a variante do prompt do nó, que o registry resolve.
-    return runAvaliacaoIndependente({ openai: client, provider, bloco1, log, model, effort, variant: aiIndependente.variantFor(evaluator) });
+    // v28/v28-nota e v25/v25-nota são o MESMO código de pipeline; o que muda é a
+    // VERSÃO (trio de .md + regra de agregação) e a VARIANTE do prompt do nó,
+    // ambas resolvidas pelo registry.
+    return runAvaliacaoIndependente({
+      openai: client, provider, bloco1, log, model, effort,
+      version: aiIndependente.versionFor(evaluator),
+      variant: aiIndependente.variantFor(evaluator),
+      evaluatorId: evaluator,
+    });
   }
   // GLM (z.ai): chat.completions — devolve o raciocínio em message.reasoning_content.
   if (provider === 'glm') {
@@ -5700,13 +5727,16 @@ async function runIndependenteSync({ client, provider, evaluator, model, effort,
   });
 }
 
-// Resposta/entry unificada (todos os avaliadores). `partes` só v25; `notasDetalhe` só single.
+// Resposta/entry unificada (todos os avaliadores). `partes` só pipeline;
+// `notasDetalhe` só single. `evaluator` sai do entry (id do alternador, ex.
+// 'v28-nota'), que é o que a tela usa pra rotular a run.
 function buildAvalResponse(entry, result) {
   return {
     id: entry ? entry.id : null,
     casoNome: entry ? entry.casoNome : '',
-    evaluator: result.evaluator,
-    variant: result.variant || null, // v25: 'com-feedback' | 'so-nota'
+    evaluator: (entry && entry.evaluator) || result.evaluator,
+    version: result.version || null, // pipeline: 'v28' | 'v25'
+    variant: result.variant || null, // pipeline: 'com-feedback' | 'so-nota'
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
     partes: result.partes || null,
@@ -5715,11 +5745,30 @@ function buildAvalResponse(entry, result) {
     corpoSintetizador: result.corpoSintetizador || null,
     feedbackAluno: result.feedbackAluno || null,
     reasoning: result.reasoning || null, // raciocínio do supervisor (single; GLM devolve, GPT não)
+    // Pipeline com captura (v28): o raciocínio é grande e fica em arquivo
+    // próprio — aqui vai só o aviso de que há o que baixar, e a rota
+    // /:id/reasoning serve o .txt. Sem `id` (resultado ainda não persistido)
+    // não há de onde baixar.
+    reasoningDisponivel: !!(entry && entry.reasoningDisponivel),
     instrumentacao: result.instrumentacao || null,
   };
 }
 
-// Persiste o resultado em avaliacao-v25.json (store de todos os 3 avaliadores).
+// Raciocínio das runs de pipeline com captura (v28): um .txt por avaliação, em
+// arquivo próprio no volume. Fora do avaliacao-v25.json de propósito — aquele
+// store é lido INTEIRO a cada gravação, e somar dezenas de KB de resumo por run
+// o faria crescer rápido sem que ninguém leia isso no caminho normal.
+const AVAL_REASONING_DIR = path.join(DATA_DIR, 'avaliacao-reasoning');
+
+// Nome de arquivo a partir do id da entry. O id é gerado por nós ('av25-' +
+// timestamp + hex), mas a checagem fica aqui mesmo assim: é ela que garante que
+// nada vindo da URL vire caminho.
+function reasoningPathFor(entryId) {
+  if (!/^av25-[0-9]+-[0-9a-f]{6}$/.test(String(entryId || ''))) return null;
+  return path.join(AVAL_REASONING_DIR, entryId + '.txt');
+}
+
+// Persiste o resultado em avaliacao-v25.json (store de todos os avaliadores).
 async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model, effort, batch, result }) {
   const entry = {
     id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
@@ -5727,6 +5776,7 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
     userId: user.id,
     userName: user.name || '',
     casoId, casoNome, evaluator, model, effort, batch: !!batch,
+    version: result.version || null, // versão do pipeline ('v28' | 'v25'); null nos single
     variant: result.variant || null,
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
@@ -5738,6 +5788,22 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
     reasoning: result.reasoning || null,
     instrumentacao: result.instrumentacao || null,
   };
+
+  // Grava o .txt do raciocínio (quando houve) antes de indexar a entry, para o
+  // botão de baixar nunca apontar para arquivo que não existe.
+  const txt = (result.reasoningTxt || '').trim();
+  if (txt) {
+    try {
+      fs.mkdirSync(AVAL_REASONING_DIR, { recursive: true });
+      fs.writeFileSync(reasoningPathFor(entry.id), txt, 'utf-8');
+      entry.reasoningDisponivel = true;
+    } catch (e) {
+      // Perder o resumo não pode derrubar a avaliação: a nota e o feedback são
+      // o produto, e isto aqui é material de leitura do supervisor.
+      console.error('[aval-reasoning] falha ao gravar:', e.message);
+    }
+  }
+
   await withFileLock('avaliacao-v25.json', async () => {
     const store = readJSON('avaliacao-v25.json', []);
     store.push(entry);
@@ -5746,13 +5812,14 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
   return entry;
 }
 
-// Enfileira um job em batch: monta as requests (1 p/ single, 14 p/ v25), submete
-// à Batch API e grava o job em avaliacao-fila.json (status 'processing').
+// Enfileira um job em batch: monta as requests (1 p/ single, uma por critério
+// p/ o pipeline), submete à Batch API e grava o job em avaliacao-fila.json
+// (status 'processing').
 async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome }) {
   const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
   let requests;
   if (aiIndependente.isPipeline(evaluator)) {
-    requests = buildV25NodeRequests({ bloco1, log, model, effort, provider, variant: aiIndependente.variantFor(evaluator) }).map((n) => ({
+    requests = buildPipelineNodeRequests({ bloco1, log, model, effort, provider, version: aiIndependente.versionFor(evaluator), variant: aiIndependente.variantFor(evaluator) }).map((n) => ({
       custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body,
     }));
   } else {
@@ -5770,7 +5837,7 @@ async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey,
     userId: user.id, userName: user.name || '',
     casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: true,
     status: 'processing', batchId: batchObj.id, requestCount: requests.length,
-    log, // necessário p/ o sintetizador do v25 no coletor (removido quando termina)
+    log, // necessário p/ o sintetizador do pipeline no coletor (removido quando termina)
     result: null, error: null,
   };
   await withFileLock('avaliacao-fila.json', async () => {
@@ -5796,7 +5863,7 @@ async function markAvalJob(jobId, patch) {
 // Modo síncrono via JOB LOCAL (não é a Batch API da OpenAI): a chamada ao
 // modelo roda em background, fora do ciclo request/response, então a rota
 // devolve o jobId na hora e nunca esbarra no timeout de 100s do Cloudflare —
-// mesmo se o avaliador demorar bastante (GLM effort high/max, v18-25/v25 com
+// mesmo se o avaliador demorar bastante (GLM effort high/max, v18-25/pipeline com
 // prompt grande). O cliente faz polling em /fila igual ao batch real, só que
 // aqui não há desconto de 50% nem espera de horas: termina assim que o modelo
 // responde. Bug corrigido: antes disso, batch:false fazia `await
@@ -5866,9 +5933,10 @@ async function sweepAvaliacaoBatches() {
           if (aiIndependente.isPipeline(job.evaluator)) {
             const nodeOutputs = [];
             for (const [suffix, out] of outputs) nodeOutputs.push({ num: Number(suffix), text: out.text, usage: out.usage });
-            result = await finalizeV25({
+            result = await finalizePipeline({
               openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort,
-              variant: aiIndependente.variantFor(job.evaluator), nodeOutputs, batch: true,
+              version: aiIndependente.versionFor(job.evaluator), variant: aiIndependente.variantFor(job.evaluator),
+              evaluatorId: job.evaluator, nodeOutputs, batch: true,
             });
           } else {
             const out = outputs.get('0') || { text: '', usage: null };
@@ -5902,7 +5970,7 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
     const b = req.body || {};
     const log = clampStr(b.log, 200000).trim();
     const casoId = b.casoId;
-    const evaluator = b.evaluator || 'v25';
+    const evaluator = b.evaluator || 'v28';
     const modelKey = b.model || 'gpt-5.5';
     const effort = b.effort || 'medium';
     const batch = b.batch === true;
@@ -5949,6 +6017,22 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
       res.status(500).json(falhou(req, err, 'avaliação-independente'));
     }
   }
+});
+
+// Baixa o .txt com o resumo do raciocínio de uma avaliação (v28). Mesma regra de
+// acesso da fila: supervisor vê o que rodou, admin vê tudo. Devolve texto puro —
+// o cliente transforma em arquivo.
+app.get('/api/avaliacao-independente/:id/reasoning', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const entry = readJSON('avaliacao-v25.json', []).find((e) => e && e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Avaliação não encontrada.' });
+  if (req.user.role !== 'admin' && entry.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Esta avaliação é de outro usuário.' });
+  }
+  const file = reasoningPathFor(entry.id);
+  if (!file || !fs.existsSync(file)) {
+    return res.status(404).json({ error: 'Esta avaliação não guardou raciocínio (só o v28 em modo síncrono guarda).' });
+  }
+  res.type('text/plain; charset=utf-8').send(fs.readFileSync(file, 'utf-8'));
 });
 
 // Fila de avaliações (jobs em batch). Supervisor vê os próprios; admin vê todos.

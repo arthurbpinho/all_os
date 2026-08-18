@@ -5,25 +5,40 @@ import { useWakeLock } from '../useWakeLock';
 import { downloadText } from '../logFiles';
 
 // Avaliação Independente — laboratório de PRICING (supervisor/admin). Alterna o
-// PROMPT (v16-2 / v18-25 / pipeline v25 com feedback ou só nota), o MODELO e o
-// EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH (50% off) com uma fila.
-// Mostra a nota + o CUSTO EXATO (tokens × preço do modelo) e permite baixar um
-// relatório com tudo. Isolado do avaliador de produção e da simulação.
+// PROMPT (v16-2 / v18-25 / pipeline v28 ou v25, com feedback ou só nota), o
+// MODELO e o EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH (50% off) com
+// uma fila. Mostra a nota + o CUSTO EXATO (tokens × preço do modelo) e permite
+// baixar um relatório com tudo. Isolado do avaliador de produção e da simulação.
 
 // Precisa espelhar o registry EVALUATORS do servidor (server/avaliacao-independente.js),
-// que é quem valida. As duas entradas v25 são o MESMO pipeline de 14 nós: em
-// 'v25' o nó devolve ANÁLISE+NOTA+CONFIANÇA e o sintetizador escreve o feedback
-// do aluno; em 'v25-nota' o nó devolve só a nota — sai a mesma nota final, sem
-// feedback e mais barato (o texto por critério some do billing).
+// que é quem valida. As duas entradas de cada VERSÃO do pipeline (v28, v25) são o
+// mesmo código, mudando só a saída do nó: em 'vNN' o nó devolve ANÁLISE+NOTA+
+// CONFIANÇA e o sintetizador escreve o feedback do aluno; em 'vNN-nota' o nó
+// devolve só a nota — sai a mesma nota final, sem feedback e mais barato (o texto
+// por critério some do billing). O v28 é a versão em teste (15 critérios); o v25
+// fica aqui para rodar o mesmo log nos dois e comparar nota, feedback e custo.
 const EVALUATORS = [
-  { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback' },
-  { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota' },
+  { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', nos: 15 },
+  { id: 'v28-nota', label: 'v28 · pipeline (15 nós) · só nota', nos: 15 },
+  { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback', nos: 14 },
+  { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota', nos: 14 },
   { id: 'v16-2', label: 'v16.2 · 6 critérios' },
   { id: 'v18-25', label: 'v18.25 · 15 critérios' },
 ];
-// Avaliadores que rodam o pipeline v25 (qualquer variante).
+// Avaliadores que rodam o pipeline multi-nó (v28/v25, qualquer variante) — são
+// os que têm contagem de nós no registry.
 function isPipelineId(id) {
-  return id === 'v25' || id === 'v25-nota';
+  const e = EVALUATORS.find((x) => x.id === id);
+  return !!(e && e.nos);
+}
+// Quantos nós a versão roda (para os textos de tela). 0 se não for pipeline.
+function nosDe(id) {
+  const e = EVALUATORS.find((x) => x.id === id);
+  return (e && e.nos) || 0;
+}
+// Variante "só nota" (o nó devolve apenas a NOTA, sem análise nem sintetizador).
+function isSoNotaId(id) {
+  return /-nota$/.test(String(id || ''));
 }
 // `efforts` só aparece no modelo que FOGE do padrão do provedor. A família 5.6
 // aceita dois degraus a mais (xhigh, max) — por isso a lista de effort virou
@@ -147,7 +162,8 @@ export default function Avaliacao({ user }) {
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
-  const [evaluator, setEvaluator] = useState('v25');
+  const [evaluator, setEvaluator] = useState('v28');
+  const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
   const [useBatch, setUseBatch] = useState(false);
@@ -283,6 +299,25 @@ export default function Avaliacao({ user }) {
     downloadText(name, buildReport(res, log));
   }
 
+  // O raciocínio não vem no resultado (é grande, e ninguém lê no caminho
+  // normal): mora em arquivo no servidor e só é buscado quando o supervisor
+  // pede. Ver GET /api/avaliacao-independente/:id/reasoning.
+  async function downloadReasoning(res) {
+    if (!res || !res.id || baixandoReasoning) return;
+    setBaixandoReasoning(true);
+    setError('');
+    try {
+      const txt = await api.avaliacaoReasoning(res.id);
+      const date = new Date().toISOString().slice(0, 10);
+      const name = `raciocinio-${res.evaluator || 'run'}-${(res.instrumentacao && res.instrumentacao.model) || ''}-${date}.txt`.replace(/\s+/g, '_');
+      downloadText(name, txt);
+    } catch (e) {
+      setError(e.message || 'Erro ao baixar o raciocínio.');
+    } finally {
+      setBaixandoReasoning(false);
+    }
+  }
+
   const pendingCount = fila.filter((j) => j.status === 'processing' || j.status === 'queued').length;
 
   // ── Botão flutuante + painel da Fila (presente em todas as telas) ──
@@ -348,8 +383,8 @@ export default function Avaliacao({ user }) {
             </div>
             <div className="evaluating-status">
               <div className="evaluating-line"><span className="dot active" /> Lendo o Bloco 1 do caso e o log</div>
-              <div className="evaluating-line"><span className="dot active" /> {isPipe ? '14 nós avaliando, um por critério' : 'Avaliando os critérios'}</div>
-              <div className="evaluating-line"><span className="dot pulse" /> {evaluator === 'v25-nota' ? 'Calculando a nota (esta variante não gera feedback)' : 'Calculando a nota e o feedback'}</div>
+              <div className="evaluating-line"><span className="dot active" /> {isPipe ? `${nosDe(evaluator)} nós avaliando, um por critério` : 'Avaliando os critérios'}</div>
+              <div className="evaluating-line"><span className="dot pulse" /> {isSoNotaId(evaluator) ? 'Calculando a nota (esta variante não gera feedback)' : 'Calculando a nota e o feedback'}</div>
             </div>
           </div>
         </div>
@@ -363,6 +398,11 @@ export default function Avaliacao({ user }) {
     const inst = result.instrumentacao;
     const isPipe = Array.isArray(result.partes);
     const incluidos = isPipe ? result.partes.filter((p) => p.incluido).length : 0;
+    // Quem ficou fora da nota depende da VERSÃO do pipeline: no v25 a confiança
+    // baixa exclui o critério; no v28 ela é só recado ao supervisor, e só fica de
+    // fora o nó que não devolveu número. Runs antigas não gravaram `version` —
+    // sem ela, a regra é a do v25, que era a única que existia.
+    const versaoPipe = result.version || 'v25';
     const numNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => typeof d.nota === 'number').length : 0;
     const naNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => d.nota === 'NA').length : 0;
     return (
@@ -375,6 +415,16 @@ export default function Avaliacao({ user }) {
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-outline" onClick={() => downloadReport(result, transcript)}>Baixar relatório (.txt)</button>
+            {result.reasoningDisponivel && (
+              <button
+                className="btn btn-outline"
+                onClick={() => downloadReasoning(result)}
+                disabled={baixandoReasoning}
+                title="Resumo do raciocínio de cada nó, como o provedor o entrega. Material do supervisor — não vai para o aluno."
+              >
+                {baixandoReasoning ? 'Baixando…' : 'Baixar raciocínio (.txt)'}
+              </button>
+            )}
             <button className="btn btn-outline" onClick={handleReset}>Nova avaliação</button>
           </div>
         </div>
@@ -415,7 +465,7 @@ export default function Avaliacao({ user }) {
                   {result.notaFinal == null
                     ? 'Não avaliável: sem critérios suficientes para uma nota.'
                     : isPipe
-                      ? `Agregada de ${incluidos} de 14 critérios (os de confiança baixa ficaram fora).`
+                      ? `Agregada de ${incluidos} de ${result.partes.length} critérios ${versaoPipe === 'v28' ? '(a confiança não tira ninguém da nota; fica de fora só o nó sem nota legível).' : '(os de confiança baixa ficaram fora).'}`
                       : `Média de ${numNotas} critérios${naNotas ? ` (${naNotas} marcados NA, fora da conta)` : ''}.`}
                 </div>
               </div>
@@ -454,6 +504,30 @@ export default function Avaliacao({ user }) {
               </div>
             )}
 
+            {/* Pipeline com captura (v28): o raciocínio vai para arquivo e sai
+                pelo botão do topo. Quando não houve, o aviso explica por quê —
+                senão o supervisor procura um botão que não existe. */}
+            {isPipe && versaoPipe === 'v28' && (
+              <div className="card aval-reasoning">
+                <div className="aval-reasoning-head">Raciocínio dos nós</div>
+                {result.reasoningDisponivel
+                  ? (
+                    <div className="aval-reasoning-empty">
+                      Guardado nesta avaliação: use <strong>Baixar raciocínio (.txt)</strong>, no topo. É o resumo que
+                      o provedor entrega de cada nó (a cadeia bruta não é exposta por ninguém), com a nota e a
+                      confiança ao lado. Material do supervisor — não vai para o aluno.
+                    </div>
+                  )
+                  : (
+                    <div className="aval-reasoning-empty">
+                      Sem resumo nesta run{inst?.totais?.reasoning ? <> (foram <strong>{fmtTok(inst.totais.reasoning)}</strong> tokens de reasoning, já cobrados na saída)</> : null}.
+                      O resumo só existe no modo <strong>síncrono</strong>: o <strong>batch</strong> roda por um endpoint que não devolve esse texto,
+                      e o modelo <strong>"mini"</strong> não emite resumo.
+                    </div>
+                  )}
+              </div>
+            )}
+
             {/* Raciocínio "gasto" que o supervisor lê (v16-2/v18-25 raciocinam no
                 canal oculto). GLM (z.ai) devolve o texto; GPT via chat.completions não. */}
             {!isPipe && (
@@ -473,8 +547,8 @@ export default function Avaliacao({ user }) {
           <div className="card v25-feedback">
             {result.feedbackAluno
               ? <div className="v25-feedback-text">{result.feedbackAluno}</div>
-              : (result.variant === 'so-nota' || result.evaluator === 'v25-nota')
-                ? <div className="v25-feedback-empty">A variante <strong>só nota</strong> não gera feedback: os nós devolvem apenas a nota de cada critério, sem análise, e o sintetizador não roda. Para o feedback do aluno, rode em <strong>v25 · com feedback</strong>.</div>
+              : (result.variant === 'so-nota' || isSoNotaId(result.evaluator))
+                ? <div className="v25-feedback-empty">A variante <strong>só nota</strong> não gera feedback: os nós devolvem apenas a nota de cada critério, sem análise, e o sintetizador não roda. Para o feedback do aluno, rode a mesma versão em <strong>com feedback</strong>.</div>
                 : <div className="v25-feedback-empty">Sem feedback gerado. Veja as notas por critério.</div>}
           </div>
         )}
@@ -505,9 +579,10 @@ export default function Avaliacao({ user }) {
             </select>
             {isPipelineId(evaluator) && (
               <div className="aval-ev-hint">
-                {evaluator === 'v25'
-                  ? <>Os 14 nós devolvem análise + nota + confiança, e o sintetizador escreve o feedback do aluno.</>
-                  : <>Os 14 nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
+                {!isSoNotaId(evaluator)
+                  ? <>Os {nosDe(evaluator)} nós devolvem análise + nota + confiança, e o sintetizador escreve o feedback do aluno.</>
+                  : <>Os {nosDe(evaluator)} nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
+                {evaluator.startsWith('v28') && <> No v28 a confiança é recado para o supervisor: ela aparece no critério, mas <strong>não tira ninguém da nota</strong>.</>}
               </div>
             )}
           </div>

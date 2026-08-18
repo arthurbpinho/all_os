@@ -1,41 +1,117 @@
-// Avaliação Independente v25 (AvaliAllos) — TESTE, isolado do avaliador v16.2.
+// Avaliação Independente — pipeline multi-nó (AvaliAllos), em TESTE e isolado
+// dos avaliadores de produção. Hospeda DUAS VERSÕES do mesmo desenho, v25 e v28
+// (ver PIPELINE_VERSIONS); o nome "v25" no arquivo, nas envs e no store JSON é
+// histórico — quem escolhe a versão é o registry de avaliadores.
 //
 // Roda em GPT-5.x (OpenAI, mesma OPENAI_API_KEY do resto; modelo por env
 // AVALIACAO_V25_MODEL, hoje gpt-5.4-mini-2026-03-17). Os demais avaliadores
 // (Treino/Competitivo/Duelo/Neuro/Trilha) NÃO são tocados por este arquivo.
 //
 // Pipeline completo (ver avaliacao/nova avaliacao/brief-pipeline-v25-completo.md):
-//   1) 14 nós GPT em paralelo, um por critério. Cada nó vê só o seu critério +
-//      o Bloco 1 + o log, e devolve ANÁLISE / NOTA / CONFIANÇA.
-//   2) Agregador determinístico (código): exclui os de confiança baixa, aplica
-//      pesos (iguais por enquanto) e normaliza a média(1–10) para 0–100.
+//   1) Um nó GPT por critério, em paralelo (14 no v25, 15 no v28). Cada nó vê só
+//      o seu critério + o Bloco 1 + o log, e devolve ANÁLISE / NOTA / CONFIANÇA.
+//   2) Agregador determinístico (código): aplica pesos (iguais por enquanto) e
+//      normaliza a média(1–10) para 0–100. No v25 os critérios de confiança
+//      `baixa` ficam de fora da conta; no v28 a confiança não mexe no cálculo.
 //   3) Sintetizador (1 chamada): recebe só o log + as análises em prosa (sem
 //      números, sem Bloco 1) e devolve o corpo do feedback do aluno.
 //   4) Montagem final (código): cola "Nota: X/100" + saudação fixa + corpo.
 //
-// Duas VARIANTES do nó (ver V25_VARIANTS), escolhidas no alternador da tela:
+// Duas VARIANTES do nó (ver PIPELINE_VARIANTS), escolhidas no alternador da tela:
 //   com-feedback → o nó devolve ANÁLISE + NOTA + CONFIANÇA (pipeline completo,
 //                  com sintetizador e feedback do aluno);
 //   so-nota      → o nó devolve só a NOTA (sem análise, o passo 3 é pulado e não
 //                  há feedback do aluno; nota final e partes saem iguais). Roda
 //                  mais barato — some o texto por critério do billing.
-// As duas moram no MESMO prompt-no-v25-montado.md, em blocos `@variante`.
+// As duas moram no MESMO .md do prompt do nó, em blocos `@variante`.
+//
+// RACIOCÍNIO (só v28, `capturaReasoning`): a OpenAI não entrega a cadeia bruta
+// de raciocínio em lugar nenhum — só um RESUMO, e só pela Responses API. Por
+// isso, quando a versão pede captura, os nós GPT saem do chat.completions e vão
+// para a Responses (mesmas mensagens: o prefixo cacheável vira `instructions`,
+// o critério vira `input`, então o caching continua valendo). O GLM é mais
+// simples: devolve `reasoning_content` no próprio chat.completions, de graça.
+//
+// Custo: os tokens de reasoning JÁ são cobrados hoje, como saída, pedindo ou não
+// o resumo — o modelo os gera de todo jeito. Pedir o resumo não cria raciocínio
+// novo; ele é uma janela para tokens que você já comprou. Se o sumarizador em si
+// entrar no `usage`, aparece na instrumentação da run (a linha de custo sobe), que
+// é exatamente o que este laboratório mede. Modo BATCH não tem resumo: a Batch
+// API roda em /v1/chat/completions, que não devolve esse texto — limitação do
+// provedor, não escolha nossa.
 //
 // Prompt caching: a OpenAI cacheia o maior prefixo comum automaticamente
 // (>~1024 tokens, sem marcação manual). Por isso o bloco estático + o caso vão
 // na mensagem `developer` (o prefixo), e só o critério/as análises na `user` (o
-// que varia). Os 13 nós seguintes leem A+B do cache. Roda 1 nó primeiro pra
-// semear o cache, depois os outros 13 em paralelo (igual à versão anterior).
+// que varia). Os nós seguintes leem A+B do cache. Roda 1 nó primeiro pra semear
+// o cache, depois os outros em paralelo (igual à versão anterior).
 //
-// Os prompts (nó + sintetizador) e os 14 critérios vêm dos .md em
-// avaliacao/nova avaliacao/ — fonte única da verdade; editar o .md muda o
-// comportamento. Instrumentação de tokens/custo embutida para o teste de pricing.
+// Os prompts (nó + sintetizador) e os critérios vêm dos .md no PROMPTS_DIR —
+// fonte única da verdade; editar o .md muda o comportamento. Instrumentação de
+// tokens/custo embutida para o teste de pricing.
 
 const fs = require('fs');
 const path = require('path');
 const { PROMPTS_DIR } = require('./paths');
 
-const DIR = path.join(PROMPTS_DIR, 'avaliacao', 'nova avaliacao');
+// VERSÕES do pipeline. Cada uma é um trio de .md no PROMPTS_DIR (prompt do nó,
+// critérios, sintetizador) mais o que muda no CÓDIGO entre elas:
+//
+//   v25 → 14 critérios. CONFIANÇA `baixa` significa "o log não deu material":
+//         o critério sai da nota final e sai do sintetizador.
+//   v28 → 15 critérios (coerência interna e narrativa voltam separadas, desfeita
+//         a fusão em "Confiança transmitida"). A CONFIANÇA virou recado para o
+//         supervisor e NÃO entra mais no cálculo — o próprio prompt manda dar
+//         nota de todo jeito ([SAÍDA]: "Ela não entra no cálculo... A nota você
+//         dá de todo jeito"), então todo critério com nota entra na média e nas
+//         análises do sintetizador.
+//
+// `dirs` é lista porque a pasta do v25 tem nomes diferentes nos dois lugares: no
+// volume de produção ela se chama "nova avaliacao" e a cópia local do repo (a
+// que semeia o volume e os testes) se chama "v25". Vale a primeira que existir,
+// então os dois ambientes rodam sem renomear pasta em produção.
+const PIPELINE_VERSIONS = {
+  v25: {
+    id: 'v25',
+    dirs: ['nova avaliacao', 'v25'],
+    montado: 'prompt-no-v25-montado.md',
+    criterios: 'criterios-no-v25.md',
+    sintetizador: 'sintetizador-v25.md',
+    nCriterios: 14,
+    confiancaBaixaExclui: true,
+    capturaReasoning: false,
+  },
+  v28: {
+    id: 'v28',
+    dirs: ['v28'],
+    montado: 'prompt-no-v28-montado.md',
+    criterios: 'criterios-no-v28.md',
+    sintetizador: 'sintetizador-v28.md',
+    nCriterios: 15,
+    confiancaBaixaExclui: false,
+    // Guarda o RESUMO do raciocínio de cada nó (ver captureReasoning abaixo).
+    // Só no v28: ligar isto no v25 trocaria o transporte das chamadas dele e
+    // sujaria a linha de base de custo/latência que já foi medida.
+    capturaReasoning: true,
+  },
+};
+const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
+const DEFAULT_VERSION = 'v25';
+
+function versionConfig(version) {
+  const cfg = PIPELINE_VERSIONS[version];
+  if (!cfg) throw new Error(`Versão do pipeline inválida: ${version} (${PIPELINE_VERSIONS_IDS.join(' | ')}).`);
+  return cfg;
+}
+
+// Pasta da versão dentro do PROMPTS_DIR: a primeira de `dirs` que já tenha o
+// prompt do nó. Nenhuma existindo, devolve a primeira — assim o erro que sobe é
+// o ENOENT do caminho canônico, que diz onde o arquivo deveria estar.
+function versionDir(cfg) {
+  const base = path.join(PROMPTS_DIR, 'avaliacao');
+  const achada = cfg.dirs.find((d) => fs.existsSync(path.join(base, d, cfg.montado)));
+  return path.join(base, achada || cfg.dirs[0]);
+}
 
 // Modelo dos nós e do sintetizador (GPT-5.x). Var própria do v25 — independente
 // do OPENAI_EVAL_MODEL dos outros modos, que continuam intocados.
@@ -136,25 +212,26 @@ const SAUDACAO_FIXA = `Trate este feedback como pré-correção, um ponto de par
 
 Eu só tenho acesso ao que você escreveu, não ao que você pensou. Quando o raciocínio por trás de uma fala importar, descreva-o no botão de estrela. Isso me ajuda a separar uma decisão clínica consciente de um erro por falta de percepção.`;
 
-// Variantes de saída do NÓ, marcadas no próprio prompt-no-v25-montado.md com
-// blocos `<!-- @variante:X -->…<!-- /@variante -->`:
+// Variantes de saída do NÓ, marcadas no próprio prompt do nó montado com
+// blocos `<!-- @variante:X -->…<!-- /@variante -->` (iguais nas duas versões):
 //   com-feedback → ANÁLISE + NOTA + CONFIANÇA (o pipeline inteiro: agregador +
 //                  sintetizador + feedback do aluno);
 //   so-nota      → só a NOTA (sem análise ⇒ sem sintetizador ⇒ sem feedback do
 //                  aluno; nota final e partes seguem iguais). Mais barato: o
 //                  texto por critério some do billing, o reasoning fica.
 // O resto do prompt é compartilhado — editar fora dos blocos muda as duas.
-const V25_VARIANTS = ['com-feedback', 'so-nota'];
-const V25_DEFAULT_VARIANT = 'com-feedback';
+const PIPELINE_VARIANTS = ['com-feedback', 'so-nota'];
+const DEFAULT_VARIANT = 'com-feedback';
 
 function isValidVariant(v) {
-  return V25_VARIANTS.includes(v);
+  return PIPELINE_VARIANTS.includes(v);
 }
 
 // Mantém os blocos da variante escolhida e apaga os das outras. Se o arquivo não
 // tiver marcador nenhum (versão antiga do .md, ainda no volume de produção),
-// falha em vez de rodar silenciosamente a variante errada.
-function selectVariant(text, variant) {
+// falha em vez de rodar silenciosamente a variante errada. `arquivo` só aparece
+// na mensagem de erro (é o .md da versão em uso).
+function selectVariant(text, variant, arquivo = 'O prompt do nó montado') {
   const re = /[ \t]*<!--\s*@variante:([a-z0-9-]+)\s*-->\r?\n?([\s\S]*?)[ \t]*<!--\s*\/@variante\s*-->\r?\n?/g;
   let found = false;
   const out = String(text).replace(re, (_m, v, inner) => {
@@ -162,7 +239,7 @@ function selectVariant(text, variant) {
     return v === variant ? inner : '';
   });
   if (!found) {
-    throw new Error(`prompt-no-v25-montado.md sem os blocos <!-- @variante:… --> (variante "${variant}"). Atualize o .md pelo painel de prompts (Administração → Prompts).`);
+    throw new Error(`${arquivo} sem os blocos <!-- @variante:… --> (variante "${variant}"). Atualize o .md pelo painel de prompts (Administração → Prompts).`);
   }
   return out;
 }
@@ -171,15 +248,15 @@ function selectVariant(text, variant) {
 // comentários de CACHE BREAKPOINT, já com a variante escolhida aplicada. PURO
 // (recebe o texto, não lê disco) para o editor de prompts poder validar um
 // rascunho com exatamente o mesmo parser que a produção usa.
-function parseMontado(raw, variant = V25_DEFAULT_VARIANT) {
-  if (!isValidVariant(variant)) throw new Error('Variante v25 inválida: ' + variant);
-  const montado = selectVariant(raw, variant);
+function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó montado') {
+  if (!isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
+  const montado = selectVariant(raw, variant, arquivo);
 
   const start = montado.indexOf('## [METACOMANDO]');
   const bpA = montado.indexOf('<!-- ===== CACHE BREAKPOINT A');
   const bpB = montado.indexOf('<!-- ===== CACHE BREAKPOINT B');
   if (start === -1 || bpA === -1 || bpB === -1) {
-    throw new Error('prompt-no-v25-montado.md sem os marcadores esperados (METACOMANDO / BREAKPOINT A / BREAKPOINT B).');
+    throw new Error(`${arquivo} sem os marcadores esperados (METACOMANDO / BREAKPOINT A / BREAKPOINT B).`);
   }
   const bpAEnd = montado.indexOf('-->', bpA) + 3;
   const bpBEnd = montado.indexOf('-->', bpB) + 3;
@@ -189,7 +266,7 @@ function parseMontado(raw, variant = V25_DEFAULT_VARIANT) {
   const blockC = montado.slice(bpBEnd).trim();               // {{CRITÉRIO}}
 
   for (const [name, blk, slot] of [['B', blockB, '{{BLOCO_1}}'], ['B', blockB, '{{LOG}}'], ['C', blockC, '{{CRITÉRIO}}']]) {
-    if (!blk.includes(slot)) throw new Error(`Bloco ${name} do prompt v25 não contém o slot ${slot}.`);
+    if (!blk.includes(slot)) throw new Error(`Bloco ${name} do ${arquivo} não contém o slot ${slot}.`);
   }
   return { blockA, blockB, blockC };
 }
@@ -197,53 +274,57 @@ function parseMontado(raw, variant = V25_DEFAULT_VARIANT) {
 // Sintetizador: bloco estático (do METACOMANDO até o breakpoint) vira o
 // `developer` cacheável; o resto ({{LOG}} + {{ANALISES}} + tarefa) vira `user`.
 // Puro, pelo mesmo motivo do parseMontado.
-function parseSintetizador(sint) {
+function parseSintetizador(sint, arquivo = 'O sintetizador') {
   const sStart = sint.indexOf('## [METACOMANDO]');
   const sBp = sint.indexOf('<!-- CACHE BREAKPOINT');
   if (sStart === -1 || sBp === -1) {
-    throw new Error('sintetizador-v25.md sem os marcadores esperados (METACOMANDO / CACHE BREAKPOINT).');
+    throw new Error(`${arquivo} sem os marcadores esperados (METACOMANDO / CACHE BREAKPOINT).`);
   }
   const sBpEnd = sint.indexOf('-->', sBp) + 3;
   const synthStatic = sint.slice(sStart, sBp).trim();
   const synthVariable = sint.slice(sBpEnd).trim();
   for (const slot of ['{{LOG}}', '{{ANALISES}}']) {
-    if (!synthVariable.includes(slot)) throw new Error(`Sintetizador v25 não contém o slot ${slot}.`);
+    if (!synthVariable.includes(slot)) throw new Error(`${arquivo} não contém o slot ${slot}.`);
   }
   return { synthStatic, synthVariable };
 }
 
-const _assetsByVariant = new Map();
+const _assetsCache = new Map();
 
-// Esquece os prompts memoizados. Chamado quando um .md do v25 é salvo ou
+// Esquece os prompts memoizados. Chamado quando um .md do pipeline é salvo ou
 // restaurado pelo editor de prompts — sem isto o servidor seguiria servindo a
 // versão antiga até o próximo restart.
 function clearAssetsCache() {
-  _assetsByVariant.clear();
+  _assetsCache.clear();
 }
 
-// Lê os .md do volume e devolve os blocos + os 14 critérios. Memoizado por
-// variante (invalidado por clearAssetsCache).
-function loadAssets(variant = V25_DEFAULT_VARIANT) {
-  if (!isValidVariant(variant)) throw new Error('Variante v25 inválida: ' + variant);
-  if (_assetsByVariant.has(variant)) return _assetsByVariant.get(variant);
+// Lê os .md do volume e devolve os blocos + os critérios da versão. Memoizado
+// por (versão, variante) e invalidado por clearAssetsCache.
+function loadAssets(version = DEFAULT_VERSION, variant = DEFAULT_VARIANT) {
+  const cfg = versionConfig(version);
+  if (!isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
+  const chave = `${version}|${variant}`;
+  if (_assetsCache.has(chave)) return _assetsCache.get(chave);
 
-  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(DIR, 'prompt-no-v25-montado.md'), 'utf8'), variant);
+  const dir = versionDir(cfg);
+  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), variant, cfg.montado);
 
-  const criteria = parseCriteria(fs.readFileSync(path.join(DIR, 'criterios-no-v25.md'), 'utf8'));
-  if (criteria.length !== 14) {
-    throw new Error(`Esperava 14 critérios em criterios-no-v25.md, encontrei ${criteria.length}.`);
+  const criteria = parseCriteria(fs.readFileSync(path.join(dir, cfg.criterios), 'utf8'));
+  if (criteria.length !== cfg.nCriterios) {
+    throw new Error(`Esperava ${cfg.nCriterios} critérios em ${cfg.criterios}, encontrei ${criteria.length}.`);
   }
 
-  const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(DIR, 'sintetizador-v25.md'), 'utf8'));
+  const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador);
 
-  const assets = { variant, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
-  _assetsByVariant.set(variant, assets);
+  const assets = { version, variant, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
+  _assetsCache.set(chave, assets);
   return assets;
 }
 
-// Extrai, de criterios-no-v25.md: a descrição completa de cada critério (o bloco
+// Extrai, do .md de critérios: a descrição completa de cada critério (o bloco
 // inteiro daquele número, que vai no slot {{CRITÉRIO}}) e o nome + linha curta
-// (rótulos para a tela do supervisor).
+// (rótulos para a tela do supervisor). Devolve quantos houver, na ordem — quem
+// confere se são 14 ou 15 é o loadAssets, pela versão.
 function parseCriteria(raw) {
   const lcIdx = raw.indexOf('## Linha curta');
   const descSection = lcIdx !== -1 ? raw.slice(0, lcIdx) : raw;
@@ -262,13 +343,11 @@ function parseCriteria(raw) {
     shorts[Number(m[1])] = { nome: m[2].trim(), linhaCurta: m[3].trim() };
   }
 
-  const out = [];
-  for (let i = 1; i <= 14; i++) {
-    if (descs[i] && shorts[i]) {
-      out.push({ num: i, nome: shorts[i].nome, linhaCurta: shorts[i].linhaCurta, descricao: descs[i] });
-    }
-  }
-  return out;
+  return Object.keys(descs)
+    .map(Number)
+    .filter((i) => shorts[i])
+    .sort((a, b) => a - b)
+    .map((i) => ({ num: i, nome: shorts[i].nome, linhaCurta: shorts[i].linhaCurta, descricao: descs[i] }));
 }
 
 // Substituição literal (função replacer) — evita que `$` no log/bloco1/critério
@@ -360,7 +439,12 @@ async function mapLimit(items, limit, fn) {
 // Chamada não-streaming ao GPT (reasoning model). `developer` = prefixo
 // estático/do-caso (cacheado automaticamente pela OpenAI); `user` = a parte que
 // varia. Sem cache_control manual — não existe na OpenAI.
-async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', rotulo = 'chamada') {
+async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', rotulo = 'chamada', captura = false) {
+  // Captura ligada + OpenAI → Responses API, o único lugar onde o resumo do
+  // raciocínio existe. Nos demais casos segue o chat.completions de sempre.
+  if (captura && provider === 'openai') {
+    return gptCompleteResponses(openai, developer, user, maxTokens, model, effort, rotulo);
+  }
   const resp = await withRetry(rotulo, () => openai.chat.completions.create(buildChatBody({
     provider,
     model,
@@ -371,7 +455,65 @@ async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL
       { role: 'user', content: user },
     ],
   })));
-  return { text: resp.choices && resp.choices[0] && resp.choices[0].message ? resp.choices[0].message.content || '' : '', usage: resp.usage || null };
+  const message = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
+  return {
+    text: message.content || '',
+    // GLM devolve o raciocínio aqui mesmo, sem custo nem chamada extra.
+    reasoning: captura ? extractChatReasoning(message) : '',
+    usage: resp.usage || null,
+  };
+}
+
+// A OpenAI só emite resumo de raciocínio nos modelos que têm sumarizador — o
+// "mini" não tem, e mandar `summary` para ele faz a chamada falhar. Mesma regra
+// que o avaliador de prompt único usa (ver buildSingleEvalResponsesArgs).
+function modelEmiteResumo(model) {
+  return !/mini/i.test(String(model || ''));
+}
+
+// Junta o resumo do raciocínio da Responses API. A OpenAI entrega o texto nos
+// eventos `reasoning_summary_text.delta` — no não-streaming ele costuma vir
+// vazio, por isso consumimos o stream aqui dentro (igual ao caminho do avaliador
+// de prompt único). O visível e o usage saem do mesmo stream.
+async function gptCompleteResponses(openai, developer, user, maxTokens, model, effort, rotulo) {
+  return withRetry(rotulo, async () => {
+    const stream = await openai.responses.create({
+      model,
+      reasoning: modelEmiteResumo(model) ? { effort, summary: 'auto' } : { effort },
+      max_output_tokens: maxTokens,
+      instructions: developer, // prefixo estático + caso → é o que a OpenAI cacheia
+      input: [{ role: 'user', content: user }],
+      stream: true,
+    });
+    let text = '';
+    let reasoning = '';
+    let usage = null;
+    for await (const ev of stream) {
+      if (ev.type === 'response.output_text.delta') {
+        if (ev.delta) text += ev.delta;
+      } else if (ev.type === 'response.reasoning_summary_text.delta') {
+        if (ev.delta) reasoning += ev.delta;
+      } else if (ev.type === 'response.reasoning_summary_part.added') {
+        if (reasoning) reasoning += '\n\n'; // separa as partes do resumo
+      } else if (ev.type === 'response.completed') {
+        usage = (ev.response && ev.response.usage) || null;
+      }
+    }
+    return { text, reasoning: reasoning.trim(), usage };
+  });
+}
+
+// Raciocínio que o provedor devolveu junto da resposta do chat.completions. O
+// GLM (z.ai) manda em `message.reasoning_content` quando o thinking está ligado;
+// alguns provedores embutem em <think>…</think> no próprio conteúdo. A OpenAI,
+// por este endpoint, não manda nada (só a contagem de tokens).
+function extractChatReasoning(message) {
+  const m = message || {};
+  const rc = m.reasoning_content || m.reasoning || '';
+  if (rc && String(rc).trim()) return String(rc).trim();
+  const c = typeof m.content === 'string' ? m.content : '';
+  const tag = c.match(/<think>([\s\S]*?)<\/think>/i);
+  return tag ? tag[1].trim() : '';
 }
 
 // Estrutura a saída do nó por regex simples (conforme [SAÍDA] do prompt).
@@ -395,28 +537,38 @@ function parseNodeOutput(text) {
 }
 
 async function runNode(openai, assets, bloco1, log, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
-  // developer = A (estático) + B (Bloco 1 + log) → idêntico nos 14 nós deste caso
-  // (logo, cacheado). user = C com o critério → o que varia por nó.
+  // developer = A (estático) + B (Bloco 1 + log) → idêntico em todos os nós deste
+  // caso (logo, cacheado). user = C com o critério → o que varia por nó.
   const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const { text, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`);
+  const captura = !!(assets.cfg && assets.cfg.capturaReasoning);
+  const { text, reasoning, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
   const parsed = parseNodeOutput(text);
   return {
     num: criterio.num,
     nome: criterio.nome,
     linhaCurta: criterio.linhaCurta,
     ...parsed,
+    reasoning: reasoning || '',
     usage,
   };
 }
 
-// Agregador determinístico. Pesos iguais por enquanto (parametrizáveis). Exclui
-// os critérios de confiança `baixa`. Normaliza a média (1–10) para 0–100.
-function aggregate(results, weights) {
+// Um critério entra na nota quando tem nota. Na v25 a CONFIANÇA `baixa` também
+// o tira (o prompt de lá manda usar `baixa` para "o log não deu material");
+// na v28 a confiança é só recado ao supervisor e não mexe no cálculo.
+function entraNaNota(r, confiancaBaixaExclui) {
+  if (!Number.isFinite(r.nota)) return false;
+  return !confiancaBaixaExclui || r.confianca !== 'baixa';
+}
+
+// Agregador determinístico. Pesos iguais por enquanto (parametrizáveis).
+// Normaliza a média (1–10) para 0–100.
+function aggregate(results, weights, confiancaBaixaExclui = true) {
   let ws = 0;
   let wt = 0;
   results.forEach((r, i) => {
-    if (r.confianca !== 'baixa' && Number.isFinite(r.nota)) {
+    if (entraNaNota(r, confiancaBaixaExclui)) {
       const w = weights[i] != null ? weights[i] : 1;
       ws += r.nota * w;
       wt += w;
@@ -427,12 +579,16 @@ function aggregate(results, weights) {
   return { notaFinal: Math.round(media * 10), media, considerados: wt };
 }
 
-// Monta o bloco {{ANALISES}} do sintetizador: para cada critério NÃO-`baixa`, na
-// ordem dos critérios, cabeçalho (nº + nome) + linha curta + a prosa do nó. Sem
-// NOTA nem CONFIANÇA (a valência já vem na 1ª palavra da prosa). Vazio se nenhum.
-function buildAnalises(results) {
+// Monta o bloco {{ANALISES}} do sintetizador: para cada critério que entra na
+// nota, na ordem dos critérios, cabeçalho (nº + nome) + linha curta + a prosa do
+// nó. Sem NOTA nem CONFIANÇA (a valência já vem na 1ª palavra da prosa). Vazio
+// se nenhum. Critério sem prosa (variante só-nota, ou nó fora de formato) não
+// entra. O corte por confiança segue o da versão: na v25 `baixa` também sai do
+// feedback; na v28 todas as análises vão para o sintetizador, que espera uma
+// por critério.
+function buildAnalises(results, confiancaBaixaExclui = true) {
   const blocks = results
-    .filter((r) => r.confianca !== 'baixa' && r.analise)
+    .filter((r) => (!confiancaBaixaExclui || r.confianca !== 'baixa') && r.analise)
     .sort((a, b) => a.num - b.num)
     .map((r) => `## ${r.num} · ${r.nome}\n${r.linhaCurta}\n${r.analise}`);
   return blocks.join('\n\n');
@@ -440,10 +596,10 @@ function buildAnalises(results) {
 
 // Sintetizador: 1 chamada. developer = bloco estático (cacheável entre
 // avaliações); user = log + análises. Devolve só o corpo (sem nota, sem saudação).
-async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
+async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = false) {
   const user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
-  const { text, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider, 'sintetizador');
-  return { corpo: (text || '').trim(), usage };
+  const { text, reasoning, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider, 'sintetizador', captura);
+  return { corpo: (text || '').trim(), reasoning: reasoning || '', usage };
 }
 
 // Montagem final (código): nota + saudação fixa + corpo do sintetizador.
@@ -527,25 +683,94 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
   return { model, effort, totais, custo, batch: !!batch };
 }
 
-// Executa o pipeline completo: 14 nós → agregador → sintetizador → montagem.
+// Monta o .txt do raciocínio que o supervisor baixa: cabeçalho com o que a run
+// foi, um bloco por nó (com a nota e a confiança ao lado, que é o que dá sentido
+// ao resumo) e o do sintetizador no fim. Puro — recebe o resultado, devolve
+// texto — para o servidor só gravar e a rota só servir.
+//
+// Devolve '' quando não há resumo nenhum: aí não existe arquivo a guardar nem
+// botão a mostrar (batch, modelo "mini", GLM com thinking desligado).
+function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, batch, casoNome, notaFinal, partes, reasoningSintetizador, criadoEm }) {
+  const blocos = (partes || []).filter((p) => p.reasoning && p.reasoning.trim());
+  if (!blocos.length && !(reasoningSintetizador || '').trim()) return '';
+
+  const L = [];
+  L.push('AVALIAÇÃO INDEPENDENTE — RACIOCÍNIO DA AVALIAÇÃO');
+  L.push('='.repeat(52));
+  L.push(`Avaliador: ${evaluatorLabel || version || '—'}${variant ? ` (${variant})` : ''}`);
+  L.push(`Modelo: ${model || '—'} · effort: ${effort || '—'}${batch ? ' · batch' : ''}`);
+  if (casoNome) L.push(`Caso: ${casoNome}`);
+  if (notaFinal != null) L.push(`Nota final: ${notaFinal}/100`);
+  if (criadoEm) L.push(`Gerado em: ${criadoEm}`);
+  L.push('');
+  L.push('O que é este arquivo: o RESUMO do raciocínio de cada nó, do jeito que o');
+  L.push('provedor o entrega. Não é a cadeia bruta de pensamento — a OpenAI não a');
+  L.push('expõe em lugar nenhum, só este resumo. Serve para o supervisor entender');
+  L.push('por que um critério recebeu a nota que recebeu, e não vai para o aluno.');
+  L.push('');
+
+  for (const p of blocos) {
+    L.push('─'.repeat(52));
+    L.push(`${p.num} · ${p.nome}`);
+    const meta = [
+      Number.isFinite(p.nota) ? `nota ${p.nota}/10` : 'sem nota',
+      p.confianca ? `confiança ${p.confianca}` : 'sem confiança',
+      p.incluido ? 'na nota final' : 'fora da nota final',
+    ];
+    L.push(`[${meta.join(' · ')}]`);
+    L.push('');
+    L.push(p.reasoning.trim());
+    L.push('');
+  }
+
+  if ((reasoningSintetizador || '').trim()) {
+    L.push('─'.repeat(52));
+    L.push('Sintetizador (quem escreve o feedback do aluno)');
+    L.push('');
+    L.push(reasoningSintetizador.trim());
+    L.push('');
+  }
+
+  const semResumo = (partes || []).filter((p) => !(p.reasoning && p.reasoning.trim()));
+  if (semResumo.length) {
+    L.push('─'.repeat(52));
+    L.push(`Sem resumo de raciocínio em ${semResumo.length} nó(s): ${semResumo.map((p) => p.num).join(', ')}.`);
+    L.push('O provedor não devolveu texto para eles nesta run.');
+  }
+  return L.join('\n');
+}
+
+// Executa o pipeline completo: nós → agregador → sintetizador → montagem.
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
-// os outros 13 em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) —
-// assim o prefixo A+B (com o log) é cobrado cheio uma vez e lido barato pelos
-// demais. O sintetizador roda por último.
-async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT }) {
-  const assets = loadAssets(variant);
+// os demais em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) — assim
+// o prefixo A+B (com o log) é cobrado cheio uma vez e lido barato pelos outros.
+// O sintetizador roda por último.
+async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT, evaluatorId }) {
+  const assets = loadAssets(version, variant);
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
 
   const first = await runNode(openai, assets, bloco1, log, criteria[0], model, effort, provider);
   // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
-  // nova, e na OpenAI os 13 de uma vez estouram o TPM (cada nó reserva ~20k
+  // nova, e na OpenAI todos de uma vez estouram o TPM (cada nó reserva ~20k
   // tokens; ver OPENAI_V25_CONCURRENCY).
   const conc = provider === 'glm' ? GLM_V25_CONCURRENCY : OPENAI_V25_CONCURRENCY;
   const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, bloco1, log, c, model, effort, provider));
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
-  const { notaFinal, considerados } = aggregate(results, weights);
+  return finishPipeline({
+    openai, assets, log, results, weights, model, effort, provider, batch: false, evaluatorId,
+    capturaSint: !!(assets.cfg && assets.cfg.capturaReasoning),
+  });
+}
+
+// Passo comum do fim do pipeline (síncrono e batch): agregador → partes →
+// sintetizador → montagem → instrumentação.
+async function finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint = false }) {
+  const { cfg, version, variant } = assets;
+  const excluiBaixa = cfg.confiancaBaixaExclui;
+
+  const { notaFinal, considerados } = aggregate(results, weights, excluiBaixa);
 
   const partes = results.map((r) => ({
     num: r.num,
@@ -554,35 +779,51 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
     analise: r.analise,
     nota: r.nota,
     confianca: r.confianca,
-    // `baixa` (ou sem nota) aparece na tela mas não entra na conta final.
-    incluido: r.confianca !== 'baixa' && Number.isFinite(r.nota),
+    // Fora da conta final (v25: `baixa`; qualquer versão: nó que não devolveu
+    // número). Aparece na tela do supervisor de qualquer jeito, marcado.
+    incluido: entraNaNota(r, excluiBaixa),
   }));
 
   // Sintetizador + feedback do aluno só fazem sentido com pelo menos um critério
-  // avaliável. Caso degenerado (tudo `baixa` → "não avaliável"): só o supervisor
-  // vê as partes; não há feedback de aluno a montar.
-  const analises = buildAnalises(results);
+  // avaliável. Caso degenerado (nenhuma nota, ou tudo `baixa` no v25): só o
+  // supervisor vê as partes; não há feedback de aluno a montar.
+  const analises = buildAnalises(results, excluiBaixa);
   let corpoSintetizador = null;
   let feedbackAluno = null;
   let synthUsage = null;
+  let synthReasoning = '';
   if (notaFinal != null && analises) {
-    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider);
+    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider, capturaSint);
     corpoSintetizador = synth.corpo;
     synthUsage = synth.usage;
+    synthReasoning = synth.reasoning || '';
     feedbackAluno = montarFeedback(notaFinal, corpoSintetizador);
   }
 
-  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, false);
+  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);
 
-  return { evaluator: 'v25', variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+  // Raciocínio: o .txt já montado (ou '' quando não houve resumo nenhum). Sai
+  // separado do resto porque é grande — o caller grava em arquivo próprio em vez
+  // de engordar o store que é lido inteiro a cada avaliação.
+  const reasoningTxt = buildReasoningTxt({
+    evaluatorLabel: evaluatorId || version,
+    version, variant, model, effort, batch, casoNome: null, notaFinal,
+    partes: partes.map((p, i) => ({ ...p, reasoning: results[i] ? results[i].reasoning : '' })),
+    reasoningSintetizador: synthReasoning,
+    criadoEm: new Date().toISOString(),
+  });
+
+  // `evaluator` é o id do avaliador no alternador (v28, v28-nota, ...) quando o
+  // caller o informa; sem ele, a própria versão do pipeline.
+  return { evaluator: evaluatorId || version, version, variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao, reasoningTxt };
 }
 
-// --- Suporte a BATCH API (14 nós num lote; sintetizador roda síncrono no coletor) ---
+// --- Suporte a BATCH API (os nós num lote; sintetizador roda síncrono no coletor) ---
 
-// Corpos /v1/chat/completions dos 14 nós (mesmo developer cacheável + user do
+// Corpos /v1/chat/completions dos nós (mesmo developer cacheável + user do
 // critério). O caller monta o custom_id (ex.: `${jobId}::${num}`) e o JSONL.
-function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT }) {
-  const assets = loadAssets(variant);
+function buildPipelineNodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT }) {
+  const assets = loadAssets(version, variant);
   const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
   return assets.criteria.map((criterio) => ({
     num: criterio.num,
@@ -601,8 +842,8 @@ function buildV25NodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFF
 
 // Finaliza a partir das saídas dos nós do batch. `nodeOutputs` = [{ num, text, usage }].
 // Roda o agregador, o sintetizador (síncrono, 1 chamada) e a instrumentação.
-async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', variant = V25_DEFAULT_VARIANT, nodeOutputs, batch = false }) {
-  const assets = loadAssets(variant);
+async function finalizePipeline({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT, nodeOutputs, batch = false, evaluatorId }) {
+  const assets = loadAssets(version, variant);
   const weights = assets.criteria.map(() => 1);
   const byNum = new Map((nodeOutputs || []).map((o) => [o.num, o]));
   const results = assets.criteria
@@ -612,38 +853,27 @@ async function finalizeV25({ openai, log, model = V25_MODEL, effort = V25_EFFORT
     })
     .sort((a, b) => a.num - b.num);
 
-  const { notaFinal, considerados } = aggregate(results, weights);
-  const partes = results.map((r) => ({
-    num: r.num, nome: r.nome, linhaCurta: r.linhaCurta, analise: r.analise,
-    nota: r.nota, confianca: r.confianca,
-    incluido: r.confianca !== 'baixa' && Number.isFinite(r.nota),
-  }));
-
-  const analises = buildAnalises(results);
-  let corpoSintetizador = null;
-  let feedbackAluno = null;
-  let synthUsage = null;
-  if (notaFinal != null && analises) {
-    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider);
-    corpoSintetizador = synth.corpo;
-    synthUsage = synth.usage;
-    feedbackAluno = montarFeedback(notaFinal, corpoSintetizador);
-  }
-
-  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);
-  return { evaluator: 'v25', variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao };
+  // `capturaSint: false` sempre: aqui os nós vieram da Batch API, que roda em
+  // /v1/chat/completions e não devolve resumo de raciocínio. Capturar só o do
+  // sintetizador daria um arquivo manco (14 ou 15 nós em branco) e ainda trocaria
+  // o transporte de uma run cujo motivo de existir é medir custo.
+  return finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint: false });
 }
 
 module.exports = {
   runAvaliacaoIndependente,
   buildChatBody,
-  V25_VARIANTS,
-  V25_DEFAULT_VARIANT,
+  PIPELINE_VERSIONS,
+  DEFAULT_VERSION,
+  PIPELINE_VARIANTS,
+  DEFAULT_VARIANT,
   isValidVariant,
   selectVariant,
   // Batch API (Avaliação Independente):
-  buildV25NodeRequests,
-  finalizeV25,
+  buildPipelineNodeRequests,
+  finalizePipeline,
+  buildReasoningTxt,
+  modelEmiteResumo,
   // usados pelo editor de prompts (validação com o parser da produção):
   parseMontado,
   parseSintetizador,

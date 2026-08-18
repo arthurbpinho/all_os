@@ -10,16 +10,21 @@
 //   node scripts/upload-prompt.js avaliacao/avaliador-v16-2.md
 //
 // O caminho remoto (relativo ao PROMPTS_DIR) é o mesmo caminho local passado
-// como argumento — só funciona pra arquivos que já existem no volume (a rota
-// não cria arquivo novo, só atualiza).
+// como argumento. Por padrão só ATUALIZA arquivo que já existe no volume; para
+// levar um prompt NOVO (uma versão nova do avaliador, por exemplo), passe
+// --criar, que cria o arquivo e a pasta dele:
+//
+//   node scripts/upload-prompt.js --criar avaliacao/v28/criterios-no-v28.md
 
 const fs = require('fs');
 const path = require('path');
 
 async function main() {
-  const localPath = process.argv[2];
+  const args = process.argv.slice(2);
+  const criar = args.includes('--criar');
+  const localPath = args.find((a) => !a.startsWith('--'));
   if (!localPath) {
-    console.error('Uso: node scripts/upload-prompt.js <caminho .md, ex: avaliacao/avaliador-v16-2.md>');
+    console.error('Uso: node scripts/upload-prompt.js [--criar] <caminho .md, ex: avaliacao/avaliador-v16-2.md>');
     process.exit(1);
   }
 
@@ -50,12 +55,12 @@ async function main() {
   const putRes = await fetch(`${baseUrl}/api/admin/prompts/${remotePath}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, criar }),
   });
   const putBody = await putRes.json();
   if (!putRes.ok) throw new Error(`Upload falhou: ${putBody.error || putRes.status}`);
 
-  console.log(`OK: ${remotePath} atualizado em ${baseUrl}`);
+  console.log(`OK: ${remotePath} ${putBody.criado ? 'criado' : 'atualizado'} em ${baseUrl}`);
 }
 
 main().catch((err) => {
