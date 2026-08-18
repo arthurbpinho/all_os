@@ -15,6 +15,7 @@ process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'a'.repeat(48);          // 48 chars — passa no fail-closed
 process.env.ADMIN_INITIAL_PASSWORD = 'testpass1234'; // 12+ chars
 process.env.DATA_DIR = DATA_DIR;
+process.env.SELECAO_EXPORT_SECRET = 'test-export-secret'; // backup externo (Apps Script)
 // Força modo demo (sem chamar Anthropic/OpenAI/GLM). Setar pra '' em vez de
 // delete — se deletar, o dotenv.config() do server/index.js re-injeta do .env
 // real (e a suite passaria a bater na rede: ex. a reflexão da Antessala usa GLM).
