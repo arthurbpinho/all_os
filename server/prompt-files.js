@@ -23,7 +23,16 @@
 const fs = require('fs');
 const path = require('path');
 const { DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { parseMontado, parseSintetizador, parseCriteria, V25_VARIANTS } = require('./avaliacao-v25');
+const { parseMontado, parseSintetizador, parseCriteria, PIPELINE_VERSIONS, PIPELINE_VARIANTS } = require('./avaliacao-v25');
+
+// Pastas de primeiro nível do PROMPTS_DIR. São as duas famílias de prompt que o
+// app lê (e as que o boot semeia). Um arquivo NOVO só pode nascer dentro delas:
+// o volume é do app, não um disco livre — e um caminho digitado errado no painel
+// vira erro na hora, em vez de um .md órfão que ninguém lê.
+const PROMPT_ROOTS = ['avaliacao', 'entrevistador'];
+// Profundidade máxima de um caminho novo: raiz + subpasta + arquivo
+// (ex.: avaliacao/v28/criterios-no-v28.md). Nada mais fundo que isso existe hoje.
+const MAX_NEW_PATH_SEGMENTS = 3;
 
 const BACKUPS_DIR = path.join(DATA_DIR, 'prompt-backups');
 const MAX_BACKUPS = 20;
@@ -71,22 +80,29 @@ function listPromptFiles() {
 // valor roda o parser de produção e estoura com a mensagem dele. Arquivo fora
 // desta tabela passa só pelas checagens genéricas (não-vazio, tamanho) — não
 // invento contrato para prompt cujo formato o código não lê.
-const VALIDATORS = {
-  'avaliacao/nova avaliacao/prompt-no-v25-montado.md': (content) => {
-    // As duas variantes precisam continuar montáveis, com os três blocos e os
-    // slots. Se um marcador `@variante` sumir, cai aqui.
-    for (const variant of V25_VARIANTS) parseMontado(content, variant);
-  },
-  'avaliacao/nova avaliacao/sintetizador-v25.md': (content) => {
-    parseSintetizador(content);
-  },
-  'avaliacao/nova avaliacao/criterios-no-v25.md': (content) => {
-    const criteria = parseCriteria(content);
-    if (criteria.length !== 14) {
-      throw new Error(`Esperava 14 critérios (com nome e linha curta), encontrei ${criteria.length}.`);
-    }
-  },
-};
+// Os três .md de cada VERSÃO do pipeline (v28, v25) têm contrato conhecido —
+// são montados pelo mesmo parser da produção. As pastas vêm de PIPELINE_VERSIONS
+// (`dirs`), então uma versão nova entra aqui sozinha, sem editar esta tabela.
+const VALIDATORS = {};
+for (const cfg of Object.values(PIPELINE_VERSIONS)) {
+  for (const dir of cfg.dirs) {
+    const base = `avaliacao/${dir}/`;
+    VALIDATORS[base + cfg.montado] = (content) => {
+      // As duas variantes precisam continuar montáveis, com os três blocos e os
+      // slots. Se um marcador `@variante` sumir, cai aqui.
+      for (const variant of PIPELINE_VARIANTS) parseMontado(content, variant, cfg.montado);
+    };
+    VALIDATORS[base + cfg.sintetizador] = (content) => {
+      parseSintetizador(content, cfg.sintetizador);
+    };
+    VALIDATORS[base + cfg.criterios] = (content) => {
+      const criteria = parseCriteria(content);
+      if (criteria.length !== cfg.nCriterios) {
+        throw new Error(`Esperava ${cfg.nCriterios} critérios (com nome e linha curta), encontrei ${criteria.length}.`);
+      }
+    };
+  }
+}
 
 // Valida o conteúdo para um caminho. Devolve { ok } ou { ok:false, error }.
 function validatePromptContent(relPath, content) {
@@ -103,6 +119,35 @@ function validatePromptContent(relPath, content) {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+// Política para CRIAR um .md que ainda não existe no volume (o "Novo arquivo" do
+// painel e o --criar do script). O resolvePromptPath já barra traversal e
+// extensão; aqui vem o resto: onde pode nascer, quão fundo, e nome de segmento
+// sem surpresa (nada começando com ponto, nada de caractere exótico). Devolve
+// { ok } ou { ok:false, error } com a mensagem que o admin lê.
+function validateNewPromptPath(relPath) {
+  const rel = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!resolvePromptPath(rel)) {
+    return { ok: false, error: 'Caminho inválido: precisa ser um .md dentro da pasta de prompts, sem ".." no meio.' };
+  }
+  const segs = rel.split('/');
+  if (segs.length < 2 || segs.length > MAX_NEW_PATH_SEGMENTS) {
+    return { ok: false, error: `O caminho precisa ter entre 2 e ${MAX_NEW_PATH_SEGMENTS} partes, começando pela pasta (ex.: avaliacao/v28/criterios-no-v28.md).` };
+  }
+  if (!PROMPT_ROOTS.includes(segs[0])) {
+    return { ok: false, error: `Arquivo novo só pode ser criado dentro de ${PROMPT_ROOTS.join('/ ou ')}/ — o caminho começou com "${segs[0]}".` };
+  }
+  for (const seg of segs) {
+    if (!seg || seg.startsWith('.')) return { ok: false, error: 'Cada parte do caminho precisa ter nome e não pode começar com ponto.' };
+    if (seg.length > 80) return { ok: false, error: 'Cada parte do caminho tem de caber em 80 caracteres.' };
+    // Letras (com acento), números, espaço e - _ . ( ) — o suficiente para os
+    // nomes que já existem ("nova avaliacao", "avaliador 18") e nada além.
+    if (!/^[\p{L}\p{N} ._()-]+$/u.test(seg)) {
+      return { ok: false, error: `"${seg}" tem caractere que não vale em nome de pasta ou arquivo aqui (use letras, números, espaço, ponto, hífen, sublinhado ou parênteses).` };
+    }
+  }
+  return { ok: true };
 }
 
 // Se o arquivo tem contrato verificado (aparece na UI para o admin saber que a
@@ -168,7 +213,9 @@ function readBackup(relPath, id) {
 module.exports = {
   BACKUPS_DIR,
   MAX_BACKUPS,
+  PROMPT_ROOTS,
   resolvePromptPath,
+  validateNewPromptPath,
   relOf,
   listPromptFiles,
   validatePromptContent,

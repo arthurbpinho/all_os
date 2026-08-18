@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizeV25, isRetryableAIError, retryDelayMs } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs } = require('../server/avaliacao-v25');
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -124,12 +124,11 @@ describe('Avaliação Independente — parsers e pricing', () => {
   });
 });
 
-// As duas variantes do pipeline v25 (com feedback × só nota) saem do MESMO
-// prompt-no-v25-montado.md, por blocos `@variante`. O que estes testes protegem:
-// a seleção não vaza o texto da outra variante, o arquivo sem marcador falha alto
-// (em vez de rodar a variante errada em silêncio) e a só-nota não chama o
-// sintetizador.
-describe('Avaliação Independente — variantes do v25', () => {
+// As duas variantes do pipeline (com feedback × só nota) saem do MESMO .md do nó,
+// por blocos `@variante`. O que estes testes protegem: a seleção não vaza o texto
+// da outra variante, o arquivo sem marcador falha alto (em vez de rodar a
+// variante errada em silêncio) e a só-nota não chama o sintetizador.
+describe('Avaliação Independente — variantes do pipeline', () => {
   it('selectVariant mantém só os blocos da variante e exige marcadores', () => {
     const md = 'topo\n<!-- @variante:com-feedback -->\nCOM\n<!-- /@variante -->\n<!-- @variante:so-nota -->\nSO\n<!-- /@variante -->\nfim';
     expect(selectVariant(md, 'com-feedback')).toContain('COM');
@@ -141,8 +140,8 @@ describe('Avaliação Independente — variantes do v25', () => {
   });
 
   it('loadAssets: com-feedback pede ANÁLISE/CONFIANÇA; so-nota pede só a NOTA', () => {
-    const comFb = loadAssets('com-feedback');
-    const soNota = loadAssets('so-nota');
+    const comFb = loadAssets('v25', 'com-feedback');
+    const soNota = loadAssets('v25', 'so-nota');
 
     expect(comFb.blockA).toMatch(/ANÁLISE:/);
     expect(comFb.blockA).toMatch(/CONFIANÇA:/);
@@ -159,25 +158,66 @@ describe('Avaliação Independente — variantes do v25', () => {
       expect(a.blockB).toContain('{{LOG}}');
       expect(a.blockC).toContain('{{CRITÉRIO}}');
     }
-    expect(() => loadAssets('nao-existe')).toThrow(/Variante/);
+    expect(() => loadAssets('v25', 'nao-existe')).toThrow(/Variante/);
+    expect(() => loadAssets('v99')).toThrow(/Versão do pipeline/);
   });
 
-  it('registry: v25 e v25-nota são pipeline, com variantes distintas', () => {
+  // O v28 é a versão em teste: mesmo pipeline, 15 critérios (coerência interna e
+  // narrativa voltam separadas) e os mesmos marcadores de variante/cache. Se um
+  // .md do v28 chegar ao volume com 14 critérios ou sem marcador, é aqui que se
+  // vê — antes de alguém gastar uma run inteira pra descobrir.
+  it('loadAssets v28: 15 critérios, marcadores e variantes iguais aos do v25', () => {
+    const comFb = loadAssets('v28', 'com-feedback');
+    const soNota = loadAssets('v28', 'so-nota');
+
+    expect(comFb.criteria.length).toBe(15);
+    expect(soNota.criteria.length).toBe(15);
+    // A fusão dos dois critérios de coerência (v25 nº 7, "Confiança transmitida")
+    // está desfeita: eles voltam separados, e a numeração anda um.
+    expect(comFb.criteria[6].nome).toBe('Coerência interna');
+    expect(comFb.criteria[7].nome).toBe('Coerência narrativa');
+    expect(comFb.criteria[14].nome).toBe('Criatividade');
+    expect(comFb.criteria.every((c) => c.descricao && c.linhaCurta)).toBe(true);
+
+    expect(comFb.blockA).toMatch(/ANÁLISE:/);
+    expect(comFb.blockA).toMatch(/CONFIANÇA:/);
+    expect(soNota.blockA).not.toMatch(/ANÁLISE:/);
+    expect(soNota.blockA).toMatch(/NOTA: <inteiro/);
+
+    for (const a of [comFb, soNota]) {
+      expect(a.blockB).toContain('{{BLOCO_1}}');
+      expect(a.blockB).toContain('{{LOG}}');
+      expect(a.blockC).toContain('{{CRITÉRIO}}');
+      expect(a.synthVariable).toContain('{{ANALISES}}');
+    }
+  });
+
+  it('registry: as 4 entradas de pipeline resolvem versão e variante', () => {
     expect(ai.isValidEvaluator('v25-nota')).toBe(true);
+    expect(ai.isValidEvaluator('v28')).toBe(true);
+    expect(ai.isValidEvaluator('v28-nota')).toBe(true);
     expect(ai.isPipeline('v25')).toBe(true);
     expect(ai.isPipeline('v25-nota')).toBe(true);
+    expect(ai.isPipeline('v28')).toBe(true);
+    expect(ai.isPipeline('v28-nota')).toBe(true);
     expect(ai.isPipeline('v18-25')).toBe(false);
     expect(ai.variantFor('v25')).toBe('com-feedback');
     expect(ai.variantFor('v25-nota')).toBe('so-nota');
+    expect(ai.variantFor('v28')).toBe('com-feedback');
+    expect(ai.variantFor('v28-nota')).toBe('so-nota');
     expect(ai.variantFor('v16-2')).toBe(null);
+    expect(ai.versionFor('v28')).toBe('v28');
+    expect(ai.versionFor('v28-nota')).toBe('v28');
+    expect(ai.versionFor('v25')).toBe('v25');
+    expect(ai.versionFor('v18-25')).toBe(null);
   });
 
-  it('finalizeV25 só-nota: agrega a nota e não chama o sintetizador', async () => {
+  it('finalizePipeline só-nota: agrega a nota e não chama o sintetizador', async () => {
     // Nós devolvem só "NOTA: n" → sem análise, o sintetizador é pulado. Se ele
     // fosse chamado, este cliente falso estouraria.
     const openai = { chat: { completions: { create: () => { throw new Error('sintetizador não deveria rodar'); } } } };
     const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({ num: i + 1, text: 'NOTA: 8', usage: null }));
-    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'so-nota', nodeOutputs });
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'so-nota', nodeOutputs });
     expect(r.variant).toBe('so-nota');
     expect(r.notaFinal).toBe(80); // média 8 → 80/100
     expect(r.considerados).toBe(14);
@@ -186,7 +226,7 @@ describe('Avaliação Independente — variantes do v25', () => {
     expect(r.partes.every((p) => p.incluido && p.analise === '')).toBe(true);
   });
 
-  it('finalizeV25 com feedback: análise dos nós vira corpo do sintetizador', async () => {
+  it('finalizePipeline com feedback: análise dos nós vira corpo do sintetizador', async () => {
     let userPrompt = '';
     const openai = {
       chat: { completions: { create: async (body) => {
@@ -197,7 +237,7 @@ describe('Avaliação Independente — variantes do v25', () => {
     const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
       num: i + 1, text: `ANÁLISE: ok. Fez bem no critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
     }));
-    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs });
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs });
     expect(r.notaFinal).toBe(80);
     expect(r.corpoSintetizador).toBe('Corpo do feedback.');
     expect(r.feedbackAluno).toMatch(/^Nota: 80\/100/);
@@ -206,12 +246,221 @@ describe('Avaliação Independente — variantes do v25', () => {
   });
 });
 
-// Rate limit (429) do v25. O contador de TPM da OpenAI reserva o
+// A diferença de CÓDIGO entre as duas versões: no v25 um critério com CONFIANÇA
+// `baixa` sai da nota e do sintetizador; no v28 a confiança é só recado ao
+// supervisor ("Ela não entra no cálculo... A nota você dá de todo jeito") e todo
+// critério com nota conta. Rodar o v28 com a regra do v25 baixaria a base da
+// média em silêncio — daí estes testes.
+describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', () => {
+  // 14 nós nota 8 + 1 com nota 2 e confiança baixa.
+  function nodeOutputs(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      num: i + 1,
+      text: i === n - 1
+        ? `ANÁLISE: erro. Sem material no critério ${i + 1}.\nNOTA: 2\nCONFIANÇA: baixa`
+        : `ANÁLISE: preciso. Fez bem no critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`,
+      usage: null,
+    }));
+  }
+  function fakeOpenAI(capture) {
+    return { chat: { completions: { create: async (body) => {
+      capture.user = body.messages[1].content;
+      return { choices: [{ message: { content: 'Corpo do feedback.' } }], usage: null };
+    } } } };
+  }
+
+  it('v25: o critério `baixa` fica fora da nota e fora do sintetizador', async () => {
+    const cap = {};
+    const r = await finalizePipeline({
+      openai: fakeOpenAI(cap), log: 'log', model: 'gpt-5.5', effort: 'medium',
+      version: 'v25', variant: 'com-feedback', nodeOutputs: nodeOutputs(14),
+    });
+    expect(r.version).toBe('v25');
+    expect(r.considerados).toBe(13);   // 14 - 1 excluído
+    expect(r.notaFinal).toBe(80);      // média dos 13 que ficaram = 8
+    expect(r.partes[13].incluido).toBe(false);
+    expect(cap.user).not.toContain('Sem material no critério 14');
+  });
+
+  it('v28: o critério `baixa` conta na nota e vai para o sintetizador', async () => {
+    const cap = {};
+    const r = await finalizePipeline({
+      openai: fakeOpenAI(cap), log: 'log', model: 'gpt-5.5', effort: 'medium',
+      version: 'v28', variant: 'com-feedback', nodeOutputs: nodeOutputs(15),
+    });
+    expect(r.version).toBe('v28');
+    expect(r.considerados).toBe(15);   // ninguém sai
+    expect(r.notaFinal).toBe(76);      // (14×8 + 2) / 15 = 7,6 → 76
+    expect(r.partes.length).toBe(15);
+    expect(r.partes[14].confianca).toBe('baixa');
+    expect(r.partes[14].incluido).toBe(true);
+    expect(cap.user).toContain('Sem material no critério 15');
+    expect(cap.user).not.toMatch(/NOTA: 8/); // o sintetizador segue sem ver números
+  });
+
+  it('v28: nó sem nota legível fica fora da conta (em qualquer versão)', async () => {
+    const outs = nodeOutputs(15);
+    outs[0] = { num: 1, text: 'ANÁLISE: preciso. Sem nota nenhuma aqui.', usage: null };
+    const r = await finalizePipeline({
+      openai: fakeOpenAI({}), log: 'log', model: 'gpt-5.5', effort: 'medium',
+      version: 'v28', variant: 'com-feedback', nodeOutputs: outs,
+    });
+    expect(r.partes[0].incluido).toBe(false);
+    expect(r.considerados).toBe(14);
+  });
+
+  it('evaluatorId do alternador chega ao resultado (rótulo da run)', async () => {
+    const r = await finalizePipeline({
+      openai: fakeOpenAI({}), log: 'log', model: 'gpt-5.5', effort: 'medium',
+      version: 'v28', variant: 'so-nota', evaluatorId: 'v28-nota',
+      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: 'NOTA: 8', usage: null })),
+    });
+    expect(r.evaluator).toBe('v28-nota');
+    expect(r.notaFinal).toBe(80);
+    expect(r.feedbackAluno).toBe(null);
+  });
+});
+
+// RACIOCÍNIO (v28). A cadeia bruta não existe em API nenhuma; o que dá para
+// guardar é o RESUMO, e só pela Responses API — o chat.completions da OpenAI
+// devolve apenas a contagem de tokens. O que estes testes protegem: o v28 usa o
+// transporte que traz o resumo, o v25 NÃO muda de transporte (senão a linha de
+// base de custo dele mudaria junto), o "mini" não recebe `summary` (a chamada
+// falharia) e o prefixo cacheável continua sendo o mesmo em todos os nós.
+describe('Avaliação Independente — captura do raciocínio (v28)', () => {
+  // Cliente falso da Responses API: devolve o stream de eventos que a OpenAI
+  // emite, incluindo os deltas do resumo do raciocínio.
+  function fakeResponses(capture = {}) {
+    capture.calls = [];
+    return {
+      responses: {
+        create: async (args) => {
+          capture.calls.push(args);
+          const ehSintetizador = !args.input[0].content.includes('[CRITÉRIO]');
+          const texto = ehSintetizador
+            ? 'Corpo do feedback.'
+            : 'ANÁLISE: preciso. Sustentou a leitura.\nNOTA: 8\nCONFIANÇA: alta';
+          return (async function* () {
+            yield { type: 'response.reasoning_summary_text.delta', delta: ehSintetizador ? 'Pensei no feedback.' : 'Pesei as travas F3 e F4.' };
+            yield { type: 'response.output_text.delta', delta: texto };
+            yield { type: 'response.completed', response: { usage: { input_tokens: 900, output_tokens: 300, output_tokens_details: { reasoning_tokens: 200 } } } };
+          })();
+        },
+      },
+      chat: { completions: { create: async () => { throw new Error('v28 com captura não deveria usar chat.completions'); } } },
+    };
+  }
+
+  it('v28 roda pela Responses API, pede o resumo e guarda o raciocínio', async () => {
+    const cap = {};
+    const r = await runAvaliacaoIndependente({
+      openai: fakeResponses(cap), bloco1: 'BLOCO1-SECRETO', log: 'T: oi',
+      model: 'gpt-5.6-sol', effort: 'high', version: 'v28', variant: 'com-feedback', evaluatorId: 'v28',
+    });
+
+    expect(cap.calls.length).toBe(16); // 15 nós + sintetizador
+    expect(cap.calls[0].reasoning).toEqual({ effort: 'high', summary: 'auto' });
+    // O prefixo cacheável continua idêntico em todos os nós (é o que a OpenAI
+    // cacheia) e o Bloco 1 segue fora do que vai ao sintetizador.
+    const nos = cap.calls.slice(0, 15);
+    expect(new Set(nos.map((c) => c.instructions)).size).toBe(1);
+    expect(nos[0].instructions).toContain('BLOCO1-SECRETO');
+    expect(cap.calls[15].instructions).not.toContain('BLOCO1-SECRETO');
+
+    // O .txt sai montado, com o resumo de cada nó e o do sintetizador.
+    expect(r.reasoningTxt).toContain('Pesei as travas F3 e F4.');
+    expect(r.reasoningTxt).toContain('Sintetizador');
+    expect(r.reasoningTxt).toContain('Pensei no feedback.');
+    expect((r.reasoningTxt.match(/nota 8\/10/g) || []).length).toBe(15);
+    // E não vaza o Bloco 1 nem o feedback do aluno.
+    expect(r.reasoningTxt).not.toContain('BLOCO1-SECRETO');
+  });
+
+  it('v25 não muda de transporte (segue no chat.completions, sem raciocínio)', async () => {
+    let chamadasChat = 0;
+    const openai = {
+      chat: { completions: { create: async (body) => {
+        chamadasChat++;
+        const ehSintetizador = !body.messages[1].content.includes('[CRITÉRIO]');
+        return {
+          choices: [{ message: { content: ehSintetizador ? 'Corpo.' : 'ANÁLISE: ok. Fez.\nNOTA: 8\nCONFIANÇA: alta' } }],
+          usage: null,
+        };
+      } } },
+      responses: { create: async () => { throw new Error('v25 não deveria usar a Responses API'); } },
+    };
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'b', log: 'l', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback',
+    });
+    expect(chamadasChat).toBe(15); // 14 nós + sintetizador
+    expect(r.reasoningTxt).toBe('');
+  });
+
+  it('modelo "mini" não recebe summary (a chamada falharia)', async () => {
+    expect(modelEmiteResumo('gpt-5.6-sol')).toBe(true);
+    expect(modelEmiteResumo('gpt-5.4-mini-2026-03-17')).toBe(false);
+    const cap = {};
+    await runAvaliacaoIndependente({
+      openai: fakeResponses(cap), bloco1: 'b', log: 'l',
+      model: 'gpt-5.4-mini-2026-03-17', effort: 'low', version: 'v28', variant: 'so-nota',
+    });
+    expect(cap.calls[0].reasoning).toEqual({ effort: 'low' }); // sem summary
+  });
+
+  // GLM devolve o raciocínio no próprio chat.completions — de graça e sem trocar
+  // de endpoint. Não faz sentido mandar o GLM para a Responses API da OpenAI.
+  it('GLM: raciocínio vem do reasoning_content, no mesmo chat.completions', async () => {
+    const openai = {
+      chat: { completions: { create: async (body) => ({
+        choices: [{ message: {
+          content: body.messages[1].content.includes('[CRITÉRIO]') ? 'ANÁLISE: ok. Fez.\nNOTA: 7\nCONFIANÇA: alta' : 'Corpo.',
+          reasoning_content: 'raciocínio do GLM',
+        } }],
+        usage: null,
+      }) } },
+    };
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'b', log: 'l', model: 'glm-5.2', effort: 'max',
+      provider: 'glm', version: 'v28', variant: 'com-feedback',
+    });
+    expect(r.reasoningTxt).toContain('raciocínio do GLM');
+  });
+
+  // Batch roda por /v1/chat/completions, que não devolve resumo: o .txt sai
+  // vazio e o botão de baixar não aparece. Limitação do provedor, documentada.
+  it('batch: sem resumo, o .txt fica vazio (nada a baixar)', async () => {
+    const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo.' } }], usage: null }) } } };
+    const r = await finalizePipeline({
+      openai, log: 'log', model: 'gpt-5.6-sol', effort: 'high', version: 'v28', variant: 'com-feedback', batch: true,
+      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: `ANÁLISE: preciso. C${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null })),
+    });
+    expect(r.notaFinal).toBe(80);
+    expect(r.reasoningTxt).toBe('');
+  });
+
+  it('buildReasoningTxt: vazio sem resumo; marca os nós que não devolveram', () => {
+    const base = { evaluatorLabel: 'v28', version: 'v28', variant: 'com-feedback', model: 'gpt-5.6-sol', effort: 'high', notaFinal: 80 };
+    expect(buildReasoningTxt({ ...base, partes: [{ num: 1, nome: 'X', reasoning: '' }], reasoningSintetizador: '' })).toBe('');
+    const txt = buildReasoningTxt({
+      ...base,
+      partes: [
+        { num: 1, nome: 'Precisão lexical', nota: 8, confianca: 'alta', incluido: true, reasoning: 'pensei A' },
+        { num: 2, nome: 'Antifragilidade', nota: null, confianca: null, incluido: false, reasoning: '' },
+      ],
+      reasoningSintetizador: '',
+    });
+    expect(txt).toContain('1 · Precisão lexical');
+    expect(txt).toContain('pensei A');
+    expect(txt).toContain('Sem resumo de raciocínio em 1 nó(s): 2.');
+  });
+});
+
+// Rate limit (429) do pipeline. O contador de TPM da OpenAI reserva o
 // max_completion_tokens de cada chamada (~20k por nó), então o fan-out estoura o
 // teto da organização e volta 429 com "try again in Xs". O que estes testes
 // protegem: o 429 é retentado (não vira erro do job), a espera respeita o que o
 // provedor pede e request inválido (400) NÃO é retentado.
-describe('Avaliação Independente — retry de rate limit (v25)', () => {
+describe('Avaliação Independente — retry de rate limit (pipeline)', () => {
   it('classifica o que vale retentar', () => {
     expect(isRetryableAIError({ status: 429 })).toBe(true);
     expect(isRetryableAIError({ status: 503 })).toBe(true);
@@ -234,7 +483,7 @@ describe('Avaliação Independente — retry de rate limit (v25)', () => {
     expect(retryDelayMs({ status: 500 }, 10)).toBeLessThanOrEqual(60000);
   });
 
-  it('finalizeV25: 429 no sintetizador é retentado e a avaliação conclui', async () => {
+  it('finalizePipeline: 429 no sintetizador é retentado e a avaliação conclui', async () => {
     let calls = 0;
     const openai = {
       chat: { completions: { create: async () => {
@@ -251,12 +500,12 @@ describe('Avaliação Independente — retry de rate limit (v25)', () => {
     const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
       num: i + 1, text: `ANÁLISE: ok. Critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
     }));
-    const r = await finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs });
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs });
     expect(calls).toBe(2);
     expect(r.corpoSintetizador).toBe('Corpo do feedback.');
   });
 
-  it('finalizeV25: 400 (request inválido) sobe na hora, sem retentar', async () => {
+  it('finalizePipeline: 400 (request inválido) sobe na hora, sem retentar', async () => {
     let calls = 0;
     const openai = {
       chat: { completions: { create: async () => {
@@ -269,7 +518,7 @@ describe('Avaliação Independente — retry de rate limit (v25)', () => {
     const nodeOutputs = Array.from({ length: 14 }, (_, i) => ({
       num: i + 1, text: `ANÁLISE: ok. Critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
     }));
-    await expect(finalizeV25({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', variant: 'com-feedback', nodeOutputs }))
+    await expect(finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs }))
       .rejects.toThrow(/reasoning_effort/);
     expect(calls).toBe(1);
   });
@@ -277,6 +526,24 @@ describe('Avaliação Independente — retry de rate limit (v25)', () => {
 
 describe('Avaliação Independente — endpoint', () => {
   beforeEach(() => resetData());
+
+  // O .txt do raciocínio mora em arquivo no volume, servido por rota própria
+  // (não vai no payload do resultado, que é polido a cada segundo). O que este
+  // teste protege é o acesso: quem não é supervisor/admin não chega, e run
+  // inexistente ou sem raciocínio dá 404 em vez de vazar caminho.
+  it('download do raciocínio: 403 para aluno, 404 quando não existe', async () => {
+    const aluno = await loginAs('aluno');
+    const negado = await request(app).get('/api/avaliacao-independente/av25-1-aaaaaa/reasoning').set(authHeader(aluno));
+    expect(negado.status).toBe(403);
+
+    const sup = await loginAs('prof');
+    const inexistente = await request(app).get('/api/avaliacao-independente/av25-1-aaaaaa/reasoning').set(authHeader(sup));
+    expect(inexistente.status).toBe(404);
+
+    // Id fora do formato gerado por nós não vira caminho de arquivo.
+    const traversal = await request(app).get('/api/avaliacao-independente/..%2F..%2Fetc%2Fpasswd/reasoning').set(authHeader(sup));
+    expect([400, 404]).toContain(traversal.status);
+  });
 
   it('valida avaliador/modelo/effort (400)', async () => {
     const t = await loginAs('prof'); // supervisor
@@ -287,10 +554,12 @@ describe('Avaliação Independente — endpoint', () => {
     expect(bad2.status).toBe(400);
     const bad3 = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator: 'v25', model: 'gpt-5.5', effort: 'ultra' });
     expect(bad3.status).toBe(400);
-    // v25-nota (mesmo pipeline, variante só-nota) passa pela validação de
-    // avaliador — o 400 que sobra é o do caso de teste sem Bloco 1.
-    const soNota = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator: 'v25-nota', model: 'gpt-5.5', effort: 'medium' });
-    expect(soNota.body.error).toMatch(/Bloco 1/i);
+    // As 4 entradas de pipeline (v28/v25, com feedback e só nota) passam pela
+    // validação de avaliador — o 400 que sobra é o do caso de teste sem Bloco 1.
+    for (const evaluator of ['v28', 'v28-nota', 'v25', 'v25-nota']) {
+      const ok = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, evaluator, model: 'gpt-5.5', effort: 'medium' });
+      expect(ok.body.error).toMatch(/Bloco 1/i);
+    }
   });
 
   // GPT 5.6 Sol: entrou só neste laboratório, com dois degraus de reasoning acima

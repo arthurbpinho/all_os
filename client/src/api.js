@@ -205,10 +205,24 @@ export const api = {
   // Suporte: mensagem do usuário pra administração. Cai no painel de Logs de
   // Erro do admin; devolve { codigo } pra pessoa guardar. { subject?, message }
   sendSupportMessage: (data) => request('/suporte', { method: 'POST', body: data }),
-  // Avaliação Independente v25 (Opus 4.8, 14 nós): { log, casoId } → 14 partes + nota 0–100.
+  // Avaliação Independente (laboratório de pricing do AVALIADOR): { log, casoId }
+  // → nota 0–100 + as partes por critério (uma por nó, nos avaliadores de pipeline).
   // payload: { log, casoId, evaluator, model, effort, batch }. batch:true → { queued, jobId }.
   avaliacaoIndependente: (payload) => request('/avaliacao-independente', { method: 'POST', body: payload }),
   avaliacaoFila: () => request('/avaliacao-independente/fila'),
+  // Resumo do raciocínio de uma avaliação (v28) — resposta é TEXTO puro, não
+  // JSON, então não passa pelo `request` (que faz res.json()).
+  avaliacaoReasoning: async (id) => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/avaliacao-independente/${encodeURIComponent(id)}/reasoning`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => null);
+      throw new Error((err && err.error) || `Erro ${res.status} ao baixar o raciocínio`);
+    }
+    return res.text();
+  },
   // Simulação Independente (laboratório de pricing do PACIENTE): catálogo de
   // modelos/preços + um turno de conversa. A resposta traz `turno` com tokens,
   // custo em USD e latência daquela chamada — é o que a tela mostra em tempo real.
@@ -437,7 +451,10 @@ export const api = {
   // avaliacao/"), daí o encode por segmento.
   adminListPrompts: () => request('/admin/prompts'),
   adminGetPrompt: (p) => request('/admin/prompts/' + encodePromptPath(p)),
-  adminSavePrompt: (p, content) => request('/admin/prompts/' + encodePromptPath(p), { method: 'PUT', body: { content } }),
+  // Grava um .md do volume. `criar:true` é para arquivo NOVO (o servidor recusa
+  // se o caminho já existir); sem a flag é edição do que já está lá.
+  adminSavePrompt: (p, content, { criar = false } = {}) =>
+    request('/admin/prompts/' + encodePromptPath(p), { method: 'PUT', body: criar ? { content, criar: true } : { content } }),
   adminGetPromptVersion: (p, id) => request(`/admin/prompt-versions/${encodeURIComponent(id)}?path=${encodeURIComponent(p)}`),
   adminRestorePromptVersion: (p, id) =>
     request(`/admin/prompt-versions/${encodeURIComponent(id)}/restaurar`, { method: 'POST', body: { path: p } }),

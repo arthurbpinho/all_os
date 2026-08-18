@@ -28,6 +28,8 @@ server/data/tmp_audio_*.webm
 # Fotos de paciente enviadas em runtime (ficam no volume DATA_DIR, não no repo)
 server/data/patient-photos/
 server/data/avaliacao-v25.json
+# Resumos de raciocínio das avaliações do v28 (um .txt por run, no volume)
+server/data/avaliacao-reasoning/
 
 # Prompts do avaliador/entrevistador — dados sensíveis (critérios de nota,
 # gabaritos). Fora do git; vivem só no volume persistente (server/paths.js
