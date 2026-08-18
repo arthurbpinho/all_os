@@ -2,7 +2,18 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa } = require('../server/avaliacao-v25');
+
+// Saída de um nó do v28: ele NÃO escreve nota — responde às quatro travas e à
+// realização, e o código deriva faixa e nota. `ate` = última trava que passa.
+function saidaV28({ ate = 4, realizacao = 'completa', conf = 'alta', analise = 'preciso. Fez bem.', comAnalise = true } = {}) {
+  const linhas = [];
+  if (comAnalise) linhas.push(`ANÁLISE: ${analise}`);
+  for (const n of [2, 3, 4, 5]) linhas.push(`F${n}: ${n <= ate ? 'passa' : 'não passa'}`);
+  linhas.push(`REALIZAÇÃO: ${realizacao}`);
+  if (comAnalise) linhas.push(`CONFIANÇA: ${conf}`);
+  return linhas.join('\n');
+}
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -179,10 +190,20 @@ describe('Avaliação Independente — variantes do pipeline', () => {
     expect(comFb.criteria[14].nome).toBe('Criatividade');
     expect(comFb.criteria.every((c) => c.descricao && c.linhaCurta)).toBe(true);
 
+    // O v28 pede travas + realização, e NÃO pede nota (o número nasce no código).
     expect(comFb.blockA).toMatch(/ANÁLISE:/);
     expect(comFb.blockA).toMatch(/CONFIANÇA:/);
+    for (const bloco of [comFb.blockA, soNota.blockA]) {
+      expect(bloco).toMatch(/F2: <passa\|não passa>/);
+      expect(bloco).toMatch(/F5: <passa\|não passa>/);
+      expect(bloco).toMatch(/REALIZAÇÃO: <completa\|incompleta>/);
+      expect(bloco).not.toMatch(/NOTA: <inteiro/);
+    }
     expect(soNota.blockA).not.toMatch(/ANÁLISE:/);
-    expect(soNota.blockA).toMatch(/NOTA: <inteiro/);
+    // Os numerais das faixas saem da vista do modelo: sem número para mirar, ele
+    // não consegue escolher a nota primeiro e preencher as travas para trás.
+    expect(comFb.blockA).not.toMatch(/\*\*8 \(completa\)/);
+    expect(comFb.blockA).toMatch(/\*\*Completa:\*\*/);
 
     for (const a of [comFb, soNota]) {
       expect(a.blockB).toContain('{{BLOCO_1}}');
@@ -253,14 +274,25 @@ describe('Avaliação Independente — variantes do pipeline', () => {
 // média em silêncio — daí estes testes.
 describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', () => {
   // 14 nós nota 8 + 1 com nota 2 e confiança baixa.
-  function nodeOutputs(n) {
-    return Array.from({ length: n }, (_, i) => ({
-      num: i + 1,
-      text: i === n - 1
-        ? `ANÁLISE: erro. Sem material no critério ${i + 1}.\nNOTA: 2\nCONFIANÇA: baixa`
-        : `ANÁLISE: preciso. Fez bem no critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`,
-      usage: null,
-    }));
+  // v25 escreve a NOTA; v28 responde travas. Nos dois, o último critério vale 2
+  // com confiança baixa e os demais valem 8 — o que muda é só como se diz isso.
+  function nodeOutputs(n, versao = 'v25') {
+    return Array.from({ length: n }, (_, i) => {
+      const ultimo = i === n - 1;
+      if (versao === 'v28') {
+        // nota 2 = faixa 1 completa (nem a trava da F2 passou); nota 8 = F4 completa.
+        return { num: i + 1, usage: null, text: saidaV28(ultimo
+          ? { ate: 1, realizacao: 'completa', conf: 'baixa', analise: `erro. Sem material no critério ${i + 1}.` }
+          : { ate: 4, realizacao: 'completa', conf: 'alta', analise: `preciso. Fez bem no critério ${i + 1}.` }) };
+      }
+      return {
+        num: i + 1,
+        usage: null,
+        text: ultimo
+          ? `ANÁLISE: erro. Sem material no critério ${i + 1}.\nNOTA: 2\nCONFIANÇA: baixa`
+          : `ANÁLISE: preciso. Fez bem no critério ${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`,
+      };
+    });
   }
   function fakeOpenAI(capture) {
     return { chat: { completions: { create: async (body) => {
@@ -286,7 +318,7 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     const cap = {};
     const r = await finalizePipeline({
       openai: fakeOpenAI(cap), log: 'log', model: 'gpt-5.5', effort: 'medium',
-      version: 'v28', variant: 'com-feedback', nodeOutputs: nodeOutputs(15),
+      version: 'v28', variant: 'com-feedback', nodeOutputs: nodeOutputs(15, 'v28'),
     });
     expect(r.version).toBe('v28');
     expect(r.considerados).toBe(15);   // ninguém sai
@@ -299,8 +331,8 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
   });
 
   it('v28: nó sem nota legível fica fora da conta (em qualquer versão)', async () => {
-    const outs = nodeOutputs(15);
-    outs[0] = { num: 1, text: 'ANÁLISE: preciso. Sem nota nenhuma aqui.', usage: null };
+    const outs = nodeOutputs(15, 'v28');
+    outs[0] = { num: 1, text: 'ANÁLISE: preciso. Nenhuma trava respondida aqui.', usage: null };
     const r = await finalizePipeline({
       openai: fakeOpenAI({}), log: 'log', model: 'gpt-5.5', effort: 'medium',
       version: 'v28', variant: 'com-feedback', nodeOutputs: outs,
@@ -314,12 +346,11 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
   // pedido de descrever o raciocínio na caixa de estrela) não é dele. Isto já
   // escapou uma vez: ao versionar o pipeline, o v28 herdou a saudação do v25.
   it('saudação é por versão: o v28 não leva o parágrafo da caixa de estrela', async () => {
-    const nodeOutputs = (n) => Array.from({ length: n }, (_, i) => ({
-      num: i + 1, text: `ANÁLISE: preciso. C${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
-    }));
     const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo do feedback.' } }], usage: null }) } } };
+    const outsV28 = Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: saidaV28({ analise: `preciso. C${i + 1}.` }), usage: null }));
+    const outsV25 = Array.from({ length: 14 }, (_, i) => ({ num: i + 1, text: `ANÁLISE: preciso. C${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null }));
 
-    const v28 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v28', variant: 'com-feedback', nodeOutputs: nodeOutputs(15) });
+    const v28 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v28', variant: 'com-feedback', nodeOutputs: outsV28 });
     expect(v28.feedbackAluno).toMatch(/^Nota: 80\/100/);
     expect(v28.feedbackAluno).toContain('pré-correção');
     expect(v28.feedbackAluno).not.toMatch(/caixa de estrela|botão de estrela/);
@@ -327,7 +358,7 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     expect(v28.feedbackAluno).toContain('Corpo do feedback.');
 
     // O v25 segue com os dois parágrafos do brief — é linha de base, não muda.
-    const v25 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs: nodeOutputs(14) });
+    const v25 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs: outsV25 });
     expect(v25.feedbackAluno).toContain('botão de estrela');
     expect(v25.feedbackAluno).toContain('não ao que você pensou');
 
@@ -339,11 +370,124 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     const r = await finalizePipeline({
       openai: fakeOpenAI({}), log: 'log', model: 'gpt-5.5', effort: 'medium',
       version: 'v28', variant: 'so-nota', evaluatorId: 'v28-nota',
-      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: 'NOTA: 8', usage: null })),
+      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: saidaV28({ comAnalise: false }), usage: null })),
     });
     expect(r.evaluator).toBe('v28-nota');
     expect(r.notaFinal).toBe(80);
     expect(r.feedbackAluno).toBe(null);
+  });
+});
+
+// TRAVAS ESTRUTURAIS (v28). O nó não escolhe nota: responde `passa`/`não passa`
+// às quatro travas e diz se a realização é completa ou incompleta; a faixa (a
+// última trava que passou) e a nota saem do CÓDIGO. É o que torna a hierarquia
+// acumulativa uma regra de verdade, em vez de uma instrução sobre o processo
+// interno do modelo — que não dá para verificar nem pelo resumo do raciocínio.
+describe('Avaliação Independente — travas estruturais (v28)', () => {
+  it('a faixa é a última trava que passou, e a nota nasce dela', () => {
+    const nota = (ate, realizacao) => parseNodeOutputTravas(saidaV28({ ate, realizacao })).nota;
+    // completa = par, incompleta = ímpar, em cada faixa.
+    expect(nota(1, 'completa')).toBe(2);   // nem a trava da F2 passou → F1
+    expect(nota(1, 'incompleta')).toBe(1);
+    expect(nota(2, 'completa')).toBe(4);
+    expect(nota(2, 'incompleta')).toBe(3);
+    expect(nota(3, 'completa')).toBe(6);
+    expect(nota(3, 'incompleta')).toBe(5);
+    expect(nota(4, 'completa')).toBe(8);
+    expect(nota(4, 'incompleta')).toBe(7);
+    expect(nota(5, 'completa')).toBe(10);
+    expect(nota(5, 'incompleta')).toBe(9);
+  });
+
+  // O 7 só pode existir se as travas da F3 E da F4 abriram. Era exatamente o que
+  // não dava para verificar quando o modelo escrevia a nota direto.
+  it('7 exige F3 e F4 abertas — não há atalho para ele', () => {
+    const r = parseNodeOutputTravas(saidaV28({ ate: 4, realizacao: 'incompleta' }));
+    expect(r.nota).toBe(7);
+    expect(r.travas[3]).toBe(true);
+    expect(r.travas[4]).toBe(true);
+    // Sem autoria (F3 fechada), o teto é 4 — por mais "incompleto" que se diga.
+    const semAutoria = parseNodeOutputTravas(saidaV28({ ate: 2, realizacao: 'incompleta' }));
+    expect(semAutoria.nota).toBe(3);
+    expect(semAutoria.faixa).toBe(2);
+  });
+
+  // A hierarquia é aplicada por código: uma trava aberta ACIMA de uma fechada não
+  // promove ninguém, e o caso fica marcado — é o sinal de que o nó não raciocinou
+  // em hierarquia, e o supervisor precisa vê-lo.
+  it('trava aberta depois de uma fechada não promove, e marca inconsistência', () => {
+    const texto = ['F2: passa', 'F3: não passa', 'F4: passa', 'F5: passa', 'REALIZAÇÃO: completa'].join('\n');
+    const r = parseNodeOutputTravas(texto);
+    expect(r.faixa).toBe(2);
+    expect(r.nota).toBe(4);
+    expect(r.inconsistente).toBe(true);
+    // Sem inconsistência, o sinal fica limpo.
+    expect(parseNodeOutputTravas(saidaV28({ ate: 3 })).inconsistente).toBe(false);
+  });
+
+  it('derivarFaixa: para na primeira fechada; sem travas não deriva nada', () => {
+    expect(derivarFaixa({ 2: true, 3: true, 4: false, 5: false }).faixa).toBe(3);
+    expect(derivarFaixa({ 2: false, 3: false, 4: false, 5: false }).faixa).toBe(1);
+    expect(derivarFaixa({ 2: true, 3: true, 4: true, 5: true }).faixa).toBe(5);
+    expect(derivarFaixa({}).faixa).toBe(null);      // nó fora de formato
+    expect(derivarFaixa(null).faixa).toBe(null);
+  });
+
+  it('sem REALIZAÇÃO assume completa: a ímpar tem de ser afirmada', () => {
+    const r = parseNodeOutputTravas('F2: passa\nF3: passa\nF4: passa\nF5: não passa');
+    expect(r.realizacao).toBe(null);
+    expect(r.nota).toBe(8); // a par, não a ímpar
+  });
+
+  it('aceita variações de escrita das travas e isola a ANÁLISE', () => {
+    const texto = [
+      'ANÁLISE: potente. Trouxe leitura própria, mas genérica para o caso.',
+      'F2: passa — cumpre o protocolo',
+      'F3: passa — há autoria clara na devolução',
+      'F4: nao passa — serviria a qualquer paciente',
+      'F5: não passa',
+      'REALIZAÇÃO: completa — sustentado no critério',
+      'CONFIANÇA: média — log curto',
+    ].join('\n');
+    const r = parseNodeOutputTravas(texto);
+    expect(r.faixa).toBe(3);
+    expect(r.nota).toBe(6);
+    expect(r.confianca).toBe('média');
+    expect(r.analise).toBe('potente. Trouxe leitura própria, mas genérica para o caso.');
+    expect(r.analise).not.toMatch(/F2|REALIZAÇÃO/); // a análise não engole as travas
+  });
+
+  it('nó fora de formato não vira nota: fica de fora da conta', async () => {
+    const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo.' } }], usage: null }) } } };
+    const outs = Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: saidaV28({}), usage: null }));
+    outs[0] = { num: 1, text: 'ANÁLISE: preciso. Não respondi trava nenhuma.', usage: null };
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v28', variant: 'com-feedback', nodeOutputs: outs });
+    expect(r.partes[0].nota).toBe(null);
+    expect(r.partes[0].incluido).toBe(false);
+    expect(r.considerados).toBe(14);
+  });
+
+  // O v25 NÃO muda: continua escrevendo a nota direto. É a comparação.
+  it('v25 segue com NOTA no texto (as travas são só do v28)', async () => {
+    const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo.' } }], usage: null }) } } };
+    const outs = Array.from({ length: 14 }, (_, i) => ({ num: i + 1, text: `ANÁLISE: ok. C${i + 1}.\nNOTA: 7\nCONFIANÇA: alta`, usage: null }));
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs: outs });
+    expect(r.notaFinal).toBe(70);
+    expect(r.partes[0].travas).toBe(null);
+    expect(r.partes[0].faixa).toBe(null);
+  });
+
+  // A faixa e as travas chegam à tela do supervisor: é a estatística que diz se
+  // a F3 está segurando ou se todo caso chega à F4.
+  it('as partes carregam faixa, travas e realização', async () => {
+    const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo.' } }], usage: null }) } } };
+    const outs = Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: saidaV28({ ate: i % 2 ? 3 : 4 }), usage: null }));
+    const r = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v28', variant: 'com-feedback', nodeOutputs: outs });
+    expect(r.partes[0].faixa).toBe(4);
+    expect(r.partes[1].faixa).toBe(3);
+    expect(r.partes[0].travas).toEqual({ 2: true, 3: true, 4: true, 5: false });
+    expect(r.partes[0].realizacao).toBe('completa');
+    expect(r.partes.every((p) => p.travasInconsistentes === false)).toBe(true);
   });
 });
 
@@ -365,7 +509,7 @@ describe('Avaliação Independente — captura do raciocínio (v28)', () => {
           const ehSintetizador = !args.input[0].content.includes('[CRITÉRIO]');
           const texto = ehSintetizador
             ? 'Corpo do feedback.'
-            : 'ANÁLISE: preciso. Sustentou a leitura.\nNOTA: 8\nCONFIANÇA: alta';
+            : saidaV28({ analise: 'preciso. Sustentou a leitura.' });
           return (async function* () {
             yield { type: 'response.reasoning_summary_text.delta', delta: ehSintetizador ? 'Pensei no feedback.' : 'Pesei as travas F3 e F4.' };
             yield { type: 'response.output_text.delta', delta: texto };
@@ -458,7 +602,7 @@ describe('Avaliação Independente — captura do raciocínio (v28)', () => {
     const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo.' } }], usage: null }) } } };
     const r = await finalizePipeline({
       openai, log: 'log', model: 'gpt-5.6-sol', effort: 'high', version: 'v28', variant: 'com-feedback', batch: true,
-      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: `ANÁLISE: preciso. C${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null })),
+      nodeOutputs: Array.from({ length: 15 }, (_, i) => ({ num: i + 1, text: saidaV28({ analise: `preciso. C${i + 1}.` }), usage: null })),
     });
     expect(r.notaFinal).toBe(80);
     expect(r.reasoningTxt).toBe('');

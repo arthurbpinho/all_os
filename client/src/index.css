@@ -4654,6 +4654,21 @@ select option { background: var(--cream); color: var(--ink); }
 /* ============================================================
    AVALIAÇÃO INDEPENDENTE — laboratório de pricing
    ============================================================ */
+/* Travas do v28 no card do critério: onde a subida pelas faixas parou. */
+.v25-card-travas {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  margin: 6px 0 8px; font-size: 11px;
+}
+.v25-trava {
+  font-weight: 700; letter-spacing: 0.02em; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--line);
+}
+.v25-trava.passa { background: color-mix(in srgb, var(--success, #1f8a4c) 16%, transparent); color: var(--success, #1f8a4c); border-color: transparent; }
+.v25-trava.fecha { background: var(--sand-2); color: var(--muted); text-decoration: line-through; }
+.v25-trava.na { background: transparent; color: var(--muted); }
+.v25-trava-faixa { color: var(--ink-soft); }
+.v25-trava-alerta { color: var(--danger, #b3261e); font-weight: 600; cursor: help; }
+
 .aval-controls { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .aval-batch-toggle {
   display: flex; gap: 10px; align-items: flex-start;

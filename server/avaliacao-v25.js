@@ -110,6 +110,16 @@ const PIPELINE_VERSIONS = {
     // sujaria a linha de base de custo/latência que já foi medida.
     capturaReasoning: true,
     saudacao: SAUDACAO_V28,
+    // TRAVAS ESTRUTURAIS: o nó não escolhe nota. Ele responde `passa`/`não passa`
+    // às quatro travas (F2→F5) e diz se a realização é completa ou incompleta; a
+    // faixa (última trava que passou) e a nota saem daqui, do código.
+    //
+    // Por que: a subida pelas travas era uma instrução de processo INTERNO, e é
+    // exatamente o que não dá para verificar — nem pelo resumo do raciocínio, que
+    // é paráfrase de outro modelo. Pedindo a nota, o modelo podia escolhê-la de
+    // impressão e só depois narrar a régua. Aqui ele não tem número para mirar
+    // (os numerais saíram do prompt) e a hierarquia é aplicada por código.
+    travasEstruturais: true,
   },
 };
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
@@ -555,6 +565,77 @@ function extractChatReasoning(message) {
   return tag ? tag[1].trim() : '';
 }
 
+// Notas de cada faixa: [completa (par), incompleta (ímpar)]. É a tabela que o
+// prompt do v28 NÃO mostra ao modelo — ele responde travas e realização, e o
+// número nasce aqui.
+const NOTAS_POR_FAIXA = { 1: [2, 1], 2: [4, 3], 3: [6, 5], 4: [8, 7], 5: [10, 9] };
+
+// Ordem em que as travas são testadas. A trava da FN é a passagem para a faixa N,
+// então quem não passa a da F2 fica na F1.
+const TRAVAS = [2, 3, 4, 5];
+
+// Deriva a faixa a partir das respostas: sobe de baixo para cima e para na
+// primeira que não passou. É AQUI que a hierarquia acumulativa vira regra de
+// verdade — o modelo responde as quatro, mas uma trava aberta depois de uma
+// fechada não promove ninguém.
+//
+// `inconsistente` marca justamente esse caso (respondeu `passa` numa trava acima
+// de uma que não passou). Não é erro de formato: é o sinal de que o nó não está
+// pensando em hierarquia, e vale ver na tela do supervisor.
+function derivarFaixa(travas) {
+  if (!travas || travas[2] == null) return { faixa: null, inconsistente: false };
+  let faixa = 1;
+  let parou = false;
+  let inconsistente = false;
+  for (const n of TRAVAS) {
+    const passou = travas[n] === true;
+    if (parou) {
+      if (passou) inconsistente = true; // abriu uma trava acima de uma fechada
+      continue;
+    }
+    if (passou) faixa = n;
+    else parou = true;
+  }
+  return { faixa, inconsistente };
+}
+
+// Saída do nó na versão de TRAVAS ESTRUTURAIS (v28). Lê as quatro linhas de
+// trava + a realização; a nota é derivada, nunca lida do texto.
+function parseNodeOutputTravas(text) {
+  const t = String(text || '');
+
+  const travas = {};
+  for (const n of TRAVAS) {
+    // "F3: passa — …" / "F3: não passa (…)" — aceita com e sem acento/hífen.
+    const m = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s*:\\s*(n[ãa]o\\s+passa|passa)`, 'im'));
+    travas[n] = m ? !/n[ãa]o/i.test(m[1]) : null;
+  }
+
+  const realM = t.match(/REALIZA[ÇC][ÃA]O:\s*(completa|incompleta)/i);
+  // Sem o campo, assume `completa`: no v28 a ímpar tem de ser afirmada, não
+  // acontecer por omissão (era o que inflava o 7).
+  const realizacao = realM ? realM[1].toLowerCase() : null;
+
+  const confM = t.match(/CONFIAN[ÇC]A:\s*(alta|m[ée]dia|baixa)/i);
+  let confianca = confM ? confM[1].toLowerCase() : null;
+  if (confianca === 'media') confianca = 'média';
+
+  // A análise vai até a primeira linha de trava (ou o fim, se não houver).
+  const anaM = t.match(/AN[ÁA]LISE:\s*([\s\S]*?)(?=\n[^\S\n]*F[2-5]\s*:|\n[^\S\n]*REALIZA[ÇC][ÃA]O:|$)/i);
+  const analise = anaM ? anaM[1].trim() : '';
+
+  const { faixa, inconsistente } = derivarFaixa(travas);
+  const nota = faixa == null ? null : NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0];
+
+  return { nota, confianca, analise, travas, faixa, realizacao, inconsistente };
+}
+
+// Parser da saída do nó, conforme a versão: v28 responde travas (a nota é
+// derivada aqui), v25 escreve a NOTA direto.
+function parseSaidaDoNo(text, cfg) {
+  return cfg && cfg.travasEstruturais ? parseNodeOutputTravas(text) : parseNodeOutput(text);
+}
+
 // Estrutura a saída do nó por regex simples (conforme [SAÍDA] do prompt).
 function parseNodeOutput(text) {
   const t = String(text || '');
@@ -582,7 +663,7 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
   const captura = !!(assets.cfg && assets.cfg.capturaReasoning);
   const { text, reasoning, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
-  const parsed = parseNodeOutput(text);
+  const parsed = parseSaidaDoNo(text, assets.cfg);
   return {
     num: criterio.num,
     nome: criterio.nome,
@@ -757,6 +838,12 @@ function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, ba
       p.incluido ? 'na nota final' : 'fora da nota final',
     ];
     L.push(`[${meta.join(' · ')}]`);
+    // v28: como a nota foi derivada — quais travas abriram e onde parou.
+    if (p.travas) {
+      const linha = [2, 3, 4, 5].map((n) => `F${n} ${p.travas[n] === true ? '✓' : p.travas[n] === false ? '✗' : '?'}`).join('  ');
+      L.push(`[${linha}  →  faixa F${p.faixa} · realização ${p.realizacao || 'não declarada (assumida completa)'}]`);
+      if (p.travasInconsistentes) L.push('[⚠ trava aberta acima de uma fechada — o código parou na primeira fechada]');
+    }
     L.push('');
     L.push(p.reasoning.trim());
     L.push('');
@@ -834,6 +921,13 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
     analise: r.analise,
     nota: r.nota,
     confianca: r.confianca,
+    // Só no v28 (travas estruturais): como a nota foi derivada. Deixa o
+    // supervisor ver ONDE o caso parou, que é a estatística que interessa —
+    // se a F3 está segurando ou se todo mundo chega à F4.
+    travas: r.travas || null,
+    faixa: r.faixa != null ? r.faixa : null,
+    realizacao: r.realizacao || null,
+    travasInconsistentes: !!r.inconsistente,
     // Fora da conta final (v25: `baixa`; qualquer versão: nó que não devolveu
     // número). Aparece na tela do supervisor de qualquer jeito, marcado.
     incluido: entraNaNota(r, excluiBaixa),
@@ -904,7 +998,7 @@ async function finalizePipeline({ openai, log, model = V25_MODEL, effort = V25_E
   const results = assets.criteria
     .map((c) => {
       const o = byNum.get(c.num) || { text: '', usage: null };
-      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseNodeOutput(o.text), usage: o.usage };
+      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseSaidaDoNo(o.text, assets.cfg), usage: o.usage };
     })
     .sort((a, b) => a.num - b.num);
 
@@ -929,6 +1023,9 @@ module.exports = {
   finalizePipeline,
   buildReasoningTxt,
   modelEmiteResumo,
+  parseNodeOutputTravas,
+  derivarFaixa,
+  NOTAS_POR_FAIXA,
   estimarTokens,
   concorrenciaPorTPM,
   // usados pelo editor de prompts (validação com o parser da produção):

@@ -82,6 +82,29 @@ function statusLabel(s) {
   if (s === 'error') return 'Erro';
   return 'Na fila';
 }
+// v28: linha das travas no card do critério. Mostra onde a subida parou, que é
+// o que diz se a trava está de fato segurando (um 7 exige F3 e F4 abertas).
+function TravasLinha({ p }) {
+  if (!p.travas) return null;
+  return (
+    <div className="v25-card-travas">
+      {[2, 3, 4, 5].map((n) => (
+        <span key={n} className={`v25-trava ${p.travas[n] === true ? 'passa' : p.travas[n] === false ? 'fecha' : 'na'}`}>
+          F{n}
+        </span>
+      ))}
+      <span className="v25-trava-faixa">
+        faixa F{p.faixa} · {p.realizacao || 'realização não declarada'}
+      </span>
+      {p.travasInconsistentes && (
+        <span className="v25-trava-alerta" title="O nó abriu uma trava acima de uma que fechou. O código parou na primeira fechada — mas isso indica que ele não avaliou em hierarquia.">
+          ⚠ fora de hierarquia
+        </span>
+      )}
+    </div>
+  );
+}
+
 function confLabel(c) {
   if (c === 'alta') return 'confiança alta';
   if (c === 'média' || c === 'media') return 'confiança média';
@@ -481,6 +504,7 @@ export default function Avaliacao({ user }) {
                       <span className="v25-card-nota">{Number.isFinite(p.nota) ? `${p.nota}/10` : '—'}</span>
                     </div>
                     <div className="v25-card-short">{p.linhaCurta}</div>
+                    <TravasLinha p={p} />
                     <div className="v25-card-analise">{p.analise}</div>
                     <div className="v25-card-foot">
                       <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>
