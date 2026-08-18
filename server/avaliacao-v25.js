@@ -54,6 +54,21 @@ const fs = require('fs');
 const path = require('path');
 const { PROMPTS_DIR } = require('./paths');
 
+// Saudação colada por código no topo do feedback do aluno (o modelo não a gera
+// nem a varia — ver brief, "Montagem final"). É POR VERSÃO: cada uma tem a sua
+// em PIPELINE_VERSIONS.saudacao, porque o texto faz parte do que a versão
+// entrega ao aluno, não do encanamento.
+//
+// v25: os dois parágrafos do brief original, intocados (as runs dele são linha
+// de base — mudar o texto mudaria o que já foi medido).
+const SAUDACAO_V25 = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.
+
+Eu só tenho acesso ao que você escreveu, não ao que você pensou. Quando o raciocínio por trás de uma fala importar, descreva-o no botão de estrela. Isso me ajuda a separar uma decisão clínica consciente de um erro por falta de percepção.`;
+
+// v28: só o enquadramento do feedback. O segundo parágrafo do v25 (o pedido para
+// descrever o raciocínio na caixa de estrela) sai daqui.
+const SAUDACAO_V28 = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.`;
+
 // VERSÕES do pipeline. Cada uma é um trio de .md no PROMPTS_DIR (prompt do nó,
 // critérios, sintetizador) mais o que muda no CÓDIGO entre elas:
 //
@@ -80,6 +95,7 @@ const PIPELINE_VERSIONS = {
     nCriterios: 14,
     confiancaBaixaExclui: true,
     capturaReasoning: false,
+    saudacao: SAUDACAO_V25,
   },
   v28: {
     id: 'v28',
@@ -93,6 +109,7 @@ const PIPELINE_VERSIONS = {
     // Só no v28: ligar isto no v25 trocaria o transporte das chamadas dele e
     // sujaria a linha de base de custo/latência que já foi medida.
     capturaReasoning: true,
+    saudacao: SAUDACAO_V28,
   },
 };
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
@@ -205,12 +222,6 @@ function resolvePrices(model) {
   }
   return null;
 }
-
-// Saudação fixa colada por código no topo do feedback do aluno (o modelo não a
-// gera nem a varia — ver brief, "Montagem final").
-const SAUDACAO_FIXA = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.
-
-Eu só tenho acesso ao que você escreveu, não ao que você pensou. Quando o raciocínio por trás de uma fala importar, descreva-o no botão de estrela. Isso me ajuda a separar uma decisão clínica consciente de um erro por falta de percepção.`;
 
 // Variantes de saída do NÓ, marcadas no próprio prompt do nó montado com
 // blocos `<!-- @variante:X -->…<!-- /@variante -->` (iguais nas duas versões):
@@ -602,9 +613,9 @@ async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, 
   return { corpo: (text || '').trim(), reasoning: reasoning || '', usage };
 }
 
-// Montagem final (código): nota + saudação fixa + corpo do sintetizador.
-function montarFeedback(notaFinal, corpo) {
-  return `Nota: ${notaFinal}/100\n\n${SAUDACAO_FIXA}\n\n${corpo}`;
+// Montagem final (código): nota + saudação da versão + corpo do sintetizador.
+function montarFeedback(notaFinal, corpo, saudacao = SAUDACAO_V25) {
+  return `Nota: ${notaFinal}/100\n\n${saudacao}\n\n${corpo}`;
 }
 
 // Resumo de uso + CUSTO EXATO da run. Soma os tokens que cada uma das 15
@@ -797,7 +808,7 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
     corpoSintetizador = synth.corpo;
     synthUsage = synth.usage;
     synthReasoning = synth.reasoning || '';
-    feedbackAluno = montarFeedback(notaFinal, corpoSintetizador);
+    feedbackAluno = montarFeedback(notaFinal, corpoSintetizador, cfg.saudacao);
   }
 
   const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);

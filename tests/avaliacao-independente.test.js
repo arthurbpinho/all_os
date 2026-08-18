@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS } = require('../server/avaliacao-v25');
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -307,6 +307,32 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     });
     expect(r.partes[0].incluido).toBe(false);
     expect(r.considerados).toBe(14);
+  });
+
+  // A saudação é colada por CÓDIGO no topo do feedback, e é de cada versão — não
+  // do encanamento. O v28 leva só o enquadramento; o segundo parágrafo do v25 (o
+  // pedido de descrever o raciocínio na caixa de estrela) não é dele. Isto já
+  // escapou uma vez: ao versionar o pipeline, o v28 herdou a saudação do v25.
+  it('saudação é por versão: o v28 não leva o parágrafo da caixa de estrela', async () => {
+    const nodeOutputs = (n) => Array.from({ length: n }, (_, i) => ({
+      num: i + 1, text: `ANÁLISE: preciso. C${i + 1}.\nNOTA: 8\nCONFIANÇA: alta`, usage: null,
+    }));
+    const openai = { chat: { completions: { create: async () => ({ choices: [{ message: { content: 'Corpo do feedback.' } }], usage: null }) } } };
+
+    const v28 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v28', variant: 'com-feedback', nodeOutputs: nodeOutputs(15) });
+    expect(v28.feedbackAluno).toMatch(/^Nota: 80\/100/);
+    expect(v28.feedbackAluno).toContain('pré-correção');
+    expect(v28.feedbackAluno).not.toMatch(/caixa de estrela|botão de estrela/);
+    expect(v28.feedbackAluno).not.toContain('não ao que você pensou');
+    expect(v28.feedbackAluno).toContain('Corpo do feedback.');
+
+    // O v25 segue com os dois parágrafos do brief — é linha de base, não muda.
+    const v25 = await finalizePipeline({ openai, log: 'log', model: 'gpt-5.5', effort: 'medium', version: 'v25', variant: 'com-feedback', nodeOutputs: nodeOutputs(14) });
+    expect(v25.feedbackAluno).toContain('botão de estrela');
+    expect(v25.feedbackAluno).toContain('não ao que você pensou');
+
+    // E as duas saudações são declaradas na versão, não num global compartilhado.
+    expect(PIPELINE_VERSIONS.v28.saudacao).not.toBe(PIPELINE_VERSIONS.v25.saudacao);
   });
 
   it('evaluatorId do alternador chega ao resultado (rótulo da run)', async () => {
