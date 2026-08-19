@@ -3,6 +3,7 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { useWakeLock } from '../useWakeLock';
 import { downloadText } from '../logFiles';
+import RichText from '../components/RichText';
 
 // Avaliação Independente — laboratório de PRICING (supervisor/admin). Alterna o
 // PROMPT (v16-2 / v18-25 / pipeline v28 ou v25, com feedback ou só nota), o
@@ -11,18 +12,17 @@ import { downloadText } from '../logFiles';
 // baixar um relatório com tudo. Isolado do avaliador de produção e da simulação.
 
 // Precisa espelhar o registry EVALUATORS do servidor (server/avaliacao-independente.js),
-// que é quem valida. As duas entradas de cada VERSÃO do pipeline (v28, v25) são o
-// mesmo código, mudando só a saída do nó: em 'vNN' o nó devolve ANÁLISE+NOTA+
-// CONFIANÇA e o sintetizador escreve o feedback do aluno; em 'vNN-nota' o nó
-// devolve só a nota — sai a mesma nota final, sem feedback e mais barato (o texto
-// por critério some do billing). O v28 é a versão em teste (15 critérios); o v25
-// fica aqui para rodar o mesmo log nos dois e comparar nota, feedback e custo.
+// que é quem valida. O v31 é a versão em teste (travas respondidas uma a uma,
+// análise depois delas, sem confiança); v28 e v25 ficam para rodar o mesmo log e
+// comparar. Nas versões que têm duas entradas, é o mesmo código mudando só a
+// saída do nó: em 'vNN-nota' ele devolve só a nota, sem análise nem feedback do
+// aluno — mais barato, porque o texto por critério some do billing.
 const EVALUATORS = [
+  { id: 'v31', label: 'v31 · pipeline (15 nós)', nos: 15 },
   { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', nos: 15 },
   { id: 'v28-nota', label: 'v28 · pipeline (15 nós) · só nota', nos: 15 },
   { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback', nos: 14 },
   { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota', nos: 14 },
-  { id: 'v16-2', label: 'v16.2 · 6 critérios' },
   { id: 'v18-25', label: 'v18.25 · 15 critérios' },
 ];
 // Avaliadores que rodam o pipeline multi-nó (v28/v25, qualquer variante) — são
@@ -94,11 +94,11 @@ function TravasLinha({ p }) {
         </span>
       ))}
       <span className="v25-trava-faixa">
-        faixa F{p.faixa} · {p.realizacao || 'realização não declarada'}
+        faixa F{p.faixa} · {p.realizacao || 'realização assumida completa'}
       </span>
       {p.travasInconsistentes && (
-        <span className="v25-trava-alerta" title="O nó abriu uma trava acima de uma que fechou. O código parou na primeira fechada — mas isso indica que ele não avaliou em hierarquia.">
-          ⚠ fora de hierarquia
+        <span className="v25-trava-alerta" title="O nó abriu uma trava acima de uma que fechou. O código descartou a de cima e parou na primeira fechada — mas o sinal indica que ele hesitou neste critério.">
+          ⚠ trava descartada
         </span>
       )}
     </div>
@@ -185,7 +185,7 @@ export default function Avaliacao({ user }) {
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
-  const [evaluator, setEvaluator] = useState('v28');
+  const [evaluator, setEvaluator] = useState('v31');
   const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
@@ -505,9 +505,16 @@ export default function Avaliacao({ user }) {
                     </div>
                     <div className="v25-card-short">{p.linhaCurta}</div>
                     <TravasLinha p={p} />
-                    <div className="v25-card-analise">{p.analise}</div>
+                    <div className="v25-card-analise"><RichText text={p.analise} /></div>
                     <div className="v25-card-foot">
-                      <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>
+                      {/* A confiança saiu no v31; no lugar dela, a etiqueta que o
+                          sintetizador recebe (derivada da faixa, escrita por código). */}
+                      {p.etiqueta
+                        ? <span className="v25-etiqueta">[{p.etiqueta}]</span>
+                        : <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>}
+                      {p.analiseForaDeOrdem && (
+                        <span className="v25-trava-alerta" title="A análise veio antes das travas mesmo depois da retentativa: a prosa pode ter ancorado as respostas deste critério.">⚠ análise fora de ordem</span>
+                      )}
                       {!p.incluido && <span className="v25-excluded-tag">fora da nota</span>}
                     </div>
                   </div>
@@ -552,13 +559,13 @@ export default function Avaliacao({ user }) {
               </div>
             )}
 
-            {/* Raciocínio "gasto" que o supervisor lê (v16-2/v18-25 raciocinam no
+            {/* Raciocínio "gasto" que o supervisor lê (o v18-25 raciocina no
                 canal oculto). GLM (z.ai) devolve o texto; GPT via chat.completions não. */}
             {!isPipe && (
               <div className="card aval-reasoning">
                 <div className="aval-reasoning-head">Raciocínio — visível ao supervisor</div>
                 {result.reasoning
-                  ? <div className="aval-reasoning-text">{result.reasoning}</div>
+                  ? <div className="aval-reasoning-text"><RichText text={result.reasoning} /></div>
                   : (
                     <div className="aval-reasoning-empty">
                       Sem texto de raciocínio nesta run{inst?.totais?.reasoning ? <> (foram <strong>{fmtTok(inst.totais.reasoning)}</strong> tokens de reasoning, já no custo de saída)</> : null}. O resumo do raciocínio aparece no modo <strong>síncrono</strong>: no <strong>GPT</strong> (exceto o "mini", que não emite resumo) e no <strong>GLM</strong> com effort <strong>high/max</strong>. No modo <strong>batch</strong> o texto não vem.
@@ -570,7 +577,7 @@ export default function Avaliacao({ user }) {
         ) : (
           <div className="card v25-feedback">
             {result.feedbackAluno
-              ? <div className="v25-feedback-text">{result.feedbackAluno}</div>
+              ? <div className="v25-feedback-text"><RichText text={result.feedbackAluno} /></div>
               : (result.variant === 'so-nota' || isSoNotaId(result.evaluator))
                 ? <div className="v25-feedback-empty">A variante <strong>só nota</strong> não gera feedback: os nós devolvem apenas a nota de cada critério, sem análise, e o sintetizador não roda. Para o feedback do aluno, rode a mesma versão em <strong>com feedback</strong>.</div>
                 : <div className="v25-feedback-empty">Sem feedback gerado. Veja as notas por critério.</div>}
@@ -604,9 +611,10 @@ export default function Avaliacao({ user }) {
             {isPipelineId(evaluator) && (
               <div className="aval-ev-hint">
                 {!isSoNotaId(evaluator)
-                  ? <>Os {nosDe(evaluator)} nós devolvem análise + nota + confiança, e o sintetizador escreve o feedback do aluno.</>
+                  ? <>Os {nosDe(evaluator)} nós avaliam um critério cada, e o sintetizador escreve o feedback do aluno a partir das análises.</>
                   : <>Os {nosDe(evaluator)} nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
                 {evaluator.startsWith('v28') && <> No v28 a confiança é recado para o supervisor: ela aparece no critério, mas <strong>não tira ninguém da nota</strong>.</>}
+                {evaluator === 'v31' && <> O nó responde as quatro travas como perguntas independentes e a análise vem <strong>depois</strong> delas; faixa, realização e nota são derivadas por código.</>}
               </div>
             )}
           </div>

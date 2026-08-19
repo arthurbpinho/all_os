@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { downloadText } from '../logFiles';
+import RichText from '../components/RichText';
 
 // Simulação Independente — laboratório de PRICING do PACIENTE (supervisor/admin).
 //
@@ -462,7 +463,7 @@ export default function SimulacaoIndependente({ user }) {
               <div className="chat-message-author">
                 {msg.role === 'user' ? (user?.name || 'Terapeuta') : (caso ? caso.name : 'Paciente')}
               </div>
-              <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+              <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
               {t && (
                 <div className="sim-turn-chip">
                   <strong>{t.custo ? fmtUSD(t.custo.usd) : 'custo n/d'}</strong>

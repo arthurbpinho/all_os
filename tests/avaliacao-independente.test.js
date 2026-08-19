@@ -2,7 +2,22 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA } = require('../server/avaliacao-v25');
+
+// Saída de um nó do v31: uma linha `Fn abre` por trava, uma `Fn realizada` por
+// faixa aberta (mais a da F1 quando a trava da F2 não abre), e a ANÁLISE no FIM.
+// `abertas` = conjunto de travas respondidas com sim.
+function saidaV31({ abertas = [2, 3, 4], realizadas = {}, analise = 'Devolveu a âncora e a paciente abriu.', comAnalise = true } = {}) {
+  const linhas = [];
+  for (const n of [2, 3, 4, 5]) {
+    const abre = abertas.includes(n);
+    linhas.push(`F${n} abre: ${abre ? 'sim' : 'não'}`);
+    if (abre && realizadas[n] !== false) linhas.push(`F${n} realizada: ${realizadas[n] || 'completa'}`);
+  }
+  if (!abertas.includes(2) && realizadas[1] !== false) linhas.push(`F1 realizada: ${realizadas[1] || 'completa'}`);
+  if (comAnalise) linhas.push(`ANÁLISE: ${analise}`);
+  return linhas.join('\n');
+}
 
 // Saída de um nó do v28: ele NÃO escreve nota — responde às quatro travas e à
 // realização, e o código deriva faixa e nota. `ate` = última trava que passa.
@@ -375,6 +390,155 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     expect(r.evaluator).toBe('v28-nota');
     expect(r.notaFinal).toBe(80);
     expect(r.feedbackAluno).toBe(null);
+  });
+});
+
+// v31 — a consolidação. Diferenças que o CÓDIGO enxerga em relação ao v28:
+// sem variantes, sem CONFIANÇA, saída por faixa (`Fn abre` + `Fn realizada`) com
+// a ANÁLISE no FIM, e a etiqueta do sintetizador escrita por código.
+//
+// A regra de derivação é a mesma e é o coração da coisa: a faixa é a maior Fn
+// com TODAS as travas de F2 até Fn abertas; trava aberta acima de uma fechada é
+// descartada. O nó responde as quatro como perguntas independentes justamente
+// para não saber onde vai parar — se soubesse, saberia a nota.
+describe('Avaliação Independente — v31', () => {
+  // O v31 captura o resumo do raciocínio, então as chamadas vão pela Responses
+  // API. `responder(user)` devolve o texto de saída daquela chamada.
+  function fakeResponsesV31(responder, capture = {}) {
+    capture.calls = [];
+    return {
+      responses: {
+        create: async (args) => {
+          capture.calls.push(args);
+          const texto = responder(args.input[0].content);
+          return (async function* () {
+            yield { type: 'response.output_text.delta', delta: texto };
+            yield { type: 'response.completed', response: { usage: { input_tokens: 900, output_tokens: 200 } } };
+          })();
+        },
+      },
+    };
+  }
+
+  it('carrega sem @variante, com 15 critérios e o contrato de saída novo', () => {
+    const a = loadAssets('v31');
+    expect(a.criteria.length).toBe(15);
+    expect(a.variant).toBe(null);
+    expect(a.criteria[6].nome).toBe('Coerência interna');
+    expect(a.criteria[14].nome).toBe('Criatividade');
+    // A linha curta passou a usar dois-pontos no lugar do travessão.
+    expect(a.criteria.every((c) => c.linhaCurta && c.descricao)).toBe(true);
+
+    expect(a.blockA).toMatch(/F2 abre: <sim\|não>/);
+    expect(a.blockA).toMatch(/F1 realizada: <completa\|incompleta>/);
+    expect(a.blockA).not.toMatch(/CONFIAN/i);   // o campo deixou de existir
+    expect(a.blockA).not.toMatch(/NOTA:/);      // o nó não escreve nota
+    expect(a.blockB).toContain('{{BLOCO_1}}');
+    expect(a.blockC).toContain('{{CRITÉRIO}}');
+    // Nenhum numeral de nota à vista, para não haver alvo.
+    expect(a.blockA).not.toMatch(/\b8 \(completa\)|\b7 \(incompleta\)/);
+  });
+
+  it('faixa = maior Fn com todas as travas abaixo abertas; nota vem dela', () => {
+    const nota = (abertas, realizadas) => parseNodeOutputV31(saidaV31({ abertas, realizadas })).nota;
+    expect(nota([2, 3, 4, 5], {})).toBe(10);
+    expect(nota([2, 3, 4, 5], { 5: 'incompleta' })).toBe(9);
+    expect(nota([2, 3, 4], {})).toBe(8);
+    expect(nota([2, 3, 4], { 4: 'incompleta' })).toBe(7);
+    expect(nota([2, 3], {})).toBe(6);
+    expect(nota([2, 3], { 3: 'incompleta' })).toBe(5);
+    expect(nota([2], {})).toBe(4);
+    expect(nota([2], { 2: 'incompleta' })).toBe(3);
+    expect(nota([], {})).toBe(2);                       // F1 completa
+    expect(nota([], { 1: 'incompleta' })).toBe(1);      // F1 incompleta
+  });
+
+  // A regra (b): a independência é de quem RESPONDE; a hierarquia é de quem
+  // COMBINA. Trava aberta acima de uma fechada não promove ninguém.
+  it('trava aberta acima de uma fechada é descartada', () => {
+    const r = parseNodeOutputV31(saidaV31({ abertas: [3], realizadas: { 3: 'completa', 1: 'completa' } }));
+    expect(r.faixa).toBe(1);   // a F2 não abriu, então para na F1
+    expect(r.nota).toBe(2);
+    expect(r.inconsistente).toBe(true);
+    // A realização da faixa descartada não entra em conta nenhuma.
+    expect(r.realizacao).toBe('completa'); // a da F1, não a da F3
+
+    const semBuraco = parseNodeOutputV31(saidaV31({ abertas: [2, 3] }));
+    expect(semBuraco.inconsistente).toBe(false);
+    expect(semBuraco.faixa).toBe(3);
+  });
+
+  it('realizada ausente vale completa, inclusive na F1', () => {
+    // Faixa F3 aberta, mas sem a linha de realização dela.
+    const semRealizada = parseNodeOutputV31(saidaV31({ abertas: [2, 3], realizadas: { 3: false } }));
+    expect(semRealizada.faixa).toBe(3);
+    expect(semRealizada.nota).toBe(6); // a par, não a ímpar
+    // F1 sem realização: 2, que é a maior das duas.
+    const f1 = parseNodeOutputV31(saidaV31({ abertas: [], realizadas: { 1: false } }));
+    expect(f1.nota).toBe(2);
+    // Faltar a realização de uma faixa DESCARTADA não é erro nem muda nada.
+    const descartada = parseNodeOutputV31(saidaV31({ abertas: [3], realizadas: { 3: false, 1: 'incompleta' } }));
+    expect(descartada.nota).toBe(1);
+  });
+
+  it('a etiqueta sai só da faixa e é colada por código nas análises', () => {
+    expect(ETIQUETA_POR_FAIXA).toEqual({ 1: 'erro', 2: 'clichê', 3: 'potente', 4: 'preciso', 5: 'excepcional' });
+    // completa/incompleta não muda a etiqueta.
+    expect(parseNodeOutputV31(saidaV31({ abertas: [2, 3, 4] })).etiqueta).toBe('preciso');
+    expect(parseNodeOutputV31(saidaV31({ abertas: [2, 3, 4], realizadas: { 4: 'incompleta' } })).etiqueta).toBe('preciso');
+    expect(parseNodeOutputV31(saidaV31({ abertas: [2] })).etiqueta).toBe('clichê');
+  });
+
+  it('ANÁLISE antes das travas é sinalizada (e o nó é refeito uma vez)', async () => {
+    const foraDeOrdem = ['ANÁLISE: escrevi antes.', 'F2 abre: sim', 'F2 realizada: completa', 'F3 abre: não', 'F4 abre: não', 'F5 abre: não'].join('\n');
+    expect(parseNodeOutputV31(foraDeOrdem).analiseForaDeOrdem).toBe(true);
+    expect(parseNodeOutputV31(saidaV31({})).analiseForaDeOrdem).toBe(false);
+    // A análise não engole as linhas de trava mesmo fora de ordem.
+    expect(parseNodeOutputV31(foraDeOrdem).analise).toBe('escrevi antes.');
+
+    // runNode refaz a chamada quando a ordem vem trocada; se insistir, aceita e marca.
+    const cap = {};
+    const openai = fakeResponsesV31((user) => (user.includes('[CRITÉRIO]') ? foraDeOrdem : 'Corpo.'), cap);
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'b', log: 'l', model: 'gpt-5.5', effort: 'medium', version: 'v31',
+    });
+    // 15 nós × 2 tentativas + sintetizador
+    expect(cap.calls.length).toBe(31);
+    expect(r.partes.every((p) => p.analiseForaDeOrdem)).toBe(true);
+    expect(r.notaFinal).toBe(40); // F2 aberta e completa em todos → nota 4
+  });
+
+  it('pipeline v31 ponta a ponta: etiquetas chegam ao sintetizador', async () => {
+    let userSint = '';
+    const openai = fakeResponsesV31((user) => {
+      const ehCriterio = user.includes('[CRITÉRIO]');
+      if (!ehCriterio) userSint = user;
+      return ehCriterio ? saidaV31({ abertas: [2, 3, 4] }) : 'Corpo do feedback.';
+    });
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'BLOCO1-SECRETO', log: 'T: oi', model: 'gpt-5.5', effort: 'medium',
+      version: 'v31', evaluatorId: 'v31',
+    });
+    expect(r.notaFinal).toBe(80);
+    expect(r.considerados).toBe(15);
+    expect(r.partes[0].etiqueta).toBe('preciso');
+    expect(r.partes[0].confianca).toBe(null); // não existe mais
+    // O sintetizador recebe as 15 análises com a etiqueta colada por código.
+    expect((userSint.match(/\[preciso\]/g) || []).length).toBe(15);
+    expect(userSint).not.toContain('BLOCO1-SECRETO');
+    expect(r.feedbackAluno).toMatch(/^Nota: 80\/100/);
+    expect(r.feedbackAluno).not.toMatch(/caixa de estrela|botão de estrela/); // saudação do v28
+  });
+
+  it('registry: v31 é pipeline sem variante; v16-2 saiu do alternador', () => {
+    expect(ai.isValidEvaluator('v31')).toBe(true);
+    expect(ai.isPipeline('v31')).toBe(true);
+    expect(ai.versionFor('v31')).toBe('v31');
+    expect(ai.variantFor('v31')).toBe(null);
+    expect(ai.isValidEvaluator('v16-2')).toBe(false);
+    // O parser do v16-2 fica, e os nomes dos critérios das runs antigas também.
+    const antiga = ai.parseSingleEvalOutput('v16-2', 'Prosa.\n\n[notas-supervisor]\n{"1": 8}');
+    expect(antiga.notasDetalhe[0].nome).toBe('Construção linguística das intervenções');
   });
 });
 

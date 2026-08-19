@@ -88,9 +88,14 @@ for (const cfg of Object.values(PIPELINE_VERSIONS)) {
   for (const dir of cfg.dirs) {
     const base = `avaliacao/${dir}/`;
     VALIDATORS[base + cfg.montado] = (content) => {
-      // As duas variantes precisam continuar montáveis, com os três blocos e os
-      // slots. Se um marcador `@variante` sumir, cai aqui.
-      for (const variant of PIPELINE_VARIANTS) parseMontado(content, variant, cfg.montado);
+      // Nas versões com variantes, as duas precisam continuar montáveis (se um
+      // marcador `@variante` sumir, cai aqui). Nas sem variante (v31 em diante),
+      // o arquivo inteiro é o prompt e a checagem é dos blocos e dos slots.
+      if (cfg.variantes === false) {
+        parseMontado(content, null, cfg.montado, false);
+        return;
+      }
+      for (const variant of PIPELINE_VARIANTS) parseMontado(content, variant, cfg.montado, true);
     };
     VALIDATORS[base + cfg.sintetizador] = (content) => {
       parseSintetizador(content, cfg.sintetizador);

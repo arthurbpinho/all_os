@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { cleanEvaluationForStudent } from '../prompts';
+import RichText from '../components/RichText';
 
 // Logs da Trilha (admin) — foco em CUSTO: cada exercício pode ter até 3 IAs
 // envolvidas (personagem, avaliador opcional, esquema visual opcional). O
@@ -312,7 +313,7 @@ export default function AdminTrilhaLogs() {
                     <span style={{ fontWeight: 600, color: m.role === 'user' ? 'var(--marrs-deep)' : 'var(--terra)' }}>
                       {m.role === 'user' ? (viewing.userName || 'Aluno') : (viewing.itemTitle || 'Personagem')}
                     </span>
-                    <div>{m.content}</div>
+                    <div><RichText text={m.content} /></div>
                   </div>
                 ))}
               </div>

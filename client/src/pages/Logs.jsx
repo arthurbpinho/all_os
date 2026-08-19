@@ -6,6 +6,7 @@ import LogActions from '../components/LogActions';
 import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
+import RichText from '../components/RichText';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
@@ -264,7 +265,7 @@ function LogCard({ log, showDownload }) {
                 <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
-                    {evaluation}
+                    <RichText text={evaluation} />
                   </div>
                 )}
               </div>
@@ -300,7 +301,7 @@ function LogCard({ log, showDownload }) {
                   )}
                   <div className={`msg ${isUser ? 'user' : 'assistant'}`}>
                     <strong>{roleLabel}{msg.highlighted ? ' ★' : ''}</strong>
-                    {msg.content}
+                    <RichText text={msg.content} />
                     {msg.highlighted && msg.comment && (
                       <div className="log-comment" style={{ marginTop: 6, fontStyle: 'italic' }}>
                         {`{${msg.comment}}`}
@@ -622,7 +623,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
               return (
                 <div key={i} className={`msg ${isUser ? 'user' : 'assistant'}`}>
                   <strong>{isUser ? 'Terapeuta' : 'Paciente'}{msg.highlighted ? ' ★' : ''}</strong>
-                  {msg.content}
+                  <RichText text={msg.content} />
                   {msg.highlighted && msg.comment && (
                     <div className="log-comment" style={{ marginTop: 6, fontStyle: 'italic' }}>
                       {`{${msg.comment}}`}
@@ -642,7 +643,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
               <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
-                  {evaluation}
+                  <RichText text={evaluation} />
                 </div>
               )}
             </div>

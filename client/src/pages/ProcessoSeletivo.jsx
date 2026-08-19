@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { PatientAvatarButton } from '../components/PatientAvatar';
+import RichText from '../components/RichText';
 
 // Fluxo público do candidato do Processo Seletivo. Renderizado FORA do shell do
 // app (App.jsx intercepta /processo-seletivo antes do gate de login), então este
@@ -587,7 +588,7 @@ export default function ProcessoSeletivo() {
                 <div className="chat-message-author">
                   {msg.highlighted && <span className="star-inline">★</span>} {isUser ? 'Você' : (character?.name || 'Paciente')}
                 </div>
-                <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+                <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
                 {isUser && !finishing && (
                   <div className="message-tools">
                     {msg.highlighted ? (

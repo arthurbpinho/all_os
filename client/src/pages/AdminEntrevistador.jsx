@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import RichText from '../components/RichText';
 
 export default function AdminEntrevistador({ user }) {
   // O prompt do entrevistador é resolvido no servidor (admin-only) — o cliente
@@ -289,7 +290,7 @@ export default function AdminEntrevistador({ user }) {
                 <div className="chat-message-author">
                   {msg.role === 'user' ? user.name : 'Entrevistador'}
                 </div>
-                <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+                <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
               </div>
             ))}
 

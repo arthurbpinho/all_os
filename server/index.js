@@ -21,6 +21,7 @@ const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, b
 const aiIndependente = require('./avaliacao-independente');
 const promptFiles = require('./prompt-files');
 const simIndependente = require('./simulacao-independente');
+const benchmark = require('./benchmark-simulacao');
 const aiModels = require('./ai-models');
 const errorLog = require('./error-log');
 const { buildReflectionPrompt: buildAntessalaReflection } = require('./antessala');
@@ -6149,6 +6150,809 @@ app.post('/api/simulacao-independente/chat', requireAuth, requireRole('superviso
     }
   }
 });
+
+// ============================================================================
+// BENCHMARKING DE SIMULAÇÃO — capacidade de processamento do PACIENTE
+// (supervisor/admin)
+// ----------------------------------------------------------------------------
+// Você sobe o log de um atendimento que já aconteceu, escolhe o aluno que
+// atendeu e o personagem, e o sistema REFAZ aquele atendimento sozinho: um
+// primeiro modelo extrai do log a PERSONA de quem atendeu, e essa persona
+// conversa com o paciente pelo número de interações que você pedir (1 interação
+// = 1 fala do paciente + 1 fala do aluno).
+//
+// O que se mede é o PACIENTE — custo por interação, custo total e latência de
+// cada modelo candidato ao longo de um atendimento inteiro. O aluno simulado é
+// instrumento, não objeto: roda sempre em gpt-5.6-luna high.
+//
+// NÃO HÁ AVALIAÇÃO. Nada é pontuado, nada vira log de sessão, nada toca em
+// gamificação (pedido explícito do dono). O produto é custo + transcrição.
+//
+// Por que é JOB em background (e não uma resposta HTTP): 70 interações são 140
+// chamadas em sequência, dezenas de minutos. O Cloudflare corta em 100s. Mesmo
+// desenho da Avaliação Independente em modo local: a rota devolve o id na hora e
+// o cliente faz polling, vendo a conversa crescer.
+// ============================================================================
+
+// Uma run por arquivo, fora do JSON da fila: a transcrição de 70 interações passa
+// de 100 KB e a fila é re-lida INTEIRA a cada atualização de progresso.
+const BENCH_RUNS_DIR = path.join(DATA_DIR, 'benchmark-runs');
+
+// O id é gerado aqui ('bench-' + timestamp + hex), mas a checagem existe pra que
+// nada vindo da URL possa virar caminho de arquivo.
+function benchRunPathFor(id) {
+  if (!/^bench-[0-9]+-[0-9a-f]{8}$/.test(String(id || ''))) return null;
+  return path.join(BENCH_RUNS_DIR, id + '.json');
+}
+function readBenchRun(id) {
+  const p = benchRunPathFor(id);
+  if (!p || !fs.existsSync(p)) return null;
+  try { return JSON.parse(fs.readFileSync(p, 'utf-8')); } catch { return null; }
+}
+function writeBenchRun(run) {
+  const p = benchRunPathFor(run.id);
+  if (!p) return;
+  fs.mkdirSync(BENCH_RUNS_DIR, { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(run), 'utf-8');
+}
+
+// Cancelamento pedido pela tela. Em memória de propósito: é sinal para o loop
+// que está rodando NESTE processo — se o servidor reiniciar, o job morre com ele
+// (e o sweep de boot marca os órfãos).
+const benchCancelados = new Set();
+
+async function markBenchJob(id, patch) {
+  await withFileLock('benchmark-fila.json', async () => {
+    const arr = readJSON('benchmark-fila.json');
+    const i = arr.findIndex((j) => j && j.id === id);
+    if (i === -1) return;
+    arr[i] = { ...arr[i], ...patch };
+    writeJSON('benchmark-fila.json', arr);
+  });
+}
+
+// Esta pessoa já tem run ou lote em voo? Um benchmark são 2×N chamadas
+// sequenciais gastando dinheiro real, e um lote multiplica isso pelos modelos:
+// duplo clique não pode virar dois lotes de 70 interações. 'aguardando' conta —
+// é run de lote que ainda não começou, mas vai.
+async function benchOcupado(userId) {
+  return readJSON('benchmark-fila.json')
+    .some((j) => j && j.userId === userId && (j.status === 'processing' || j.status === 'aguardando' || j.status === 'cancelando'));
+}
+
+// Uma fala. Dois transportes:
+//   · Responses API (streaming) quando queremos o RESUMO do raciocínio — é o
+//     único lugar da OpenAI onde ele existe. Custo idêntico ao chat.completions
+//     (mesmos preços por token; o resumo é janela para token já cobrado), e o
+//     caching por prefixo continua valendo: `instructions` é o prefixo estável.
+//   · chat.completions no resto — inclusive no GLM, que devolve o raciocínio em
+//     `reasoning_content` sem trocar de transporte.
+async function runBenchTurn({ client, modelKey, model, provider, effort, systemPrompt, turns, maxTokens, captura, rotulo }) {
+  const t0 = Date.now();
+  let texto = '';
+  let reasoning = '';
+  let usage = null;
+
+  await benchmark.withBenchRetry(rotulo, async () => {
+    texto = ''; reasoning = ''; usage = null; // zera: a tentativa anterior pode ter parcial
+    if (captura && provider === 'openai') {
+      const stream = await client.responses.create({
+        model,
+        reasoning: { effort, summary: 'auto' },
+        max_output_tokens: maxTokens,
+        instructions: systemPrompt, // prefixo estável → é o que a OpenAI cacheia
+        input: turns.map((t) => ({ role: t.role, content: t.content })),
+        stream: true,
+      });
+      for await (const ev of stream) {
+        if (ev.type === 'response.output_text.delta') {
+          if (ev.delta) texto += ev.delta;
+        } else if (ev.type === 'response.reasoning_summary_text.delta') {
+          if (ev.delta) reasoning += ev.delta;
+        } else if (ev.type === 'response.reasoning_summary_part.added') {
+          if (reasoning) reasoning += '\n\n'; // separa as partes do resumo
+        } else if (ev.type === 'response.completed') {
+          usage = (ev.response && ev.response.usage) || null;
+        }
+      }
+      texto = texto.trim();
+      reasoning = reasoning.trim();
+      return;
+    }
+    const body = simIndependente.buildSimChatBody({ provider, model, effort, systemPrompt, turns });
+    // O teto é o DAQUI, não o da Simulação Independente: nesta aba o effort é
+    // high nos dois lados, e a folga de raciocínio precisa ser maior.
+    if (provider === 'glm') body.max_tokens = maxTokens;
+    else body.max_completion_tokens = maxTokens;
+    const resp = await client.chat.completions.create(body);
+    const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
+    texto = simIndependente.extractSimText(provider, resp);
+    reasoning = captura ? aiIndependente.extractReasoning(msg) : '';
+    usage = resp.usage || null;
+  });
+
+  const totais = benchmark.normalizeBenchUsage(provider, usage);
+  return {
+    modelKey, model, provider, effort,
+    texto,
+    reasoning,
+    totais,
+    custo: simIndependente.computeSimCost(modelKey, totais),
+    latenciaMs: Date.now() - t0,
+  };
+}
+
+// Uma fala, com UMA retentativa quando o modelo devolve texto vazio. Vazio quase
+// sempre significa que o teto de tokens foi consumido pelo raciocínio: o modelo
+// pensou tudo e não sobrou espaço pra falar. Duas vezes seguidas = falha real, e
+// a run para com o que já tem (o parcial fica gravado e continua baixável).
+async function benchTurnOuFalha(args) {
+  const primeira = await runBenchTurn(args);
+  if (primeira.texto) return primeira;
+  console.warn(`[bench] ${args.rotulo} devolveu fala vazia — repetindo uma vez`);
+  const segunda = await runBenchTurn(args);
+  if (segunda.texto) return segunda;
+  throw new Error(`${args.rotulo} devolveu fala vazia duas vezes (o teto de ${args.maxTokens} tokens provavelmente foi consumido pelo raciocínio).`);
+}
+
+// Roda a run inteira. Persiste depois de CADA interação, pra a tela acompanhar a
+// conversa ao vivo e pra um erro no meio nunca jogar fora o que já foi pago.
+async function runBenchmarkRun({ run, log, pacienteSystemPrompt, clientPaciente, clientAluno, personaPronta }) {
+  const persistir = async () => {
+    run.resumo = benchmark.resumoDeCustos({
+      interacoes: run.interacoes,
+      pacienteModelKey: run.paciente.modelKey,
+      alunoModelKey: run.aluno.modelKey,
+      // Persona compartilhada é custo do LOTE, não desta run — contá-la em cada
+      // run somaria a mesma chamada N vezes no total do lote.
+      personaTurno: run.personaCompartilhada ? null : run.personaTurno,
+    });
+    writeBenchRun(run);
+    await markBenchJob(run.id, {
+      status: run.status,
+      progresso: { feitas: run.interacoes.length, total: run.interacoesPedidas },
+      resumo: run.resumo,
+      completedAt: run.completedAt || null,
+      error: run.error || null,
+    });
+  };
+
+  // ── Etapa 1: a persona do aluno sai do log enviado ────────────────────────
+  // Em LOTE ela já vem pronta: uma extração serve todos os modelos, e é isso que
+  // garante que todos enfrentem o MESMO aluno simulado (ver runLote).
+  if (personaPronta) {
+    run.persona = personaPronta.texto;
+    run.personaTurno = personaPronta.turno;
+    run.personaCompartilhada = true;
+    await persistir();
+  } else {
+    const personaTurno = await benchTurnOuFalha({
+      client: clientAluno,
+      modelKey: run.aluno.modelKey, model: run.aluno.model, provider: run.aluno.provider, effort: run.aluno.effort,
+      systemPrompt: benchmark.PERSONA_INSTRUCTION,
+      turns: [{ role: 'user', content: benchmark.buildPersonaInput({ log, alunoNome: run.alunoNome, casoNome: run.casoNome }) }],
+      maxTokens: benchmark.BENCH_PERSONA_MAX_TOKENS,
+      captura: run.capturaAluno,
+      rotulo: 'extração de persona',
+    });
+    run.persona = personaTurno.texto;
+    run.personaTurno = { ...personaTurno, texto: undefined };
+    await persistir();
+  }
+
+  const alunoSystemPrompt = benchmark.buildAlunoSystemPrompt({
+    personaTexto: run.persona, alunoNome: run.alunoNome, casoNome: run.casoNome,
+  });
+
+  // ── Etapa 2: o atendimento ────────────────────────────────────────────────
+  for (let n = 1; n <= run.interacoesPedidas; n++) {
+    if (benchCancelado(run)) {
+      run.status = 'cancelado';
+      run.completedAt = new Date().toISOString();
+      await persistir();
+      return run;
+    }
+
+    // O paciente fala primeiro (mesmo disparo da produção: "Iniciar" oculto).
+    const tp = await benchTurnOuFalha({
+      client: clientPaciente,
+      modelKey: run.paciente.modelKey, model: run.paciente.model, provider: run.paciente.provider, effort: run.paciente.effort,
+      systemPrompt: pacienteSystemPrompt,
+      turns: benchmark.historyForPatient(run.transcript),
+      maxTokens: benchmark.tetoTokens(run.paciente.effort),
+      captura: run.capturaPaciente,
+      rotulo: `fala ${n} do paciente`,
+    });
+    run.transcript.push({ ator: 'paciente', texto: tp.texto });
+
+    const ta = await benchTurnOuFalha({
+      client: clientAluno,
+      modelKey: run.aluno.modelKey, model: run.aluno.model, provider: run.aluno.provider, effort: run.aluno.effort,
+      systemPrompt: alunoSystemPrompt,
+      turns: benchmark.historyForAluno(run.transcript),
+      maxTokens: benchmark.tetoTokens(run.aluno.effort),
+      captura: run.capturaAluno,
+      rotulo: `fala ${n} do aluno`,
+    });
+    run.transcript.push({ ator: 'aluno', texto: ta.texto });
+
+    run.interacoes.push({
+      n,
+      paciente: { ...tp, texto: undefined },
+      aluno: { ...ta, texto: undefined },
+    });
+    await persistir();
+    console.log(
+      `[bench] ${run.id} interação ${n}/${run.interacoesPedidas} — paciente `
+      + `${tp.custo ? '$' + tp.custo.usd.toFixed(6) : 'n/d'} (${tp.latenciaMs}ms) · aluno ${ta.latenciaMs}ms`,
+    );
+  }
+
+  run.status = 'completed';
+  run.completedAt = new Date().toISOString();
+  await persistir();
+  return run;
+}
+
+// ── LOTE: os modelos escolhidos, no mesmo caso, com a MESMA persona ──────────
+// Automatiza o fluxo que antes era manual (rodar um modelo, esperar, trocar o
+// modelo, rodar de novo). Duas coisas que só o lote consegue:
+//
+//   1. A ficha de persona é extraída UMA vez e usada por TODOS os modelos. É o
+//      que torna a comparação válida — cada modelo enfrenta exatamente o mesmo
+//      aluno simulado, com a mesma forma de atender. Se cada run extraísse a sua,
+//      as fichas sairiam diferentes (o modelo não é determinístico) e parte da
+//      diferença medida seria do aluno, não do paciente. De brinde, custa uma
+//      extração em vez de N.
+//   2. Dois modos de execução (escolha de quem roda): `fila` faz um modelo por
+//      vez do começo ao fim — mais lento, sem risco de TPM; `paralelo` dispara
+//      todos juntos — rápido, mas o lado do ALUNO é o mesmo modelo em todas as
+//      runs, então N runs simultâneas multiplicam por N a pressão sobre o TPM
+//      dele. Default é `fila`.
+//
+// Uma run que falha NÃO derruba o lote: o erro fica registrado nela e as outras
+// seguem. É o oposto do desejável num pipeline, e o certo aqui — o dinheiro já
+// gasto nas outras runs não pode ir embora porque a z.ai deu 429.
+const BENCH_LOTES_FILE = 'benchmark-lotes.json';
+
+function readBenchLote(id) {
+  if (!/^blote-[0-9]+-[0-9a-f]{8}$/.test(String(id || ''))) return null;
+  return readJSON(BENCH_LOTES_FILE).find((l) => l && l.id === id) || null;
+}
+async function markLote(id, patch) {
+  await withFileLock(BENCH_LOTES_FILE, async () => {
+    const arr = readJSON(BENCH_LOTES_FILE);
+    const i = arr.findIndex((l) => l && l.id === id);
+    if (i === -1) return;
+    arr[i] = { ...arr[i], ...patch };
+    writeJSON(BENCH_LOTES_FILE, arr);
+  });
+}
+
+// Cancelamento vale para a run e para o lote dela (a tela cancela o lote inteiro).
+function benchCancelado(run) {
+  return benchCancelados.has(run.id) || (run.loteId && benchCancelados.has(run.loteId));
+}
+
+async function runLoteRun({ run, log, pacienteSystemPrompt, clientPaciente, clientAluno, personaPronta }) {
+  await markBenchJob(run.id, { status: 'processing' });
+  run.status = 'processing';
+  try {
+    const feito = await runBenchmarkRun({ run, log, pacienteSystemPrompt, clientPaciente, clientAluno, personaPronta });
+    console.log(`[bench] ${run.id} (${run.paciente.key}) ${feito.status} — ${feito.interacoes.length} interação(ões)`);
+    return feito;
+  } catch (e) {
+    registrarErro(null, e, 'benchmark-simulação/lote-run', { extra: { runId: run.id, loteId: run.loteId, paciente: run.paciente.key } });
+    run.status = 'error';
+    run.error = e.message;
+    run.completedAt = new Date().toISOString();
+    try { writeBenchRun(run); } catch {}
+    await markBenchJob(run.id, {
+      status: 'error', error: e.message, completedAt: run.completedAt,
+      progresso: { feitas: run.interacoes.length, total: run.interacoesPedidas },
+      resumo: run.resumo,
+    });
+    return run;
+  }
+}
+
+async function runLote({ lote, runs, log, pacienteSystemPrompt, clientAluno, clientePara }) {
+  // Etapa 1: a persona, uma vez, para todo o lote.
+  const personaTurno = await benchTurnOuFalha({
+    client: clientAluno,
+    modelKey: lote.aluno.modelKey, model: lote.aluno.model, provider: lote.aluno.provider, effort: lote.aluno.effort,
+    systemPrompt: benchmark.PERSONA_INSTRUCTION,
+    turns: [{ role: 'user', content: benchmark.buildPersonaInput({ log, alunoNome: lote.alunoNome, casoNome: lote.casoNome }) }],
+    maxTokens: benchmark.BENCH_PERSONA_MAX_TOKENS,
+    captura: lote.capturaAluno,
+    rotulo: 'extração de persona do lote',
+  });
+  const personaPronta = { texto: personaTurno.texto, turno: { ...personaTurno, texto: undefined } };
+  lote.persona = personaPronta.texto;
+  lote.personaTurno = personaPronta.turno;
+  await markLote(lote.id, { persona: lote.persona, personaTurno: lote.personaTurno });
+
+  const executar = (run) => runLoteRun({
+    run, log, pacienteSystemPrompt, clientAluno, personaPronta,
+    clientPaciente: clientePara(run.paciente.provider),
+  });
+
+  if (lote.modo === 'paralelo') {
+    await Promise.all(runs.map(executar));
+  } else {
+    for (const run of runs) {
+      if (benchCancelados.has(lote.id)) {
+        // Run que nunca começou não é erro: fica cancelada, sem custo nenhum.
+        run.status = 'cancelado';
+        run.completedAt = new Date().toISOString();
+        try { writeBenchRun(run); } catch {}
+        await markBenchJob(run.id, { status: 'cancelado', completedAt: run.completedAt });
+        continue;
+      }
+      await executar(run);
+    }
+  }
+
+  const finais = runs.map((r) => readBenchRun(r.id) || r);
+  const cancelado = benchCancelados.has(lote.id) || finais.some((r) => r.status === 'cancelado');
+  const comFalha = finais.filter((r) => r.status === 'error').length;
+  const status = cancelado ? 'cancelado'
+    : comFalha === finais.length ? 'error'
+      : comFalha ? 'parcial' : 'completed';
+  await markLote(lote.id, {
+    status,
+    completedAt: new Date().toISOString(),
+    resumo: benchmark.resumoComparativo({ runs: finais, personaTurno: lote.personaTurno }),
+    error: comFalha ? `${comFalha} de ${finais.length} modelo(s) falharam; os demais estão completos.` : null,
+  });
+  console.log(`[bench-lote] ${lote.id} ${status} — ${finais.length} modelo(s), ${lote.modo}`);
+}
+
+// Dispara um LOTE: um modelo por linha, mesmo caso, mesma persona.
+app.post('/api/benchmark-simulacao/lote', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const log = clampStr(b.log, 200000).trim();
+    const casoId = b.casoId;
+    const interacoes = Number(b.interacoes);
+    const alunoNome = clampStr(b.alunoNome, 80).trim();
+    const modo = b.modo || benchmark.BENCH_MODO_PADRAO;
+
+    if (!log) return res.status(400).json({ error: 'Envie o log do atendimento que será replicado.' });
+    if (log.length < 200) return res.status(400).json({ error: 'O log é curto demais para extrair a persona do aluno (mínimo 200 caracteres).' });
+    if (!casoId) return res.status(400).json({ error: 'Selecione o paciente que foi atendido.' });
+    const pacientes = benchmark.normalizePacientes(b.pacientes);
+    if (!pacientes) {
+      return res.status(400).json({ error: `Escolha ao menos um modelo de paciente válido (${Object.keys(benchmark.BENCH_PACIENTES).join(' | ')}).` });
+    }
+    if (!benchmark.isValidInteracoes(interacoes)) {
+      return res.status(400).json({ error: `Número de interações inválido (${benchmark.BENCH_INTERACOES.join(' | ')}).` });
+    }
+    if (!benchmark.isValidModo(modo)) {
+      return res.status(400).json({ error: `Modo inválido (${benchmark.BENCH_MODOS.join(' | ')}).` });
+    }
+
+    const resolved = resolveChatSystemPrompt({ context: { type: 'freeplay', itemId: casoId }, user: req.user });
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+    const aluno = benchmark.alunoPreset();
+    const clientAluno = getClientForSimProvider(aluno.provider);
+    if (!clientAluno) {
+      return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(aluno.provider)} não configurada (modelo do aluno simulado).` });
+    }
+    // Todos os provedores do lote precisam de chave ANTES de começar: descobrir no
+    // meio que falta a do 4º modelo depois de pagar os 3 primeiros é inaceitável.
+    for (const p of pacientes) {
+      if (!getClientForSimProvider(p.provider)) {
+        return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(p.provider)} não configurada (necessária para ${p.label}).` });
+      }
+    }
+
+    if (await benchOcupado(req.user.id)) {
+      return res.status(409).json({ error: 'Você já tem um benchmark rodando. Espere terminar (ou cancele) antes de começar outro.' });
+    }
+
+    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const casoNome = freeChar ? freeChar.name : '';
+    const loteId = 'blote-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+    const criadoEm = new Date().toISOString();
+
+    // Uma run (arquivo + job) por modelo, já criadas: a tela mostra o plano
+    // inteiro desde o primeiro segundo, com as que ainda não começaram em
+    // 'aguardando'.
+    const runs = pacientes.map((paciente) => ({
+      id: 'bench-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+      createdAt: criadoEm,
+      completedAt: null,
+      loteId,
+      userId: req.user.id,
+      userName: req.user.name || '',
+      casoId, casoNome, alunoNome,
+      interacoesPedidas: interacoes,
+      paciente, aluno,
+      capturaPaciente: benchmark.capturaResumo(paciente),
+      capturaAluno: benchmark.capturaResumo(aluno),
+      personaCompartilhada: true,
+      status: 'aguardando',
+      error: null,
+      persona: '',
+      personaTurno: null,
+      transcript: [],
+      interacoes: [],
+      resumo: null,
+    }));
+    for (const run of runs) writeBenchRun(run);
+
+    const lote = {
+      id: loteId,
+      createdAt: criadoEm,
+      completedAt: null,
+      userId: req.user.id,
+      userName: req.user.name || '',
+      casoId, casoNome, alunoNome,
+      interacoes, modo,
+      aluno,
+      capturaAluno: benchmark.capturaResumo(aluno),
+      pacientes: pacientes.map((p) => p.key),
+      runIds: runs.map((r) => r.id),
+      status: 'processing',
+      error: null,
+      persona: '',
+      personaTurno: null,
+      resumo: null,
+    };
+    await withFileLock(BENCH_LOTES_FILE, async () => {
+      const arr = readJSON(BENCH_LOTES_FILE);
+      arr.push(lote);
+      writeJSON(BENCH_LOTES_FILE, arr);
+    });
+    await withFileLock('benchmark-fila.json', async () => {
+      const arr = readJSON('benchmark-fila.json');
+      for (const run of runs) {
+        arr.push({
+          id: run.id, createdAt: criadoEm, completedAt: null, loteId,
+          userId: req.user.id, userName: run.userName,
+          casoId, casoNome, alunoNome,
+          pacienteKey: run.paciente.key, pacienteLabel: run.paciente.label,
+          alunoLabel: aluno.label,
+          interacoesPedidas: interacoes,
+          status: 'aguardando',
+          progresso: { feitas: 0, total: interacoes },
+          resumo: null, error: null,
+        });
+      }
+      writeJSON('benchmark-fila.json', arr);
+    });
+
+    runLote({ lote, runs, log, pacienteSystemPrompt: resolved.systemPrompt, clientAluno, clientePara: getClientForSimProvider })
+      .catch(async (e) => {
+        // Só cai aqui se a EXTRAÇÃO DE PERSONA falhar (as runs têm try/catch
+        // próprio): nesse caso nenhum modelo rodou, e é isso que o lote informa.
+        registrarErro(null, e, 'benchmark-simulação/lote', { extra: { loteId, modelos: lote.pacientes } });
+        await markLote(loteId, { status: 'error', error: e.message, completedAt: new Date().toISOString() });
+        for (const run of runs) {
+          if (run.status !== 'aguardando') continue;
+          run.status = 'error';
+          run.error = 'A extração da persona do lote falhou: ' + e.message;
+          try { writeBenchRun(run); } catch {}
+          await markBenchJob(run.id, { status: 'error', error: run.error });
+        }
+      })
+      .finally(() => {
+        benchCancelados.delete(loteId);
+        for (const run of runs) benchCancelados.delete(run.id);
+      });
+
+    console.log(`[bench-lote] ${loteId} iniciado: ${pacientes.length} modelo(s) × ${interacoes} interações em ${modo}`);
+    res.json({ id: loteId, runIds: lote.runIds, status: 'processing' });
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json(falhou(req, err, 'benchmark-simulação/lote'));
+  }
+});
+
+// Histórico de lotes. Supervisor vê os próprios; admin vê todos.
+app.get('/api/benchmark-simulacao/lotes', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const lotes = readJSON(BENCH_LOTES_FILE)
+    .filter((l) => l && (req.user.role === 'admin' || l.userId === req.user.id))
+    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, 30)
+    .map((l) => ({ ...l, personaTurno: l.personaTurno ? { ...l.personaTurno, reasoning: undefined } : null }));
+  res.json(lotes);
+});
+
+// Um lote + o estado de cada run dele (é o que a tela faz polling).
+app.get('/api/benchmark-simulacao/lote/:id', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const lote = readBenchLote(req.params.id);
+  if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
+  if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este lote é de outro usuário.' });
+  }
+  const runs = (lote.runIds || []).map((id) => readBenchRun(id)).filter(Boolean);
+  res.json({
+    ...lote,
+    personaTurno: lote.personaTurno ? { ...lote.personaTurno, reasoning: undefined } : null,
+    // Sempre recalculado: enquanto o lote roda, o `resumo` gravado ainda é null.
+    resumo: benchmark.resumoComparativo({ runs, personaTurno: lote.personaTurno }),
+    runs: runs.map((r) => ({
+      id: r.id, pacienteKey: r.paciente.key, pacienteLabel: r.paciente.label,
+      status: r.status, error: r.error || null,
+      progresso: { feitas: (r.interacoes || []).length, total: r.interacoesPedidas },
+      resumo: r.resumo || null,
+      reasoningDisponivel: benchmark.temReasoning(r),
+    })),
+  });
+});
+
+// Relatório comparativo do lote (.txt). Só números — nada aqui julga qualidade.
+app.get('/api/benchmark-simulacao/lote/:id/relatorio', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const lote = readBenchLote(req.params.id);
+  if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
+  if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este lote é de outro usuário.' });
+  }
+  const runs = (lote.runIds || []).map((id) => readBenchRun(id)).filter(Boolean);
+  res.type('text/plain; charset=utf-8').send(benchmark.buildLoteRelatorioTxt({ lote, runs }));
+});
+
+// Cancela o lote: a run em andamento para na próxima interação e as que ainda não
+// começaram nem começam. Tudo que já rodou fica gravado e baixável.
+app.post('/api/benchmark-simulacao/lote/:id/cancelar', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
+  const lote = readBenchLote(req.params.id);
+  if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
+  if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este lote é de outro usuário.' });
+  }
+  if (lote.status !== 'processing') return res.status(400).json({ error: 'Este lote já terminou.' });
+  benchCancelados.add(lote.id);
+  await markLote(lote.id, { status: 'cancelando' });
+  res.json({ ok: true, status: 'cancelando' });
+});
+
+// Catálogo da tela: pacientes em teste, opções de interações, quem é o aluno e a
+// lista de alunos cadastrados (pra rotular a run e nomear a persona).
+app.get('/api/benchmark-simulacao/opcoes', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const alunos = readJSON('users.json')
+    .filter((u) => u && u.role === 'therapist')
+    .map((u) => ({ id: u.id, name: u.name || u.username }))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
+  res.json({ ...benchmark.benchCatalogo(), alunos });
+});
+
+// Dispara uma run. Devolve o id na hora; o trabalho segue em background.
+app.post('/api/benchmark-simulacao', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const log = clampStr(b.log, 200000).trim();
+    const casoId = b.casoId;
+    const pacienteKey = b.paciente;
+    const interacoesPedidas = Number(b.interacoes);
+    const alunoNome = clampStr(b.alunoNome, 80).trim();
+
+    if (!log) return res.status(400).json({ error: 'Envie o log do atendimento que será replicado.' });
+    if (log.length < 200) return res.status(400).json({ error: 'O log é curto demais para extrair a persona do aluno (mínimo 200 caracteres).' });
+    if (!casoId) return res.status(400).json({ error: 'Selecione o paciente que foi atendido.' });
+    const paciente = benchmark.patientPreset(pacienteKey);
+    if (!paciente) {
+      return res.status(400).json({ error: `Modelo de paciente inválido (${Object.keys(benchmark.BENCH_PACIENTES).join(' | ')}).` });
+    }
+    if (!benchmark.isValidInteracoes(interacoesPedidas)) {
+      return res.status(400).json({ error: `Número de interações inválido (${benchmark.BENCH_INTERACOES.join(' | ')}).` });
+    }
+
+    // Prompt do personagem resolvido no servidor, igual à produção — o cliente
+    // nunca manda systemPrompt.
+    const resolved = resolveChatSystemPrompt({ context: { type: 'freeplay', itemId: casoId }, user: req.user });
+    if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+    const aluno = benchmark.alunoPreset();
+    const clientPaciente = getClientForSimProvider(paciente.provider);
+    if (!clientPaciente) {
+      return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(paciente.provider)} não configurada (modelo do paciente).` });
+    }
+    const clientAluno = getClientForSimProvider(aluno.provider);
+    if (!clientAluno) {
+      return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(aluno.provider)} não configurada (modelo do aluno simulado).` });
+    }
+
+    if (await benchOcupado(req.user.id)) {
+      return res.status(409).json({ error: 'Você já tem um benchmark rodando. Espere terminar (ou cancele) antes de começar outro.' });
+    }
+
+    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const casoNome = freeChar ? freeChar.name : '';
+    const id = 'bench-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
+
+    const run = {
+      id,
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+      userId: req.user.id,
+      userName: req.user.name || '',
+      casoId, casoNome,
+      alunoNome,
+      interacoesPedidas,
+      paciente, aluno,
+      // Resumo de raciocínio só entra quando é de graça (ver capturaResumo).
+      capturaPaciente: benchmark.capturaResumo(paciente),
+      capturaAluno: benchmark.capturaResumo(aluno),
+      status: 'processing',
+      error: null,
+      persona: '',
+      personaTurno: null,
+      transcript: [],   // [{ ator: 'paciente'|'aluno', texto }]
+      interacoes: [],   // [{ n, paciente: turno, aluno: turno }] — turno sem texto
+      resumo: null,
+    };
+    writeBenchRun(run);
+
+    const job = {
+      id, createdAt: run.createdAt, completedAt: null,
+      userId: req.user.id, userName: run.userName,
+      casoId, casoNome, alunoNome,
+      pacienteKey: paciente.key, pacienteLabel: paciente.label,
+      alunoLabel: aluno.label,
+      interacoesPedidas,
+      status: 'processing',
+      progresso: { feitas: 0, total: interacoesPedidas },
+      resumo: null, error: null,
+    };
+    await withFileLock('benchmark-fila.json', async () => {
+      const arr = readJSON('benchmark-fila.json');
+      arr.push(job);
+      writeJSON('benchmark-fila.json', arr);
+    });
+
+    runBenchmarkRun({ run, log, pacienteSystemPrompt: resolved.systemPrompt, clientPaciente, clientAluno })
+      .then((r) => {
+        console.log(`[bench] ${id} ${r.status} — ${r.interacoes.length} interação(ões), total ${r.resumo && r.resumo.totalUsd != null ? '$' + r.resumo.totalUsd.toFixed(6) : 'n/d'}`);
+      })
+      .catch(async (e) => {
+        // Job assíncrono: ninguém espera resposta HTTP, então o painel de Logs de
+        // Erro é o único lugar onde a falha aparece inteira. O parcial já está
+        // gravado e continua baixável.
+        registrarErro(null, e, 'benchmark-simulação/job', { extra: { id, paciente: paciente.key, interacoes: interacoesPedidas } });
+        run.status = 'error';
+        run.error = e.message;
+        run.completedAt = new Date().toISOString();
+        try { writeBenchRun(run); } catch {}
+        await markBenchJob(id, {
+          status: 'error', error: e.message, completedAt: run.completedAt,
+          progresso: { feitas: run.interacoes.length, total: interacoesPedidas },
+          resumo: run.resumo,
+        });
+      })
+      .finally(() => { benchCancelados.delete(id); });
+
+    console.log(`[bench] ${id} iniciado: ${paciente.label} × ${interacoesPedidas} interações (aluno ${aluno.label})`);
+    res.json({ id, status: 'processing' });
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json(falhou(req, err, 'benchmark-simulação'));
+  }
+});
+
+// Fila/histórico de runs. Supervisor vê as próprias; admin vê todas. Registrada
+// ANTES de /:id — senão 'fila' cairia no parâmetro.
+app.get('/api/benchmark-simulacao/fila', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const jobs = readJSON('benchmark-fila.json')
+    .filter((j) => j && (req.user.role === 'admin' || j.userId === req.user.id))
+    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
+    .slice(0, 50);
+  res.json(jobs);
+});
+
+// Uma run inteira (transcrição + custo por interação). É o que a tela faz polling
+// enquanto roda — o resumo do raciocínio NÃO vem aqui, tem endpoint próprio.
+app.get('/api/benchmark-simulacao/:id', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const run = readBenchRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Benchmark não encontrado.' });
+  if (req.user.role !== 'admin' && run.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este benchmark é de outro usuário.' });
+  }
+  const semRaciocinio = (run.interacoes || []).map((it) => ({
+    n: it.n,
+    paciente: it.paciente ? { ...it.paciente, reasoning: undefined } : null,
+    aluno: it.aluno ? { ...it.aluno, reasoning: undefined } : null,
+  }));
+  res.json({
+    ...run,
+    interacoes: semRaciocinio,
+    personaTurno: run.personaTurno ? { ...run.personaTurno, reasoning: undefined } : null,
+    reasoningDisponivel: benchmark.temReasoning(run),
+  });
+});
+
+// Log completo em texto puro (a tela transforma em arquivo).
+app.get('/api/benchmark-simulacao/:id/log', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const run = readBenchRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Benchmark não encontrado.' });
+  if (req.user.role !== 'admin' && run.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este benchmark é de outro usuário.' });
+  }
+  res.type('text/plain; charset=utf-8').send(benchmark.buildBenchLogTxt(run));
+});
+
+// Ficha de persona do aluno em texto puro. Mesma regra de acesso dos outros dois
+// arquivos; 404 enquanto a extração não terminou.
+app.get('/api/benchmark-simulacao/:id/persona', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const run = readBenchRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Benchmark não encontrado.' });
+  if (req.user.role !== 'admin' && run.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este benchmark é de outro usuário.' });
+  }
+  const txt = benchmark.buildBenchPersonaTxt(run);
+  if (!txt) return res.status(404).json({ error: 'Esta run ainda não gerou a ficha de persona.' });
+  res.type('text/plain; charset=utf-8').send(txt);
+});
+
+// Resumo do raciocínio — arquivo SEPARADO do log (pedido do dono). Só existe
+// quando algum lado devolveu resumo sem custo extra.
+app.get('/api/benchmark-simulacao/:id/reasoning', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
+  const run = readBenchRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Benchmark não encontrado.' });
+  if (req.user.role !== 'admin' && run.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este benchmark é de outro usuário.' });
+  }
+  const txt = benchmark.buildBenchReasoningTxt(run);
+  if (!txt) {
+    return res.status(404).json({ error: 'Esta run não guardou raciocínio: nenhum dos dois lados devolve resumo de graça nesta configuração (effort none não pensa; modelo "mini" não tem sumarizador).' });
+  }
+  res.type('text/plain; charset=utf-8').send(txt);
+});
+
+// Cancela uma run em andamento. O loop para na próxima interação e o parcial fica
+// gravado (com o custo do que já rodou — dinheiro gasto não desaparece do
+// relatório).
+app.post('/api/benchmark-simulacao/:id/cancelar', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
+  const run = readBenchRun(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Benchmark não encontrado.' });
+  if (req.user.role !== 'admin' && run.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Este benchmark é de outro usuário.' });
+  }
+  if (run.status !== 'processing') return res.status(400).json({ error: 'Esta run já terminou.' });
+  benchCancelados.add(run.id);
+  await markBenchJob(run.id, { status: 'cancelando' });
+  res.json({ ok: true, status: 'cancelando' });
+});
+
+// Runs que ficaram 'processing' de um processo anterior: o loop vivia em memória,
+// então um restart do servidor as deixa órfãs. Marca uma vez, no boot, pra a tela
+// não ficar esperando por algo que não roda mais.
+(function marcarBenchmarksOrfaos() {
+  try {
+    const arr = readJSON('benchmark-fila.json');
+    let mudou = false;
+    for (const j of arr) {
+      if (j && (j.status === 'processing' || j.status === 'aguardando' || j.status === 'cancelando')) {
+        j.status = 'error';
+        j.error = 'Interrompido por reinício do servidor (o parcial continua baixável).';
+        j.completedAt = new Date().toISOString();
+        mudou = true;
+        const run = readBenchRun(j.id);
+        if (run && run.status === 'processing') {
+          run.status = 'error';
+          run.error = j.error;
+          run.completedAt = j.completedAt;
+          try { writeBenchRun(run); } catch {}
+        }
+      }
+    }
+    if (mudou) writeJSON('benchmark-fila.json', arr);
+
+    const lotes = readJSON('benchmark-lotes.json');
+    let mudouLote = false;
+    for (const l of lotes) {
+      if (l && (l.status === 'processing' || l.status === 'cancelando')) {
+        l.status = 'error';
+        l.error = 'Interrompido por reinício do servidor (o que rodou continua baixável).';
+        l.completedAt = new Date().toISOString();
+        mudouLote = true;
+      }
+    }
+    if (mudouLote) writeJSON('benchmark-lotes.json', lotes);
+  } catch (e) {
+    console.error('[bench] falha ao marcar runs órfãs:', e.message);
+  }
+})();
 
 // --- Speech to Text Proxy ---
 app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {

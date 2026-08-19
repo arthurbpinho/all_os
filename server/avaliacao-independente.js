@@ -10,15 +10,17 @@
 //
 // NOTA: o v18-25 lido aqui é o MESMO arquivo que a produção usa como avaliador
 // individual (avaliacao/avaliador 18/avaliador-v18-25.md) — editar aquele .md
-// muda os dois. O v16-2 fica só como linha de base de comparação do laboratório:
-// nenhum modo de produção usa mais a grade de 6 critérios.
+// muda os dois.
 //
-// Diferença crítica entre os dois formatos de saída (por isso parsers distintos):
-//   v16-2  → prosa + bloco `[notas-supervisor]` (JSON, 6 critérios 0–10) NO FIM.
-//   v18-25 → bloco `[notas]` (15 linhas "N: nota|NA", 1–10) NO INÍCIO, depois
-//            `[feedback]` + o corpo. `NA` nos critérios 10 e 13.
-// A nota final dos dois sai do mesmo finalScoreFromCriteria (soma/(nº×10)×100),
-// que já exclui NA (vira NaN → filtrado). Ver server/scoring.js.
+// Formato de saída do v18-25 (por isso o parser próprio): bloco `[notas]`
+// (15 linhas "N: nota|NA", 1–10) NO INÍCIO, depois `[feedback]` + o corpo.
+// `NA` nos critérios 10 e 13. A nota final sai de finalScoreFromCriteria
+// (soma/(nº×10)×100), que já exclui NA (vira NaN → filtrado). Ver server/scoring.js.
+//
+// O v16-2 (6 critérios) saiu do alternador: nenhum modo de produção usa mais
+// aquela grade, e o laboratório passou a comparar só as linhas vivas — v18-25,
+// v25, v28 e v31. O parser dele (parseV162) fica, porque o store guarda runs
+// antigas que ainda são lidas por ele.
 
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +34,8 @@ const AVALIACAO_DIR = path.join(PROMPTS_DIR, 'avaliacao');
 const SINGLE_MAX_TOKENS = Number(process.env.AVALIACAO_SINGLE_MAX_TOKENS || 64000);
 
 // Nomes dos critérios (rótulos de tela). Fonte: os próprios .md dos avaliadores.
+// O v16-2 saiu do alternador, mas o mapa fica: o store guarda runs antigas dele,
+// e sem isto elas voltariam a exibir "Critério 1", "Critério 2"...
 const CRIT_V162 = {
   1: 'Construção linguística das intervenções',
   2: 'Relação terapêutica',
@@ -57,12 +61,14 @@ const CRIT_V1825 = {
 //   ...        → nó devolve ANÁLISE+NOTA+CONFIANÇA → sintetizador → feedback.
 //   ...-nota   → nó devolve só a NOTA → sem sintetizador, sem feedback (barato).
 //
-// v28 é a versão em teste (15 critérios, régua por travas, confiança fora do
-// cálculo); v25 fica no alternador para rodar o MESMO log nos dois e comparar
-// nota, feedback e custo. Nenhuma das duas é usada por modo de produção.
+// v31 é a versão em teste (travas respondidas uma a uma, análise depois delas,
+// sem confiança, etiqueta escrita por código); v28 e v25 ficam no alternador
+// para rodar o MESMO log e comparar nota, feedback e custo. Nenhuma delas é
+// usada por modo de produção — a produção segue no avaliador de sempre.
 const EVALUATORS = {
-  'v16-2': { id: 'v16-2', label: 'v16.2 · 6 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador-v16-2.md'), criterios: CRIT_V162 },
   'v18-25': { id: 'v18-25', label: 'v18.25 · 15 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador 18', 'avaliador-v18-25.md'), criterios: CRIT_V1825 },
+  // v31 não tem variante: o .md não traz blocos @variante, e a saída é uma só.
+  'v31': { id: 'v31', label: 'v31 · pipeline (15 nós)', kind: 'pipeline', version: 'v31', variant: null, criterios: null },
   'v28': { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', kind: 'pipeline', version: 'v28', variant: 'com-feedback', criterios: null },
   'v28-nota': { id: 'v28-nota', label: 'v28 · pipeline (15 nós) · só nota', kind: 'pipeline', version: 'v28', variant: 'so-nota', criterios: null },
   'v25': { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback', kind: 'pipeline', version: 'v25', variant: 'com-feedback', criterios: null },
@@ -200,10 +206,12 @@ function parseSingleEvalOutput(evaluatorId, text) {
   const ev = EVALUATORS[evaluatorId] || {};
   const { notas, feedback } = evaluatorId === 'v16-2' ? parseV162(text) : parseV1825(text);
   const score = finalScoreFromCriteria(notas);
+  // Fallback do v16-2: fora do registry, mas as runs guardadas ainda se leem.
+  const nomes = ev.criterios || (evaluatorId === 'v16-2' ? CRIT_V162 : null);
   const notasDetalhe = notas
     ? Object.keys(notas)
         .sort((a, b) => Number(a) - Number(b))
-        .map((k) => ({ num: Number(k), nome: (ev.criterios && ev.criterios[Number(k)]) || `Critério ${k}`, nota: notas[k] }))
+        .map((k) => ({ num: Number(k), nome: (nomes && nomes[Number(k)]) || `Critério ${k}`, nota: notas[k] }))
     : [];
   return { notas, notasDetalhe, feedback, score };
 }
