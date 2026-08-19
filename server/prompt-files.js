@@ -97,6 +97,14 @@ for (const cfg of Object.values(PIPELINE_VERSIONS)) {
       }
       for (const variant of PIPELINE_VARIANTS) parseMontado(content, variant, cfg.montado, true);
     };
+    if (cfg.montadoFase2) {
+      VALIDATORS[base + cfg.montadoFase2] = (content) => {
+        const { blockC } = parseMontado(content, null, cfg.montadoFase2, false);
+        if (!blockC.includes('{{FAIXA}}')) {
+          throw new Error('A fase 2 precisa do slot {{FAIXA}} — é por ele que a faixa derivada pelo código chega ao modelo.');
+        }
+      };
+    }
     VALIDATORS[base + cfg.sintetizador] = (content) => {
       parseSintetizador(content, cfg.sintetizador);
     };

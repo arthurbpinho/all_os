@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA, parseFase1V32, parseFase2V32, PERGUNTA_PARA_TRAVA } = require('../server/avaliacao-v25');
 
 // Saída de um nó do v31: uma linha `Fn abre` por trava, uma `Fn realizada` por
 // faixa aberta (mais a da F1 quando a trava da F2 não abre), e a ANÁLISE no FIM.
@@ -390,6 +390,132 @@ describe('Avaliação Independente — confiança baixa: v25 exclui, v28 não', 
     expect(r.evaluator).toBe('v28-nota');
     expect(r.notaFinal).toBe(80);
     expect(r.feedbackAluno).toBe(null);
+  });
+});
+
+// v32 — o nó vira DUAS chamadas, e o que muda de lugar é a régua.
+//
+// A fase 1 responde as quatro perguntas SEM a régua à vista: enquanto as cinco
+// faixas estão na frente, o modelo consegue se colocar numa delas por leitura
+// holística e preencher as respostas de trás para frente. Sem a escada, a
+// impressão continua se formando — nada impede — mas não tem onde pousar.
+// O código deriva a faixa; a fase 2 a recebe pronta, com a régua inteira, e
+// decide só completa/incompleta e a análise.
+describe('Avaliação Independente — v32 (duas fases)', () => {
+  // Distingue as chamadas pelo conteúdo: fase 2 é a única que traz {{FAIXA}}
+  // preenchida; o sintetizador é a única sem [CRITÉRIO].
+  function fakeV32(respostas, cap = {}) {
+    cap.f1 = []; cap.f2 = []; cap.sint = [];
+    return { responses: { create: async (args) => {
+      const user = args.input[0].content;
+      const ehSint = !/\[CRITÉRIO\]/.test(user);
+      const ehF2 = !ehSint && /FAIXA/.test(user);
+      (ehSint ? cap.sint : ehF2 ? cap.f2 : cap.f1).push({ instructions: args.instructions, user, max: args.max_output_tokens });
+      const texto = ehSint ? 'Corpo.' : ehF2 ? respostas.f2 : respostas.f1;
+      return (async function* () {
+        yield { type: 'response.output_text.delta', delta: texto };
+        yield { type: 'response.completed', response: { usage: { input_tokens: 1000, output_tokens: 100 } } };
+      })();
+    } } };
+  }
+  const F1_ATE_F3 = '1: sim — fez trabalho clínico.\n2: sim — há autoria.\n3: não — genérico.\n4: não';
+  const F2_INCOMPLETA = 'REALIZAÇÃO: incompleta — divide espaço com o protocolo.\nANÁLISE: Devolveu a palavra que ela repetia.';
+
+  it('a fase 1 não vê a régua nem o vocabulário da escada', () => {
+    const a = loadAssets('v32');
+    // Nada que revele que existem faixas, quantas são, ou como se ordenam.
+    expect(a.blockA).not.toMatch(/faixa|trava|completa|incompleta/i);
+    expect(a.blockA).not.toMatch(/\bF[1-5]\b/);
+    expect(a.blockA).not.toMatch(/Clichê|Potente|Precisa|Excepcional/);
+    // As perguntas são numeradas de 1 a 4, não pelas faixas a que correspondem.
+    expect(a.blockA).toMatch(/^\*\*1\.\*\* /m);
+    expect(a.blockA).toMatch(/1: <sim\|não>/);
+    // E a fase 2 vê a régua inteira e recebe a faixa pronta.
+    expect(a.fase2.blockA).toMatch(/Faixa 3 · Potente/);
+    expect(a.fase2.blockC).toContain('{{FAIXA}}');
+  });
+
+  it('fase 1 → faixa por código → fase 2 recebe a faixa pronta', async () => {
+    const cap = {};
+    const openai = fakeV32({ f1: F1_ATE_F3, f2: F2_INCOMPLETA }, cap);
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'BLOCO1-SECRETO', log: 'T: oi', model: 'gpt-5.6-sol', effort: 'high',
+      version: 'v32', evaluatorId: 'v32',
+    });
+    expect(cap.f1.length).toBe(15);
+    expect(cap.f2.length).toBe(15);
+    expect(cap.sint.length).toBe(1);
+    // O nome da faixa derivada chega no slot, e é a que as respostas produzem.
+    expect(cap.f2[0].user).toContain('Faixa 3 · Potente');
+    // Cada fase tem o SEU prefixo cacheável, compartilhado pelos 15 nós.
+    expect(new Set(cap.f1.map((c) => c.instructions)).size).toBe(1);
+    expect(new Set(cap.f2.map((c) => c.instructions)).size).toBe(1);
+    // Tetos de saída separados: a reserva de TPM não é 16k duas vezes.
+    expect(cap.f1[0].max).toBeGreaterThan(cap.f2[0].max);
+    // 1→F2, 2→F3, 3→F4, 4→F5: sim/sim/não/não = faixa 3, incompleta = 5.
+    expect(r.partes[0].travas).toEqual({ 2: true, 3: true, 4: false, 5: false });
+    expect(r.partes[0].faixa).toBe(3);
+    expect(r.partes[0].realizacao).toBe('incompleta');
+    expect(r.partes[0].nota).toBe(5);
+    expect(r.partes[0].etiqueta).toBe('potente');
+    expect(r.notaFinal).toBe(50);
+    expect(r.instrumentacao.chamadas).toBe(31); // 15 + 15 + sintetizador
+  });
+
+  it('as duas chamadas do nó entram na conta de tokens', async () => {
+    const r = await runAvaliacaoIndependente({
+      openai: fakeV32({ f1: F1_ATE_F3, f2: F2_INCOMPLETA }), bloco1: 'b', log: 'l',
+      model: 'gpt-5.6-sol', effort: 'high', version: 'v32',
+    });
+    expect(r.instrumentacao.totais.output).toBe(3100); // 31 chamadas × 100
+  });
+
+  it('fase 1 ilegível: sem faixa, o nó sai da nota e a fase 2 nem roda', async () => {
+    const cap = {};
+    const openai = fakeV32({ f1: 'não respondi nada', f2: F2_INCOMPLETA }, cap);
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'b', log: 'l', model: 'gpt-5.5', effort: 'medium', version: 'v32',
+    });
+    expect(cap.f2.length).toBe(0);          // não há faixa a julgar
+    expect(r.partes[0].nota).toBe(null);
+    expect(r.partes[0].incluido).toBe(false);
+    expect(r.notaFinal).toBe(null);         // nenhum critério avaliável
+  });
+
+  it('fase 2 ilegível: a faixa vale, realização cai no padrão completa', async () => {
+    const r = await runAvaliacaoIndependente({
+      openai: fakeV32({ f1: F1_ATE_F3, f2: 'texto fora de formato' }), bloco1: 'b', log: 'l',
+      model: 'gpt-5.5', effort: 'medium', version: 'v32',
+    });
+    expect(r.partes[0].faixa).toBe(3);
+    expect(r.partes[0].realizacao).toBe(null);
+    expect(r.partes[0].nota).toBe(6);   // a par, não a ímpar
+    expect(r.partes[0].analise).toBe(''); // sem prosa para o sintetizador
+  });
+
+  it('parser da fase 1 mapeia pergunta → trava (1→F2 … 4→F5)', () => {
+    expect(PERGUNTA_PARA_TRAVA).toEqual({ 1: 2, 2: 3, 3: 4, 4: 5 });
+    const r = parseFase1V32('1: sim\n2: não\n3: sim\n4: não');
+    expect(r.travas).toEqual({ 2: true, 3: false, 4: true, 5: false });
+    expect(r.faixa).toBe(2);           // a de cima é descartada
+    expect(r.inconsistente).toBe(true);
+    // Sem resposta legível não há faixa (e o nó sai da nota).
+    expect(parseFase1V32('bla').faixa).toBe(null);
+  });
+
+  it('parser da fase 2 lê realização e análise', () => {
+    const r = parseFase2V32('REALIZAÇÃO: completa — manda no critério.\nANÁLISE: Sustentou a leitura do começo ao fim.');
+    expect(r.realizacao).toBe('completa');
+    expect(r.analise).toBe('Sustentou a leitura do começo ao fim.');
+    expect(parseFase2V32('nada').realizacao).toBe(null);
+  });
+
+  it('registry: v32 é pipeline de duas fases, sem variante', () => {
+    expect(ai.isValidEvaluator('v32')).toBe(true);
+    expect(ai.versionFor('v32')).toBe('v32');
+    expect(ai.variantFor('v32')).toBe(null);
+    expect(PIPELINE_VERSIONS.v32.duasFases).toBe(true);
+    expect(PIPELINE_VERSIONS.v31.duasFases).toBeUndefined();
   });
 });
 

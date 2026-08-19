@@ -67,6 +67,9 @@ const CRIT_V1825 = {
 // usada por modo de produção — a produção segue no avaliador de sempre.
 const EVALUATORS = {
   'v18-25': { id: 'v18-25', label: 'v18.25 · 15 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador 18', 'avaliador-v18-25.md'), criterios: CRIT_V1825 },
+  // v32: o nó vira duas chamadas (perguntas sem régua → código deriva a faixa →
+  // régua + faixa decidem a realização). 30 chamadas por avaliação, não 15.
+  'v32': { id: 'v32', label: 'v32 · pipeline (15 nós × 2 fases)', kind: 'pipeline', version: 'v32', variant: null, criterios: null },
   // v31 não tem variante: o .md não traz blocos @variante, e a saída é uma só.
   'v31': { id: 'v31', label: 'v31 · pipeline (15 nós)', kind: 'pipeline', version: 'v31', variant: null, criterios: null },
   'v28': { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', kind: 'pipeline', version: 'v28', variant: 'com-feedback', criterios: null },

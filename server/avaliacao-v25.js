@@ -154,6 +154,45 @@ const PIPELINE_VERSIONS = {
     formatoSaida: 'travas-v31',
     etiquetaNaAnalise: true,
   },
+  // v32 — o nó vira DUAS chamadas, e é a régua que muda de lugar.
+  //
+  // O problema que isto resolve: enquanto as cinco faixas estão à vista na hora
+  // de responder as travas, o modelo consegue se colocar numa delas por leitura
+  // holística e preencher as quatro respostas de trás para frente até chegar lá.
+  // Tirar a escada da frente não impede a impressão de se formar — nada impede —,
+  // mas tira o lugar onde ela pousaria: ele pode achar o atendimento bom ou ruim
+  // e ainda assim não saber que combinação de sim e não produz o quê.
+  //
+  //   fase 1: entrada + princípios + critério + as quatro perguntas, SEM régua
+  //           nenhuma e sem os rótulos F2..F5 (que já denunciariam a escada e a
+  //           posição de cada pergunta nela). Devolve só quatro sim/não.
+  //   → o CÓDIGO deriva a faixa (mesma regra de sempre).
+  //   fase 2: régua inteira + a faixa já derivada. Devolve realização e análise.
+  //
+  // A paridade continua julgada com a régua toda à vista, que é o que ela pede:
+  // incompleta se define por dividir espaço com as faixas de baixo.
+  //
+  // Custo: 30 chamadas por avaliação em vez de 15. Em dinheiro pesa pouco (a
+  // fase 2 é curta e o bloco do caso já está em cache); o que pesa é LATÊNCIA e
+  // TPM — ver V32_FASE1_MAX_TOKENS/V32_FASE2_MAX_TOKENS, que dimensionam a
+  // reserva de cada fase separadamente em vez de reservar 16k duas vezes.
+  v32: {
+    id: 'v32',
+    dirs: ['v32'],
+    montado: 'prompt-no-v32-fase1-montado.md',
+    montadoFase2: 'prompt-no-v32-fase2-montado.md',
+    criterios: 'criterios-no-v32.md',
+    sintetizador: 'sintetizador-v32.md',
+    nCriterios: 15,
+    confiancaBaixaExclui: false,
+    capturaReasoning: true,
+    saudacao: SAUDACAO_V28,
+    travasEstruturais: true,
+    variantes: false,
+    formatoSaida: 'duas-fases',
+    etiquetaNaAnalise: true,
+    duasFases: true,
+  },
 };
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
 const DEFAULT_VERSION = 'v25';
@@ -182,6 +221,13 @@ const V25_EFFORT = process.env.AVALIACAO_V25_EFFORT || 'medium';
 // gerado. Folga generosa: se curto, o GPT gasta tudo pensando e devolve vazio.
 const V25_MAX_TOKENS = Number(process.env.AVALIACAO_V25_MAX_TOKENS || 16000);
 const V25_SYNTH_MAX_TOKENS = Number(process.env.AVALIACAO_V25_SYNTH_MAX_TOKENS || 16000);
+// Tetos por fase do v32. O contador de TPM da OpenAI RESERVA o teto de saída de
+// cada chamada, então partir o nó em duas dobraria a reserva se as duas
+// pedissem os 16k de sempre. A fase 1 devolve quatro linhas e a fase 2 devolve
+// cinco, mas o raciocínio (que sai do mesmo teto) é onde mora o trabalho: a
+// fase 1 faz o julgamento clínico das quatro perguntas e fica com a folga maior.
+const V32_FASE1_MAX_TOKENS = Number(process.env.AVALIACAO_V32_FASE1_MAX_TOKENS || 12000);
+const V32_FASE2_MAX_TOKENS = Number(process.env.AVALIACAO_V32_FASE2_MAX_TOKENS || 6000);
 
 // Preços em USD por 1 milhão de tokens, para o custo EXATO da run (ver
 // buildInstrumentacao). Chaves = prefixo do modelo, batidas do prefixo mais
@@ -376,7 +422,19 @@ function loadAssets(version = DEFAULT_VERSION, variant = DEFAULT_VARIANT) {
 
   const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador);
 
-  const assets = { version, variant: v, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
+  // Versões de duas fases trazem um segundo prompt montado, com a MESMA
+  // estrutura (estático / caso / cauda) — a diferença é o que cada um mostra: a
+  // fase 1 não vê a régua, a fase 2 vê e recebe a faixa já derivada.
+  let fase2 = null;
+  if (cfg.duasFases) {
+    const f2 = parseMontado(fs.readFileSync(path.join(dir, cfg.montadoFase2), 'utf8'), null, cfg.montadoFase2, false);
+    if (!f2.blockC.includes('{{FAIXA}}')) {
+      throw new Error(`${cfg.montadoFase2} não contém o slot {{FAIXA}} (a fase 2 recebe a faixa já derivada pelo código).`);
+    }
+    fase2 = f2;
+  }
+
+  const assets = { version, variant: v, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable, fase2 };
   _assetsCache.set(chave, assets);
   return assets;
 }
@@ -676,6 +734,44 @@ function capturaLigada(cfg) {
 // não pode escolher o tom da própria análise. Ver sintetizador-v31.md.
 const ETIQUETA_POR_FAIXA = { 1: 'erro', 2: 'clichê', 3: 'potente', 4: 'preciso', 5: 'excepcional' };
 
+// Nome da faixa como ela aparece na régua — é o que vai no slot {{FAIXA}} da
+// fase 2 do v32, para o modelo achar as duas descrições dela no texto.
+const NOME_DA_FAIXA = {
+  1: 'Faixa 1 · Erro',
+  2: 'Faixa 2 · Clichê',
+  3: 'Faixa 3 · Potente',
+  4: 'Faixa 4 · Precisa',
+  5: 'Faixa 5 · Excepcional',
+};
+
+// Fase 1 do v32: quatro linhas `N: sim|não`. As perguntas são numeradas de 1 a 4
+// no prompt, e não pelas faixas — o rótulo `F3` diria ao modelo que existe uma
+// escada de cinco degraus e onde aquela pergunta cai nela. A correspondência
+// (1→F2, 2→F3, 3→F4, 4→F5) mora aqui, no código.
+const PERGUNTA_PARA_TRAVA = { 1: 2, 2: 3, 3: 4, 4: 5 };
+
+function parseFase1V32(text) {
+  const t = String(text || '');
+  const travas = {};
+  for (const [pergunta, trava] of Object.entries(PERGUNTA_PARA_TRAVA)) {
+    const m = t.match(new RegExp(`^[^\\S\\n]*${pergunta}\\s*[:.)]\\s*(sim|n[ãa]o)`, 'im'));
+    travas[trava] = m ? /^sim$/i.test(m[1]) : null;
+  }
+  const { faixa, inconsistente } = derivarFaixa(travas);
+  return { travas, faixa, inconsistente };
+}
+
+// Fase 2 do v32: realização + análise. A faixa não vem daqui — já veio do código.
+function parseFase2V32(text) {
+  const t = String(text || '');
+  const realM = t.match(/REALIZA[ÇC][ÃA]O\s*:\s*(completa|incompleta)/i);
+  const anaM = t.match(/AN[ÁA]LISE\s*:\s*([\s\S]*)$/i);
+  return {
+    realizacao: realM ? realM[1].toLowerCase() : null,
+    analise: anaM ? anaM[1].trim() : '',
+  };
+}
+
 // Saída do nó na versão v31: uma linha `Fn abre` por trava e uma `Fn realizada`
 // por faixa aberta (mais a da F1 quando a trava da F2 não abre), com a ANÁLISE
 // no FIM.
@@ -790,6 +886,64 @@ function parseNodeOutput(text) {
 // `developer` (bloco estático + caso) vem pronto do caller: é idêntico em todos
 // os nós — é justamente o prefixo que a OpenAI cacheia — e montá-lo uma vez só
 // evita refazer a concatenação grande a cada nó. Ver buildDeveloper.
+// Nó de DUAS FASES (v32). A fase 1 responde as quatro perguntas sem ver a régua;
+// o código deriva a faixa; a fase 2 recebe a faixa pronta, com a régua inteira à
+// vista, e devolve realização e análise.
+//
+// Degradação: fase 1 ilegível → sem faixa, o nó fica fora da nota e a fase 2 nem
+// roda (não haveria faixa a julgar). Fase 2 ilegível → a faixa vale, a realização
+// cai no padrão `completa` e a análise fica vazia (o critério conta na nota, mas
+// não manda prosa ao sintetizador).
+async function runNodeDuasFases(openai, assets, developer1, developer2, criterio, model, effort, provider) {
+  const captura = capturaLigada(assets.cfg);
+  const usages = [];
+
+  const user1 = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
+  const r1 = await gptComplete(openai, developer1, user1, V32_FASE1_MAX_TOKENS, model, effort, provider, `nó ${criterio.num} f1`, captura);
+  usages.push(r1.usage);
+  const { travas, faixa, inconsistente } = parseFase1V32(r1.text);
+
+  const base = {
+    num: criterio.num,
+    nome: criterio.nome,
+    linhaCurta: criterio.linhaCurta,
+    travas,
+    faixa,
+    inconsistente,
+    confianca: null,
+    analiseForaDeOrdem: false,
+    etiqueta: faixa == null ? null : ETIQUETA_POR_FAIXA[faixa],
+    reasoning: r1.reasoning || '',
+    usage: r1.usage,
+    usages,
+    retentativas: 0,
+  };
+
+  if (faixa == null) {
+    return { ...base, nota: null, realizacao: null, analise: '' };
+  }
+
+  const user2 = fill(
+    fill(assets.fase2.blockC, '{{CRITÉRIO}}', criterio.descricao),
+    '{{FAIXA}}', NOME_DA_FAIXA[faixa],
+  );
+  const r2 = await gptComplete(openai, developer2, user2, V32_FASE2_MAX_TOKENS, model, effort, provider, `nó ${criterio.num} f2`, captura);
+  usages.push(r2.usage);
+  const { realizacao, analise } = parseFase2V32(r2.text);
+
+  return {
+    ...base,
+    // Realização ausente vale completa, como nas outras versões: a ímpar tem de
+    // ser afirmada, nunca acontecer por omissão.
+    nota: NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0],
+    realizacao,
+    analise,
+    // O raciocínio das duas fases, na ordem, para o .txt do supervisor.
+    reasoning: [r1.reasoning, r2.reasoning].filter(Boolean).join('\n\n---\n\n'),
+    usages,
+  };
+}
+
 async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
   const captura = capturaLigada(assets.cfg);
@@ -1055,8 +1209,18 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
   const weights = criteria.map(() => 1);
 
   const developer = buildDeveloper(assets, bloco1, log);
+  // Duas fases: cada uma tem o seu prefixo cacheável (estático próprio + o mesmo
+  // bloco do caso). São duas famílias de cache, uma por fase, cada uma
+  // compartilhada pelos 15 nós.
+  const duasFases = !!assets.cfg.duasFases;
+  const developer2 = duasFases
+    ? assets.fase2.blockA + '\n\n' + fill(fill(assets.fase2.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log)
+    : null;
+  const rodarNo = (c) => (duasFases
+    ? runNodeDuasFases(openai, assets, developer, developer2, c, model, effort, provider)
+    : runNode(openai, assets, developer, c, model, effort, provider));
 
-  const first = await runNode(openai, assets, developer, criteria[0], model, effort, provider);
+  const first = await rodarNo(criteria[0]);
   // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
   // nova, e na OpenAI o que estoura é o TPM. Lá o lote é dimensionado pelo peso
   // REAL desta run (prompt + Bloco 1 + log + teto de saída), porque o mesmo nó
@@ -1066,11 +1230,15 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
     conc = GLM_V25_CONCURRENCY;
   } else {
     const maiorCriterio = criteria.reduce((a, c) => Math.max(a, (c.descricao || '').length), 0);
-    const reserva = estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
+    // No v32 quem dita o lote é a fase mais pesada: as duas rodam em sequência
+    // dentro do mesmo nó, então nunca estão as duas no ar pelo mesmo nó.
+    const reserva = duasFases
+      ? estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + Math.max(V32_FASE1_MAX_TOKENS, V32_FASE2_MAX_TOKENS)
+      : estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
     conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
     console.log(`[v25-fanout] ${criteria.length} nós · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
   }
-  const rest = await mapLimit(criteria.slice(1), conc, (c) => runNode(openai, assets, developer, c, model, effort, provider));
+  const rest = await mapLimit(criteria.slice(1), conc, (c) => rodarNo(c));
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
   return finishPipeline({
@@ -1202,6 +1370,10 @@ module.exports = {
   finalizePipeline,
   buildReasoningTxt,
   modelEmiteResumo,
+  parseFase1V32,
+  parseFase2V32,
+  PERGUNTA_PARA_TRAVA,
+  NOME_DA_FAIXA,
   parseNodeOutputV31,
   ETIQUETA_POR_FAIXA,
   parseNodeOutputTravas,
