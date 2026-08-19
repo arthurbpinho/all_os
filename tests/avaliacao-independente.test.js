@@ -2,7 +2,7 @@
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
-const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA, parseFase1V32, parseFase2V32, PERGUNTA_PARA_TRAVA } = require('../server/avaliacao-v25');
+const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, reservarTPM, _resetTPM, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA, parseFase1V32, parseFase2V32, PERGUNTA_PARA_TRAVA } = require('../server/avaliacao-v25');
 
 // Saída de um nó do v31: uma linha `Fn abre` por trava, uma `Fn realizada` por
 // faixa aberta (mais a da F1 quando a trava da F2 não abre), e a ANÁLISE no FIM.
@@ -991,6 +991,45 @@ describe('Avaliação Independente — retry de rate limit (pipeline)', () => {
     // Sem estimativa utilizável, mantém o teto (não trava o fan-out).
     expect(concorrenciaPorTPM(0, 4)).toBe(4);
     expect(concorrenciaPorTPM(NaN, 4)).toBe(4);
+  });
+
+  // O heurístico de concorrência conta chamadas EM VOO; o limite da OpenAI conta
+  // tokens POR MINUTO. As duas coisas só coincidem se toda chamada demorar o
+  // mesmo — e no v32 não demoram (cada nó são duas, a segunda curta), então com
+  // a mesma concorrência passam mais chamadas por minuto e a janela enche por
+  // acúmulo. Daí o limitador de janela deslizante, que modela o que a OpenAI faz.
+  it('limitador de TPM: deixa passar o que cabe e segura o que não cabe', async () => {
+    const antes = process.env.AVALIACAO_V25_TPM_LIMITER;
+    const antesTeto = process.env.AVALIACAO_V25_TPM;
+    process.env.AVALIACAO_V25_TPM_LIMITER = '1';
+    process.env.AVALIACAO_V25_TPM = '100000'; // orçamento = 85k
+    _resetTPM();
+    try {
+      // 4 × 20k = 80k cabe no orçamento e passa direto.
+      const t0 = Date.now();
+      for (let i = 0; i < 4; i++) await reservarTPM(20000);
+      expect(Date.now() - t0).toBeLessThan(200);
+
+      // A quinta estouraria (100k > 85k): o limitador segura. Não esperamos os
+      // 60s aqui — basta ver que ela NÃO passa de imediato.
+      let passou = false;
+      const pendente = reservarTPM(20000).then(() => { passou = true; });
+      await new Promise((r) => setTimeout(r, 120));
+      expect(passou).toBe(false);
+
+      // Limitador desligado: passa na hora, mesmo com a janela cheia.
+      process.env.AVALIACAO_V25_TPM_LIMITER = '0';
+      const t1 = Date.now();
+      await reservarTPM(999999);
+      expect(Date.now() - t1).toBeLessThan(100);
+      void pendente;
+    } finally {
+      if (antes === undefined) delete process.env.AVALIACAO_V25_TPM_LIMITER;
+      else process.env.AVALIACAO_V25_TPM_LIMITER = antes;
+      if (antesTeto === undefined) delete process.env.AVALIACAO_V25_TPM;
+      else process.env.AVALIACAO_V25_TPM = antesTeto;
+      _resetTPM();
+    }
   });
 
   it('estimarTokens é pessimista (erra para menos concorrência)', () => {

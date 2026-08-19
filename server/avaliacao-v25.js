@@ -508,6 +508,64 @@ function estimarTokens(str) {
   return Math.ceil(String(str || '').length / 3.5);
 }
 
+// --- Limitador de TPM por janela deslizante -------------------------------
+//
+// Por que o heurístico de concorrência não bastava: ele conta chamadas EM VOO,
+// e o limite da OpenAI conta tokens POR MINUTO. As duas coisas só coincidem se
+// toda chamada demorar o mesmo. No v32 não demoram: cada nó são duas chamadas em
+// sequência, a segunda bem mais curta, então com a MESMA concorrência passam
+// mais chamadas por minuto — e a janela enche por acúmulo ("Used 195581,
+// Requested 16111"), sem que nenhuma chamada isolada seja grande.
+//
+// Este limitador modela o que a OpenAI de fato faz: mantém as reservas dos
+// últimos 60s e segura a próxima chamada até ela caber. É GLOBAL de propósito —
+// o teto é da organização, então duas avaliações rodando juntas dividem o mesmo
+// orçamento em vez de se atropelarem.
+const _tpmJanela = []; // { t: ms, tokens }
+
+// Teto efetivo, lido a cada chamada. `0` desliga o limitador (usado nos testes,
+// que não falam com a rede e não podem dormir esperando janela).
+function tpmTeto() {
+  if (process.env.AVALIACAO_V25_TPM_LIMITER === '0') return 0;
+  const n = Number(process.env.AVALIACAO_V25_TPM);
+  return Number.isFinite(n) && n > 0 ? n : OPENAI_V25_TPM;
+}
+
+// Fração do teto que deixamos ocupar. Abaixo de 1 porque a nossa estimativa de
+// input é aproximada (chars/3.5) e porque o relógio da OpenAI não é o nosso.
+const TPM_OCUPACAO = Number(process.env.AVALIACAO_V25_TPM_OCUPACAO || 0.85);
+
+function _limpaJanela(agora) {
+  while (_tpmJanela.length && agora - _tpmJanela[0].t >= 60000) _tpmJanela.shift();
+}
+
+// Espera até que `tokens` caibam na janela, e então os registra. Uma chamada
+// maior que o orçamento inteiro passa assim que a janela esvazia — travá-la
+// seria pior do que tomar o 429, que o retry já cobre.
+async function reservarTPM(tokens) {
+  const teto = tpmTeto();
+  if (!teto || !Number.isFinite(tokens) || tokens <= 0) return;
+  const orcamento = teto * TPM_OCUPACAO;
+  for (;;) {
+    const agora = Date.now();
+    _limpaJanela(agora);
+    const usados = _tpmJanela.reduce((a, r) => a + r.tokens, 0);
+    if (!_tpmJanela.length || usados + tokens <= orcamento) {
+      _tpmJanela.push({ t: agora, tokens });
+      return;
+    }
+    // Espera o suficiente para a reserva mais antiga sair da janela.
+    const esperar = 60000 - (agora - _tpmJanela[0].t) + 50;
+    console.log(`[v25-tpm] janela em ${Math.round(usados / 1000)}k/${Math.round(orcamento / 1000)}k — segurando ${Math.round(tokens / 1000)}k por ${Math.round(esperar / 100) / 10}s`);
+    await sleep(Math.max(50, Math.min(esperar, 60000)));
+  }
+}
+
+// Só para teste: esvazia a janela entre casos.
+function _resetTPM() {
+  _tpmJanela.length = 0;
+}
+
 // Quantos nós disparar juntos sem estourar o TPM. Cada chamada RESERVA
 // input + maxTokens na janela, então o que cabe é orçamento / reserva. Nunca
 // abaixo de 1: aí vira serial, e o que sobrar o retry cobre.
@@ -610,6 +668,12 @@ async function mapLimit(items, limit, fn) {
 // estático/do-caso (cacheado automaticamente pela OpenAI); `user` = a parte que
 // varia. Sem cache_control manual — não existe na OpenAI.
 async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', rotulo = 'chamada', captura = false) {
+  // A OpenAI reserva input + o TETO de saída no contador de TPM, mesmo que o
+  // modelo gere menos. Reservamos a mesma coisa, antes de chamar. (O GLM tem
+  // limite próprio, tratado pela concorrência menor do fan-out.)
+  if (provider === 'openai') {
+    await reservarTPM(estimarTokens(developer) + estimarTokens(user) + maxTokens);
+  }
   // Captura ligada + OpenAI → Responses API, o único lugar onde o resumo do
   // raciocínio existe. Nos demais casos segue o chat.completions de sempre.
   if (captura && provider === 'openai') {
@@ -1388,6 +1452,8 @@ module.exports = {
   NOTAS_POR_FAIXA,
   estimarTokens,
   concorrenciaPorTPM,
+  reservarTPM,
+  _resetTPM,
   // usados pelo editor de prompts (validação com o parser da produção):
   parseMontado,
   parseSintetizador,
