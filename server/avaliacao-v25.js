@@ -754,7 +754,14 @@ function parseFase1V32(text) {
   const t = String(text || '');
   const travas = {};
   for (const [pergunta, trava] of Object.entries(PERGUNTA_PARA_TRAVA)) {
-    const m = t.match(new RegExp(`^[^\\S\\n]*${pergunta}\\s*[:.)]\\s*(sim|n[ãa]o)`, 'im'));
+    // Tolerante à decoração que o modelo às vezes acrescenta: negrito, "Pergunta
+    // 3:", ponto/parêntese/hífen como separador. Uma linha que não casa vira
+    // `null`, e null FECHA a trava — então um parser estrito não inflaria nota
+    // nenhuma, mas tiraria o critério inteiro da conta sem ninguém ver.
+    const m = t.match(new RegExp(
+      `^[^\\S\\n]*[*_#>\\s-]*(?:pergunta\\s*)?${pergunta}[*_\\s]*[:.)\\-–—][\\s*_]*(sim|n[ãa]o)`,
+      'im',
+    ));
     travas[trava] = m ? /^sim$/i.test(m[1]) : null;
   }
   const { faixa, inconsistente } = derivarFaixa(travas);

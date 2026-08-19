@@ -493,6 +493,26 @@ describe('Avaliação Independente — v32 (duas fases)', () => {
     expect(r.partes[0].analise).toBe(''); // sem prosa para o sintetizador
   });
 
+  // Uma linha que não casa vira null, e null FECHA a trava — então um parser
+  // estrito nunca infla nota; ele some com o critério inteiro da conta, em
+  // silêncio. Por isso o parser tolera a decoração que o modelo acrescenta.
+  it('parser da fase 1 tolera negrito, ponto, hífen, "Pergunta N" e lista', () => {
+    const esperado = { 2: true, 3: true, 4: false, 5: false };
+    const formatos = [
+      '1: sim\n2: sim\n3: não\n4: não',
+      '**1:** sim\n**2:** sim\n**3:** não\n**4:** não',
+      '**1: sim**\n**2: sim**\n**3: não**\n**4: não**',
+      '1. sim\n2. sim\n3. não\n4. não',
+      '1 - sim\n2 - sim\n3 - não\n4 - não',
+      'Pergunta 1: sim\nPergunta 2: sim\nPergunta 3: não\nPergunta 4: não',
+      '- 1: sim\n- 2: sim\n- 3: não\n- 4: não',
+      '1: sim — fez\n2: sim — tem autoria\n3: nao — serviria a qualquer paciente\n4: não',
+    ];
+    for (const f of formatos) expect(parseFase1V32(f).travas).toEqual(esperado);
+    // Sem nada legível continua sem faixa (o critério sai da nota, marcado).
+    expect(parseFase1V32('não respondi').faixa).toBe(null);
+  });
+
   it('parser da fase 1 mapeia pergunta → trava (1→F2 … 4→F5)', () => {
     expect(PERGUNTA_PARA_TRAVA).toEqual({ 1: 2, 2: 3, 3: 4, 4: 5 });
     const r = parseFase1V32('1: sim\n2: não\n3: sim\n4: não');
