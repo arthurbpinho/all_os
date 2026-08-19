@@ -22,6 +22,9 @@ process.env.SELECAO_EXPORT_SECRET = 'test-export-secret'; // backup externo (App
 process.env.ANTHROPIC_API_KEY = '';
 process.env.OPENAI_API_KEY = '';
 process.env.GLM_API_KEY = '';
+// Limitador de TPM desligado nos testes: eles não falam com a rede, e o
+// limitador dormiria esperando a janela de 60s abrir.
+process.env.AVALIACAO_V25_TPM_LIMITER = '0';
 
 // O require do app DEVE vir depois das envs acima.
 const app = require('../server/index.js');
