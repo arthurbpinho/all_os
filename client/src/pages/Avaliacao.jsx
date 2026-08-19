@@ -18,6 +18,7 @@ import RichText from '../components/RichText';
 // saída do nó: em 'vNN-nota' ele devolve só a nota, sem análise nem feedback do
 // aluno — mais barato, porque o texto por critério some do billing.
 const EVALUATORS = [
+  { id: 'v32', label: 'v32 · pipeline (15 nós × 2 fases)', nos: 15, fases: 2 },
   { id: 'v31', label: 'v31 · pipeline (15 nós)', nos: 15 },
   { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', nos: 15 },
   { id: 'v28-nota', label: 'v28 · pipeline (15 nós) · só nota', nos: 15 },
@@ -186,7 +187,7 @@ export default function Avaliacao({ user }) {
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
-  const [evaluator, setEvaluator] = useState('v31');
+  const [evaluator, setEvaluator] = useState('v32');
   const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
@@ -621,6 +622,7 @@ export default function Avaliacao({ user }) {
                   : <>Os {nosDe(evaluator)} nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
                 {evaluator.startsWith('v28') && <> No v28 a confiança é recado para o supervisor: ela aparece no critério, mas <strong>não tira ninguém da nota</strong>.</>}
                 {evaluator === 'v31' && <> O nó responde as quatro travas como perguntas independentes e a análise vem <strong>depois</strong> delas; faixa, realização e nota são derivadas por código.</>}
+                {evaluator === 'v32' && <> Cada nó são <strong>duas chamadas</strong>: a primeira responde as quatro perguntas <strong>sem ver a régua</strong> (sem escada à vista, a impressão do atendimento não tem onde pousar), o código deriva a faixa, e a segunda decide completa ou incompleta com a régua inteira. São 30 chamadas por avaliação: pesa em tempo, pouco em dinheiro.</>}
               </div>
             )}
           </div>
