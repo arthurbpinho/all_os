@@ -138,6 +138,7 @@ function buildReport(result, log) {
   L.push(`Modelo: ${inst.model || '—'}`);
   L.push(`Effort: ${inst.effort || '—'}`);
   L.push(`Batch (50% off): ${inst.batch ? 'sim' : 'não'}`);
+  if (inst.chamadas) L.push(`Chamadas ao modelo: ${inst.chamadas}${inst.retentativas ? ` (${inst.retentativas} refeitas por ordem trocada)` : ''}`);
   if (result.casoNome) L.push(`Caso: ${result.casoNome}`);
   L.push('');
   L.push(`NOTA FINAL: ${result.notaFinal != null ? result.notaFinal + '/100' : '— (não avaliável)'}`);
@@ -461,6 +462,11 @@ export default function Avaliacao({ user }) {
             {inst.custo
               ? <> · custo: <strong>{fmtUSD(inst.custo.usd)}</strong></>
               : (inst.totais ? <> · custo: <strong title="Modelo sem preço na tabela">n/d</strong></> : null)}
+            {inst.retentativas > 0 && (
+              <span className="v25-trava-alerta" title="Chamadas EXTRAS cobradas porque a análise veio antes das travas e o nó foi refeito. Cada uma custa uma chamada inteira; desligue com AVALIACAO_V25_RETRY_ORDEM=0.">
+                {' '}· <strong>{inst.retentativas} retentativa(s) de ordem</strong>
+              </span>
+            )}
             {inst.totais && (
               <span className="v25-modelbar-tok">
                 {' '}· {fmtTok(inst.totais.input)} in · {fmtTok(inst.totais.cached)} cache · {fmtTok(inst.totais.output)} out

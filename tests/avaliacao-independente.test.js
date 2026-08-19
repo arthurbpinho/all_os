@@ -496,16 +496,46 @@ describe('Avaliação Independente — v31', () => {
     // A análise não engole as linhas de trava mesmo fora de ordem.
     expect(parseNodeOutputV31(foraDeOrdem).analise).toBe('escrevi antes.');
 
-    // runNode refaz a chamada quando a ordem vem trocada; se insistir, aceita e marca.
+    // A retentativa vem DESLIGADA: refazer custa uma chamada inteira e não prova
+    // nada sobre a ordem do raciocínio (só sobre a do texto). A detecção fica.
     const cap = {};
     const openai = fakeResponsesV31((user) => (user.includes('[CRITÉRIO]') ? foraDeOrdem : 'Corpo.'), cap);
     const r = await runAvaliacaoIndependente({
       openai, bloco1: 'b', log: 'l', model: 'gpt-5.5', effort: 'medium', version: 'v31',
     });
-    // 15 nós × 2 tentativas + sintetizador
-    expect(cap.calls.length).toBe(31);
-    expect(r.partes.every((p) => p.analiseForaDeOrdem)).toBe(true);
+    expect(cap.calls.length).toBe(16); // 15 nós + sintetizador, sem repetição
+    expect(r.instrumentacao.retentativas).toBe(0);
+    expect(r.partes.every((p) => p.analiseForaDeOrdem)).toBe(true); // marcadas
     expect(r.notaFinal).toBe(40); // F2 aberta e completa em todos → nota 4
+  });
+
+  // Se alguém ligar a retentativa por env, a chamada descartada FOI cobrada e
+  // tem de entrar na conta — senão o laboratório subestima o custo justamente
+  // na run em que ele sobe.
+  it('retentativa ligada: a tentativa descartada entra na instrumentação', async () => {
+    const antes = process.env.AVALIACAO_V25_RETRY_ORDEM;
+    process.env.AVALIACAO_V25_RETRY_ORDEM = '1'; // lido a cada chamada
+    const runComRetry = runAvaliacaoIndependente;
+    try {
+      const foraDeOrdem = ['ANÁLISE: antes.', 'F2 abre: sim', 'F2 realizada: completa', 'F3 abre: não', 'F4 abre: não', 'F5 abre: não'].join('\n');
+      let chamadas = 0;
+      const openai = { responses: { create: async (args) => {
+        chamadas++;
+        const ehCrit = args.input[0].content.includes('[CRITÉRIO]');
+        return (async function* () {
+          yield { type: 'response.output_text.delta', delta: ehCrit ? foraDeOrdem : 'Corpo.' };
+          yield { type: 'response.completed', response: { usage: { input_tokens: 1000, output_tokens: 100 } } };
+        })();
+      } } };
+      const r = await runComRetry({ openai, bloco1: 'b', log: 'l', model: 'gpt-5.6-sol', effort: 'high', version: 'v31' });
+      expect(chamadas).toBe(31);                          // 15×2 + sintetizador
+      expect(r.instrumentacao.chamadas).toBe(31);         // e a conta enxerga as 31
+      expect(r.instrumentacao.retentativas).toBe(15);
+      expect(r.instrumentacao.totais.output).toBe(3100);  // 31 × 100
+    } finally {
+      if (antes === undefined) delete process.env.AVALIACAO_V25_RETRY_ORDEM;
+      else process.env.AVALIACAO_V25_RETRY_ORDEM = antes;
+    }
   });
 
   it('pipeline v31 ponta a ponta: etiquetas chegam ao sintetizador', async () => {

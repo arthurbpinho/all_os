@@ -459,12 +459,27 @@ function concorrenciaPorTPM(reservaPorChamada, tetoConfigurado) {
   return Math.max(1, Math.min(tetoConfigurado, cabem));
 }
 
-// Quantas vezes refazer a chamada de um nó quando a ANÁLISE vem ANTES das travas
-// (v31). A ordem é o que impede a prosa de ancorar as respostas, então vale
-// insistir — mas não é falha do nó: esgotadas as tentativas, o resultado é
-// aceito e a parte fica marcada para o supervisor ver. Cada tentativa custa uma
-// chamada inteira, daí o padrão baixo.
-const V25_RETRY_ORDEM = Number(process.env.AVALIACAO_V25_RETRY_ORDEM || 1);
+// Refazer o nó quando a ANÁLISE vem ANTES das travas. DESLIGADO por padrão, por
+// dois motivos que se somam:
+//
+//   1. Custo: cada disparo é uma chamada inteira a mais. Num caso em que o
+//      modelo erra a ordem sistematicamente, a run inteira dobra.
+//   2. O remédio não pega a doença. O que preocupa é a impressão formada ANTES
+//      de qualquer linha ser escrita, dentro do raciocínio. Um modelo que
+//      decidiu a nota na cabeça e depois emitiu as travas na ordem certa passa
+//      no teste; um que emitiu fora de ordem pode ter respondido pergunta por
+//      pergunta. A ordem no papel não é evidência da ordem no pensamento.
+//
+// A DETECÇÃO fica: a parte é marcada com `analiseForaDeOrdem` e aparece na tela
+// e no .txt. Como diagnóstico ela é barata e honesta — diz que aquele nó não
+// seguiu o formato, sem fingir que provou algo sobre o raciocínio dele.
+// Para experimentar com retentativa: AVALIACAO_V25_RETRY_ORDEM=1. Lido a cada
+// chamada (como o interruptor do raciocínio), para dar pra ligar e desligar sem
+// reiniciar o servidor no meio de uma bateria de teste.
+function retriesDeOrdem() {
+  const n = Number(process.env.AVALIACAO_V25_RETRY_ORDEM);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
 
 // Retentativas por chamada, acima das do SDK. O SDK da OpenAI retenta 429/5xx só
 // 2× com backoff de ~0,5s/1s — curto demais quando o Retry-After é de segundos
@@ -779,13 +794,22 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
   const captura = capturaLigada(assets.cfg);
 
+  // A tentativa descartada FOI COBRADA: o usage de todas entra na conta, não só
+  // o da última. Sem isto o laboratório subestimaria o custo justamente nas runs
+  // em que ele mais sobe — e o número daqui existe para ser comparado com o
+  // billing real.
+  const usages = [];
   let out;
   let parsed;
+  let retentativas = 0;
   for (let tentativa = 0; ; tentativa++) {
     out = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
+    usages.push(out.usage);
     parsed = parseSaidaDoNo(out.text, assets.cfg);
-    if (!parsed.analiseForaDeOrdem || tentativa >= V25_RETRY_ORDEM) break;
-    console.warn(`[v25-ordem] nó ${criterio.num}: análise veio antes das travas — refazendo (${tentativa + 1}/${V25_RETRY_ORDEM})`);
+    const teto = retriesDeOrdem();
+    if (!parsed.analiseForaDeOrdem || tentativa >= teto) break;
+    retentativas++;
+    console.warn(`[v25-ordem] nó ${criterio.num}: análise veio antes das travas — refazendo (${tentativa + 1}/${teto})`);
   }
 
   return {
@@ -795,6 +819,9 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
     ...parsed,
     reasoning: out.reasoning || '',
     usage: out.usage,
+    // Todas as chamadas deste nó (a aproveitada e as descartadas).
+    usages,
+    retentativas,
   };
 }
 
@@ -907,7 +934,17 @@ function custoFromTotais(totais, prices, factor) {
 // API — nos 14 NÓS (que rodam em lote); o sintetizador roda síncrono no coletor,
 // então é cobrado full, e o custo abaixo soma nós(×0,5) + synth(×1) corretamente.
 function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT, batch = false) {
-  const totaisNodes = sumUsages(nodeResults.map((r) => r && r.usage));
+  // `usages` traz TODAS as chamadas do nó (incluindo tentativas descartadas por
+  // ordem); `usage` sozinho é o fallback das versões que não retentam.
+  const usagesNodes = [];
+  let retentativas = 0;
+  for (const r of nodeResults || []) {
+    if (!r) continue;
+    if (Array.isArray(r.usages) && r.usages.length) usagesNodes.push(...r.usages);
+    else usagesNodes.push(r.usage);
+    retentativas += r.retentativas || 0;
+  }
+  const totaisNodes = sumUsages(usagesNodes);
   const totaisSynth = sumUsages(synthUsage ? [synthUsage] : []);
   const totais = {
     input: totaisNodes.input + totaisSynth.input,
@@ -930,7 +967,9 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
     custo = { usd, moeda: 'USD', precosPorMTok: prices, componentes, batch: !!batch };
   }
 
-  return { model, effort, totais, custo, batch: !!batch };
+  // `retentativas` = chamadas EXTRAS cobradas por ordem trocada. Aparece na tela
+  // para o custo de uma run não subir sem explicação.
+  return { model, effort, totais, custo, batch: !!batch, retentativas, chamadas: usagesNodes.length + (synthUsage ? 1 : 0) };
 }
 
 // Monta o .txt do raciocínio que o supervisor baixa: cabeçalho com o que a run
