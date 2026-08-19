@@ -3,6 +3,7 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import LogActions from '../components/LogActions';
 import { makeLogItems, evalSection, downloadText } from '../logFiles';
+import RichText from '../components/RichText';
 
 const SORT_OPTIONS = [
   { value: 'recent', label: 'Mais recentes' },
@@ -353,7 +354,7 @@ export default function SelecaoLogs() {
                                 <span className={m.role === 'user' ? 'role-user' : 'role-assistant'}>
                                   {m.highlighted ? '★ ' : ''}{m.role === 'user' ? 'Candidato' : (log.characterName || 'Paciente')}
                                 </span>
-                                <div>{m.content}</div>
+                                <div><RichText text={m.content} /></div>
                                 {m.highlighted && m.comment && (
                                   <div style={{ marginTop: 4, fontStyle: 'italic', color: 'var(--marrs-deep)' }}>{`{${m.comment}}`}</div>
                                 )}
@@ -366,7 +367,7 @@ export default function SelecaoLogs() {
                       ? (
                         <div>
                           <div className="aval-reasoning-head" style={{ marginBottom: 10 }}>Raciocínio do avaliador</div>
-                          <div className="aval-reasoning-text">{reasoning}</div>
+                          <div className="aval-reasoning-text"><RichText text={reasoning} /></div>
                         </div>
                       )
                       : (

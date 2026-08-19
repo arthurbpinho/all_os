@@ -30,6 +30,11 @@ server/data/patient-photos/
 server/data/avaliacao-v25.json
 # Resumos de raciocínio das avaliações do v28 (um .txt por run, no volume)
 server/data/avaliacao-reasoning/
+server/data/benchmark-fila.json
+server/data/benchmark-lotes.json
+# Runs do Benchmarking de Simulação (uma por arquivo: transcrição + custo por
+# interação + resumo do raciocínio). Ficam no volume, fora do git.
+server/data/benchmark-runs/
 
 # Prompts do avaliador/entrevistador — dados sensíveis (critérios de nota,
 # gabaritos). Fora do git; vivem só no volume persistente (server/paths.js

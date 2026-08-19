@@ -4,6 +4,7 @@ import { api } from '../api';
 import ScoreBadge from '../components/ScoreBadge';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
+import RichText from '../components/RichText';
 
 // Sessão de duelo: você atende o personagem do duelo na sua própria sessão.
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
@@ -364,7 +365,7 @@ export default function DuelSession({ user }) {
           <div className="card">
             <div className="post-evaluation">
               <h4>Análise comparativa da IA</h4>
-              <div className="post-evaluation-body">{r.evaluation}</div>
+              <div className="post-evaluation-body"><RichText text={r.evaluation} /></div>
             </div>
           </div>
         )}
@@ -426,7 +427,7 @@ export default function DuelSession({ user }) {
                 <div className="chat-message-author">
                   {msg.highlighted && <span className="star-inline">★</span>} {author}
                 </div>
-                <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+                <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
                 {isUser && (
                   <div className="message-tools">
                     {msg.highlighted ? (

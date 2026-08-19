@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { downloadText } from '../logFiles';
+import RichText from './RichText';
 
 export default function ProgressionChat({ patient, user, onEvaluationComplete, onCancel }) {
   const [messages, setMessages] = useState([]);
@@ -168,7 +169,7 @@ ${evaluationText}`;
         <div className="chat-evaluation-display">
           <div className="evaluation-section">
             <div className="evaluation-text">
-              {evaluationText}
+              <RichText text={evaluationText} />
             </div>
           </div>
 
@@ -216,7 +217,7 @@ ${evaluationText}`;
         <div className="chat-messages">
           {messages.map((msg, idx) => (
             <div key={idx} className={`chat-message-row ${msg.role}`}>
-              <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+              <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
             </div>
           ))}
           {isTyping && (

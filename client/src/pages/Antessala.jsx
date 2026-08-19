@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import RichText from '../components/RichText';
 
 /* ------------------------------------------------------------------ *
  * Antessala (pré-supervisão) — Allos
@@ -530,7 +531,7 @@ function ReflectionPanel({ state, onClose }) {
           <>
             {lines.map((l, i) => (
               <p key={i} style={{ fontSize: 13.5, color: C.ink, margin: '0 0 8px', paddingLeft: 14, position: 'relative' }}>
-                <span style={{ position: 'absolute', left: 0, color: C.action }}>›</span>{l}
+                <span style={{ position: 'absolute', left: 0, color: C.action }}>›</span><RichText text={l} />
               </p>
             ))}
             <p style={{ fontSize: 11, color: C.inkSoft, margin: '6px 0 0', fontStyle: 'italic' }}>Estas perguntas não trazem respostas. Elas só existem para você aprofundar o que já escreveu. Edite os campos acima como quiser.</p>

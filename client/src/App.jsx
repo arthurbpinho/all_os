@@ -19,6 +19,7 @@ import AdminPrompts from './pages/AdminPrompts';
 import AdminErrorLogs from './pages/AdminErrorLogs';
 import Avaliacao from './pages/Avaliacao'
 import SimulacaoIndependente from './pages/SimulacaoIndependente'
+import BenchmarkSimulacao from './pages/BenchmarkSimulacao'
 import Profile from './pages/Profile';
 import Missoes from './pages/Missoes';
 import Ranking from './pages/Ranking';
@@ -315,6 +316,13 @@ export default function App() {
               <Link to="/simulacao-independente" className={isActive('/simulacao-independente') ? 'active' : ''}>
                 {ICONS.freeplay}<span>Simulação Independente</span>
               </Link>
+              {/* Mesmo laboratório do paciente, com o ALUNO automatizado: sobe o log
+                  de um atendimento, a IA reproduz a persona de quem atendeu e
+                  refaz o caso por N interações. Mede custo e sustentação do
+                  paciente num atendimento inteiro. Sem avaliação. */}
+              <Link to="/benchmark-simulacao" className={isActive('/benchmark-simulacao') ? 'active' : ''}>
+                {ICONS.log}<span>Benchmarking de Simulação</span>
+              </Link>
             </>
           )}
 
@@ -465,6 +473,7 @@ export default function App() {
           <Route path="/supervisor" element={<Logs user={user} />} />
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
           <Route path="/simulacao-independente" element={<SimulacaoIndependente user={user} />} />
+          <Route path="/benchmark-simulacao" element={<BenchmarkSimulacao />} />
           <Route path="/suporte" element={<Suporte user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />

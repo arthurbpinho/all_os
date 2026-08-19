@@ -96,6 +96,8 @@ const PIPELINE_VERSIONS = {
     confiancaBaixaExclui: true,
     capturaReasoning: false,
     saudacao: SAUDACAO_V25,
+    variantes: true,
+    formatoSaida: 'nota-direta',
   },
   v28: {
     id: 'v28',
@@ -120,6 +122,37 @@ const PIPELINE_VERSIONS = {
     // impressão e só depois narrar a régua. Aqui ele não tem número para mirar
     // (os numerais saíram do prompt) e a hierarquia é aplicada por código.
     travasEstruturais: true,
+    variantes: true,
+    formatoSaida: 'travas-v28',
+  },
+  // v31 — consolidação da revisão de escrita. Mudanças que o CÓDIGO enxerga:
+  //   · sem variantes (o arquivo não tem blocos @variante; só uma entrada no
+  //     alternador);
+  //   · sem CONFIANÇA (o campo deixou de existir);
+  //   · saída nova: por faixa, `Fn abre: sim|não` + `Fn realizada:
+  //     completa|incompleta` (só das que abriram, mais a da F1 quando a trava
+  //     da F2 não abre), e a ANÁLISE por ÚLTIMO — a prosa não ancora mais as
+  //     respostas, porque vem depois delas;
+  //   · a etiqueta que o sintetizador lê ([erro], [clichê], [potente],
+  //     [preciso], [excepcional]) é escrita por código, derivada só da faixa.
+  // A derivação da faixa é a MESMA do v28 (sobe de baixo para cima, para na
+  // primeira fechada, descarta trava aberta acima de fechada). O nó responde as
+  // quatro travas como perguntas independentes justamente para não saber onde
+  // vai parar — se soubesse, poderia mirar a nota.
+  v31: {
+    id: 'v31',
+    dirs: ['v31'],
+    montado: 'prompt-no-v31-montado.md',
+    criterios: 'criterios-no-v31.md',
+    sintetizador: 'sintetizador-v31.md',
+    nCriterios: 15,
+    confiancaBaixaExclui: false, // não há confiança nesta versão
+    capturaReasoning: true,
+    saudacao: SAUDACAO_V28,
+    travasEstruturais: true,
+    variantes: false,
+    formatoSaida: 'travas-v31',
+    etiquetaNaAnalise: true,
   },
 };
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
@@ -269,9 +302,11 @@ function selectVariant(text, variant, arquivo = 'O prompt do nó montado') {
 // comentários de CACHE BREAKPOINT, já com a variante escolhida aplicada. PURO
 // (recebe o texto, não lê disco) para o editor de prompts poder validar um
 // rascunho com exatamente o mesmo parser que a produção usa.
-function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó montado') {
-  if (!isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
-  const montado = selectVariant(raw, variant, arquivo);
+// `comVariantes: false` para as versões cujo .md não tem blocos `@variante` (o
+// v31 em diante): o arquivo inteiro é o prompt, e não há o que selecionar.
+function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó montado', comVariantes = true) {
+  if (comVariantes && !isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
+  const montado = comVariantes ? selectVariant(raw, variant, arquivo) : String(raw);
 
   const start = montado.indexOf('## [METACOMANDO]');
   const bpA = montado.indexOf('<!-- ===== CACHE BREAKPOINT A');
@@ -323,12 +358,16 @@ function clearAssetsCache() {
 // por (versão, variante) e invalidado por clearAssetsCache.
 function loadAssets(version = DEFAULT_VERSION, variant = DEFAULT_VARIANT) {
   const cfg = versionConfig(version);
-  if (!isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
-  const chave = `${version}|${variant}`;
+  const comVariantes = cfg.variantes !== false;
+  // Versão sem variantes ignora o parâmetro (e aceita null, que é o que o
+  // registry devolve para uma entrada de alternador sem variante).
+  const v = comVariantes ? (variant || DEFAULT_VARIANT) : null;
+  if (comVariantes && !isValidVariant(v)) throw new Error('Variante inválida: ' + variant);
+  const chave = `${version}|${v || '-'}`;
   if (_assetsCache.has(chave)) return _assetsCache.get(chave);
 
   const dir = versionDir(cfg);
-  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), variant, cfg.montado);
+  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), v, cfg.montado, comVariantes);
 
   const criteria = parseCriteria(fs.readFileSync(path.join(dir, cfg.criterios), 'utf8'));
   if (criteria.length !== cfg.nCriterios) {
@@ -337,7 +376,7 @@ function loadAssets(version = DEFAULT_VERSION, variant = DEFAULT_VARIANT) {
 
   const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador);
 
-  const assets = { version, variant, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
+  const assets = { version, variant: v, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable };
   _assetsCache.set(chave, assets);
   return assets;
 }
@@ -358,8 +397,10 @@ function parseCriteria(raw) {
     descs[Number(m[1])] = m[0].trim();
   }
 
+  // Separador entre nome e linha curta: travessão até o v28, dois-pontos a
+  // partir do v31. Aceita os dois para os .md das duas gerações conviverem.
   const shorts = {};
-  const reShort = /^(\d{1,2})\.\s+\*\*(.+?)\*\*\s+—\s+(.+?)\.?\s*$/gm;
+  const reShort = /^(\d{1,2})\.\s+\*\*(.+?)\*\*\s*(?:—|:)\s+(.+?)\.?\s*$/gm;
   while ((m = reShort.exec(shortSection))) {
     shorts[Number(m[1])] = { nome: m[2].trim(), linhaCurta: m[3].trim() };
   }
@@ -417,6 +458,13 @@ function concorrenciaPorTPM(reservaPorChamada, tetoConfigurado) {
   const cabem = Math.floor((OPENAI_V25_TPM * OPENAI_V25_TPM_FATOR) / reservaPorChamada);
   return Math.max(1, Math.min(tetoConfigurado, cabem));
 }
+
+// Quantas vezes refazer a chamada de um nó quando a ANÁLISE vem ANTES das travas
+// (v31). A ordem é o que impede a prosa de ancorar as respostas, então vale
+// insistir — mas não é falha do nó: esgotadas as tentativas, o resultado é
+// aceito e a parte fica marcada para o supervisor ver. Cada tentativa custa uma
+// chamada inteira, daí o padrão baixo.
+const V25_RETRY_ORDEM = Number(process.env.AVALIACAO_V25_RETRY_ORDEM || 1);
 
 // Retentativas por chamada, acima das do SDK. O SDK da OpenAI retenta 429/5xx só
 // 2× com backoff de ~0,5s/1s — curto demais quando o Retry-After é de segundos
@@ -599,6 +647,71 @@ function derivarFaixa(travas) {
   return { faixa, inconsistente };
 }
 
+// Captura do resumo do raciocínio: a versão pede, mas dá para desligar por env
+// sem deploy (AVALIACAO_V25_REASONING=0) — é o interruptor para medir se ela
+// pesa no billing ou no rate limit. Nota: a RESERVA de TPM não muda com ela,
+// porque o teto de saída é o mesmo nos dois caminhos; o que muda é o transporte.
+function capturaLigada(cfg) {
+  if (process.env.AVALIACAO_V25_REASONING === '0') return false;
+  return !!(cfg && cfg.capturaReasoning);
+}
+
+// Etiqueta que o sintetizador lê no início de cada análise. Sai SÓ da faixa —
+// completa/incompleta não a muda. É escrita por código: o nó nunca a vê, então
+// não pode escolher o tom da própria análise. Ver sintetizador-v31.md.
+const ETIQUETA_POR_FAIXA = { 1: 'erro', 2: 'clichê', 3: 'potente', 4: 'preciso', 5: 'excepcional' };
+
+// Saída do nó na versão v31: uma linha `Fn abre` por trava e uma `Fn realizada`
+// por faixa aberta (mais a da F1 quando a trava da F2 não abre), com a ANÁLISE
+// no FIM.
+//
+// O nó responde as quatro travas como perguntas independentes e não sabe onde
+// vai parar — por isso responde a realização de todas as faixas que abriu. Só a
+// realização da faixa DERIVADA conta; as outras são descartadas aqui mesmo e não
+// chegam a ser persistidas. Se o nó soubesse qual delas contaria, saberia a nota
+// e poderia preencher as travas de trás para frente.
+function parseNodeOutputV31(text) {
+  const t = String(text || '');
+
+  const travas = {};
+  const realizadas = {};
+  for (const n of [1, 2, 3, 4, 5]) {
+    if (n >= 2) {
+      const abre = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s+abre\\s*:\\s*(sim|n[ãa]o)`, 'im'));
+      travas[n] = abre ? /^sim$/i.test(abre[1]) : null;
+    }
+    const real = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s+realizada\\s*:\\s*(completa|incompleta)`, 'im'));
+    realizadas[n] = real ? real[1].toLowerCase() : null;
+  }
+
+  const { faixa, inconsistente } = derivarFaixa(travas);
+  // Realização ausente vale `completa`: a ímpar tem de ser afirmada, nunca
+  // acontecer por omissão. Vale inclusive na F1, onde completa é a nota maior.
+  const realizacao = faixa == null ? null : realizadas[faixa];
+  const nota = faixa == null ? null : NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0];
+
+  // A ANÁLISE vem por último no formato. Se ela aparecer ANTES da primeira
+  // linha de trava, a prosa ancorou as respostas — é o que o caller retenta.
+  const idxAnalise = t.search(/^[^\S\n]*AN[ÁA]LISE\s*:/im);
+  const idxPrimeiraTrava = t.search(/^[^\S\n]*F[1-5]\s+(?:abre|realizada)\s*:/im);
+  const analiseForaDeOrdem = idxAnalise !== -1 && idxPrimeiraTrava !== -1 && idxAnalise < idxPrimeiraTrava;
+
+  const anaM = t.match(/AN[ÁA]LISE\s*:\s*([\s\S]*?)(?=\n[^\S\n]*F[1-5]\s+(?:abre|realizada)\s*:|$)/i);
+  const analise = anaM ? anaM[1].trim() : '';
+
+  return {
+    nota,
+    confianca: null, // o v31 não tem confiança
+    analise,
+    travas,
+    faixa,
+    realizacao,
+    inconsistente,
+    analiseForaDeOrdem,
+    etiqueta: faixa == null ? null : ETIQUETA_POR_FAIXA[faixa],
+  };
+}
+
 // Saída do nó na versão de TRAVAS ESTRUTURAIS (v28). Lê as quatro linhas de
 // trava + a realização; a nota é derivada, nunca lida do texto.
 function parseNodeOutputTravas(text) {
@@ -633,7 +746,10 @@ function parseNodeOutputTravas(text) {
 // Parser da saída do nó, conforme a versão: v28 responde travas (a nota é
 // derivada aqui), v25 escreve a NOTA direto.
 function parseSaidaDoNo(text, cfg) {
-  return cfg && cfg.travasEstruturais ? parseNodeOutputTravas(text) : parseNodeOutput(text);
+  const formato = (cfg && cfg.formatoSaida) || 'nota-direta';
+  if (formato === 'travas-v31') return parseNodeOutputV31(text);
+  if (formato === 'travas-v28') return parseNodeOutputTravas(text);
+  return parseNodeOutput(text);
 }
 
 // Estrutura a saída do nó por regex simples (conforme [SAÍDA] do prompt).
@@ -661,16 +777,24 @@ function parseNodeOutput(text) {
 // evita refazer a concatenação grande a cada nó. Ver buildDeveloper.
 async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const captura = !!(assets.cfg && assets.cfg.capturaReasoning);
-  const { text, reasoning, usage } = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
-  const parsed = parseSaidaDoNo(text, assets.cfg);
+  const captura = capturaLigada(assets.cfg);
+
+  let out;
+  let parsed;
+  for (let tentativa = 0; ; tentativa++) {
+    out = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
+    parsed = parseSaidaDoNo(out.text, assets.cfg);
+    if (!parsed.analiseForaDeOrdem || tentativa >= V25_RETRY_ORDEM) break;
+    console.warn(`[v25-ordem] nó ${criterio.num}: análise veio antes das travas — refazendo (${tentativa + 1}/${V25_RETRY_ORDEM})`);
+  }
+
   return {
     num: criterio.num,
     nome: criterio.nome,
     linhaCurta: criterio.linhaCurta,
     ...parsed,
-    reasoning: reasoning || '',
-    usage,
+    reasoning: out.reasoning || '',
+    usage: out.usage,
   };
 }
 
@@ -706,11 +830,17 @@ function aggregate(results, weights, confiancaBaixaExclui = true) {
 // entra. O corte por confiança segue o da versão: na v25 `baixa` também sai do
 // feedback; na v28 todas as análises vão para o sintetizador, que espera uma
 // por critério.
-function buildAnalises(results, confiancaBaixaExclui = true) {
+function buildAnalises(results, confiancaBaixaExclui = true, comEtiqueta = false) {
   const blocks = results
     .filter((r) => (!confiancaBaixaExclui || r.confianca !== 'baixa') && r.analise)
     .sort((a, b) => a.num - b.num)
-    .map((r) => `## ${r.num} · ${r.nome}\n${r.linhaCurta}\n${r.analise}`);
+    .map((r) => {
+      // v31: a etiqueta ([preciso], [clichê]...) é colada por CÓDIGO a partir da
+      // faixa. O nó não a escreve nem a vê, então não escolhe o tom com que a
+      // própria análise chega ao sintetizador.
+      const etiqueta = comEtiqueta && r.etiqueta ? `[${r.etiqueta}] ` : '';
+      return `## ${r.num} · ${r.nome}\n${r.linhaCurta}\n${etiqueta}${r.analise}`;
+    });
   return blocks.join('\n\n');
 }
 
@@ -832,17 +962,21 @@ function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, ba
   for (const p of blocos) {
     L.push('─'.repeat(52));
     L.push(`${p.num} · ${p.nome}`);
+    // A confiança só entra nas versões que a têm (saiu no v31); a etiqueta, nas
+    // que a geram por código.
     const meta = [
       Number.isFinite(p.nota) ? `nota ${p.nota}/10` : 'sem nota',
-      p.confianca ? `confiança ${p.confianca}` : 'sem confiança',
+      p.etiqueta ? `etiqueta ${p.etiqueta}` : null,
+      p.confianca ? `confiança ${p.confianca}` : null,
       p.incluido ? 'na nota final' : 'fora da nota final',
-    ];
+    ].filter(Boolean);
     L.push(`[${meta.join(' · ')}]`);
     // v28: como a nota foi derivada — quais travas abriram e onde parou.
     if (p.travas) {
       const linha = [2, 3, 4, 5].map((n) => `F${n} ${p.travas[n] === true ? '✓' : p.travas[n] === false ? '✗' : '?'}`).join('  ');
       L.push(`[${linha}  →  faixa F${p.faixa} · realização ${p.realizacao || 'não declarada (assumida completa)'}]`);
-      if (p.travasInconsistentes) L.push('[⚠ trava aberta acima de uma fechada — o código parou na primeira fechada]');
+      if (p.travasInconsistentes) L.push('[⚠ trava aberta acima de uma fechada — descartada; o código parou na primeira fechada]');
+      if (p.analiseForaDeOrdem) L.push('[⚠ a análise veio antes das travas mesmo depois da retentativa]');
     }
     L.push('');
     L.push(p.reasoning.trim());
@@ -902,7 +1036,7 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
 
   return finishPipeline({
     openai, assets, log, results, weights, model, effort, provider, batch: false, evaluatorId,
-    capturaSint: !!(assets.cfg && assets.cfg.capturaReasoning),
+    capturaSint: capturaLigada(assets.cfg),
   });
 }
 
@@ -927,6 +1061,12 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
     travas: r.travas || null,
     faixa: r.faixa != null ? r.faixa : null,
     realizacao: r.realizacao || null,
+    // v31: etiqueta derivada da faixa (a que o sintetizador lê) e o aviso de que
+    // a prosa veio antes das travas mesmo depois da retentativa.
+    etiqueta: r.etiqueta || null,
+    analiseForaDeOrdem: !!r.analiseForaDeOrdem,
+    // Trava aberta acima de uma fechada foi DESCARTADA pelo código. Sem a
+    // confiança, este é o sinal mais próximo que sobrou de "o nó titubeou aqui".
     travasInconsistentes: !!r.inconsistente,
     // Fora da conta final (v25: `baixa`; qualquer versão: nó que não devolveu
     // número). Aparece na tela do supervisor de qualquer jeito, marcado.
@@ -936,7 +1076,7 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
   // Sintetizador + feedback do aluno só fazem sentido com pelo menos um critério
   // avaliável. Caso degenerado (nenhuma nota, ou tudo `baixa` no v25): só o
   // supervisor vê as partes; não há feedback de aluno a montar.
-  const analises = buildAnalises(results, excluiBaixa);
+  const analises = buildAnalises(results, excluiBaixa, !!cfg.etiquetaNaAnalise);
   let corpoSintetizador = null;
   let feedbackAluno = null;
   let synthUsage = null;
@@ -1023,6 +1163,8 @@ module.exports = {
   finalizePipeline,
   buildReasoningTxt,
   modelEmiteResumo,
+  parseNodeOutputV31,
+  ETIQUETA_POR_FAIXA,
   parseNodeOutputTravas,
   derivarFaixa,
   NOTAS_POR_FAIXA,

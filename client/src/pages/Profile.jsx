@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import PhotoCropper from '../components/PhotoCropper';
+import RichText from '../components/RichText';
 
 export default function Profile({ user, onUpdate }) {
   const navigate = useNavigate();
@@ -309,7 +310,7 @@ export default function Profile({ user, onUpdate }) {
               {generatingDesc ? (
                 <span className="visual-desc-loading"><span className="spinner" /> Gerando descrição visual…</span>
               ) : visualDescription ? (
-                visualDescription
+                <RichText text={visualDescription} />
               ) : (
                 'Adicione uma foto de perfil para obter uma descrição visual para utilizar como aparência nos casos com seu paciente'
               )}

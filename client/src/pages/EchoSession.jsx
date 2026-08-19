@@ -11,6 +11,7 @@ import NeuroTestComparison from '../components/NeuroTestComparison';
 import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
+import RichText from '../components/RichText';
 
 // Bloco de texto (Neuroavaliação) que descreve a seleção de testes do aluno para
 // o avaliador — vai no fim da transcrição enviada à correção. O gabarito (bateria
@@ -1009,7 +1010,7 @@ export default function EchoSession({ user, sessionType }) {
               <div className="post-evaluation-body">
                 {/* Blocos de máquina (notas por critério, resultado de missão)
                     somem da visão do aluno, mas continuam salvos no log. */}
-                {cleanEvaluationForStudent(evaluationText)}
+                <RichText text={cleanEvaluationForStudent(evaluationText)} />
               </div>
             </div>
           )}
@@ -1339,7 +1340,7 @@ export default function EchoSession({ user, sessionType }) {
                   {msg.highlighted && <span className="star-inline">★</span>} {author}
                 </div>
                 <div className={`chat-message ${msg.role}`}>
-                  {msg.content}
+                  <RichText text={msg.content} />
                 </div>
                 {isUser && (
                   <div className="message-tools">

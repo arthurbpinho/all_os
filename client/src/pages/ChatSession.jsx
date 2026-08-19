@@ -9,6 +9,7 @@ import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from 
 import { makeLogItems, evalSection as evalSectionTxt, downloadText } from '../logFiles';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 import { useWakeLock } from '../useWakeLock';
+import RichText from '../components/RichText';
 
 const PHASE_SIMULATION = 'simulation';
 const PHASE_EVALUATING = 'evaluating';
@@ -715,7 +716,7 @@ export default function ChatSession({ user }) {
               <div className="post-evaluation-body">
                 {/* Blocos de máquina (notas por critério, marcadores de nota)
                     somem da visão do aluno, mas continuam salvos no log. */}
-                {cleanEvaluationForStudent(evaluationText)}
+                <RichText text={cleanEvaluationForStudent(evaluationText)} />
               </div>
             </div>
           )}
@@ -847,7 +848,7 @@ export default function ChatSession({ user }) {
               <div className="chat-message-author">
                 {msg.role === 'user' ? user.name : item?.title || 'Paciente'}
               </div>
-              <div className={`chat-message ${msg.role}`}>{msg.content}</div>
+              <div className={`chat-message ${msg.role}`}><RichText text={msg.content} /></div>
             </div>
           );
         })}
