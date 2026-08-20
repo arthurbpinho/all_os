@@ -96,6 +96,33 @@ describe('Benchmark do paciente (link com senha)', () => {
     }
   });
 
+  // Regressão: o helmet manda Referrer-Policy: no-referrer no app inteiro, e por
+  // isso o navegador envia `Origin: null` no POST do formulário. O allowlist do
+  // CORS rejeitava esse valor e o login morria com 500 em produção — mas passava
+  // nos testes, porque o supertest não manda Origin nenhum. Todo caso abaixo
+  // simula um navegador de verdade.
+  it.each([
+    ['null', 'null'],
+    ['origem do proprio host', 'http://127.0.0.1'],
+    ['origem estranha', 'https://sei-la.exemplo.com'],
+  ])('POST com Origin %s não é barrado pelo CORS', async (_rotulo, origin) => {
+    const res = await request(app)
+      .post('/benchmarkpaciente')
+      .set('Origin', origin)
+      .type('form')
+      .send({ senha: SENHA });
+    // O que importa é não estourar no middleware de CORS (500). A rota é
+    // mesmo-origem, protegida por senha, e não expõe API pra outra origem.
+    expect(res.status).toBe(303);
+    expect(cookieDe(res)).toBeTruthy();
+  });
+
+  it('GET com Origin: null também passa', async () => {
+    const res = await request(app).get('/benchmarkpaciente').set('Origin', 'null');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('Senha de acesso');
+  });
+
   it('a rota não é engolida pelo catch-all da SPA', async () => {
     const res = await request(app).get('/benchmarkpaciente');
     // Se o catch-all pegasse, viria o index.html do client (com <div id="root">).
