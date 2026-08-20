@@ -8533,6 +8533,198 @@ app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'),
   res.status(status).json(out);
 });
 
+// ============================================================================
+// BENCHMARK DO PACIENTE SIMULADO — relatório estático atrás de senha
+// ----------------------------------------------------------------------------
+// Link fixo (/benchmarkpaciente) pra circular o relatório do benchmark com quem
+// precisa lê-lo, sem criar conta. NÃO é área do app: é UM arquivo HTML
+// autocontido em public/, servido atrás de uma senha compartilhada.
+//
+// O arquivo é gerado fora do repo (a pasta avaliacao/ é gitignorada por conter
+// os logs brutos e os prompts dos personagens); pro deploy, só a página final
+// é copiada pra public/.
+// ============================================================================
+const BENCHMARK_HTML = path.join(__dirname, '..', 'public', 'benchmark-paciente.html');
+// Senha compartilhada. Mesmo espírito da do processo seletivo: vai por mensagem
+// pra quem vai ler e só destrava um relatório interno — não protege dado
+// pessoal. Quem segura força bruta é o benchmarkLimiter.
+const BENCHMARK_PASSWORD = process.env.BENCHMARK_PASSWORD || 'albires1';
+const BENCHMARK_COOKIE = 'benchmark_acesso';
+const BENCHMARK_TTL_H = 12;
+
+function senhaBenchmarkConfere(entrada) {
+  const a = Buffer.from(String(entrada == null ? '' : entrada), 'utf8');
+  const b = Buffer.from(BENCHMARK_PASSWORD, 'utf8');
+  if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
+  return crypto.timingSafeEqual(a, b);
+}
+
+// O app não usa cookie-parser (nenhuma outra rota precisa de cookie), então o
+// header é lido na mão em vez de puxar dependência nova só por isto.
+function lerCookie(req, nome) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const parte of raw.split(';')) {
+    const i = parte.indexOf('=');
+    if (i < 0) continue;
+    if (parte.slice(0, i).trim() === nome) {
+      try { return decodeURIComponent(parte.slice(i + 1).trim()); } catch { return null; }
+    }
+  }
+  return null;
+}
+
+function benchmarkLiberado(req) {
+  const tok = lerCookie(req, BENCHMARK_COOKIE);
+  if (!tok) return false;
+  try {
+    const p = jwt.verify(tok, JWT_SECRET);
+    return p && p.scope === 'benchmark';
+  } catch { return false; }
+}
+
+// O CSP global do app é script-src 'self', que bloquearia o script inline do
+// relatório (os botões de download). Em vez de afrouxar a política do app
+// inteiro, esta rota manda um CSP próprio liberando SÓ o hash daquele script —
+// se o relatório for regerado e o script mudar, o hash muda junto e nada
+// silenciosamente deixa de valer. O hash é calculado uma vez, na primeira
+// visita, e recalculado se o arquivo for trocado (mtime muda).
+let _bmHashCache = { mtime: 0, hashes: [] };
+function hashesDoRelatorio() {
+  let st;
+  try { st = fs.statSync(BENCHMARK_HTML); } catch { return []; }
+  if (st.mtimeMs === _bmHashCache.mtime) return _bmHashCache.hashes;
+  const html = fs.readFileSync(BENCHMARK_HTML, 'utf8');
+  const hashes = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(
+    (m) => `'sha256-${crypto.createHash('sha256').update(m[1], 'utf8').digest('base64')}'`
+  );
+  _bmHashCache = { mtime: st.mtimeMs, hashes };
+  return hashes;
+}
+
+function cspDoRelatorio() {
+  const scripts = ["'self'", ...hashesDoRelatorio()].join(' ');
+  return [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    `script-src ${scripts}`,
+    "script-src-attr 'none'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: blob:",
+    // O download monta um Blob e clica num <a download>. Esta combinação foi
+    // verificada em navegador com o CSP aplicado: sem blob: aqui, os botões
+    // de exportação morrem calados.
+    "media-src 'self' blob:",
+    "connect-src 'self' blob:",
+    "upgrade-insecure-requests",
+  ].join('; ');
+}
+
+const benchmarkLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  keyGenerator: ipKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+});
+
+function paginaSenhaBenchmark({ erro } = {}) {
+  return `<!doctype html>
+<html lang="pt-BR"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Benchmark do paciente simulado — Allos</title>
+<style>
+:root{color-scheme:light dark;--bg:#F4F5F8;--card:#fff;--ink:#171A21;--muted:#6B7383;
+  --rule:#DCE0E7;--accent:#1F4FD8;--crit:#AE2317}
+@media (prefers-color-scheme:dark){:root{--bg:#0D1015;--card:#14181F;--ink:#E7EAF0;
+  --muted:#8F98A8;--rule:#252B35;--accent:#88A6FF;--crit:#F1786C}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:var(--bg);color:var(--ink);padding:24px;
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:8px;
+  padding:36px 34px;max-width:420px;width:100%}
+.eyebrow{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);
+  margin:0 0 14px;font-family:ui-monospace,monospace}
+h1{font-family:Georgia,serif;font-weight:500;font-size:1.6rem;line-height:1.2;margin:0 0 10px}
+p.sub{color:var(--muted);font-size:.94rem;line-height:1.55;margin:0 0 24px}
+label{display:block;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:7px;font-family:ui-monospace,monospace}
+input{width:100%;padding:11px 13px;font-size:1rem;border:1px solid var(--rule);
+  border-radius:5px;background:var(--bg);color:var(--ink);font-family:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+button{width:100%;margin-top:16px;padding:12px;font-size:.96rem;font-weight:600;
+  background:var(--accent);color:#fff;border:0;border-radius:5px;cursor:pointer;
+  font-family:inherit}
+button:hover{filter:brightness(1.08)}
+button:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.erro{background:color-mix(in srgb,var(--crit) 12%,transparent);color:var(--crit);
+  border:1px solid color-mix(in srgb,var(--crit) 35%,transparent);border-radius:5px;
+  padding:10px 12px;font-size:.9rem;margin-bottom:18px}
+</style></head><body>
+<main class="card">
+  <p class="eyebrow">Allos · acesso restrito</p>
+  <h1>Benchmark do paciente simulado</h1>
+  <p class="sub">Relatório de escolha do modelo de IA que opera o paciente simulado.
+     Informe a senha de acesso para ler.</p>
+  ${erro ? `<p class="erro">${erro}</p>` : ''}
+  <form method="POST" action="/benchmarkpaciente" autocomplete="off">
+    <label for="senha">Senha de acesso</label>
+    <input id="senha" name="senha" type="password" required autofocus
+           autocomplete="current-password" enterkeyhint="go">
+    <button type="submit">Ver o relatório</button>
+  </form>
+</main></body></html>`;
+}
+
+// O relatório é privado: nada de cache compartilhado nem indexação.
+function enviaRelatorio(req, res) {
+  if (!fs.existsSync(BENCHMARK_HTML)) {
+    return res.status(503).type('html').send(paginaSenhaBenchmark({
+      erro: 'O relatório ainda não foi publicado nesta instância.',
+    }));
+  }
+  res.setHeader('Content-Security-Policy', cspDoRelatorio());
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.type('html').sendFile(BENCHMARK_HTML);
+}
+
+app.get('/benchmarkpaciente', benchmarkLimiter, (req, res) => {
+  if (benchmarkLiberado(req)) return enviaRelatorio(req, res);
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  res.type('html').send(paginaSenhaBenchmark());
+});
+
+app.post('/benchmarkpaciente', benchmarkLimiter,
+  express.urlencoded({ extended: false, limit: '2kb' }),
+  (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+    if (!senhaBenchmarkConfere(req.body && req.body.senha)) {
+      return res.status(401).type('html').send(paginaSenhaBenchmark({
+        erro: 'Senha incorreta. Confira e tente de novo.',
+      }));
+    }
+    const token = jwt.sign({ scope: 'benchmark' }, JWT_SECRET, { expiresIn: `${BENCHMARK_TTL_H}h` });
+    res.cookie(BENCHMARK_COOKIE, token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: BENCHMARK_TTL_H * 60 * 60 * 1000,
+      path: '/benchmarkpaciente',
+    });
+    // PRG: redireciona pro GET pra que dar F5 não reenvie a senha.
+    res.redirect(303, '/benchmarkpaciente');
+  });
+
 // Serve static files in production
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientDist)) {
