@@ -143,6 +143,19 @@ function isLocalViteDevOrigin(origin) {
   }
 }
 
+// O relatório do benchmark (/benchmarkpaciente) é montado ANTES do CORS de
+// propósito, e as rotas são registradas neste router lá embaixo, onde as
+// dependências (JWT, limiters) já existem.
+//
+// Motivo: o helmet manda Referrer-Policy: no-referrer no app inteiro, e pela
+// spec do Fetch um form POST partindo de uma página com essa política envia
+// `Origin: null`. O allowlist abaixo rejeita esse valor (`new URL('null')`
+// lança), então o login pela senha morria com 500 em produção. Como a página é
+// mesmo-origem e não expõe API, o caminho certo é o CORS nem ver essa rota —
+// e não afrouxar o allowlist pra aceitar `null`, que valeria pra todo mundo.
+const benchmarkRouter = express.Router();
+app.use('/benchmarkpaciente', benchmarkRouter);
+
 app.use(cors((req, cb) => {
   const origin = req.headers.origin;
   // Same-origin (sem header Origin) sempre passa.
@@ -8696,14 +8709,14 @@ function enviaRelatorio(req, res) {
   res.type('html').sendFile(BENCHMARK_HTML);
 }
 
-app.get('/benchmarkpaciente', benchmarkLimiter, (req, res) => {
+benchmarkRouter.get('/', benchmarkLimiter, (req, res) => {
   if (benchmarkLiberado(req)) return enviaRelatorio(req, res);
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   res.type('html').send(paginaSenhaBenchmark());
 });
 
-app.post('/benchmarkpaciente', benchmarkLimiter,
+benchmarkRouter.post('/', benchmarkLimiter,
   express.urlencoded({ extended: false, limit: '2kb' }),
   (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
