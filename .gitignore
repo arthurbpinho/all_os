@@ -50,3 +50,7 @@ entrevistador/
 server/data/exercises.json
 server/data/freeplay-characters.json
 server/data/neuro-characters.json
+
+# Documentação interna e material de apoio — ficam só na máquina, fora do git.
+SEGURANCA.md
+.manuais/
