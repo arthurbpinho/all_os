@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 
 // Detecta se o app já está rodando em modo standalone (instalado como PWA)
@@ -148,6 +149,12 @@ export default function Login({ onLogin, visitorAtivo = false }) {
           </button>
         </form>
 
+        <div className="login-links">
+          <Link to="/esqueci-senha">Esqueci minha senha</Link>
+          <span aria-hidden="true">·</span>
+          <Link to="/cadastro">Criar uma conta</Link>
+        </div>
+
         <div className="login-or">
           <span>ou</span>
         </div>
@@ -181,7 +188,7 @@ export default function Login({ onLogin, visitorAtivo = false }) {
         target="_blank"
         rel="noopener noreferrer"
       >
-        Quer sair do modo visitante e ter uma conta real na all<span className="accent">_OS</span>? Participe do processo seletivo!
+        Quer fazer parte da equipe da all<span className="accent">_OS</span>? Participe do processo seletivo!
       </a>
 
       {showAndroidInstructions && (

@@ -19,8 +19,8 @@
 //
 // O v16-2 (6 critérios) saiu do alternador: nenhum modo de produção usa mais
 // aquela grade, e o laboratório passou a comparar só as linhas vivas — v18-25,
-// v25, v28 e v31. O parser dele (parseV162) fica, porque o store guarda runs
-// antigas que ainda são lidas por ele.
+// v25, v28, v29, v31 e v32. O parser dele (parseV162) fica, porque o store
+// guarda runs antigas que ainda são lidas por ele.
 
 const fs = require('fs');
 const path = require('path');
@@ -61,12 +61,19 @@ const CRIT_V1825 = {
 //   ...        → nó devolve ANÁLISE+NOTA+CONFIANÇA → sintetizador → feedback.
 //   ...-nota   → nó devolve só a NOTA → sem sintetizador, sem feedback (barato).
 //
-// v31 é a versão em teste (travas respondidas uma a uma, análise depois delas,
-// sem confiança, etiqueta escrita por código); v28 e v25 ficam no alternador
-// para rodar o MESMO log e comparar nota, feedback e custo. Nenhuma delas é
-// usada por modo de produção — a produção segue no avaliador de sempre.
+// v29 é a versão em teste (travas respondidas uma a uma, análise depois delas,
+// sem confiança, etiqueta escrita por código, e o "aconteceu e funcionou" da
+// trava separado do "caracteriza o trabalho" da régua); v32, v31, v28 e v25
+// ficam no alternador para rodar o MESMO log e comparar nota, feedback e
+// custo. Nenhuma delas é usada por modo de produção — a produção segue no
+// avaliador de sempre.
 const EVALUATORS = {
   'v18-25': { id: 'v18-25', label: 'v18.25 · 15 critérios', kind: 'single', promptFile: path.join(AVALIACAO_DIR, 'avaliador 18', 'avaliador-v18-25.md'), criterios: CRIT_V1825 },
+  // v29 é a mais NOVA (o número é do rascunho do prompt, não da ordem de
+  // chegada): volta a uma chamada por nó, com as travas da F3 e da F4 na
+  // redação do v32 e os dois eixos de decisão separados. Vem primeiro por ser
+  // a que está em teste agora. Sem variante, como o v31.
+  'v29': { id: 'v29', label: 'v29 · pipeline (15 nós)', kind: 'pipeline', version: 'v29', variant: null, criterios: null },
   // v32: o nó vira duas chamadas (perguntas sem régua → código deriva a faixa →
   // régua + faixa decidem a realização). 30 chamadas por avaliação, não 15.
   'v32': { id: 'v32', label: 'v32 · pipeline (15 nós × 2 fases)', kind: 'pipeline', version: 'v32', variant: null, criterios: null },

@@ -12,12 +12,15 @@ import RichText from '../components/RichText';
 // baixar um relatório com tudo. Isolado do avaliador de produção e da simulação.
 
 // Precisa espelhar o registry EVALUATORS do servidor (server/avaliacao-independente.js),
-// que é quem valida. O v31 é a versão em teste (travas respondidas uma a uma,
-// análise depois delas, sem confiança); v28 e v25 ficam para rodar o mesmo log e
-// comparar. Nas versões que têm duas entradas, é o mesmo código mudando só a
-// saída do nó: em 'vNN-nota' ele devolve só a nota, sem análise nem feedback do
-// aluno — mais barato, porque o texto por critério some do billing.
+// que é quem valida. O v29 é a versão em teste (travas respondidas uma a uma,
+// análise depois delas, sem confiança, e a pergunta da trava separada da pergunta
+// da régua); v32, v31, v28 e v25 ficam para rodar o mesmo log e comparar. A lista
+// está em ordem de CHEGADA (o v29 é o mais novo apesar do número, que é do
+// rascunho do prompt). Nas versões que têm duas entradas, é o mesmo código mudando
+// só a saída do nó: em 'vNN-nota' ele devolve só a nota, sem análise nem feedback
+// do aluno — mais barato, porque o texto por critério some do billing.
 const EVALUATORS = [
+  { id: 'v29', label: 'v29 · pipeline (15 nós)', nos: 15 },
   { id: 'v32', label: 'v32 · pipeline (15 nós × 2 fases)', nos: 15, fases: 2 },
   { id: 'v31', label: 'v31 · pipeline (15 nós)', nos: 15 },
   { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', nos: 15 },
@@ -78,9 +81,13 @@ function evaluatorLabel(id) {
   const e = EVALUATORS.find((x) => x.id === id);
   return e ? e.label : (id || '—');
 }
+// Dois estados de espera, e a diferença importa para quem olha: 'aguardando' é
+// a fila LOCAL (o job existe, mas o teto de tokens enfileirados do modelo na
+// OpenAI está cheio); 'processing' é a Batch API já mastigando.
 function statusLabel(s) {
   if (s === 'completed') return 'Pronto';
   if (s === 'error') return 'Erro';
+  if (s === 'aguardando') return 'Aguardando vaga';
   return 'Na fila';
 }
 // v28: linha das travas no card do critério. Mostra onde a subida parou, que é
@@ -104,6 +111,17 @@ function TravasLinha({ p }) {
       )}
     </div>
   );
+}
+
+// Linha sob a nota final do pipeline: quem ficou de fora da conta muda com a
+// VERSÃO. No v25 a confiança baixa exclui o critério; no v28 a confiança é só
+// recado ao supervisor; do v29/v31/v32 em diante não existe confiança, e só
+// fica de fora o nó cuja saída não deu para ler.
+function subNotaPipeline(versao, incluidos, total) {
+  const base = `Agregada de ${incluidos} de ${total} critérios `;
+  if (versao === 'v25') return base + '(os de confiança baixa ficaram fora).';
+  if (versao === 'v28') return base + '(a confiança não tira ninguém da nota; fica de fora só o nó sem nota legível).';
+  return base + '(fica de fora só o nó cuja saída não deu para ler).';
 }
 
 function confLabel(c) {
@@ -187,7 +205,9 @@ export default function Avaliacao({ user }) {
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
-  const [evaluator, setEvaluator] = useState('v32');
+  // Abre na versão em teste (a primeira da lista) — é a que o supervisor roda
+  // hoje; as outras ficam no alternador para comparar o mesmo log.
+  const [evaluator, setEvaluator] = useState(EVALUATORS[0].id);
   const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
@@ -287,7 +307,9 @@ export default function Avaliacao({ user }) {
       if (data && data.queued && data.local) {
         await pollLocalJob(data.jobId);
       } else if (data && data.queued) {
-        setQueuedMsg('Avaliação enviada para a fila (batch — ~50% mais barato, assíncrono). Ela aparece em "Fila de avaliações" quando o lote volta.');
+        setQueuedMsg(data.status === 'aguardando'
+          ? 'Avaliação na fila (batch — ~50% mais barato). A fila de tokens da OpenAI está cheia agora, então ela entra assim que abrir vaga e aparece em "Fila de avaliações" quando o lote volta. Nada se perde.'
+          : 'Avaliação enviada para a fila (batch — ~50% mais barato, assíncrono). Ela aparece em "Fila de avaliações" quando o lote volta.');
         setFilaOpen(true);
         refreshFila();
         setLoading(false);
@@ -343,7 +365,7 @@ export default function Avaliacao({ user }) {
     }
   }
 
-  const pendingCount = fila.filter((j) => j.status === 'processing' || j.status === 'queued').length;
+  const pendingCount = fila.filter((j) => j.status === 'processing' || j.status === 'queued' || j.status === 'aguardando').length;
 
   // ── Botão flutuante + painel da Fila (presente em todas as telas) ──
   const filaUI = (
@@ -374,6 +396,7 @@ export default function Avaliacao({ user }) {
                     {evaluatorLabel(j.evaluator)} · {j.model} · {j.effort}
                     {j.status === 'completed' && j.result ? ` · nota ${j.result.notaFinal ?? '—'}${cst ? ' · ' + fmtUSD(cst.usd) : ''}` : ''}
                     {j.error ? ` · ${j.error}` : ''}
+                    {j.status === 'aguardando' && j.espera ? ` · ${j.espera}` : ''}
                   </div>
                   {j.status === 'completed' && j.result && (
                     <div className="aval-fila-job-actions">
@@ -423,10 +446,9 @@ export default function Avaliacao({ user }) {
     const inst = result.instrumentacao;
     const isPipe = Array.isArray(result.partes);
     const incluidos = isPipe ? result.partes.filter((p) => p.incluido).length : 0;
-    // Quem ficou fora da nota depende da VERSÃO do pipeline: no v25 a confiança
-    // baixa exclui o critério; no v28 ela é só recado ao supervisor, e só fica de
-    // fora o nó que não devolveu número. Runs antigas não gravaram `version` —
-    // sem ela, a regra é a do v25, que era a única que existia.
+    // Quem ficou fora da nota depende da VERSÃO do pipeline (ver
+    // subNotaPipeline). Runs antigas não gravaram `version` — sem ela, a regra é
+    // a do v25, que era a única que existia.
     const versaoPipe = result.version || 'v25';
     const numNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => typeof d.nota === 'number').length : 0;
     const naNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => d.nota === 'NA').length : 0;
@@ -495,7 +517,7 @@ export default function Avaliacao({ user }) {
                   {result.notaFinal == null
                     ? 'Não avaliável: sem critérios suficientes para uma nota.'
                     : isPipe
-                      ? `Agregada de ${incluidos} de ${result.partes.length} critérios ${versaoPipe === 'v28' ? '(a confiança não tira ninguém da nota; fica de fora só o nó sem nota legível).' : '(os de confiança baixa ficaram fora).'}`
+                      ? subNotaPipeline(versaoPipe, incluidos, result.partes.length)
                       : `Média de ${numNotas} critérios${naNotas ? ` (${naNotas} marcados NA, fora da conta)` : ''}.`}
                 </div>
               </div>
@@ -622,6 +644,7 @@ export default function Avaliacao({ user }) {
                   : <>Os {nosDe(evaluator)} nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
                 {evaluator.startsWith('v28') && <> No v28 a confiança é recado para o supervisor: ela aparece no critério, mas <strong>não tira ninguém da nota</strong>.</>}
                 {evaluator === 'v31' && <> O nó responde as quatro travas como perguntas independentes e a análise vem <strong>depois</strong> delas; faixa, realização e nota são derivadas por código.</>}
+                {evaluator === 'v29' && <> Como no v31 (travas uma a uma, análise depois, nota por código), mas com os <strong>dois juízos separados</strong>: a trava pergunta se aquilo aconteceu e funcionou, a régua pergunta se aquilo é o que <strong>caracteriza</strong> o trabalho — o v32 cobrava as duas coisas nas duas fases.</>}
                 {evaluator === 'v32' && <> Cada nó são <strong>duas chamadas</strong>: a primeira responde as quatro perguntas <strong>sem ver a régua</strong> (sem escada à vista, a impressão do atendimento não tem onde pousar), o código deriva a faixa, e a segunda decide completa ou incompleta com a régua inteira. São 30 chamadas por avaliação: pesa em tempo, pouco em dinheiro.</>}
               </div>
             )}

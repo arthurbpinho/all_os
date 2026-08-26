@@ -1,6 +1,6 @@
-// Ícones (linha, estilo Feather) compartilhados entre o menu lateral (App.jsx)
-// e a homepage (Home.jsx). Mantê-los num só lugar evita divergência entre o
-// ícone do menu e o do card "Como jogar".
+// Ícones (linha, estilo Feather) do menu lateral (App.jsx) e das telas que
+// repetem o mesmo ícone de um item do menu. Mantê-los num só lugar evita
+// divergência entre o ícone do menu e o da tela correspondente.
 export const ICONS = {
   // Triângulo de alerta — painel de Logs de Erro (admin).
   alert: (

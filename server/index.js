@@ -17,7 +17,8 @@ const {
 } = require('./prompts');
 const mmrEngine = require('./mmr');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody, clearAssetsCache } = require('./avaliacao-v25');
+const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody, clearAssetsCache, estimarTokens } = require('./avaliacao-v25');
+const batchFila = require('./batch-fila');
 const aiIndependente = require('./avaliacao-independente');
 const promptFiles = require('./prompt-files');
 const simIndependente = require('./simulacao-independente');
@@ -33,6 +34,10 @@ const {
   normalizeTestIds: normalizeNeuroTestIds,
   compareNeuroTests,
 } = require('./neuro-tests');
+const webpush = require('web-push');
+const contas = require('./cadastro');
+const mailer = require('./email');
+const turnstile = require('./turnstile');
 
 const app = express();
 
@@ -52,6 +57,11 @@ app.disable('x-powered-by');
 //   img/media blob:      → download de log e gravação de áudio do entrevistador
 //   script 'self' apenas → o anti-flash do tema virou /theme-init.js justamente
 //                          pra não precisar de 'unsafe-inline' aqui
+//   challenges.cloudflare → captcha do cadastro (Turnstile). Precisa dos TRÊS:
+//                          script-src (api.js), frame-src (o desafio roda em
+//                          iframe) e connect-src (a validação do widget). Sem
+//                          frame-src explícito o iframe cai no default-src
+//                          'self' e é bloqueado sem erro visível na tela.
 app.use(helmet({
   contentSecurityPolicy: {
     useDefaults: false,
@@ -61,13 +71,14 @@ app.use(helmet({
       'object-src': ["'none'"],
       'frame-ancestors': ["'none'"], // trava clickjacking do painel admin
       'form-action': ["'self'"],
-      'script-src': ["'self'"],
+      'script-src': ["'self'", 'https://challenges.cloudflare.com'],
       'script-src-attr': ["'none'"],
+      'frame-src': ["'self'", 'https://challenges.cloudflare.com'],
       'style-src': ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       'font-src': ["'self'", 'https://fonts.gstatic.com', 'data:'],
       'img-src': ["'self'", 'data:', 'blob:'],
       'media-src': ["'self'", 'blob:'],
-      'connect-src': ["'self'"],
+      'connect-src': ["'self'", 'https://challenges.cloudflare.com'],
       'worker-src': ["'self'"],
       'manifest-src': ["'self'"],
       'upgrade-insecure-requests': [],
@@ -254,7 +265,55 @@ const loginLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: ipKey,
+  // Só conta tentativa que FALHOU. Sem isso, numa faculdade ou clínica atrás de
+  // um NAT só, o 11º aluno que digitou a senha CERTA levava "Muitas tentativas".
+  // Contra brute-force o que importa é o teto de erros, não o de acertos.
+  skipSuccessfulRequests: true,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
+});
+// Cadastro público e recuperação de senha: cada request aqui dispara um e-mail
+// pela caixa da Allos, que tem cota diária no Exchange Online e reputação de
+// domínio a perder. Teto baixo e por IP, além do captcha.
+const cadastroLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 60 * 60 * 1000,
+  // 10 e não 5: numa faculdade a turma toda sai pelo mesmo IP, e 5 trancaria a
+  // sexta pessoa da sala. O que realmente segura o abuso aqui é o captcha e a
+  // confirmação por e-mail — este teto é só pra conter enxurrada.
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { error: 'Muitas tentativas de cadastro. Tente novamente mais tarde.' },
+});
+const emailLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 8,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { error: 'Muitas solicitações. Tente novamente mais tarde.' },
+});
+// Mesma ideia, para a rota autenticada de troca de e-mail: chaveia por USUÁRIO,
+// não por IP — numa clínica ou faculdade o IP é compartilhado, e uma pessoa
+// mexendo no e-mail não deve gastar a cota das outras.
+const emailAuthLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: userKey,
+  message: { error: 'Muitas solicitações. Tente novamente mais tarde.' },
+});
+// Consulta de disponibilidade de nome de usuário: sem e-mail no caminho, então
+// o teto é generoso (a tela consulta enquanto a pessoa digita), mas existe pra
+// não virar ferramenta de varredura da base de usernames.
+const checagemLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { error: 'Muitas consultas. Aguarde um momento.' },
 });
 // Emissão de token de visitante. Era 5/15min, de quando o visitante nascia de
 // um clique deliberado em "Entrar como visitante". Agora o app ABRE em modo
@@ -291,24 +350,15 @@ function userKey(req) {
 const VISITOR_AI_MAX = 40;
 
 // --- Política de senha ---
-// Piso por perfil. Supervisor e admin exigem mais porque são as contas que
-// alcançam dados de todos os alunos. Antes o piso era 6 pra todo mundo — o que
-// deixava o admin trocar, pela tela de Perfil, a senha de 12 exigida no boot
-// (ADMIN_INITIAL_PASSWORD) por uma de 6.
-const PASSWORD_MIN = 8;
-const PASSWORD_MIN_PRIVILEGIADO = 12;
-function senhaMinimaPara(role) {
-  return (role === 'admin' || role === 'supervisor') ? PASSWORD_MIN_PRIVILEGIADO : PASSWORD_MIN;
-}
-// Devolve a mensagem de erro, ou null se a senha serve.
-function validarSenha(senha, role) {
-  const min = senhaMinimaPara(role);
-  if (String(senha == null ? '' : senha).length < min) {
-    const extra = min === PASSWORD_MIN_PRIVILEGIADO ? ' (contas de supervisor e admin exigem mais)' : '';
-    return `Senha deve ter ao menos ${min} caracteres${extra}`;
-  }
-  return null;
-}
+// Piso por perfil (8; supervisor e admin 12, porque alcançam dados de TODOS os
+// alunos) + composição: 1 letra, 1 número, 1 caractere especial, não conter o
+// próprio username, e fora da lista de senhas óbvias. A regra de composição
+// nasceu com o cadastro público, mas vale pra todo mundo — seria esquisito o
+// aluno que se cadastra sozinho ter senha mais forte que a conta de supervisor
+// criada pelo admin.
+//
+// A implementação é pura e vive em cadastro.js, com teste direto.
+const { senhaMinimaPara, validarSenha } = contas;
 
 // --- Atraso progressivo por CONTA nas tentativas de login ---
 // O loginLimiter é por IP. Quem tem muitos IPs (botnet, VPN, Tor) ataca uma
@@ -319,14 +369,32 @@ function validarSenha(senha, role) {
 // — bastaria errar a senha de um aluno de propósito pra trancá-lo pra fora.
 // O atraso encarece o ataque (que precisa de milhares de tentativas) sem
 // impedir a pessoa certa de entrar.
-const falhasLogin = new Map(); // username -> { count, last }
+//
+// A chave é o username NORMALIZADO (minúsculas). Sem isso, alternar maiúsculas
+// (`admin`, `Admin`, `ADMIN`) daria um contador de atraso novo a cada variação —
+// tentativas de graça pro atacante.
+const falhasLogin = new Map(); // usernameLower -> { count, last }
 const FALHA_JANELA_MS = 15 * 60 * 1000;
 const FALHA_TOLERANCIA = 3;      // as 3 primeiras não atrasam — typo acontece
 const FALHA_ATRASO_MAX_MS = 5000;
+// Teto de entradas: a chave vem do atacante, e um spray com milhares de
+// usernames aleatórios dentro da mesma janela de 15 min faria o Map crescer sem
+// limite. Ao estourar, descarta as mais antigas — quem está sob ataque de
+// verdade é uma conta só, e essa continua no Map por ser a mais recente.
+const FALHA_MAX_ENTRADAS = 10000;
 
 function limparFalhasVelhas() {
   const cutoff = Date.now() - FALHA_JANELA_MS;
   for (const [k, v] of falhasLogin) if (v.last < cutoff) falhasLogin.delete(k);
+  if (falhasLogin.size > FALHA_MAX_ENTRADAS) {
+    // Map itera em ordem de inserção; as primeiras são as mais antigas.
+    const excedente = falhasLogin.size - FALHA_MAX_ENTRADAS;
+    let i = 0;
+    for (const k of falhasLogin.keys()) {
+      if (i++ >= excedente) break;
+      falhasLogin.delete(k);
+    }
+  }
 }
 function atrasoLoginMs(username) {
   const reg = falhasLogin.get(username);
@@ -377,12 +445,29 @@ console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
 console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
 console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
 console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — Treinamento, Seletivo, Avaliação Independente e reflexão da Antessala)');
+console.log('[startup] VAPID_PUBLIC_KEY  =', envDiag('VAPID_PUBLIC_KEY'), '(Web Push)');
+console.log('[startup] GRAPH_TENANT_ID    =', envDiag('GRAPH_TENANT_ID'), '(e-mail via Microsoft 365 / Graph)');
+console.log('[startup] GRAPH_CLIENT_ID    =', envDiag('GRAPH_CLIENT_ID'));
+console.log('[startup] GRAPH_CLIENT_SECRET=', envDiag('GRAPH_CLIENT_SECRET'));
+console.log('[startup] MAIL_FROM          =', envDiag('MAIL_FROM'), '→ e-mail', mailer.estaConfigurado() ? 'ATIVO' : 'DESLIGADO (links vão pro stdout)');
+console.log('[startup] APP_BASE_URL       =', envDiag('APP_BASE_URL'), '(base dos links de confirmação — sem ela o link sai relativo e não funciona)');
+console.log('[startup] TURNSTILE_SITE_KEY =', envDiag('TURNSTILE_SITE_KEY'), '→ captcha', turnstile.estaConfigurado() ? 'ATIVO' : 'DESLIGADO (cadastro aceita sem captcha)');
 console.log('[startup] DATA_DIR          =', envDiag('DATA_DIR'), '→ resolved:', DATA_DIR);
 console.log('[startup] PORT              =', envDiag('PORT'));
 console.log('[startup] env keys count    =', Object.keys(process.env).length);
 // Lista nomes de envs que CONTÊM "JWT" ou "SECRET" — pega typos como "jwt_secret" / "JWTSECRET"
 const jwtish = Object.keys(process.env).filter((k) => /jwt|secret/i.test(k));
 console.log('[startup] env keys com JWT/SECRET no nome:', jwtish.length ? jwtish.join(', ') : '(nenhum)');
+
+// Web Push (VAPID): sem as duas chaves, sendWebPushToUser() vira no-op — o sino
+// in-app (notifications.json) continua funcionando normalmente, só não sai
+// notificação do SO. Gerar o par com `node -e "console.log(require('web-push').generateVAPIDKeys())"`.
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:ti@allos.org.br';
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
 
 function readJSON(file, fallback = []) {
   const p = path.join(DATA_DIR, file);
@@ -462,11 +547,28 @@ const DEFAULT_PROFILE = {
 
 // 'evaluator' (Avaliador) acompanha o Processo Seletivo (Dashboard + Logs de
 // avaliações). Conta real criada pelo admin, como as demais.
-const VALID_ROLES = ['therapist', 'supervisor', 'admin', 'evaluator'];
+//
+// 'external' (Aluno Externo) é o ÚNICO papel que pode nascer de auto-cadastro
+// (POST /api/cadastro + confirmação por e-mail). Todos os outros continuam
+// exclusivos do admin. Na prática ele usa a plataforma como o aluno interno:
+// a diferença é não pressupor vínculo com a Allos, então nasce sem supervisor
+// (teacherId null) — mas o campo continua válido e o admin pode vincular
+// depois, e aí a Antessala passa a funcionar pra ele como pra qualquer aluno.
+const VALID_ROLES = ['therapist', 'supervisor', 'admin', 'evaluator', 'external'];
+
+// Papéis que a Trilha/Treino tratam como aluno. Usado nas checagens de
+// permissão pra não precisar listar os dois papéis em cada ponto.
+const ROLES_ALUNO = ['therapist', 'external'];
+function isAluno(role) { return ROLES_ALUNO.includes(role); }
 
 function hashPasswordSync(plain) {
   return bcrypt.hashSync(String(plain), BCRYPT_ROUNDS);
 }
+
+// Hash descartável contra o qual o login compara quando o usuário NÃO existe,
+// pra que os dois caminhos gastem o mesmo tempo (ver POST /api/login). O valor
+// em si é irrelevante — nenhuma senha jamais bate com ele.
+const HASH_ISCA = hashPasswordSync(crypto.randomBytes(32).toString('hex'));
 
 if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
   // Seed inicial: apenas o admin. Demais contas são criadas pela tela de Contas.
@@ -538,6 +640,58 @@ if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
   console.log(`[migration] profilePhoto padronizado em ${changed} usuário(s).`);
 })();
 
+// Migração one-shot para o cadastro público: campos que passaram a ser
+// obrigatórios no modelo de conta.
+//
+//   usernameLower / emailLower — login e checagem de duplicidade passaram a ser
+//     case-insensitive. Enquanto só o admin criava conta isso era detalhe; com
+//     cadastro aberto, `Admin` seria uma conta LIVRE se a comparação continuasse
+//     sensível a maiúsculas (impersonação no ranking, na Comunidade, no Duelo).
+//   tokenVersion — permite revogar JWT (ver signToken).
+//   emailVerified — contas criadas pelo admin entram como verificadas: o
+//     endereço foi digitado por quem já é de confiança. Só o auto-cadastro
+//     precisa provar o e-mail por link.
+(function migrateContasCadastroPublico() {
+  const users = readJSON('users.json');
+  let dirty = false;
+  const vistos = new Map(); // usernameLower -> username original
+  for (const u of users) {
+    const lower = contas.normalizeUsername(u.username);
+    if (u.usernameLower !== lower) { u.usernameLower = lower; dirty = true; }
+    const emailLower = contas.normalizeEmail(u.email);
+    if ((u.emailLower || '') !== emailLower) { u.emailLower = emailLower; dirty = true; }
+    if (typeof u.tokenVersion !== 'number') { u.tokenVersion = 0; dirty = true; }
+    if (typeof u.emailVerified !== 'boolean') { u.emailVerified = !!emailLower; dirty = true; }
+
+    // Colisão pré-existente: duas contas cujos usernames só diferem no caixa.
+    // Não dá pra resolver sozinho (qual das duas renomear é decisão humana), mas
+    // silenciar seria pior — a partir daqui o login de uma delas fica ambíguo.
+    if (vistos.has(lower)) {
+      console.error(`[FATAL] Dois usuários colidem ignorando maiúsculas: "${vistos.get(lower)}" e "${u.username}". Renomeie um deles em users.json antes de subir.`);
+      process.exit(1);
+    }
+    vistos.set(lower, u.username);
+  }
+  if (dirty) {
+    writeJSON('users.json', users);
+    console.log('[migration] contas normalizadas (usernameLower/emailLower/tokenVersion/emailVerified).');
+  }
+})();
+
+// Busca de usuário por nome, ignorando maiúsculas. Todo lookup de login passa
+// por aqui — nunca compare `u.username === entrada` direto.
+function acharPorUsername(users, username) {
+  const lower = contas.normalizeUsername(username);
+  if (!lower) return null;
+  return users.find((u) => (u.usernameLower || contas.normalizeUsername(u.username)) === lower) || null;
+}
+
+function acharPorEmail(users, email) {
+  const lower = contas.normalizeEmail(email);
+  if (!lower) return null;
+  return users.find((u) => (u.emailLower || contas.normalizeEmail(u.email)) === lower) || null;
+}
+
 if (!fs.existsSync(path.join(DATA_DIR, 'exercises.json'))) {
   // Inicia sem exercícios — o admin cadastra via interface.
   writeJSON('exercises.json', []);
@@ -599,6 +753,13 @@ if (!fs.existsSync(path.join(DATA_DIR, 'duels.json'))) {
 // { <userId>: [ {id, type, ...} ] }. Visitantes (id efêmero) não recebem.
 if (!fs.existsSync(path.join(DATA_DIR, 'notifications.json'))) {
   writeJSON('notifications.json', {});
+}
+
+// Assinaturas de Web Push por usuário — { <userId>: [ {endpoint, keys, ua,
+// createdAt} ] }. Array porque a mesma pessoa pode assinar em vários
+// dispositivos (celular + PC). Cap de 10 por usuário em POST /api/push/subscribe.
+if (!fs.existsSync(path.join(DATA_DIR, 'push-subscriptions.json'))) {
+  writeJSON('push-subscriptions.json', {});
 }
 
 // Sidequests: missões clínicas que o supervisor atribui a um aluno e que viram
@@ -757,7 +918,7 @@ function publicUser(u) {
       safe.titleTier = quest ? quest.tier : null;
     }
   }
-  if (safe.role === 'therapist' && safe.teacherId) {
+  if (isAluno(safe.role) && safe.teacherId) {
     try {
       const users = readJSON('users.json');
       const teacher = users.find((t) => t.id === safe.teacherId);
@@ -767,9 +928,19 @@ function publicUser(u) {
   return safe;
 }
 
+// `tv` = tokenVersion. Sem ele o JWT era irrevogável: trocar a senha NÃO
+// derrubava o token que já tinha vazado, e o atacante ficava dentro por até 7
+// dias depois de a pessoa reagir. Agora toda troca/reset de senha incrementa o
+// tokenVersion do usuário, e requireAuth recusa qualquer token com o valor
+// antigo. É também a peça que um "sair de todos os dispositivos" usaria, se um
+// dia essa opção entrar na tela de Perfil.
+//
+// Tokens emitidos antes desta mudança não têm `tv`, e usuários antigos não têm
+// tokenVersion — os dois lados viram 0 na comparação, então ninguém é deslogado
+// no deploy.
 function signToken(user) {
   return jwt.sign(
-    { sub: user.id, role: user.role, username: user.username },
+    { sub: user.id, role: user.role, username: user.username, tv: user.tokenVersion || 0 },
     JWT_SECRET,
     { expiresIn: user.role === 'visitor' ? VISITOR_TOKEN_TTL : TOKEN_TTL }
   );
@@ -801,6 +972,11 @@ function requireAuth(req, res, next) {
     const users = readJSON('users.json');
     const user = users.find(u => u.id === payload.sub);
     if (!user) return res.status(401).json({ error: 'Sessão inválida' });
+    // Revogação: senha trocada (ou "sair de todos os dispositivos") incrementa
+    // o tokenVersion, o que invalida na hora todo token já emitido.
+    if ((payload.tv || 0) !== (user.tokenVersion || 0)) {
+      return res.status(401).json({ error: 'Sessão expirada' });
+    }
     req.user = user;
     next();
   } catch (err) {
@@ -841,20 +1017,24 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   // Atraso progressivo por conta (ver falhasLogin). Aplicado ANTES de comparar
   // o hash e valendo mesmo pra usuário inexistente — se só as contas reais
   // atrasassem, o atraso viraria um oráculo de enumeração.
-  const atraso = SKIP_RATE_LIMIT ? 0 : atrasoLoginMs(String(username));
+  const chaveFalha = contas.normalizeUsername(username);
+  const atraso = SKIP_RATE_LIMIT ? 0 : atrasoLoginMs(chaveFalha);
   if (atraso > 0) await new Promise((r) => setTimeout(r, atraso));
 
   const users = readJSON('users.json');
-  const user = users.find(u => u.username === username);
-  // Bcrypt sempre — se não houver hash, falha silenciosa (resposta genérica para evitar enumeration)
+  const user = acharPorUsername(users, username);
+  // Bcrypt SEMPRE, inclusive quando o usuário não existe — comparando contra um
+  // hash-isca. A mensagem de erro já era genérica, mas o relógio entregava quem
+  // existe: conta inexistente respondia na hora, conta real esperava o bcrypt
+  // (~80ms). Agora os dois caminhos custam o mesmo.
   const ok = user && user.passwordHash
     ? await bcrypt.compare(String(password), user.passwordHash)
-    : false;
+    : (await bcrypt.compare(String(password), HASH_ISCA), false);
   if (!ok) {
-    registrarFalhaLogin(String(username));
+    registrarFalhaLogin(chaveFalha);
     return res.status(401).json({ error: 'Credenciais inválidas' });
   }
-  limparFalhasLogin(String(username)); // acertou: zera o contador
+  limparFalhasLogin(chaveFalha); // acertou: zera o contador
   const token = signToken(user);
   res.json({ token, user: publicUser(user) });
 });
@@ -888,7 +1068,7 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Senha atual e nova são obrigatórias' });
   }
-  const erroSenha = validarSenha(newPassword, req.user.role);
+  const erroSenha = validarSenha(newPassword, req.user.role, req.user.username);
   if (erroSenha) return res.status(400).json({ error: erroSenha.replace('Senha deve', 'Nova senha deve') });
   const ok = await bcrypt.compare(String(currentPassword), req.user.passwordHash || '');
   if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
@@ -896,8 +1076,452 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   const idx = users.findIndex(u => u.id === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
   users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
   writeJSON('users.json', users);
-  res.json({ ok: true });
+  // O token que o cliente está usando ACABOU de ser invalidado pelo bump acima,
+  // senão a própria tela que trocou a senha cairia no 401 do requireAuth.
+  const token = signToken(users[idx]);
+  if (users[idx].emailLower && users[idx].emailVerified) {
+    mailer.enviarAvisoSenhaAlterada({ to: users[idx].email, nome: users[idx].name }).catch(() => {});
+  }
+  res.json({ ok: true, token });
+});
+
+
+// ---------------------------------------------------------------------------
+// Cadastro público de Aluno Externo
+// ---------------------------------------------------------------------------
+//
+// 'external' é o ÚNICO papel que nasce sem admin. O portão não é o captcha nem
+// o rate limit — é a CONFIRMAÇÃO POR E-MAIL: enquanto o link não é clicado, não
+// existe usuário nenhum em users.json, só uma pendência descartável.
+//
+// Anti-enumeração: nome de usuário indisponível a tela PRECISA dizer (é um
+// seletor de nome, e a lista de usernames já é pública no ranking). E-mail, não:
+// "e-mail já cadastrado" confirmaria pra um estranho que fulano tem conta. Por
+// isso a resposta é sempre a mesma, e quem descobre a diferença é o DONO do
+// endereço, pelo e-mail que recebe.
+
+const PENDENTES_FILE = 'pending-registrations.json';   // cadastros aguardando confirmação
+const TROCAS_EMAIL_FILE = 'email-changes.json';        // trocas de e-mail aguardando confirmação
+const RESETS_FILE = 'password-resets.json';            // pedidos de nova senha
+
+const TTL_CONFIRMACAO_MS = 48 * 60 * 60 * 1000; // 48h
+const TTL_RESET_MS = 60 * 60 * 1000;            // 1h — janela curta, é o link mais perigoso
+
+// Versão do par termos de uso + política de privacidade aceita no cadastro.
+// Registrada em cada consentimento: a LGPD pede saber a QUE texto a pessoa disse
+// sim, não só que disse. Ao publicar uma revisão, incremente aqui.
+const TERMOS_VERSAO = process.env.TERMOS_VERSAO || '1';
+
+// Interruptor de emergência: se o cadastro virar alvo de abuso, desligue pela
+// env sem precisar de deploy de código.
+const CADASTRO_ABERTO = process.env.CADASTRO_EXTERNO_ABERTO !== 'false';
+
+// URLs dos documentos legais. Enquanto vazias, o formulário mostra o texto do
+// aceite SEM link — melhor que um link que cai na home do app. Ao publicar os
+// documentos, basta setar as duas envs; nada de deploy de código.
+const TERMOS_URL = process.env.TERMOS_URL || '';
+const PRIVACIDADE_URL = process.env.PRIVACIDADE_URL || '';
+
+// Toda leitura já poda o que venceu — os três arquivos são pequenos e
+// reescritos inteiros, então não precisa de rotina de limpeza agendada.
+function lerPendencias(file) {
+  return contas.removerExpirados(readJSON(file, []));
+}
+
+// Configuração pública consumida pelo cliente no boot. Fica fora do build do
+// Vite de propósito: acoplar a site key do captcha ao build significa rebuild
+// toda vez que a chave muda, e é o tipo de coisa que quebra no pior momento.
+app.get('/api/config', (req, res) => {
+  res.json({
+    cadastroAberto: CADASTRO_ABERTO,
+    turnstileSiteKey: turnstile.siteKey(),
+    termosVersao: TERMOS_VERSAO,
+    termosUrl: TERMOS_URL,
+    privacidadeUrl: PRIVACIDADE_URL,
+    origens: contas.ORIGENS,
+    // A tela precisa saber se "esqueci minha senha" tem como funcionar: sem
+    // e-mail configurado, o link nunca chegaria e o botão só frustaria.
+    emailAtivo: mailer.estaConfigurado(),
+  });
+});
+
+// Disponibilidade do nome de usuário, pra tela avisar enquanto a pessoa digita.
+app.get('/api/cadastro/disponibilidade', checagemLimiter, (req, res) => {
+  const username = String(req.query.username || '').trim();
+  if (!contas.usernameRegex.test(username)) {
+    return res.json({ disponivel: false, motivo: 'formato' });
+  }
+  if (contas.isReservedUsername(username)) {
+    return res.json({ disponivel: false, motivo: 'reservado' });
+  }
+  const lower = contas.normalizeUsername(username);
+  const users = readJSON('users.json');
+  const pendentes = lerPendencias(PENDENTES_FILE);
+  const emUso = !!acharPorUsername(users, username) || pendentes.some((r) => r.usernameLower === lower);
+  res.json({ disponivel: !emUso, motivo: emUso ? 'em-uso' : null });
+});
+
+app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
+  if (!CADASTRO_ABERTO) {
+    return res.status(403).json({ error: 'O cadastro está temporariamente fechado.' });
+  }
+
+  // Captcha ANTES de qualquer trabalho: é o mais barato de todos os checks e o
+  // que descarta bot burro sem tocar em disco.
+  const captcha = await turnstile.verificar(req.body && req.body.turnstileToken, clientIp(req));
+  if (!captcha.ok) {
+    return res.status(400).json({ error: 'Não foi possível validar o captcha. Recarregue a página e tente de novo.' });
+  }
+
+  try {
+    const resultado = await withFileLock(PENDENTES_FILE, async () => {
+      const users = readJSON('users.json');
+      const pendentes = lerPendencias(PENDENTES_FILE);
+
+      // Um username pendente também "segura" o nome durante as 48h, senão duas
+      // pessoas se cadastrariam com o mesmo nome e a segunda só descobriria na
+      // hora de confirmar.
+      const usernamesEmUso = new Set([
+        ...users.map((u) => u.usernameLower || contas.normalizeUsername(u.username)),
+        ...pendentes.map((r) => r.usernameLower),
+      ]);
+
+      const { errors, dados } = contas.validarCadastroPayload(req.body, {
+        usernamesEmUso,
+        termosVersao: TERMOS_VERSAO,
+      });
+      if (errors.length) return { status: 400, body: { error: errors.join('; ') } };
+
+      // --- A partir daqui a resposta é SEMPRE a mesma (anti-enumeração) ---
+      const donoDoEmail = acharPorEmail(users, dados.email);
+      if (donoDoEmail) {
+        // Nenhuma pendência é criada. Quem descobre que já existe conta é o dono
+        // do endereço, pelo e-mail — não quem preencheu o formulário.
+        return { status: 200, body: { ok: true }, avisarJaCadastrado: donoDoEmail };
+      }
+
+      // Pendência anterior com o mesmo e-mail é SUBSTITUÍDA: o caso comum é a
+      // própria pessoa refazendo o cadastro depois de errar o nome de usuário.
+      // Não vira brecha porque o link continua indo só pro dono do endereço, e o
+      // e-mail diz qual nome de usuário está sendo confirmado.
+      const restantes = pendentes.filter((r) => r.emailLower !== dados.email);
+      const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
+
+      restantes.push({
+        tokenHash,
+        expiresAt,
+        criadoEm: new Date().toISOString(),
+        username: dados.username,
+        usernameLower: dados.usernameLower,
+        emailLower: dados.email,
+        name: dados.name,
+        email: dados.email,
+        // Já entra hasheada: uma pendência é um arquivo como outro qualquer, e
+        // senha em texto puro em disco não se justifica em nenhuma janela.
+        passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
+        origem: dados.origem,
+        consentimento: dados.consentimento,
+        updateAllOS: dados.updateAllOS,
+        updateAllos: dados.updateAllos,
+        ip: clientIp(req),
+      });
+      writeJSON(PENDENTES_FILE, restantes);
+
+      return { status: 200, body: { ok: true }, enviarConfirmacao: { token, dados } };
+    });
+
+    // E-mail FORA do lock: é chamada de rede e seguraria o arquivo por segundos.
+    if (resultado.avisarJaCadastrado) {
+      mailer.enviarEmailJaCadastrado({
+        to: resultado.avisarJaCadastrado.email,
+        username: resultado.avisarJaCadastrado.username,
+      }).catch(() => {});
+    }
+    if (resultado.enviarConfirmacao) {
+      const { token, dados } = resultado.enviarConfirmacao;
+      const envio = await mailer.enviarConfirmacaoCadastro({
+        to: dados.email,
+        nome: dados.name,
+        username: dados.username,
+        token,
+      });
+      if (!envio.ok && !envio.skipped) {
+        registrarErro(req, new Error(envio.erro || 'envio falhou'), 'cadastro/email-confirmacao', { status: 200 });
+      }
+    }
+    return res.status(resultado.status).json(resultado.body);
+  } catch (err) {
+    return res.status(500).json(falhou(req, err, 'cadastro/criar'));
+  }
+});
+
+// Reenvio do link de confirmação. Resposta genérica pelo mesmo motivo do
+// cadastro: não confirma se existe pendência para aquele endereço.
+app.post('/api/cadastro/reenviar', emailLimiter, async (req, res) => {
+  const email = contas.normalizeEmail(req.body && req.body.email);
+  if (!contas.isEmailValido(email)) return res.status(400).json({ error: 'E-mail inválido' });
+
+  try {
+    const envio = await withFileLock(PENDENTES_FILE, async () => {
+      const pendentes = lerPendencias(PENDENTES_FILE);
+      const idx = pendentes.findIndex((r) => r.emailLower === email);
+      if (idx === -1) return null;
+      // Token NOVO a cada reenvio: o anterior deixa de valer, então um link
+      // antigo que tenha vazado (encaminhado, print) morre aqui.
+      const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
+      pendentes[idx] = { ...pendentes[idx], tokenHash, expiresAt };
+      writeJSON(PENDENTES_FILE, pendentes);
+      return { token, nome: pendentes[idx].name, username: pendentes[idx].username, to: pendentes[idx].email };
+    });
+
+    if (envio) {
+      await mailer.enviarConfirmacaoCadastro({ to: envio.to, nome: envio.nome, username: envio.username, token: envio.token });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json(falhou(req, err, 'cadastro/reenviar'));
+  }
+});
+
+// Confirmação do link do e-mail. Atende os DOIS fluxos que mandam esse link
+// (cadastro novo e troca de e-mail) porque a tela é a mesma e o token não diz
+// de qual tipo é — procura primeiro nas pendências de cadastro, depois nas de
+// troca.
+// Limiter generoso de propósito: esta rota não envia e-mail, e o token tem 256
+// bits de entropia — não existe força bruta a conter. Um teto apertado aqui só
+// trancaria a segunda turma de alunos confirmando pelo wi-fi da faculdade.
+app.post('/api/confirmar-email', checagemLimiter, async (req, res) => {
+  const token = req.body && req.body.token;
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'Link inválido.' });
+  }
+  const alvo = contas.hashToken(token);
+  const INVALIDO = { error: 'Link inválido ou expirado. Peça um novo.' };
+
+  try {
+    // --- 1. Cadastro novo ---
+    const criado = await withFileLock('users.json', async () => {
+      const pendentes = lerPendencias(PENDENTES_FILE);
+      const reg = pendentes.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
+      if (!reg) return null;
+
+      const users = readJSON('users.json');
+      // Revalida DENTRO do lock: entre o cadastro e o clique no link (até 48h) o
+      // admin pode ter criado uma conta com esse mesmo nome ou e-mail.
+      if (acharPorUsername(users, reg.username)) {
+        return { conflito: 'O nome de usuário escolhido não está mais disponível. Refaça o cadastro com outro nome.' };
+      }
+      if (acharPorEmail(users, reg.emailLower)) {
+        return { conflito: 'Este e-mail já pertence a uma conta. Use "Esqueci minha senha" para entrar.' };
+      }
+
+      const novo = {
+        id: nextUserId(users),
+        username: reg.username,
+        usernameLower: reg.usernameLower,
+        name: reg.name,
+        role: 'external',
+        // Nasce sem supervisor. O admin pode vincular depois pela tela de
+        // Contas, e aí a Antessala passa a valer pra ele como pra qualquer aluno.
+        teacherId: null,
+        passwordHash: reg.passwordHash,
+        tokenVersion: 0,
+        ...DEFAULT_PROFILE,
+        email: reg.email,
+        emailLower: reg.emailLower,
+        emailVerified: true,
+        origem: reg.origem,
+        consentimento: reg.consentimento,
+        updateAllOS: !!reg.updateAllOS,
+        updateAllos: !!reg.updateAllos,
+        criadoEm: new Date().toISOString(),
+      };
+      users.push(novo);
+      writeJSON('users.json', users);
+      // Consome a pendência usada e qualquer outra do mesmo e-mail/nome.
+      writeJSON(PENDENTES_FILE, pendentes.filter(
+        (r) => r.tokenHash !== reg.tokenHash && r.emailLower !== reg.emailLower && r.usernameLower !== reg.usernameLower
+      ));
+      return { user: novo };
+    });
+
+    if (criado && criado.conflito) return res.status(409).json({ error: criado.conflito });
+    if (criado && criado.user) {
+      // Entra já logado: a pessoa acabou de provar que é dona do e-mail, mandar
+      // digitar a senha de novo agora só adiciona atrito.
+      return res.json({
+        tipo: 'cadastro',
+        token: signToken(criado.user),
+        user: publicUser(criado.user),
+      });
+    }
+
+    // --- 2. Troca de e-mail de uma conta existente ---
+    const trocado = await withFileLock('users.json', async () => {
+      const trocas = lerPendencias(TROCAS_EMAIL_FILE);
+      const reg = trocas.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
+      if (!reg) return null;
+
+      const users = readJSON('users.json');
+      const idx = users.findIndex((u) => u.id === reg.userId);
+      if (idx === -1) return { conflito: 'Conta não encontrada.' };
+      const dono = acharPorEmail(users, reg.emailLower);
+      if (dono && dono.id !== reg.userId) {
+        return { conflito: 'Este e-mail já pertence a outra conta.' };
+      }
+      users[idx] = { ...users[idx], email: reg.email, emailLower: reg.emailLower, emailVerified: true };
+      writeJSON('users.json', users);
+      writeJSON(TROCAS_EMAIL_FILE, trocas.filter((r) => r.userId !== reg.userId));
+      return { user: users[idx] };
+    });
+
+    if (trocado && trocado.conflito) return res.status(409).json({ error: trocado.conflito });
+    if (trocado && trocado.user) {
+      return res.json({ tipo: 'troca-email', email: trocado.user.email });
+    }
+
+    return res.status(400).json(INVALIDO);
+  } catch (err) {
+    res.status(500).json(falhou(req, err, 'cadastro/confirmar'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recuperação de senha
+// ---------------------------------------------------------------------------
+
+app.post('/api/senha/esqueci', emailLimiter, async (req, res) => {
+  const email = contas.normalizeEmail(req.body && req.body.email);
+  // 200 mesmo com e-mail malformado seria mentira inútil (não vaza nada dizer
+  // que "abc" não é e-mail), então esse caso é 400 normal.
+  if (!contas.isEmailValido(email)) return res.status(400).json({ error: 'E-mail inválido' });
+
+  const captcha = await turnstile.verificar(req.body && req.body.turnstileToken, clientIp(req));
+  if (!captcha.ok) {
+    return res.status(400).json({ error: 'Não foi possível validar o captcha. Recarregue a página e tente de novo.' });
+  }
+
+  try {
+    const envio = await withFileLock(RESETS_FILE, async () => {
+      const users = readJSON('users.json');
+      const user = acharPorEmail(users, email);
+      // Endereço sem conta: NADA é enviado. É de propósito — o padrão de mandar
+      // "não há conta com este e-mail" transformaria a rota num disparador de
+      // mensagem para endereços arbitrários, gastando a cota da caixa da Allos e
+      // a reputação do domínio. A resposta da API é 200 nos dois casos, então
+      // pela API a diferença continua invisível.
+      if (!user || !user.emailVerified) return null;
+      // Visitante não tem conta; papéis privilegiados também usam este fluxo
+      // normalmente — o piso de senha continua sendo o do perfil.
+
+      const resets = contas.removerExpirados(readJSON(RESETS_FILE, []));
+      const { token, tokenHash, expiresAt } = contas.novoToken(TTL_RESET_MS);
+      // Um pedido por conta: pedir de novo invalida o link anterior.
+      const outros = resets.filter((r) => r.userId !== user.id);
+      outros.push({ tokenHash, expiresAt, userId: user.id, criadoEm: new Date().toISOString(), ip: clientIp(req) });
+      writeJSON(RESETS_FILE, outros);
+      return { to: user.email, nome: user.name, token };
+    });
+
+    if (envio) {
+      await mailer.enviarRedefinicaoSenha(envio);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json(falhou(req, err, 'senha/esqueci'));
+  }
+});
+
+app.post('/api/senha/redefinir', emailLimiter, async (req, res) => {
+  const { token, newPassword } = req.body || {};
+  if (!token || typeof token !== 'string') return res.status(400).json({ error: 'Link inválido.' });
+  const alvo = contas.hashToken(token);
+
+  try {
+    const feito = await withFileLock('users.json', async () => {
+      const resets = contas.removerExpirados(readJSON(RESETS_FILE, []));
+      const reg = resets.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
+      if (!reg) return { invalido: true };
+
+      const users = readJSON('users.json');
+      const idx = users.findIndex((u) => u.id === reg.userId);
+      if (idx === -1) return { invalido: true };
+
+      // Piso e composição pelo perfil e nome de quem está sendo redefinido.
+      const erro = validarSenha(newPassword, users[idx].role, users[idx].username);
+      if (erro) return { erroSenha: erro };
+
+      users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+      // Derruba todas as sessões: se o motivo do reset foi invasão, o token do
+      // invasor tem que morrer junto com a senha dele.
+      users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
+      writeJSON('users.json', users);
+      // Uso único: o link consumido some, e os outros pedidos da mesma conta também.
+      writeJSON(RESETS_FILE, resets.filter((r) => r.userId !== reg.userId));
+      return { user: users[idx] };
+    });
+
+    if (feito.invalido) return res.status(400).json({ error: 'Link inválido ou expirado. Peça um novo.' });
+    if (feito.erroSenha) return res.status(400).json({ error: feito.erroSenha.replace('Senha deve', 'Nova senha deve') });
+
+    mailer.enviarAvisoSenhaAlterada({ to: feito.user.email, nome: feito.user.name }).catch(() => {});
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json(falhou(req, err, 'senha/redefinir'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Troca de e-mail do próprio usuário
+// ---------------------------------------------------------------------------
+//
+// Substitui a edição direta do campo `email` no PUT /api/users/:id, que era um
+// caminho de sequestro de conta: bastava uma sessão roubada pra apontar o e-mail
+// pra si, pedir reset e ficar com a conta. Aqui exige a senha atual, confirma o
+// endereço novo por link e AVISA o antigo.
+app.post('/api/me/email', requireAuth, emailAuthLimiter, async (req, res) => {
+  if (req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Visitante não tem conta para alterar.' });
+  }
+  const { senhaAtual, novoEmail } = req.body || {};
+  const email = contas.normalizeEmail(novoEmail);
+  if (!contas.isEmailValido(email)) return res.status(400).json({ error: 'E-mail inválido' });
+  if (email === (req.user.emailLower || '')) {
+    return res.status(400).json({ error: 'Este já é o e-mail da sua conta.' });
+  }
+  // Senha atual: sem isso, uma sessão roubada trocaria o e-mail sozinha.
+  const ok = await bcrypt.compare(String(senhaAtual || ''), req.user.passwordHash || '');
+  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+
+  try {
+    const pedido = await withFileLock(TROCAS_EMAIL_FILE, async () => {
+      const users = readJSON('users.json');
+      const dono = acharPorEmail(users, email);
+      if (dono && dono.id !== req.user.id) {
+        return { conflito: 'Este e-mail já está em uso por outra conta.' };
+      }
+      const trocas = contas.removerExpirados(readJSON(TROCAS_EMAIL_FILE, []));
+      const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
+      const outros = trocas.filter((r) => r.userId !== req.user.id);
+      outros.push({ tokenHash, expiresAt, userId: req.user.id, email, emailLower: email, criadoEm: new Date().toISOString() });
+      writeJSON(TROCAS_EMAIL_FILE, outros);
+      return { token };
+    });
+
+    if (pedido.conflito) return res.status(409).json({ error: pedido.conflito });
+
+    await mailer.enviarConfirmacaoTrocaEmail({ to: email, nome: req.user.name, token: pedido.token });
+    // Alarme no endereço antigo. Não pede ação — só dá à pessoa a chance de
+    // reagir se a troca não partiu dela.
+    if (req.user.emailLower && req.user.emailVerified) {
+      mailer.enviarAvisoTrocaEmail({ to: req.user.email, novoEmail: email }).catch(() => {});
+    }
+    res.json({ ok: true, aguardandoConfirmacao: email });
+  } catch (err) {
+    res.status(500).json(falhou(req, err, 'me/email'));
+  }
 });
 
 // Define o "título" (subtítulo) ativo exibido no perfil e no ranking. SÓ
@@ -1063,7 +1687,12 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
   // gerado por IA (POST /api/me/visual-description) e shareAppearance é o
   // consentimento de mostrar a aparência aos pacientes simulados (ainda não
   // usado nos prompts — só guardado no perfil por enquanto).
-  const allowed = ['name', 'gender', 'email', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance'];
+  //
+  // `email` NÃO entra aqui de propósito. Ele virou âncora do "esqueci minha
+  // senha": deixar trocar direto seria sequestro de conta em dois passos —
+  // troco pro meu endereço, peço reset, recebo a senha. A troca passa por
+  // POST /api/me/email, que confirma o endereço novo por link e avisa o antigo.
+  const allowed = ['name', 'gender', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance'];
   const patch = {};
   for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
   users[idx] = { ...users[idx], ...patch };
@@ -1096,28 +1725,55 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
     if (!usernameRegex.test(username)) {
       errors.push('Usuário inválido (3-32 caracteres, letras/números/. _ -)');
     }
-    const dup = users.find(u => u.username === username && (!currentUser || u.id !== currentUser.id));
-    if (dup) errors.push('Usuário já existe');
+    // Ignorando maiúsculas: `Joao` e `joao` não podem coexistir (ver
+    // migrateContasCadastroPublico).
+    const dup = acharPorUsername(users, username);
+    if (dup && (!currentUser || dup.id !== currentUser.id)) errors.push('Usuário já existe');
   }
-  // Piso depende do perfil sendo criado/editado (ver validarSenha).
+  // Piso depende do perfil sendo criado/editado (ver validarSenha). O username
+  // vai junto porque a senha não pode contê-lo.
   if (!isUpdate && !body.password) {
     errors.push(`Senha deve ter ao menos ${senhaMinimaPara(role)} caracteres`);
   } else if (body.password !== undefined && body.password !== '') {
-    const erroSenha = validarSenha(body.password, role);
+    const erroSenha = validarSenha(body.password, role, username);
     if (erroSenha) errors.push(erroSenha);
+  }
+  // E-mail: opcional numa conta criada pelo admin, mas se vier tem que ser
+  // válido e único — é a âncora do "esqueci minha senha", e dois donos pro
+  // mesmo endereço tornariam o reset ambíguo.
+  //
+  // Só valida quando o endereço realmente MUDA. Antes desta versão o campo era
+  // texto livre, então pode haver conta antiga com e-mail malformado em disco;
+  // validar em toda edição impediria o admin de mexer no nome ou na foto dessas
+  // contas até arrumar o e-mail, o que não é problema dele naquele momento.
+  const emailNovo = contas.normalizeEmail(body.email);
+  const emailMudou = body.email !== undefined
+    && (!currentUser || emailNovo !== contas.normalizeEmail(currentUser.email));
+  if (emailMudou && emailNovo !== '') {
+    if (!contas.isEmailValido(emailNovo)) {
+      errors.push('E-mail inválido');
+    } else {
+      const dono = acharPorEmail(users, emailNovo);
+      if (dono && (!currentUser || dono.id !== currentUser.id)) {
+        errors.push('Este e-mail já está em uso por outra conta');
+      }
+    }
   }
   if (!isUpdate && !VALID_ROLES.includes(role)) {
     errors.push('Função inválida');
   }
-  if (role === 'therapist') {
-    if (!teacherId) {
-      errors.push('Aluno deve estar vinculado a um professor');
-    } else {
-      const t = users.find(u => u.id === teacherId);
-      if (!t || t.role !== 'supervisor') errors.push('Professor inválido');
-    }
+  // Aluno INTERNO exige supervisor (é o que "interno" significa aqui). Aluno
+  // EXTERNO nasce sem — mas o vínculo continua válido, e o admin pode criar
+  // depois pela tela de Contas; a partir daí ele usa a Antessala como qualquer
+  // aluno.
+  if (role === 'therapist' && !teacherId) {
+    errors.push('Aluno deve estar vinculado a um professor');
   }
-  if (role && role !== 'therapist' && teacherId) {
+  if (isAluno(role) && teacherId) {
+    const t = users.find(u => u.id === teacherId);
+    if (!t || t.role !== 'supervisor') errors.push('Professor inválido');
+  }
+  if (role && !isAluno(role) && teacherId) {
     errors.push('Apenas alunos podem estar vinculados a um professor');
   }
   return errors;
@@ -1134,16 +1790,23 @@ app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res)
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
 
   const role = req.body.role;
+  const username = req.body.username.trim();
+  const email = contas.normalizeEmail(req.body.email);
   const newUser = {
     id: nextUserId(users),
-    username: req.body.username.trim(),
+    username,
+    usernameLower: contas.normalizeUsername(username),
     name: (req.body.name || req.body.username).trim(),
     role,
-    teacherId: role === 'therapist' ? (req.body.teacherId || null) : null,
+    teacherId: isAluno(role) ? (req.body.teacherId || null) : null,
     passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
+    tokenVersion: 0,
     ...DEFAULT_PROFILE,
     gender: req.body.gender || '',
-    email: req.body.email || '',
+    email,
+    emailLower: email,
+    // Endereço digitado pelo admin — não passa por link de confirmação.
+    emailVerified: !!email,
     profilePhoto: req.body.profilePhoto || DEFAULT_PROFILE.profilePhoto,
   };
   users.push(newUser);
@@ -1167,13 +1830,19 @@ app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, r
     ...(req.body.username !== undefined ? { username: String(req.body.username).trim() } : {}),
     ...(req.body.name !== undefined ? { name: String(req.body.name).trim() } : {}),
     ...(req.body.role !== undefined ? { role: req.body.role } : {}),
-    ...(req.body.email !== undefined ? { email: req.body.email } : {}),
+    ...(req.body.email !== undefined ? { email: contas.normalizeEmail(req.body.email) } : {}),
     ...(req.body.gender !== undefined ? { gender: req.body.gender } : {}),
     ...(req.body.profilePhoto !== undefined ? { profilePhoto: req.body.profilePhoto } : {}),
   };
+  merged.usernameLower = contas.normalizeUsername(merged.username);
+  merged.emailLower = contas.normalizeEmail(merged.email);
+  // Trocado pelo admin, entra já verificado (mesma lógica da criação).
+  if (req.body.email !== undefined && merged.emailLower !== (current.emailLower || '')) {
+    merged.emailVerified = !!merged.emailLower;
+  }
 
-  // teacherId só faz sentido para alunos
-  if (merged.role === 'therapist') {
+  // teacherId só faz sentido para aluno (interno ou externo)
+  if (isAluno(merged.role)) {
     if (req.body.teacherId !== undefined) merged.teacherId = req.body.teacherId || null;
   } else {
     merged.teacherId = null;
@@ -1188,9 +1857,11 @@ app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, r
   if (req.body.password) {
     // Piso pelo perfil RESULTANTE: promover alguém a supervisor já na mesma
     // request exige a senha do perfil novo, não a do antigo.
-    const erroSenha = validarSenha(req.body.password, merged.role);
+    const erroSenha = validarSenha(req.body.password, merged.role, merged.username);
     if (erroSenha) return res.status(400).json({ error: erroSenha });
     merged.passwordHash = await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS);
+    // Derruba as sessões abertas do usuário (ver signToken).
+    merged.tokenVersion = (current.tokenVersion || 0) + 1;
   }
 
   // Se um professor mudou de função, desvincular alunos
@@ -1234,9 +1905,12 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'
   const idx = users.findIndex(u => u.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
   // Piso pelo perfil de quem está sendo resetado (ver validarSenha).
-  const erroSenha = validarSenha(newPassword, users[idx].role);
+  const erroSenha = validarSenha(newPassword, users[idx].role, users[idx].username);
   if (erroSenha) return res.status(400).json({ error: erroSenha });
   users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  // Sessões abertas com a senha antiga morrem aqui — é justamente o cenário em
+  // que o admin reseta porque a conta pode estar comprometida.
+  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
   writeJSON('users.json', users);
   res.json({ ok: true });
 });
@@ -1288,9 +1962,12 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
 // Professor: lista de alunos vinculados a ele
 app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
   const users = readJSON('users.json');
+  // Aluno externo entra na mesma lista: pro supervisor, um aluno vinculado a
+  // ele é um aluno — interno ou não. O externo sem vínculo (o caso comum) tem
+  // teacherId null e simplesmente não aparece pra nenhum supervisor.
   const list = req.user.role === 'admin'
-    ? users.filter(u => u.role === 'therapist')
-    : users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id);
+    ? users.filter(u => isAluno(u.role))
+    : users.filter(u => isAluno(u.role) && u.teacherId === req.user.id);
   res.json(list.map(publicUser));
 });
 
@@ -2426,8 +3103,8 @@ app.get('/api/logs', requireAuth, (req, res) => {
   const users = readJSON('users.json');
 
   // criteriaScores (notas por critério do avaliador) são só pra supervisor/admin.
-  // O aluno (therapist) e o visitante recebem o log SEM esse campo.
-  const isStudent = req.user.role === 'therapist' || req.user.role === 'visitor';
+  // Aluno (interno ou externo) e visitante recebem o log SEM esse campo.
+  const isStudent = isAluno(req.user.role) || req.user.role === 'visitor';
   const serve = (arr) => {
     const decorated = decorateLogs(arr);
     if (!isStudent) return decorated;
@@ -2435,7 +3112,7 @@ app.get('/api/logs', requireAuth, (req, res) => {
   };
 
   // Aluno e visitante: só os próprios.
-  if (req.user.role === 'therapist' || req.user.role === 'visitor') {
+  if (isAluno(req.user.role) || req.user.role === 'visitor') {
     return res.json(serve(logs.filter(l => l.userId === req.user.id)));
   }
 
@@ -2450,7 +3127,7 @@ app.get('/api/logs', requireAuth, (req, res) => {
   // Professor: apenas logs de seus alunos
   if (req.user.role === 'supervisor') {
     const myStudents = new Set(
-      users.filter(u => u.role === 'therapist' && u.teacherId === req.user.id).map(u => u.id)
+      users.filter(u => isAluno(u.role) && u.teacherId === req.user.id).map(u => u.id)
     );
     return res.json(serve(logs.filter(l => myStudents.has(l.userId))));
   }
@@ -2746,6 +3423,19 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   logs.push(log);
   writeJSON('logs.json', logs);
 
+  // "Sua avaliação está pronta" — atualiza (não duplica) a notificação "na
+  // fila" disparada no início de /api/evaluate (mesmo refId 'eval:'+userId).
+  // Competitivo fica de fora: chega aqui só por esta rota quando NÃO é
+  // competitivo — o competitivo tem seu próprio ciclo fila→pronta em
+  // /api/competitive/finish + finalizeCompetitiveEvals. Sem evaluation/score
+  // não há o que anunciar (ex.: Simulação Livre do visitante, sem avaliador).
+  if (mode !== 'competitive' && (log.evaluation || Number.isFinite(log.score))) {
+    upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
+      type: 'evaluation_ready',
+      message: `Sua avaliação${log.itemTitle ? ` de "${log.itemTitle}"` : ''} está pronta.`,
+    });
+  }
+
   // MMR competitivo: partida válida = freeplay + mode competitive + nota
   // numérica + usuário real (visitante tem id efêmero, fica de fora). A nota S
   // é a nota crua (0..100) do avaliador, parseada no cliente — mesmo modelo de
@@ -2927,6 +3617,15 @@ app.get('/api/admin/feedback', requireAuth, requireRole('admin'), (req, res) => 
   res.json([...all].reverse());
 });
 
+// Admin: remove uma entrada de feedback (ex.: teste do próprio admin).
+app.delete('/api/admin/feedback/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const all = readJSON('feedback.json', []);
+  const next = all.filter((f) => f.id !== req.params.id);
+  if (next.length === all.length) return res.status(404).json({ error: 'Feedback não encontrado.' });
+  writeJSON('feedback.json', next);
+  res.json({ ok: true });
+});
+
 // --- Logs de Erro (painel do admin) ---
 // Contrapartida do `falhou()`: o usuário recebe só a mensagem genérica + código,
 // e o detalhe (mensagem real, stack, quem, onde, quando) vive aqui.
@@ -3004,43 +3703,6 @@ app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, re
   }
   console.log(`[admin] aviso enviado por ${req.user.username} para ${count} usuário(s)`);
   res.json({ ok: true, count });
-});
-
-// Atualizações do sistema criadas pelo admin (painel "Atualizações"). Ficam em
-// updates.json e são mescladas no cliente com o changelog estático.
-//
-// Restrito a admin e supervisor: são notas de versão, comunicação interna de
-// desenvolvimento — aluno e visitante não veem. O painel também some pra eles
-// no cliente; o gate está aqui porque esconder só na tela deixaria o conteúdo
-// acessível a qualquer um com uma sessão.
-app.get('/api/updates', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
-  const list = readJSON('updates.json', []);
-  const sorted = [...list].sort((a, b) =>
-    String(b.date || '').localeCompare(String(a.date || '')) ||
-    String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-  res.json(sorted);
-});
-
-app.post('/api/admin/updates', requireAuth, requireRole('admin'), (req, res) => {
-  const title = clampStr(req.body && req.body.title, 120).trim();
-  const body = clampStr(req.body && req.body.body, 4000).trim();
-  if (!body) return res.status(400).json({ error: 'O conteúdo da atualização é obrigatório.' });
-  const reqDate = req.body && req.body.date;
-  const date = (typeof reqDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(reqDate))
-    ? reqDate
-    : new Date().toISOString().slice(0, 10);
-  const entry = {
-    id: 'upd-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
-    date,
-    title,
-    body,
-    createdAt: new Date().toISOString(),
-  };
-  const list = readJSON('updates.json', []);
-  list.push(entry);
-  writeJSON('updates.json', list);
-  console.log(`[admin] atualização publicada por ${req.user.username}: ${title || date}`);
-  res.json(entry);
 });
 
 // --- Ranking global de jogadores (por MMR competitivo) ---
@@ -4274,7 +4936,27 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       writeJSON('trilha-eval-queue.json', arr);
     });
     sweepTrilhaEvalBatches().catch(() => {});
+    upsertEvaluationNotification(req.user.id, 'trilha-job:' + job.id, {
+      type: 'evaluation_queued',
+      message: EVAL_QUEUED_MESSAGE,
+    });
     return res.json({ pending: true, jobId: job.id });
+  }
+
+  // "Sua avaliação está na fila" pra todo mundo que chega até aqui (Treinamento,
+  // Neuro, Trilha síncrona GLM/Claude): mesmo sendo síncrono no servidor, a
+  // chamada ao avaliador leva 30-90s+ (ver evaluator-prompts-and-streaming), e o
+  // "pronta" só sai quando o cliente salva o log em POST /api/logs — então há um
+  // intervalo real em que vale avisar (ex.: aluno minimiza o app no celular).
+  // refId por usuário (não por sessão): não há um id compartilhado entre esta
+  // requisição SSE e o POST /api/logs que vem depois sem plumbing extra no
+  // client; um slot por usuário é suficiente (o pior caso de duas avaliações
+  // simultâneas do mesmo aluno só reusa a mesma linha, sem quebrar nada).
+  if (isFreeSim || isNeuroEval || isExercise) {
+    upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
+      type: 'evaluation_queued',
+      message: EVAL_QUEUED_MESSAGE,
+    });
   }
 
   // Reasoning visível: SÓ pra supervisor/admin e SÓ quando o cliente pede (aba
@@ -4746,6 +5428,116 @@ function parseSelectionEval(rawText) {
   return { evaluation: clean, criteriaScores: criteria, score };
 }
 
+// ============================================================================
+// FILA LOCAL NA FRENTE DA BATCH API
+// ----------------------------------------------------------------------------
+// A OpenAI limita, por (organização, modelo), quantos tokens podem estar
+// ENFILEIRADOS em batches ao mesmo tempo — e conta o TETO de cada requisição
+// (input + max_completion_tokens), não o que ela vai gastar. Quando o teto
+// estoura, `batches.create` responde 200 e o batch morre depois, na validação,
+// com `token_limit_exceeded`.
+//
+// Os QUATRO modos que usam batch (Seletivo, Competitivo, Trilha e Avaliação
+// Independente) dividem esse mesmo teto, então a contabilidade tem de ser
+// compartilhada: é o que este ledger faz. Cada batch submetido entra com a sua
+// estimativa de tokens; sai quando o batch termina (ou quando envelhece além da
+// janela de 24h, caso o coletor tenha perdido o desfecho).
+//
+// A régua de decisão está em server/batch-fila.js (pura, testada). Aqui mora só
+// o I/O: ler o ledger, gravar, e responder "cabe agora?".
+const LEDGER_FILE = 'batch-ledger.json';
+
+// Tokens que este conjunto de corpos de requisição vai RESERVAR na fila.
+function tokensDoLote(bodies) {
+  return bodies.reduce((soma, body) => soma + batchFila.tokensDaRequisicao(body, estimarTokens), 0);
+}
+
+// Quanto do teto do modelo já está ocupado por batches em voo (de qualquer modo).
+function tokensEmVoo(model) {
+  return batchFila.tokensEmVooDe(readJSON(LEDGER_FILE, []), model);
+}
+
+// Cabe um lote de `tokens` deste modelo agora?
+function cabeNaFilaDaOpenAI(model, tokens) {
+  return batchFila.temVaga({ model, tokens, tokensEmVoo: tokensEmVoo(model) });
+}
+
+// Registra um batch recém-criado como ocupante da fila.
+async function registrarBatchEmVoo({ batchId, model, tokens, modo }) {
+  await withFileLock(LEDGER_FILE, async () => {
+    const arr = readJSON(LEDGER_FILE, []).filter((e) => e && !batchFila.ledgerExpirado(e));
+    arr.push({ batchId, model, tokens, modo, criadoEm: new Date().toISOString() });
+    writeJSON(LEDGER_FILE, arr);
+  });
+}
+
+// Libera a vaga: chamado assim que um batch chega a estado terminal. Sem isto o
+// ledger só esvaziaria pela idade (26h) e a fila ficaria artificialmente cheia.
+async function liberarBatchDaFila(batchId) {
+  await withFileLock(LEDGER_FILE, async () => {
+    const arr = readJSON(LEDGER_FILE, []);
+    const restante = arr.filter((e) => e && e.batchId !== batchId && !batchFila.ledgerExpirado(e));
+    if (restante.length !== arr.length) writeJSON(LEDGER_FILE, restante);
+  });
+}
+
+// Cria o batch a partir dos corpos já montados, com a vaga já conferida por quem
+// chama. Devolve o objeto do batch e deixa o ledger em dia.
+async function criarBatchRegistrado({ openai, requests, model, modo }) {
+  const jsonl = requests.map((r) => JSON.stringify(r)).join('\n') + '\n';
+  const file = await openai.files.create({ file: await toBatchFile(jsonl), purpose: 'batch' });
+  const batch = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+  await registrarBatchEmVoo({ batchId: batch.id, model, tokens: tokensDoLote(requests.map((r) => r.body)), modo });
+  return batch;
+}
+
+// Submete os pendentes de um modo em LOTES que caibam na fila da OpenAI, na
+// ordem de chegada. `itens` é [{ id, body }]; devolve um Map id → batchId com
+// os que entraram AGORA. O que não coube não é perdido nem marcado: fica
+// pendente e volta no próximo ciclo do sweep (a cada 3 minutos) — é a fila
+// esperando vaga, que é o comportamento que 20 pessoas submetendo ao mesmo
+// tempo precisam ter.
+async function submeterPendentesEmLotes({ openai, itens, model, modo, rotulo }) {
+  const destino = new Map();
+  if (!itens.length) return destino;
+  const comTokens = itens.map((it) => ({ ...it, tokens: batchFila.tokensDaRequisicao(it.body, estimarTokens) }));
+  const lotes = batchFila.dividirEmLotes({ itens: comTokens, model, tokensEmVoo: tokensEmVoo(model) });
+
+  for (const lote of lotes) {
+    const requests = lote.map((it) => ({ custom_id: String(it.id), method: 'POST', url: '/v1/chat/completions', body: it.body }));
+    let batch;
+    try {
+      batch = await criarBatchRegistrado({ openai, requests, model, modo });
+    } catch (e) {
+      // Recusa na própria criação (429, indisponibilidade): os itens deste lote
+      // continuam pendentes e tentam de novo no próximo ciclo.
+      console.error(`[${modo}] criação do batch falhou (${lote.length} ${rotulo} seguem na fila):`, e.message);
+      break;
+    }
+    for (const it of lote) destino.set(it.id, batch.id);
+    console.log(`[${modo}] submetidos ${lote.length} ${rotulo} no batch ${batch.id}`);
+  }
+
+  const esperando = itens.length - destino.size;
+  if (esperando > 0) {
+    console.log(`[${modo}] ${esperando} ${rotulo} sem vaga na fila da OpenAI agora — voltam no próximo ciclo`);
+  }
+  return destino;
+}
+
+// Desfecho de um batch que não completou, já com a vaga liberada e o teto
+// aprendido (quando a recusa revelou o número). Devolve o que o coletor do modo
+// deve fazer: 'espera' | 'retenta' | 'erro' (ver batch-fila.js).
+async function fecharBatchQueFalhou({ batchObj, model, tentativas = 0, modo }) {
+  const r = batchFila.classificarFalha(batchObj, tentativas);
+  if (r.teto && batchFila.aprenderTeto(model, r.teto)) {
+    console.log(`[batch-fila] teto de ${model} aprendido com a recusa: ${r.teto.toLocaleString('pt-BR')} tokens enfileirados`);
+  }
+  await liberarBatchDaFila(batchObj.id);
+  console.log(`[${modo}] batch ${batchObj.id} ${batchObj.status} → ${r.acao}${r.motivo ? ' — ' + r.motivo : ''}`);
+  return r;
+}
+
 // Cria um File (multipart) a partir do JSONL do batch, sem tocar em disco.
 function toBatchFile(jsonl) {
   const O = require('openai');
@@ -4810,25 +5602,21 @@ async function submitSelectionBatches(openai) {
   if (!spec.batch) return;
   const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
   if (!pending.length) return;
-  const lines = [];
-  const ids = [];
+  const itens = [];
   for (const log of pending) {
-    let body;
-    try { body = buildSelectionEvalBody(log, spec); } catch (e) { console.error('[selecao-batch] corpo:', e.message); continue; }
-    lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
-    ids.push(log.id);
+    try { itens.push({ id: log.id, body: buildSelectionEvalBody(log, spec) }); }
+    catch (e) { console.error('[selecao-batch] corpo:', e.message); }
   }
-  if (!lines.length) return;
-  const file = await openai.files.create({ file: await toBatchFile(lines.join('\n') + '\n'), purpose: 'batch' });
-  const batch = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+  const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'selecao-batch', rotulo: 'candidato(s)' });
+  if (!destino.size) return;
   await withFileLock('selection-logs.json', async () => {
     const arr = readJSON('selection-logs.json');
     for (const l of arr) {
-      if (ids.includes(l.id) && l.status === 'pending' && !l.evalBatchId) { l.evalBatchId = batch.id; l.evalBatchAt = new Date().toISOString(); }
+      const bid = destino.get(l.id);
+      if (bid && l.status === 'pending' && !l.evalBatchId) { l.evalBatchId = bid; l.evalBatchAt = new Date().toISOString(); }
     }
     writeJSON('selection-logs.json', arr);
   });
-  console.log(`[selecao-batch] submetidos ${ids.length} candidato(s) no batch ${batch.id}`);
 }
 
 // Fecha os logs do seletivo com o texto do avaliador: status/score/
@@ -4931,15 +5719,26 @@ async function collectSelectionBatches(openai) {
         }
       }
       const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
+      await liberarBatchDaFila(bid);
       await finalizeSelectionEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[selecao-batch] batch ${bid} completo: ${results.size} candidato(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
+      // Fila cheia ou falha passageira devolve o candidato para a fila em vez de
+      // queimá-lo: sem evalBatchId ele volta a ser "pendente" e o próximo ciclo
+      // resubmete. Só vira erro o que não tem volta.
+      const tentativas = Math.max(0, ...withBatch.filter((l) => l.evalBatchId === bid).map((l) => Number(l.evalBatchTentativas) || 0));
+      const r = await fecharBatchQueFalhou({ batchObj: batch, model: evaluatorSpecFor('seletivo').model, tentativas, modo: 'selecao-batch' });
       await withFileLock('selection-logs.json', async () => {
         const arr = readJSON('selection-logs.json');
-        for (const l of arr) { if (l.evalBatchId === bid && l.status === 'pending') { l.status = 'erro'; l.evalError = `batch ${batch.status}`; } }
+        for (const l of arr) {
+          if (l.evalBatchId !== bid || l.status !== 'pending') continue;
+          if (r.acao === 'erro') { l.status = 'erro'; l.evalError = r.motivo; continue; }
+          l.evalBatchId = null;
+          l.evalBatchEspera = r.motivo;
+          if (r.acao === 'retenta') l.evalBatchTentativas = (Number(l.evalBatchTentativas) || 0) + 1;
+        }
         writeJSON('selection-logs.json', arr);
       });
-      console.log(`[selecao-batch] batch ${bid} ${batch.status} — candidato(s) marcados com erro`);
     }
   }
 }
@@ -5004,25 +5803,21 @@ async function submitCompetitiveBatches(openai) {
   if (!spec.batch) return;
   const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
   if (!pending.length) return;
-  const lines = [];
-  const ids = [];
+  const itens = [];
   for (const log of pending) {
-    let body;
-    try { body = buildCompetitiveEvalBody(log, spec); } catch (e) { console.error('[comp-batch] corpo:', e.message); continue; }
-    lines.push(JSON.stringify({ custom_id: log.id, method: 'POST', url: '/v1/chat/completions', body }));
-    ids.push(log.id);
+    try { itens.push({ id: log.id, body: buildCompetitiveEvalBody(log, spec) }); }
+    catch (e) { console.error('[comp-batch] corpo:', e.message); }
   }
-  if (!lines.length) return;
-  const file = await openai.files.create({ file: await toBatchFile(lines.join('\n') + '\n'), purpose: 'batch' });
-  const batch = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+  const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'comp-batch', rotulo: 'competitivo(s)' });
+  if (!destino.size) return;
   await withFileLock('logs.json', async () => {
     const arr = readJSON('logs.json');
     for (const l of arr) {
-      if (ids.includes(l.id) && l.evaluationPending && !l.evalBatchId) { l.evalBatchId = batch.id; l.evalBatchAt = new Date().toISOString(); }
+      const bid = destino.get(l.id);
+      if (bid && l.evaluationPending && !l.evalBatchId) { l.evalBatchId = bid; l.evalBatchAt = new Date().toISOString(); }
     }
     writeJSON('logs.json', arr);
   });
-  console.log(`[comp-batch] submetidos ${ids.length} competitivo(s) no batch ${batch.id}`);
 }
 
 // Fecha os logs competitivos com o texto do avaliador: nota/feedback no log,
@@ -5030,6 +5825,7 @@ async function submitCompetitiveBatches(openai) {
 // o gate do MMR existir num só lugar.
 async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
   const alvo = new Set(ids.map(String));
+  const ready = []; // { userId, refId, itemTitle } — notificados DEPOIS do lock (ver fim da função)
   await withFileLock('logs.json', async () => {
     const arr = readJSON('logs.json');
     let mmr = null; let mmrChanged = false;
@@ -5041,6 +5837,7 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
         l.criteriaScores = criteriaScores;
         l.score = score;
         l.evaluationPending = false;
+        if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
         // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
         if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
           if (!mmr) mmr = readMMR();
@@ -5063,6 +5860,12 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
     writeJSON('logs.json', arr);
     if (mmrChanged) writeMMR(mmr);
   });
+  for (const r of ready) {
+    upsertEvaluationNotification(r.userId, r.refId, {
+      type: 'evaluation_ready',
+      message: `Sua avaliação${r.itemTitle ? ` de "${r.itemTitle}"` : ''} está pronta.`,
+    });
+  }
 }
 
 // Competitivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
@@ -5117,15 +5920,26 @@ async function collectCompetitiveBatches(openai) {
         }
       }
       const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
+      await liberarBatchDaFila(bid);
       await finalizeCompetitiveEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[comp-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
+      // O aluno já saiu da sessão com "sua nota sai em até 24h". Fila cheia não
+      // pode transformar isso em "sem nota": limpar o evalBatchId devolve o log
+      // ao conjunto de pendentes, e o próximo ciclo tenta de novo.
+      const tentativas = Math.max(0, ...withBatch.filter((l) => l.evalBatchId === bid).map((l) => Number(l.evalBatchTentativas) || 0));
+      const r = await fecharBatchQueFalhou({ batchObj: batch, model: evaluatorSpecFor('competitivo').model, tentativas, modo: 'comp-batch' });
       await withFileLock('logs.json', async () => {
         const arr = readJSON('logs.json');
-        for (const l of arr) { if (l.evalBatchId === bid && l.evaluationPending) { l.evaluationPending = false; l.evalError = `batch ${batch.status}`; } }
+        for (const l of arr) {
+          if (l.evalBatchId !== bid || !l.evaluationPending) continue;
+          if (r.acao === 'erro') { l.evaluationPending = false; l.evalError = r.motivo; continue; }
+          l.evalBatchId = null;
+          l.evalBatchEspera = r.motivo;
+          if (r.acao === 'retenta') l.evalBatchTentativas = (Number(l.evalBatchTentativas) || 0) + 1;
+        }
         writeJSON('logs.json', arr);
       });
-      console.log(`[comp-batch] batch ${bid} ${batch.status} — competitivo(s) marcados com erro`);
     }
   }
 }
@@ -5171,25 +5985,30 @@ let trilhaEvalSweepRunning = false;
 async function submitTrilhaEvalBatches(openai) {
   const pending = readJSON('trilha-eval-queue.json').filter((j) => j && j.status === 'processing' && !j.batchId);
   if (!pending.length) return;
-  const lines = [];
-  const ids = [];
+  // O teto de tokens enfileirados é POR MODELO, e cada exercício escolhe o seu
+  // avaliador — então os pendentes vão agrupados por modelo, cada grupo com o
+  // seu próprio orçamento de fila.
+  const porModelo = new Map();
   for (const job of pending) {
     let body;
     try { body = buildTrilhaEvalBody(job); } catch (e) { console.error('[trilha-batch] corpo:', e.message); continue; }
-    lines.push(JSON.stringify({ custom_id: job.id, method: 'POST', url: '/v1/chat/completions', body }));
-    ids.push(job.id);
+    if (!porModelo.has(job.model)) porModelo.set(job.model, []);
+    porModelo.get(job.model).push({ id: job.id, body });
   }
-  if (!lines.length) return;
-  const file = await openai.files.create({ file: await toBatchFile(lines.join('\n') + '\n'), purpose: 'batch' });
-  const batch = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
+  const destino = new Map();
+  for (const [modelo, itens] of porModelo) {
+    const enviados = await submeterPendentesEmLotes({ openai, itens, model: modelo, modo: 'trilha-batch', rotulo: 'exercício(s)' });
+    for (const [id, bid] of enviados) destino.set(id, bid);
+  }
+  if (!destino.size) return;
   await withFileLock('trilha-eval-queue.json', async () => {
     const arr = readJSON('trilha-eval-queue.json');
     for (const j of arr) {
-      if (ids.includes(j.id) && j.status === 'processing' && !j.batchId) { j.batchId = batch.id; j.batchAt = new Date().toISOString(); }
+      const bid = destino.get(j.id);
+      if (bid && j.status === 'processing' && !j.batchId) { j.batchId = bid; j.batchAt = new Date().toISOString(); }
     }
     writeJSON('trilha-eval-queue.json', arr);
   });
-  console.log(`[trilha-batch] submetidos ${ids.length} exercício(s) no batch ${batch.id}`);
 }
 
 // Coleta os batches prontos: grava o resultado (content + usage normalizado) no job.
@@ -5217,6 +6036,7 @@ async function collectTrilhaEvalBatches(openai) {
           } catch {}
         }
       }
+      const ready = []; // { userId, refId, itemId } — notificados DEPOIS do lock
       await withFileLock('trilha-eval-queue.json', async () => {
         const arr = readJSON('trilha-eval-queue.json');
         for (const j of arr) {
@@ -5225,20 +6045,42 @@ async function collectTrilhaEvalBatches(openai) {
             const rawUsage = usages.get(j.id) || null;
             j.status = 'completed';
             j.result = { content: contents.get(j.id), usage: rawUsage ? normalizeUsage('openai', rawUsage) : null };
+            if (j.userId) ready.push({ userId: j.userId, refId: 'trilha-job:' + j.id, itemId: j.itemId });
           } else {
             j.status = 'error'; j.error = 'sem resultado no batch';
           }
         }
         writeJSON('trilha-eval-queue.json', arr);
       });
+      if (ready.length) {
+        const exercises = readJSON('exercises.json');
+        for (const r of ready) {
+          const ex = exercises.find((e) => String(e.id) === String(r.itemId));
+          upsertEvaluationNotification(r.userId, r.refId, {
+            type: 'evaluation_ready',
+            message: `Sua avaliação${ex ? ` de "${ex.title}"` : ''} está pronta.`,
+          });
+        }
+      }
+      await liberarBatchDaFila(bid);
       console.log(`[trilha-batch] batch ${bid} completo: ${contents.size} exercício(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
+      // Mesma regra dos outros modos: sem batchId o job volta a ser pendente e
+      // o próximo ciclo resubmete. O aluno continua vendo "processing".
+      const doBatch = withBatch.filter((j) => j.batchId === bid);
+      const tentativas = Math.max(0, ...doBatch.map((j) => Number(j.batchTentativas) || 0));
+      const r = await fecharBatchQueFalhou({ batchObj: batch, model: (doBatch[0] && doBatch[0].model) || '', tentativas, modo: 'trilha-batch' });
       await withFileLock('trilha-eval-queue.json', async () => {
         const arr = readJSON('trilha-eval-queue.json');
-        for (const j of arr) { if (j.batchId === bid && j.status === 'processing') { j.status = 'error'; j.error = `batch ${batch.status}`; } }
+        for (const j of arr) {
+          if (j.batchId !== bid || j.status !== 'processing') continue;
+          if (r.acao === 'erro') { j.status = 'error'; j.error = r.motivo; continue; }
+          j.batchId = null;
+          j.batchEspera = r.motivo;
+          if (r.acao === 'retenta') j.batchTentativas = (Number(j.batchTentativas) || 0) + 1;
+        }
         writeJSON('trilha-eval-queue.json', arr);
       });
-      console.log(`[trilha-batch] batch ${bid} ${batch.status} — exercício(s) marcados com erro`);
     }
   }
 }
@@ -5309,6 +6151,12 @@ app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) 
   });
   // Responde na hora — o aluno vê só o agradecimento ("nota em até 24h").
   res.json({ ok: true, pending: true, logId: log.id });
+  // refId = 'log:'+log.id (não 'eval:'+userId): este id sobrevive até
+  // finalizeCompetitiveEvals, que é onde a notificação vira "pronta".
+  upsertEvaluationNotification(req.user.id, 'log:' + log.id, {
+    type: 'evaluation_queued',
+    message: EVAL_QUEUED_MESSAGE,
+  });
   // Dispara o batch já (submete este log). O collect roda no boot + intervalo.
   sweepCompetitiveBatches().catch(() => {});
 });
@@ -5826,32 +6674,85 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
   return entry;
 }
 
-// Enfileira um job em batch: monta as requests (1 p/ single, uma por critério
-// p/ o pipeline), submete à Batch API e grava o job em avaliacao-fila.json
-// (status 'processing').
+// As requisições de um job de avaliação: uma por critério no pipeline, uma só
+// nos avaliadores de prompt único. Determinístico — é remontado igual a cada
+// tentativa, o que permite reenviar um job que voltou da fila sem guardar o
+// JSONL nem o arquivo da OpenAI.
+function buildAvaliacaoRequests(job) {
+  const { id: jobId, evaluator, model, effort, provider, bloco1, log } = job;
+  if (aiIndependente.isPipeline(evaluator)) {
+    return buildPipelineNodeRequests({
+      bloco1, log, model, effort, provider,
+      version: aiIndependente.versionFor(evaluator), variant: aiIndependente.variantFor(evaluator),
+    }).map((n) => ({ custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body }));
+  }
+  return [{
+    custom_id: `${jobId}::0`, method: 'POST', url: '/v1/chat/completions',
+    body: aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider }),
+  }];
+}
+
+// Tenta mandar um job da fila local para a Batch API. Devolve 'entrou',
+// 'sem-vaga' (o job continua em 'aguardando') ou 'erro'.
+//
+// Um job aqui é um batch inteiro (15 nós do pipeline ≈ 583 mil tokens
+// enfileirados), então ele só sai quando cabe: sem vaga, fica em 'aguardando' e
+// o próximo ciclo tenta de novo. Nada se perde — é a fila fazendo o seu papel.
+async function submeterJobAvaliacao(job, client) {
+  let requests;
+  try {
+    requests = buildAvaliacaoRequests(job);
+  } catch (e) {
+    await markAvalJob(job.id, { status: 'error', error: `montagem das requisições falhou: ${e.message}` });
+    return 'erro';
+  }
+  const tokens = tokensDoLote(requests.map((r) => r.body));
+  // Um job maior que o teto do modelo inteiro nunca teria vaga: esperar por ele
+  // seria esperar para sempre. Vai assim mesmo, e a recusa da OpenAI vira um
+  // erro visível com o motivo — melhor que um job preso na fila em silêncio.
+  const cabeAlgumDia = tokens <= batchFila.espacoLivre(job.model, 0);
+  if (cabeAlgumDia && !cabeNaFilaDaOpenAI(job.model, tokens)) {
+    const livre = batchFila.espacoLivre(job.model, tokensEmVoo(job.model));
+    console.log(`[aval-batch] job ${job.id} espera vaga: precisa de ${tokens.toLocaleString('pt-BR')} tokens, livre ${livre.toLocaleString('pt-BR')}`);
+    await markAvalJob(job.id, { status: 'aguardando', espera: 'Aguardando vaga na fila de tokens da OpenAI.' });
+    return 'sem-vaga';
+  }
+  let batchObj;
+  try {
+    batchObj = await criarBatchRegistrado({ openai: client, requests, model: job.model, modo: 'aval-batch' });
+  } catch (e) {
+    // Recusa na criação: continua 'aguardando' e tenta no próximo ciclo.
+    console.error(`[aval-batch] job ${job.id} não entrou (segue na fila):`, e.message);
+    await markAvalJob(job.id, { status: 'aguardando', espera: `A fila da OpenAI recusou agora (${e.message}). Nova tentativa em minutos.` });
+    return 'sem-vaga';
+  }
+  await markAvalJob(job.id, {
+    status: 'processing', batchId: batchObj.id, requestCount: requests.length,
+    batchAt: new Date().toISOString(), espera: null,
+  });
+  console.log(`[aval-batch] job ${job.id} (${job.evaluator}/${job.model}/${job.effort}) submetido em batch ${batchObj.id} (${requests.length} req, ~${tokens.toLocaleString('pt-BR')} tokens)`);
+  return 'entrou';
+}
+
+// Enfileira um job em batch. O job entra em 'aguardando' e vai para a Batch API
+// assim que houver vaga no teto de tokens enfileirados do modelo — na hora, se
+// a fila estiver vazia (o caso comum), ou num ciclo seguinte do sweep.
+//
+// Antes daqui o job era submetido direto na rota: com a fila cheia, o batch
+// nascia e morria minutos depois com `token_limit_exceeded`, e a avaliação
+// virava erro. Agora esperar é um estado, não uma falha.
 async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome }) {
   const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
-  let requests;
-  if (aiIndependente.isPipeline(evaluator)) {
-    requests = buildPipelineNodeRequests({ bloco1, log, model, effort, provider, version: aiIndependente.versionFor(evaluator), variant: aiIndependente.variantFor(evaluator) }).map((n) => ({
-      custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body,
-    }));
-  } else {
-    requests = [{
-      custom_id: `${jobId}::0`, method: 'POST', url: '/v1/chat/completions',
-      body: aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider }),
-    }];
-  }
-  const jsonl = requests.map((r) => JSON.stringify(r)).join('\n') + '\n';
-  const file = await openai.files.create({ file: await toBatchFile(jsonl), purpose: 'batch' });
-  const batchObj = await openai.batches.create({ input_file_id: file.id, endpoint: '/v1/chat/completions', completion_window: '24h' });
-
   const job = {
     id: jobId, createdAt: new Date().toISOString(),
     userId: user.id, userName: user.name || '',
     casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: true,
-    status: 'processing', batchId: batchObj.id, requestCount: requests.length,
-    log, // necessário p/ o sintetizador do pipeline no coletor (removido quando termina)
+    status: 'aguardando', batchId: null, requestCount: 0,
+    // log e bloco1 ficam no job porque as requisições são remontadas a cada
+    // tentativa (e o sintetizador do pipeline precisa do log na coleta). Saem
+    // quando o job termina — ver markAvalJob.
+    log, bloco1,
+    tentativas: 0, espera: null,
     result: null, error: null,
   };
   await withFileLock('avaliacao-fila.json', async () => {
@@ -5859,8 +6760,8 @@ async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey,
     arr.push(job);
     writeJSON('avaliacao-fila.json', arr);
   });
-  console.log(`[aval-batch] job ${jobId} (${evaluator}/${model}/${effort}) submetido em batch ${batchObj.id} (${requests.length} req)`);
-  return job;
+  await submeterJobAvaliacao(job, openai);
+  return readJSON('avaliacao-fila.json').find((j) => j && j.id === jobId) || job;
 }
 
 async function markAvalJob(jobId, patch) {
@@ -5869,7 +6770,10 @@ async function markAvalJob(jobId, patch) {
     const i = arr.findIndex((j) => j && j.id === jobId);
     if (i === -1) return;
     arr[i] = { ...arr[i], ...patch };
-    if (patch.status === 'completed' || patch.status === 'error') delete arr[i].log; // libera o log grande
+    // Libera o material grande só quando o job acabou de verdade: enquanto ele
+    // pode voltar para a fila, log e bloco1 são o que permite remontar as
+    // requisições na próxima tentativa.
+    if (patch.status === 'completed' || patch.status === 'error') { delete arr[i].log; delete arr[i].bloco1; }
     writeJSON('avaliacao-fila.json', arr);
   });
 }
@@ -5921,6 +6825,7 @@ async function sweepAvaliacaoBatches() {
   avalSweepRunning = true;
   try {
     const jobs = readJSON('avaliacao-fila.json').filter((j) => j && j.status === 'processing' && j.batchId);
+    // (os 'aguardando' são tratados na segunda passada, depois de liberar vagas)
     for (const job of jobs) {
       const client = getClientForProvider(job.provider || 'openai');
       if (!client) continue; // provedor sem chave configurada
@@ -5928,6 +6833,7 @@ async function sweepAvaliacaoBatches() {
       try { batchObj = await client.batches.retrieve(job.batchId); } catch (e) { console.error('[aval-batch] retrieve:', e.message); continue; }
 
       if (batchObj.status === 'completed') {
+        await liberarBatchDaFila(batchObj.id);
         const outputs = new Map(); // sufixo do custom_id → { text, usage }
         if (batchObj.output_file_id) {
           const text = await (await client.files.content(batchObj.output_file_id)).text();
@@ -5967,10 +6873,35 @@ async function sweepAvaliacaoBatches() {
           await markAvalJob(job.id, { status: 'error', error: e.message });
         }
       } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batchObj.status)) {
-        await markAvalJob(job.id, { status: 'error', error: `batch ${batchObj.status}` });
-        console.log(`[aval-batch] job ${job.id} ${batchObj.status}`);
+        // Fila cheia devolve o job para 'aguardando' e ele é resubmetido quando
+        // houver vaga — a avaliação continua viva, só demora mais.
+        const r = await fecharBatchQueFalhou({ batchObj, model: job.model, tentativas: Number(job.tentativas) || 0, modo: 'aval-batch' });
+        if (r.acao === 'erro') {
+          await markAvalJob(job.id, { status: 'error', error: r.motivo });
+        } else {
+          await markAvalJob(job.id, {
+            status: 'aguardando', batchId: null, espera: r.motivo,
+            tentativas: (Number(job.tentativas) || 0) + (r.acao === 'retenta' ? 1 : 0),
+          });
+        }
       }
       // validating/in_progress/finalizing → segue 'processing', checa na próxima varredura.
+    }
+
+    // Segunda passada: a fila local. Os jobs que ainda não entraram na Batch API
+    // (novos sem vaga, ou devolvidos por uma recusa) tentam agora, mais velhos
+    // primeiro — as vagas que a passada acima liberou já contam aqui.
+    const esperando = readJSON('avaliacao-fila.json')
+      .filter((j) => j && j.status === 'aguardando')
+      .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+    for (const job of esperando) {
+      const client = getClientForProvider(job.provider || 'openai');
+      if (!client) continue;
+      const r = await submeterJobAvaliacao(job, client);
+      // Sem vaga para este, os de trás também não entram — a fila é por ordem de
+      // chegada, e furar a fila com um job pequeno adiaria o grande para sempre.
+      // Job com defeito ('erro') não segura ninguém: segue para o próximo.
+      if (r === 'sem-vaga') break;
     }
   } catch (e) {
     console.error('[aval-batch] sweep erro:', e.message);
@@ -6059,6 +6990,9 @@ app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor
       id: j.id, createdAt: j.createdAt, completedAt: j.completedAt || null,
       casoNome: j.casoNome, evaluator: j.evaluator, model: j.model, modelKey: j.modelKey,
       effort: j.effort, status: j.status, error: j.error || null,
+      // 'aguardando' = na fila LOCAL, ainda não entrou na Batch API (sem vaga no
+      // teto de tokens enfileirados do modelo). `espera` diz por quê.
+      espera: j.espera || null, tentativas: Number(j.tentativas) || 0,
       result: j.result || null, // já é o buildAvalResponse quando completo
     }));
   res.json(jobs);
@@ -6725,7 +7659,7 @@ app.post('/api/benchmark-simulacao/lote/:id/cancelar', requireAuth, requireRole(
 // lista de alunos cadastrados (pra rotular a run e nomear a persona).
 app.get('/api/benchmark-simulacao/opcoes', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
   const alunos = readJSON('users.json')
-    .filter((u) => u && u.role === 'therapist')
+    .filter((u) => u && isAluno(u.role))
     .map((u) => ({ id: u.id, name: u.name || u.username }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
   res.json({ ...benchmark.benchCatalogo(), alunos });
@@ -7021,6 +7955,79 @@ function readDuels() { return readJSON('duels.json', []); }
 function writeDuels(d) { writeJSON('duels.json', d); }
 function readNotifications() { return readJSON('notifications.json', {}); }
 function writeNotifications(n) { writeJSON('notifications.json', n); }
+function readPushSubs() { return readJSON('push-subscriptions.json', {}); }
+function writePushSubs(s) { writeJSON('push-subscriptions.json', s); }
+
+// URL de destino ao clicar/tocar na notificação (in-app e push usam a mesma).
+function notificationUrl(n) {
+  switch (n.type) {
+    case 'duel_invite': return `/duelo/aceitar/${n.duelId}`;
+    case 'duel_result': return `/duelo/sessao/${n.duelId}`;
+    case 'achievement_unlocked':
+    case 'sidequest_completed': return '/missoes';
+    case 'sidequest_assigned': return '/progressao';
+    case 'evaluation_queued':
+    case 'evaluation_ready': return '/logs';
+    default: return '/';
+  }
+}
+
+// Título+corpo em TEXTO PURO pra notificação do sistema operacional (o sino
+// in-app usa iconFor/bodyFor em JSX no client — aqui é o mesmo mapeamento,
+// mas server-side e sem markup). `tag` agrupa no tray do SO: reenviar com o
+// MESMO tag substitui a notificação anterior em vez de empilhar; `renotify`
+// força o SO a alertar (som/vibração) de novo mesmo substituindo uma existente
+// — é o mecanismo nativo que usamos pra "fila" → "pronta" virar update, não
+// duas notificações soltas (ver upsertEvaluationNotification).
+function notificationPushPayload(n) {
+  const base = { tag: n.refId || n.id, renotify: true, url: notificationUrl(n) };
+  switch (n.type) {
+    case 'duel_invite':
+      return { ...base, title: 'Novo desafio de duelo', body: `${n.fromName} te desafiou${n.characterName ? ` para atender ${n.characterName}` : ''}.` };
+    case 'duel_result':
+      return { ...base, title: 'Duelo finalizado', body: `Contra ${n.opponentName}: ${n.outcome === 'win' ? 'você venceu!' : n.outcome === 'loss' ? 'você perdeu.' : 'empate.'}` };
+    case 'achievement_unlocked':
+      return { ...base, title: 'Conquista liberada', body: n.title || '' };
+    case 'sidequest_assigned':
+      return { ...base, title: 'Nova sidequest', body: n.title || '' };
+    case 'sidequest_completed':
+      return { ...base, title: 'Sidequest concluída', body: n.title || '' };
+    case 'admin_notice':
+      return { ...base, title: n.title || 'Aviso', body: n.message || '' };
+    case 'evaluation_queued':
+      return { ...base, title: 'Avaliação enviada', body: n.message || '' };
+    case 'evaluation_ready':
+      return { ...base, title: 'Avaliação concluída', body: n.message || '' };
+    default:
+      return { ...base, title: n.title || 'Notificação', body: n.message || '' };
+  }
+}
+
+// Envia a notificação via Web Push pra todos os dispositivos assinados do
+// usuário. Best-effort e fire-and-forget: nunca deve atrasar nem derrubar o
+// fluxo que a chamou (mesmo contrato de pushNotification). Assinatura
+// expirada/revogada (404/410) é removida do store; qualquer outro erro só loga.
+function sendWebPushToUser(userId, entry) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
+  const all = readPushSubs();
+  const subs = all[userId];
+  if (!Array.isArray(subs) || !subs.length) return;
+  const payload = JSON.stringify(notificationPushPayload(entry));
+  let changed = false;
+  Promise.all(subs.map((s) =>
+    webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload).catch((err) => {
+      if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+        const idx = subs.indexOf(s);
+        if (idx >= 0) { subs.splice(idx, 1); changed = true; }
+      } else {
+        console.warn('[push] falha ao enviar:', err && err.message);
+      }
+    })
+  )).then(() => {
+    if (changed) { all[userId] = subs; writePushSubs(all); }
+  }).catch(() => {});
+}
 
 function pruneExpiredDuels() {
   let duels;
@@ -7037,21 +8044,56 @@ function pruneExpiredDuels() {
   return duels.length - kept.length;
 }
 
-// Cria uma notificação para um usuário real (visitantes não recebem).
+// Cria uma notificação para um usuário real (visitantes não recebem). Também
+// dispara Web Push pros dispositivos assinados dele (mesmo sistema, best-effort).
 function pushNotification(userId, notif) {
   if (!userId || String(userId).startsWith('visitor-')) return;
   const all = readNotifications();
   if (!all[userId]) all[userId] = [];
-  all[userId].unshift({
+  const entry = {
     id: 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     createdAt: new Date().toISOString(),
     read: false,
     ...notif,
-  });
+  };
+  all[userId].unshift(entry);
   // Cap de 50 notificações por usuário pra não inchar o arquivo.
   if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
   writeNotifications(all);
+  sendWebPushToUser(userId, entry);
 }
+
+// Cria OU ATUALIZA (por refId) uma notificação — usado pro ciclo de vida de uma
+// avaliação: "na fila" vira "pronta" na MESMA linha (não duas notificações
+// soltas), reaproveitando o `tag`+`renotify` do Web Push pra também substituir
+// a notificação do SO e alertar de novo. `read` sempre volta a false e
+// `createdAt` é atualizado: é informação NOVA (a fila virou resultado),
+// reordena pro topo do sino e conta de novo no polling (ver NotificationBell).
+function upsertEvaluationNotification(userId, refId, notif) {
+  if (!userId || String(userId).startsWith('visitor-')) return;
+  const all = readNotifications();
+  if (!all[userId]) all[userId] = [];
+  const idx = all[userId].findIndex((n) => n.refId === refId);
+  let entry;
+  if (idx >= 0) {
+    entry = { ...all[userId][idx], ...notif, refId, read: false, createdAt: new Date().toISOString() };
+    all[userId].splice(idx, 1);
+  } else {
+    entry = {
+      id: 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+      createdAt: new Date().toISOString(),
+      read: false,
+      refId,
+      ...notif,
+    };
+  }
+  all[userId].unshift(entry);
+  if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
+  writeNotifications(all);
+  sendWebPushToUser(userId, entry);
+}
+
+const EVAL_QUEUED_MESSAGE = 'Sua avaliação está na fila. Em até 24 horas, você receberá uma nova notificação quando sua avaliação for concluída.';
 
 // Detecta conquistas recém-desbloqueadas (ainda não notificadas) e dispara uma
 // notificação in-app para cada uma. Mantém em achievement-unlocks.json o
@@ -7371,7 +8413,7 @@ app.get('/api/duel/opponents', requireAuth, (req, res) => {
   }
   const users = readJSON('users.json');
   const list = users
-    .filter((u) => u.role === 'therapist' && u.id !== req.user.id)
+    .filter((u) => isAluno(u.role) && u.id !== req.user.id)
     .map((u) => ({ userId: u.id, name: u.name || u.username, profilePhoto: u.profilePhoto || '' }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
   res.json(list);
@@ -8128,8 +9170,8 @@ app.post('/api/sidequests/assign', requireAuth, (req, res) => {
   }
   const users = readJSON('users.json');
   const target = users.find((u) => u.id === userId);
-  if (!target || target.role !== 'therapist') {
-    return res.status(400).json({ error: 'Sidequests só podem ser atribuídas a terapeutas.' });
+  if (!target || !isAluno(target.role)) {
+    return res.status(400).json({ error: 'Sidequests só podem ser atribuídas a alunos.' });
   }
   const data = readSidequests();
   const def = data.bank.find((s) => s.id === sidequestId);
@@ -8224,6 +9266,49 @@ app.post('/api/notifications/read-all', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Web Push (assinatura do navegador para notificação do SO, com som) ---
+// Chave pública: sem auth (é pública por definição — precisa dela ANTES de
+// logar, no fluxo de permissão do navegador). Vazia enquanto VAPID não está
+// configurado — o client trata isso como "push indisponível" e não oferece o botão.
+app.get('/api/push/vapid-public-key', (req, res) => {
+  res.json({ key: VAPID_PUBLIC_KEY || null });
+});
+
+app.post('/api/push/subscribe', requireAuth, writeLimiter, (req, res) => {
+  if (req.user.role === 'visitor') return res.json({ ok: true }); // visitante não recebe notificação — no-op
+  const sub = req.body && req.body.subscription;
+  if (!sub || typeof sub.endpoint !== 'string' || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
+    return res.status(400).json({ error: 'Assinatura de push inválida.' });
+  }
+  const all = readPushSubs();
+  if (!all[req.user.id]) all[req.user.id] = [];
+  const list = all[req.user.id];
+  const entry = {
+    endpoint: sub.endpoint,
+    keys: { p256dh: clampStr(sub.keys.p256dh, 300), auth: clampStr(sub.keys.auth, 100) },
+    ua: clampStr(req.get('user-agent'), 300),
+    createdAt: new Date().toISOString(),
+  };
+  const idx = list.findIndex((s) => s.endpoint === entry.endpoint);
+  if (idx >= 0) list[idx] = entry; else list.push(entry);
+  // Cap por usuário — celular + PC + eventual reinstalação não deve crescer sem limite.
+  if (list.length > 10) all[req.user.id] = list.slice(-10);
+  writePushSubs(all);
+  res.json({ ok: true });
+});
+
+app.post('/api/push/unsubscribe', requireAuth, writeLimiter, (req, res) => {
+  const endpoint = req.body && req.body.endpoint;
+  if (typeof endpoint === 'string' && endpoint) {
+    const all = readPushSubs();
+    if (Array.isArray(all[req.user.id])) {
+      all[req.user.id] = all[req.user.id].filter((s) => s.endpoint !== endpoint);
+      writePushSubs(all);
+    }
+  }
+  res.json({ ok: true });
+});
+
 
 // Digital Asset Links — vincula o app Android (TWA) a esta origem pra que o
 // WebView abra em tela cheia, sem a barra do navegador. Dirigido por env vars
@@ -8285,7 +9370,11 @@ function antClampInt(v, min, max, dflt) {
   return Math.min(max, Math.max(min, n));
 }
 
-// Escrita (criar/editar/entregar/excluir) é restrita a therapist (aluno) e admin
+// Escrita (criar/editar/entregar/excluir) é restrita a aluno (interno ou
+// externo) e admin. O aluno externo SEM supervisor pode montar e entregar o
+// mapa normalmente — a entrega só não é vista por ninguém até o admin vinculá-lo
+// a um supervisor pela tela de Contas, e a partir daí os mapas entregues
+// aparecem pro supervisor como os de qualquer aluno.
 // via requireRole nas rotas — supervisor apenas lê, e o visitante (efêmero) não
 // participa (o mapa é longitudinal por aluno).
 //
@@ -8400,7 +9489,7 @@ async function callAntessalaReflection(system, userText) {
 }
 
 // GET /api/antessala — mapas do próprio aluno (resumos, mais recentes primeiro).
-app.get('/api/antessala', requireAuth, requireRole('therapist', 'admin'), (req, res) => {
+app.get('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), (req, res) => {
   const all = readJSON(ANTESSALA_FILE, []);
   const mine = all
     .filter((c) => c.ownerId === req.user.id)
@@ -8419,7 +9508,7 @@ app.get('/api/antessala/supervisor', requireAuth, requireRole('supervisor', 'adm
     visible = all.filter((c) => c.status === 'delivered');
   } else {
     const myStudents = new Set(
-      users.filter((u) => u.role === 'therapist' && u.teacherId === req.user.id).map((u) => u.id),
+      users.filter((u) => isAluno(u.role) && u.teacherId === req.user.id).map((u) => u.id),
     );
     visible = all.filter((c) => c.status === 'delivered' && myStudents.has(c.ownerId));
   }
@@ -8429,7 +9518,7 @@ app.get('/api/antessala/supervisor', requireAuth, requireRole('supervisor', 'adm
 
 // POST /api/antessala/reflect — camada maiêutica. { step, doc } → perguntas.
 // O system prompt é montado no servidor (papel travado). Registrado ANTES de /:id.
-app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'admin'), aiLimiter, async (req, res) => {
+app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'external', 'admin'), aiLimiter, async (req, res) => {
   const step = Number(req.body && req.body.step);
   if (!Number.isInteger(step) || step < 1 || step > 7) {
     return res.status(400).json({ error: 'step inválido (1 a 7)' });
@@ -8455,7 +9544,7 @@ app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'admin'
 });
 
 // POST /api/antessala — cria um mapa novo (rascunho).
-app.post('/api/antessala', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+app.post('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
   const doc = sanitizeAntessalaDoc(req.body);
   const now = new Date().toISOString();
   const record = {
@@ -8488,7 +9577,7 @@ app.get('/api/antessala/:id', requireAuth, (req, res) => {
 
 // PUT /api/antessala/:id — atualiza o mapa. Só o dono, e só enquanto rascunho
 // (depois de entregue, não é mais editável).
-app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
   const doc = sanitizeAntessalaDoc(req.body);
   let out = null;
   let status = 200;
@@ -8508,7 +9597,7 @@ app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'), wr
 
 // POST /api/antessala/:id/deliver — entrega para a supervisão (torna o mapa
 // não editável).
-app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
   let out = null;
   let status = 200;
   await withFileLock(ANTESSALA_FILE, async () => {
@@ -8527,7 +9616,7 @@ app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'ad
 });
 
 // DELETE /api/antessala/:id — dono (só rascunho) ou admin (qualquer).
-app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'admin'), writeLimiter, async (req, res) => {
+app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
   let out = null;
   let status = 200;
   await withFileLock(ANTESSALA_FILE, async () => {

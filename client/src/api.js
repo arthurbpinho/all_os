@@ -146,8 +146,38 @@ export const api = {
   },
   logout: () => { clearAuth(); },
   me: () => request('/me'),
-  changeMyPassword: (currentPassword, newPassword) =>
-    request('/me/password', { method: 'POST', body: { currentPassword, newPassword } }),
+  // Trocar a senha invalida TODOS os tokens da conta (inclusive o que esta tela
+  // está usando), então o servidor devolve um novo — sem guardá-lo aqui, a
+  // próxima chamada levaria 401 e derrubaria a pessoa pro login logo depois de
+  // ela ter trocado a senha com sucesso.
+  changeMyPassword: async (currentPassword, newPassword) => {
+    const data = await request('/me/password', { method: 'POST', body: { currentPassword, newPassword } });
+    if (data && data.token) setToken(data.token);
+    return data;
+  },
+
+  // --- Cadastro público (Aluno Externo) e recuperação de conta ---
+  // Todas sem token: são as rotas de quem ainda não tem (ou perdeu) a conta.
+  config: () => request('/config'),
+  cadastrar: (payload) => request('/cadastro', { method: 'POST', body: payload }),
+  cadastroDisponibilidade: (username) =>
+    request(`/cadastro/disponibilidade?username=${encodeURIComponent(username)}`),
+  cadastroReenviar: (email) => request('/cadastro/reenviar', { method: 'POST', body: { email } }),
+  // Atende os dois links que chegam por e-mail: cadastro novo e troca de
+  // endereço. Quando é cadastro, a resposta já vem com o token de sessão.
+  confirmarEmail: async (token) => {
+    const data = await request('/confirmar-email', { method: 'POST', body: { token } });
+    if (data && data.token) setToken(data.token);
+    return data;
+  },
+  esqueciSenha: (email, turnstileToken) =>
+    request('/senha/esqueci', { method: 'POST', body: { email, turnstileToken } }),
+  redefinirSenha: (token, newPassword) =>
+    request('/senha/redefinir', { method: 'POST', body: { token, newPassword } }),
+  // Troca do e-mail da própria conta: exige a senha atual e só vale depois de
+  // confirmar o endereço novo pelo link.
+  trocarMeuEmail: (senhaAtual, novoEmail) =>
+    request('/me/email', { method: 'POST', body: { senhaAtual, novoEmail } }),
   // Título (subtítulo) ativo exibido no perfil/ranking. titleId vazio limpa.
   setMyTitle: (titleId) => request('/me/title', { method: 'POST', body: { titleId } }),
   // Gera (via gpt-5.4-mini) a descrição visual da aparência a partir da foto
@@ -216,6 +246,7 @@ export const api = {
   // Feedback (coletado do visitante ao fim da sessão: estrelas 0–5 + mensagem)
   submitFeedback: (data) => request('/feedback', { method: 'POST', body: data }),
   getAdminFeedback: () => request('/admin/feedback'),
+  deleteAdminFeedback: (id) => request(`/admin/feedback/${id}`, { method: 'DELETE' }),
   // Suporte: mensagem do usuário pra administração. Cai no painel de Logs de
   // Erro do admin; devolve { codigo } pra pessoa guardar. { subject?, message }
   sendSupportMessage: (data) => request('/suporte', { method: 'POST', body: data }),
@@ -271,11 +302,8 @@ export const api = {
   // detalhe (mensagem real, stack, quem, onde) mora aqui.
   adminErrorLogs: () => request('/admin/error-logs'),
   adminClearErrorLogs: () => request('/admin/error-logs', { method: 'DELETE' }),
-  // Admin: dispara um aviso (notificação) pra todos + publica atualização.
+  // Admin: dispara um aviso (notificação) pra todos.
   adminSendNotification: (data) => request('/admin/notifications', { method: 'POST', body: data }),
-  adminSendUpdate: (data) => request('/admin/updates', { method: 'POST', body: data }),
-  // Atualizações do sistema criadas pelo admin (mescladas com o changelog).
-  getUpdates: () => request('/updates'),
 
   // Chat (chat completions). O servidor resolve o systemPrompt a partir de
   // context: { type, itemId } — NUNCA mande systemPrompt do cliente
@@ -610,4 +638,9 @@ export const api = {
   getNotifications: () => request('/notifications'),
   markNotificationRead: (id) => request(`/notifications/${id}/read`, { method: 'POST', body: {} }),
   markAllNotificationsRead: () => request('/notifications/read-all', { method: 'POST', body: {} }),
+
+  // --- Web Push ---
+  getVapidPublicKey: () => request('/push/vapid-public-key'),
+  subscribePush: (subscription) => request('/push/subscribe', { method: 'POST', body: { subscription } }),
+  unsubscribePush: (endpoint) => request('/push/unsubscribe', { method: 'POST', body: { endpoint } }),
 };

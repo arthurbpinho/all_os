@@ -2,6 +2,10 @@ node_modules/
 client/dist/
 .env
 
+# Certificado da credencial do app de e-mail (Microsoft Graph). A chave privada
+# vive só nesta máquina e no painel de variáveis do Railway — nunca no git.
+.certs/
+
 # Dados de runtime — NÃO versionar (contém senhas hash, logs, progresso, etc.)
 # Persistência em produção: via volume mount da Railway (DATA_DIR=/data),
 # não via git. Cada ambiente (local / prod) tem o seu próprio estado.
@@ -22,6 +26,14 @@ server/data/antessala.json
 server/data/counters.json
 server/data/daily-missions.json
 server/data/error-logs.json
+# Cadastro público: pendências aguardando confirmação (hash de senha, e-mail, IP),
+# pedidos de redefinição de senha e trocas de e-mail. São efêmeros (48h / 1h) e
+# NUNCA devem sair da máquina.
+server/data/pending-registrations.json
+server/data/password-resets.json
+server/data/email-changes.json
+# Inscrições de Web Push: contêm endpoint + chaves por dispositivo.
+server/data/push-subscriptions.json
 server/data/tmp_audio.webm
 server/data/tmp_audio_*.webm
 

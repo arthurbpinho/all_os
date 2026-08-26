@@ -26,11 +26,11 @@ describe('Processo Seletivo', () => {
     const create = await request(app)
       .post('/api/admin/users')
       .set(authHeader(adminToken))
-      .send({ username: 'aval1', name: 'Avaliador Um', role: 'evaluator', password: 'avalpass123' });
+      .send({ username: 'aval1', name: 'Avaliador Um', role: 'evaluator', password: 'Aval@pass123' });
     expect(create.status).toBe(200);
     expect(create.body.role).toBe('evaluator');
 
-    const avalToken = await loginAs('aval1', 'avalpass123');
+    const avalToken = await loginAs('aval1', 'Aval@pass123');
     const dash = await request(app).get('/api/selecao/dashboard').set(authHeader(avalToken));
     expect(dash.status).toBe(200);
     expect(dash.body).toMatchObject({ activeCount: 0, rejectedCount: 0, total: 0, threshold: 55 });
@@ -61,9 +61,9 @@ describe('Processo Seletivo', () => {
     const create = await request(app)
       .post('/api/admin/users')
       .set(authHeader(await loginAs('admin')))
-      .send({ username: 'aval2', name: 'Avaliador Dois', role: 'evaluator', password: 'avalpass123' });
+      .send({ username: 'aval2', name: 'Avaliador Dois', role: 'evaluator', password: 'Aval@pass123' });
     expect(create.status).toBe(200);
-    const avalToken = await loginAs('aval2', 'avalpass123');
+    const avalToken = await loginAs('aval2', 'Aval@pass123');
 
     const before = await request(app).get('/api/selecao/senha-config').set(authHeader(avalToken));
     expect(before.status).toBe(200);

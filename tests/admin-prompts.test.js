@@ -178,7 +178,7 @@ describe('Administração — editor de prompts', () => {
   // conhecido, o conteúdo passa pelo mesmo parser da produção.
   it('criação valida o conteúdo quando o caminho tem contrato', async () => {
     const admin = await loginAs('admin');
-    const caminho = 'avaliacao/v29/criterios-no-v29.md'; // sem validador (versão que o código não conhece)
+    const caminho = 'avaliacao/v290/criterios-no-v290.md'; // sem validador (número alto de propósito: nenhuma versão real vai ocupá-lo)
     const semContrato = await request(app).put(url(caminho)).set(authHeader(admin)).send({ content: 'texto livre', criar: true });
     expect(semContrato.status).toBe(200);
     expect(semContrato.body.validado).toBe(false);

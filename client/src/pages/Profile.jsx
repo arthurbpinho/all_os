@@ -8,7 +8,15 @@ import RichText from '../components/RichText';
 export default function Profile({ user, onUpdate }) {
   const navigate = useNavigate();
   const [name, setName] = useState(user.name || '');
-  const [email, setEmail] = useState(user.email || '');
+  // Troca de e-mail (fluxo próprio, ver mais abaixo). O campo do formulário
+  // principal não salva mais o e-mail: ele virou a âncora do "esqueci minha
+  // senha", e salvá-lo junto com nome e foto permitiria a uma sessão roubada
+  // apontar o e-mail pra si e pedir reset.
+  const [novoEmail, setNovoEmail] = useState('');
+  const [senhaParaEmail, setSenhaParaEmail] = useState('');
+  const [emailMsg, setEmailMsg] = useState('');
+  const [emailErro, setEmailErro] = useState('');
+  const [trocandoEmail, setTrocandoEmail] = useState(false);
   const [profilePhoto, setProfilePhoto] = useState(user.profilePhoto || '');
   // Aparência: consentimento de mostrar aos pacientes simulados + descrição
   // visual gerada por IA (gpt-5.4-mini). Por ora só vive no perfil.
@@ -57,12 +65,17 @@ export default function Profile({ user, onUpdate }) {
     e.preventDefault();
     setPwdError(''); setPwdSuccess('');
     if (!pwdCurrent || !pwdNew) return setPwdError('Preencha senha atual e nova.');
-    if (pwdNew.length < 6) return setPwdError('Nova senha deve ter ao menos 6 caracteres.');
+    // Checagem grosseira; a política completa (piso por perfil, letra, número,
+    // símbolo, não conter o username) é do servidor, e a mensagem dele é a que
+    // aparece aqui.
+    if (pwdNew.length < 8) return setPwdError('Nova senha deve ter ao menos 8 caracteres.');
     if (pwdNew !== pwdConfirm) return setPwdError('A confirmação não confere.');
     setPwdSaving(true);
     try {
+      // O api.changeMyPassword já guarda o token novo que vem na resposta —
+      // trocar a senha invalida todos os anteriores, inclusive o desta aba.
       await api.changeMyPassword(pwdCurrent, pwdNew);
-      setPwdSuccess('Senha alterada com sucesso.');
+      setPwdSuccess('Senha alterada. As sessões abertas em outros aparelhos foram encerradas.');
       setPwdCurrent(''); setPwdNew(''); setPwdConfirm('');
       setTimeout(() => setPwdSuccess(''), 4000);
     } catch (err) {
@@ -83,6 +96,22 @@ export default function Profile({ user, onUpdate }) {
   const titleEligible = earnedBadges.filter((a) => a.tier === 'gold' || a.sidequest);
   const streak = gamification?.streak;
 
+  async function handleTrocarEmail() {
+    setEmailErro('');
+    setEmailMsg('');
+    setTrocandoEmail(true);
+    try {
+      const res = await api.trocarMeuEmail(senhaParaEmail, novoEmail.trim());
+      setEmailMsg(`Mandamos um link de confirmação para ${res.aguardandoConfirmacao}. Até você clicar nele, seu e-mail atual continua valendo.`);
+      setNovoEmail('');
+      setSenhaParaEmail('');
+    } catch (err) {
+      setEmailErro(err.message || 'Não foi possível solicitar a troca.');
+    } finally {
+      setTrocandoEmail(false);
+    }
+  }
+
   async function handleSave(e) {
     e.preventDefault();
     setSaving(true);
@@ -90,7 +119,6 @@ export default function Profile({ user, onUpdate }) {
     try {
       const updated = await api.updateUser(user.id, {
         name: name.trim(),
-        email: email.trim(),
         profilePhoto,
         shareAppearance,
         visualDescription,
@@ -334,8 +362,40 @@ export default function Profile({ user, onUpdate }) {
         <section className="profile-section">
           <h3 className="section-title">Comunicação</h3>
           <div>
-            <label htmlFor="email">E-mail para atualizações</label>
-            <input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="seunome@dominio.com" />
+            <label>E-mail da conta</label>
+            <div className="email-atual">
+              <strong>{user.email || 'nenhum e-mail cadastrado'}</strong>
+              {user.email && (
+                <span className={user.emailVerified ? 'selo-ok' : 'selo-pendente'}>
+                  {user.emailVerified ? 'confirmado' : 'não confirmado'}
+                </span>
+              )}
+            </div>
+            <small style={{ display: 'block', marginTop: 6, color: 'var(--muted)', fontSize: 12.5, lineHeight: 1.6 }}>
+              É por este endereço que você recupera o acesso se esquecer a senha. Trocar exige
+              sua senha atual e a confirmação do endereço novo por link — até confirmar, o atual
+              continua valendo.
+            </small>
+
+            <div className="trocar-email">
+              <input
+                type="email" value={novoEmail} onChange={(e) => setNovoEmail(e.target.value)}
+                placeholder="novo e-mail" autoComplete="email" autoCapitalize="none" spellCheck="false"
+              />
+              <input
+                type="password" value={senhaParaEmail} onChange={(e) => setSenhaParaEmail(e.target.value)}
+                placeholder="sua senha atual" autoComplete="current-password"
+              />
+              <button
+                type="button" className="btn btn-outline btn-sm"
+                disabled={trocandoEmail || !novoEmail.trim() || !senhaParaEmail}
+                onClick={handleTrocarEmail}
+              >
+                {trocandoEmail ? 'Enviando…' : 'Trocar e-mail'}
+              </button>
+            </div>
+            {emailErro && <div className="alert error" style={{ marginTop: 8 }}>{emailErro}</div>}
+            {emailMsg && <div className="alert" style={{ marginTop: 8 }}>{emailMsg}</div>}
           </div>
 
           <div className="profile-checkbox-group">
