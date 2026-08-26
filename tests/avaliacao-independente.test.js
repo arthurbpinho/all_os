@@ -1,6 +1,8 @@
 // Avaliação Independente — parsers dos avaliadores (o v18-25 tem formato próprio),
 // pricing dos 3 modelos, desconto de batch, e validação de allowlist no endpoint.
-const { app, request, resetData, loginAs, authHeader } = require('./helpers');
+const fs = require('fs');
+const path = require('path');
+const { app, request, resetData, loginAs, authHeader, DATA_DIR } = require('./helpers');
 const ai = require('../server/avaliacao-independente');
 const { resolvePrices, buildChatBody, selectVariant, loadAssets, finalizePipeline, runAvaliacaoIndependente, buildReasoningTxt, modelEmiteResumo, isRetryableAIError, retryDelayMs, PIPELINE_VERSIONS, concorrenciaPorTPM, estimarTokens, reservarTPM, _resetTPM, parseNodeOutputTravas, derivarFaixa, parseNodeOutputV31, ETIQUETA_POR_FAIXA, parseFase1V32, parseFase2V32, PERGUNTA_PARA_TRAVA } = require('../server/avaliacao-v25');
 
@@ -29,6 +31,24 @@ function saidaV28({ ate = 4, realizacao = 'completa', conf = 'alta', analise = '
   if (comAnalise) linhas.push(`CONFIANÇA: ${conf}`);
   return linhas.join('\n');
 }
+// v31 e v29 capturam o resumo do raciocínio, então as chamadas vão pela Responses
+// API. `responder(user)` devolve o texto de saída daquela chamada.
+function fakeResponsesTravas(responder, capture = {}) {
+  capture.calls = [];
+  return {
+    responses: {
+      create: async (args) => {
+        capture.calls.push(args);
+        const texto = responder(args.input[0].content);
+        return (async function* () {
+          yield { type: 'response.output_text.delta', delta: texto };
+          yield { type: 'response.completed', response: { usage: { input_tokens: 900, output_tokens: 200 } } };
+        })();
+      },
+    },
+  };
+}
+
 const { finalScoreFromCriteria } = require('../server/scoring');
 
 describe('Avaliação Independente — parsers e pricing', () => {
@@ -548,24 +568,6 @@ describe('Avaliação Independente — v32 (duas fases)', () => {
 // descartada. O nó responde as quatro como perguntas independentes justamente
 // para não saber onde vai parar — se soubesse, saberia a nota.
 describe('Avaliação Independente — v31', () => {
-  // O v31 captura o resumo do raciocínio, então as chamadas vão pela Responses
-  // API. `responder(user)` devolve o texto de saída daquela chamada.
-  function fakeResponsesV31(responder, capture = {}) {
-    capture.calls = [];
-    return {
-      responses: {
-        create: async (args) => {
-          capture.calls.push(args);
-          const texto = responder(args.input[0].content);
-          return (async function* () {
-            yield { type: 'response.output_text.delta', delta: texto };
-            yield { type: 'response.completed', response: { usage: { input_tokens: 900, output_tokens: 200 } } };
-          })();
-        },
-      },
-    };
-  }
-
   it('carrega sem @variante, com 15 critérios e o contrato de saída novo', () => {
     const a = loadAssets('v31');
     expect(a.criteria.length).toBe(15);
@@ -645,7 +647,7 @@ describe('Avaliação Independente — v31', () => {
     // A retentativa vem DESLIGADA: refazer custa uma chamada inteira e não prova
     // nada sobre a ordem do raciocínio (só sobre a do texto). A detecção fica.
     const cap = {};
-    const openai = fakeResponsesV31((user) => (user.includes('[CRITÉRIO]') ? foraDeOrdem : 'Corpo.'), cap);
+    const openai = fakeResponsesTravas((user) => (user.includes('[CRITÉRIO]') ? foraDeOrdem : 'Corpo.'), cap);
     const r = await runAvaliacaoIndependente({
       openai, bloco1: 'b', log: 'l', model: 'gpt-5.5', effort: 'medium', version: 'v31',
     });
@@ -686,7 +688,7 @@ describe('Avaliação Independente — v31', () => {
 
   it('pipeline v31 ponta a ponta: etiquetas chegam ao sintetizador', async () => {
     let userSint = '';
-    const openai = fakeResponsesV31((user) => {
+    const openai = fakeResponsesTravas((user) => {
       const ehCriterio = user.includes('[CRITÉRIO]');
       if (!ehCriterio) userSint = user;
       return ehCriterio ? saidaV31({ abertas: [2, 3, 4] }) : 'Corpo do feedback.';
@@ -715,6 +717,75 @@ describe('Avaliação Independente — v31', () => {
     // O parser do v16-2 fica, e os nomes dos critérios das runs antigas também.
     const antiga = ai.parseSingleEvalOutput('v16-2', 'Prosa.\n\n[notas-supervisor]\n{"1": 8}');
     expect(antiga.notasDetalhe[0].nome).toBe('Construção linguística das intervenções');
+  });
+});
+
+// v29 — a mais NOVA das versões, apesar do número (que é do rascunho do prompt).
+// Volta a UMA chamada por nó depois do v32 e, para o CÓDIGO, é o v31: mesmo
+// contrato de saída, mesma derivação de faixa, mesmo parser. O que muda mora no
+// .md — as travas da F3 e da F4 na redação do v32, e a pergunta da trava
+// ("aconteceu e funcionou") separada da pergunta da régua ("caracteriza o
+// trabalho"), que o v32 cobrava nas duas fases.
+//
+// Estes testes existem para travar o que o código promete: que a versão carrega
+// dos .md do v29, que não é de duas fases, e que roda o pipeline inteiro pelo
+// caminho do v31.
+describe('Avaliação Independente — v29', () => {
+  it('carrega dos .md do v29: 15 critérios, sem variante, contrato de saída do v31', () => {
+    const a = loadAssets('v29');
+    expect(a.criteria.length).toBe(15);
+    expect(a.variant).toBe(null);
+    expect(a.cfg.formatoSaida).toBe('travas-v31'); // mesmo parser, de propósito
+    expect(a.cfg.duasFases).toBeUndefined();
+    expect(a.fase2).toBe(null);
+    expect(a.criteria[6].nome).toBe('Coerência interna');
+    expect(a.criteria[14].nome).toBe('Criatividade');
+
+    expect(a.blockA).toMatch(/F2 abre: <sim\|não>/);
+    expect(a.blockA).toMatch(/F1 realizada: <completa\|incompleta>/);
+    expect(a.blockA).not.toMatch(/CONFIAN/i);   // o campo não existe desde o v31
+    expect(a.blockA).not.toMatch(/NOTA:/);      // o nó não escreve nota
+    expect(a.blockB).toContain('{{BLOCO_1}}');
+    expect(a.blockC).toContain('{{CRITÉRIO}}');
+  });
+
+  it('o .md do v29 é o do v29 (e não o do v31 com outro nome)', () => {
+    // A separação dos dois juízos é a mudança da versão: se o arquivo servido
+    // for o do v31, esta frase não está lá e o teste acusa.
+    const a = loadAssets('v29');
+    expect(a.blockA).toMatch(/aconteceu e funcionou/);
+    expect(PIPELINE_VERSIONS.v29.montado).toBe('prompt-no-v29-montado.md');
+    expect(PIPELINE_VERSIONS.v29.dirs).toEqual(['v29']);
+    // Saudação do v28 em diante (sem o pedido da caixa de estrela).
+    expect(PIPELINE_VERSIONS.v29.saudacao).toBe(PIPELINE_VERSIONS.v31.saudacao);
+  });
+
+  it('pipeline v29 ponta a ponta: nota por código e etiqueta no sintetizador', async () => {
+    let userSint = '';
+    const openai = fakeResponsesTravas((user) => {
+      const ehCriterio = user.includes('[CRITÉRIO]');
+      if (!ehCriterio) userSint = user;
+      return ehCriterio ? saidaV31({ abertas: [2, 3, 4] }) : 'Corpo do feedback.';
+    });
+    const r = await runAvaliacaoIndependente({
+      openai, bloco1: 'BLOCO1-SECRETO', log: 'T: oi', model: 'gpt-5.5', effort: 'medium',
+      version: 'v29', evaluatorId: 'v29',
+    });
+    expect(r.notaFinal).toBe(80);
+    expect(r.considerados).toBe(15);
+    expect(r.version).toBe('v29');
+    expect(r.partes[0].etiqueta).toBe('preciso');
+    expect(r.partes[0].confianca).toBe(null);
+    expect((userSint.match(/\[preciso\]/g) || []).length).toBe(15);
+    expect(userSint).not.toContain('BLOCO1-SECRETO');
+    expect(r.feedbackAluno).toMatch(/^Nota: 80\/100/);
+  });
+
+  it('registry: v29 é pipeline sem variante', () => {
+    expect(ai.isValidEvaluator('v29')).toBe(true);
+    expect(ai.isPipeline('v29')).toBe(true);
+    expect(ai.versionFor('v29')).toBe('v29');
+    expect(ai.variantFor('v29')).toBe(null);
   });
 });
 
@@ -1211,5 +1282,28 @@ describe('Avaliação Independente — endpoint', () => {
     const aluno = await loginAs('aluno');
     const den = await request(app).get('/api/avaliacao-independente/fila').set(authHeader(aluno));
     expect(den.status).toBe(403);
+  });
+
+  // Um job que ainda não entrou na Batch API (teto de tokens enfileirados cheio)
+  // fica em 'aguardando' e o motivo viaja até a tela. É o contrato de que a
+  // espera é um ESTADO visível, e não um erro nem um job sumido.
+  it('fila: job aguardando vaga chega à tela com o motivo da espera', async () => {
+    const admin = await loginAs('admin');
+    fs.writeFileSync(path.join(DATA_DIR, 'avaliacao-fila.json'), JSON.stringify([{
+      id: 'avjob-espera', createdAt: new Date().toISOString(),
+      userId: 'x', userName: 'Supervisor', casoNome: 'Pedro',
+      evaluator: 'v29', model: 'gpt-5.6-luna', modelKey: 'gpt-5.6-luna', effort: 'high',
+      status: 'aguardando', batchId: null, tentativas: 0,
+      espera: 'Aguardando vaga na fila da OpenAI.',
+      log: 'T: oi', bloco1: 'segredo',
+    }]));
+    const res = await request(app).get('/api/avaliacao-independente/fila').set(authHeader(admin));
+    expect(res.status).toBe(200);
+    const job = res.body.find((j) => j.id === 'avjob-espera');
+    expect(job.status).toBe('aguardando');
+    expect(job.espera).toMatch(/Aguardando vaga/);
+    expect(job.error).toBe(null); // esperar não é falhar
+    // O material do caso não vaza pela listagem.
+    expect(JSON.stringify(job)).not.toContain('segredo');
   });
 });

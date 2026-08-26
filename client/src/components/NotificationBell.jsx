@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { playNotificationChime } from '../sound';
+import { isPushSupported, getPermission, alreadyAsked, subscribeToPush } from '../push';
 
 // Sino de notificações no canto superior direito. Faz polling das notificações
 // (duelo, conquista desbloqueada, sidequest atribuída/concluída) e abre um painel
@@ -31,6 +32,8 @@ function iconFor(n) {
     case 'sidequest_assigned': return '🗺';
     case 'sidequest_completed': return '✦';
     case 'admin_notice': return '📢';
+    case 'evaluation_queued': return '⏳';
+    case 'evaluation_ready': return '📋';
     default: return '•';
   }
 }
@@ -85,6 +88,9 @@ function bodyFor(n) {
           {' · '}{n.message}
         </>
       );
+    case 'evaluation_queued':
+    case 'evaluation_ready':
+      return n.message;
     default:
       return n.title || 'Notificação';
   }
@@ -99,6 +105,28 @@ export default function NotificationBell({ user }) {
   // IDs vistos no último poll. null = ainda não carregou (1ª vez não toca som,
   // senão tocaria pra cada notificação não-lida pré-existente).
   const seenIds = useRef(null);
+  // Oferece "ativar notificações push" só quando faz sentido: navegador
+  // suporta, ainda não perguntou nesse dispositivo, e o usuário nunca
+  // respondeu 'default' (negado fica quieto — o navegador não reabriria o
+  // prompt nativo mesmo se insistíssemos).
+  const [pushOffer, setPushOffer] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+
+  useEffect(() => {
+    setPushOffer(isPushSupported() && getPermission() === 'default' && !alreadyAsked());
+  }, []);
+
+  async function handleEnablePush() {
+    setPushBusy(true);
+    try {
+      await subscribeToPush();
+    } catch {
+      // best-effort — permissão negada ou falha de rede não deve travar o sino
+    } finally {
+      setPushBusy(false);
+      setPushOffer(false);
+    }
+  }
 
   async function load() {
     try {
@@ -148,6 +176,8 @@ export default function NotificationBell({ user }) {
       navigate('/missoes');
     } else if (n.type === 'sidequest_assigned') {
       navigate('/progressao');
+    } else if (n.type === 'evaluation_ready') {
+      navigate('/logs');
     }
   }
 
@@ -179,6 +209,14 @@ export default function NotificationBell({ user }) {
               <button className="notif-markall" onClick={markAll}>marcar todas lidas</button>
             )}
           </div>
+          {pushOffer && (
+            <div className="notif-push-offer">
+              <span>🔔 Ativar notificações push neste dispositivo?</span>
+              <button className="notif-markall" onClick={handleEnablePush} disabled={pushBusy}>
+                {pushBusy ? 'Ativando…' : 'Ativar'}
+              </button>
+            </div>
+          )}
           <div className="notif-list">
             {items.length === 0 ? (
               <div className="notif-empty">Nenhuma notificação ainda.</div>

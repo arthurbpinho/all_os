@@ -6,9 +6,16 @@ const ROLE_LABELS = {
   admin: 'Administrador',
   supervisor: 'Professor',
   therapist: 'Aluno',
+  external: 'Aluno Externo',
   evaluator: 'Avaliador',
   visitor: 'Visitante',
 };
+
+// Os dois papéis de aluno. O externo é o único que pode se auto-cadastrar
+// (/cadastro + confirmação por e-mail); a diferença aqui é só que ele NÃO exige
+// professor responsável — pode ser vinculado depois, ou nunca.
+const ROLES_ALUNO = ['therapist', 'external'];
+const ehAluno = (role) => ROLES_ALUNO.includes(role);
 
 function fbDate(iso) {
   const d = new Date(iso);
@@ -49,17 +56,12 @@ export default function AdminUsers({ user: currentUser }) {
   const [feedback, setFeedback] = useState([]);
   const [feedbackLoading, setFeedbackLoading] = useState(true);
   const [feedbackError, setFeedbackError] = useState('');
-  // Enviar aviso (notificação) e publicar atualização do sistema.
+  // Enviar aviso (notificação).
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeMsg, setNoticeMsg] = useState('');
   const [noticeSending, setNoticeSending] = useState(false);
   const [noticeResult, setNoticeResult] = useState('');
   const [noticeError, setNoticeError] = useState('');
-  const [updTitle, setUpdTitle] = useState('');
-  const [updBody, setUpdBody] = useState('');
-  const [updSending, setUpdSending] = useState(false);
-  const [updResult, setUpdResult] = useState('');
-  const [updError, setUpdError] = useState('');
 
   useEffect(() => {
     api.getAdminFeedback()
@@ -67,6 +69,16 @@ export default function AdminUsers({ user: currentUser }) {
       .catch((err) => setFeedbackError(err.message || 'Erro ao carregar o feedback.'))
       .finally(() => setFeedbackLoading(false));
   }, []);
+
+  async function handleDeleteFeedback(f) {
+    if (!window.confirm('Excluir este feedback?')) return;
+    try {
+      await api.deleteAdminFeedback(f.id);
+      setFeedback((prev) => prev.filter((x) => x.id !== f.id));
+    } catch (err) {
+      setFeedbackError(err.message || 'Erro ao excluir o feedback.');
+    }
+  }
 
   async function sendNotice(e) {
     e.preventDefault();
@@ -81,22 +93,6 @@ export default function AdminUsers({ user: currentUser }) {
       setNoticeError(err.message || 'Erro ao enviar o aviso.');
     } finally {
       setNoticeSending(false);
-    }
-  }
-
-  async function sendUpdate(e) {
-    e.preventDefault();
-    if (!updBody.trim()) { setUpdError('Escreva o conteúdo da atualização.'); return; }
-    setUpdSending(true); setUpdError(''); setUpdResult('');
-    try {
-      await api.adminSendUpdate({ title: updTitle.trim(), body: updBody.trim() });
-      setUpdResult('Atualização publicada no painel de Atualizações.');
-      setUpdTitle(''); setUpdBody('');
-      setTimeout(() => setUpdResult(''), 5000);
-    } catch (err) {
-      setUpdError(err.message || 'Erro ao publicar a atualização.');
-    } finally {
-      setUpdSending(false);
     }
   }
 
@@ -176,7 +172,7 @@ export default function AdminUsers({ user: currentUser }) {
     setForm((prev) => {
       const next = { ...prev, [name]: value };
       // Se mudar role para algo diferente de aluno, limpa teacherId
-      if (name === 'role' && value !== 'therapist') next.teacherId = '';
+      if (name === 'role' && !ehAluno(value)) next.teacherId = '';
       return next;
     });
   }
@@ -188,9 +184,12 @@ export default function AdminUsers({ user: currentUser }) {
     if (!form.username.trim()) return setFormError('Usuário é obrigatório.');
     if (!form.name.trim()) return setFormError('Nome é obrigatório.');
     if (!editingId && !form.password) return setFormError('Senha é obrigatória.');
-    if (form.password && form.password.length < 6) return setFormError('Senha deve ter ao menos 6 caracteres.');
+    // Só a checagem grosseira aqui — a política real (piso por perfil, letra,
+    // número, símbolo, não conter o username) é do servidor, e a mensagem dele
+    // é a que aparece pro admin.
+    if (form.password && form.password.length < 8) return setFormError('Senha deve ter ao menos 8 caracteres.');
     if (form.role === 'therapist' && !form.teacherId) {
-      return setFormError('Aluno precisa estar vinculado a um professor.');
+      return setFormError('Aluno interno precisa estar vinculado a um professor.');
     }
 
     setSaving(true);
@@ -199,7 +198,7 @@ export default function AdminUsers({ user: currentUser }) {
         username: form.username.trim(),
         name: form.name.trim(),
         role: form.role,
-        teacherId: form.role === 'therapist' ? form.teacherId : null,
+        teacherId: ehAluno(form.role) ? (form.teacherId || null) : null,
         email: form.email.trim(),
       };
       if (form.password) payload.password = form.password;
@@ -318,7 +317,17 @@ export default function AdminUsers({ user: currentUser }) {
                     <strong style={{ color: 'var(--marrs-deep)' }}>{f.userName || 'Anônimo'}</strong>
                     <span style={{ fontSize: 12, color: 'var(--muted)' }}>{ROLE_LABELS[f.role] || f.role || '—'}</span>
                   </span>
-                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>{fbDate(f.timestamp)}</span>
+                  <span style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+                    <span style={{ fontSize: 12, color: 'var(--muted)' }}>{fbDate(f.timestamp)}</span>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteFeedback(f)}
+                      title="Excluir feedback"
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', fontSize: 13, padding: 0 }}
+                    >
+                      ✕
+                    </button>
+                  </span>
                 </div>
                 {f.message && <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{f.message}</div>}
               </div>
@@ -327,45 +336,25 @@ export default function AdminUsers({ user: currentUser }) {
         )}
       </div>
 
-      {/* Enviar aviso (notificação) ou publicar atualização do sistema — os dois
-          ícones do topo direito da tela (sino e bloco de notas). */}
+      {/* Enviar aviso (notificação) — cai no sino de todos os usuários. */}
       <div className="card" style={{ marginBottom: 16 }}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>Enviar aviso ou atualização</div>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>📢 Enviar aviso</div>
         <p style={{ margin: '0 0 14px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          O <strong>aviso</strong> cai no sino de notificações de todos os usuários. A <strong>atualização</strong> entra
-          no painel "Atualizações do sistema" (o bloco de notas ao lado do sino).
+          Cai no sino de notificações de todos os usuários (e como push, pra quem ativou).
         </p>
-        <div style={{ display: 'grid', gap: 18, gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))' }}>
-          <form className="admin-form" onSubmit={sendNotice}>
-            <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--marrs-deep)' }}>📢 Aviso (notificação)</div>
-            <div>
-              <label htmlFor="noticeTitle">Título <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
-              <input id="noticeTitle" type="text" value={noticeTitle} onChange={(e) => setNoticeTitle(e.target.value)} placeholder="Ex: Manutenção programada" maxLength={120} />
-            </div>
-            <div>
-              <label htmlFor="noticeMsg">Mensagem</label>
-              <textarea id="noticeMsg" value={noticeMsg} onChange={(e) => setNoticeMsg(e.target.value)} placeholder="Texto do aviso que aparece na notificação…" maxLength={500} style={{ minHeight: 90 }} />
-            </div>
-            {noticeError && <div className="alert error">{noticeError}</div>}
-            {noticeResult && <div className="alert" style={{ background: 'var(--olive-tint, #eef6ee)', color: 'var(--success, #1A7A6D)' }}>{noticeResult}</div>}
-            <div><button type="submit" className="btn btn-primary" disabled={noticeSending}>{noticeSending ? 'Enviando…' : 'Enviar aviso'}</button></div>
-          </form>
-
-          <form className="admin-form" onSubmit={sendUpdate}>
-            <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--marrs-deep)' }}>📝 Atualização do sistema</div>
-            <div>
-              <label htmlFor="updTitle">Título <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
-              <input id="updTitle" type="text" value={updTitle} onChange={(e) => setUpdTitle(e.target.value)} placeholder="Ex: Novidades da semana" maxLength={120} />
-            </div>
-            <div>
-              <label htmlFor="updBody">Conteúdo</label>
-              <textarea id="updBody" value={updBody} onChange={(e) => setUpdBody(e.target.value)} placeholder="Descreva a atualização… (quebras de linha são preservadas)" maxLength={4000} style={{ minHeight: 90 }} />
-            </div>
-            {updError && <div className="alert error">{updError}</div>}
-            {updResult && <div className="alert" style={{ background: 'var(--olive-tint, #eef6ee)', color: 'var(--success, #1A7A6D)' }}>{updResult}</div>}
-            <div><button type="submit" className="btn btn-primary" disabled={updSending}>{updSending ? 'Publicando…' : 'Publicar atualização'}</button></div>
-          </form>
-        </div>
+        <form className="admin-form" onSubmit={sendNotice} style={{ maxWidth: 420 }}>
+          <div>
+            <label htmlFor="noticeTitle">Título <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}>(opcional)</em></label>
+            <input id="noticeTitle" type="text" value={noticeTitle} onChange={(e) => setNoticeTitle(e.target.value)} placeholder="Ex: Manutenção programada" maxLength={120} />
+          </div>
+          <div>
+            <label htmlFor="noticeMsg">Mensagem</label>
+            <textarea id="noticeMsg" value={noticeMsg} onChange={(e) => setNoticeMsg(e.target.value)} placeholder="Texto do aviso que aparece na notificação…" maxLength={500} style={{ minHeight: 90 }} />
+          </div>
+          {noticeError && <div className="alert error">{noticeError}</div>}
+          {noticeResult && <div className="alert" style={{ background: 'var(--olive-tint, #eef6ee)', color: 'var(--success, #1A7A6D)' }}>{noticeResult}</div>}
+          <div><button type="submit" className="btn btn-primary" disabled={noticeSending}>{noticeSending ? 'Enviando…' : 'Enviar aviso'}</button></div>
+        </form>
       </div>
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -374,6 +363,7 @@ export default function AdminUsers({ user: currentUser }) {
           { v: 'admin',      label: `Administradores (${users.filter(u => u.role === 'admin').length})` },
           { v: 'supervisor', label: `Professores (${users.filter(u => u.role === 'supervisor').length})` },
           { v: 'therapist',  label: `Alunos (${users.filter(u => u.role === 'therapist').length})` },
+          { v: 'external',   label: `Alunos Externos (${users.filter(u => u.role === 'external').length})` },
           { v: 'evaluator',  label: `Avaliadores (${users.filter(u => u.role === 'evaluator').length})` },
         ].map((opt) => (
           <button
@@ -425,6 +415,10 @@ export default function AdminUsers({ user: currentUser }) {
                     <td style={{ color: 'var(--ink-soft)' }}>
                       {u.role === 'therapist'
                         ? (teacher ? `Professor: ${teacher.name}` : <span style={{ color: 'var(--danger, #c44)' }}>sem professor</span>)
+                        : u.role === 'external'
+                        /* Externo sem professor é o estado normal, não um erro —
+                           por isso em cinza, e não em vermelho como no interno. */
+                        ? (teacher ? `Professor: ${teacher.name}` : <span style={{ color: 'var(--muted)' }}>sem vínculo</span>)
                         : u.role === 'supervisor'
                           ? `${users.filter(s => s.teacherId === u.id).length} aluno(s)`
                           : '—'}
@@ -471,6 +465,7 @@ export default function AdminUsers({ user: currentUser }) {
                   <label htmlFor="role">Função</label>
                   <select id="role" name="role" value={form.role} onChange={handleChange}>
                     <option value="therapist">Aluno</option>
+                    <option value="external">Aluno Externo</option>
                     <option value="supervisor">Professor</option>
                     <option value="evaluator">Avaliador</option>
                     <option value="admin">Administrador</option>
@@ -502,18 +497,32 @@ export default function AdminUsers({ user: currentUser }) {
                 />
               </div>
 
-              {form.role === 'therapist' && (
+              {ehAluno(form.role) && (
                 <div>
-                  <label htmlFor="teacherId">Professor responsável</label>
-                  <select id="teacherId" name="teacherId" value={form.teacherId} onChange={handleChange} required>
-                    <option value="">— selecione —</option>
+                  <label htmlFor="teacherId">
+                    Professor responsável
+                    {form.role === 'external' && (
+                      <em style={{ color: 'var(--muted)', fontStyle: 'italic' }}> (opcional)</em>
+                    )}
+                  </label>
+                  <select
+                    id="teacherId" name="teacherId" value={form.teacherId} onChange={handleChange}
+                    required={form.role === 'therapist'}
+                  >
+                    <option value="">— {form.role === 'external' ? 'sem vínculo' : 'selecione'} —</option>
                     {teachers.map((t) => (
                       <option key={t.id} value={t.id}>{t.name} ({t.username})</option>
                     ))}
                   </select>
-                  {teachers.length === 0 && (
+                  {form.role === 'external' && (
+                    <small style={{ display: 'block', marginTop: 4, color: 'var(--muted)', fontSize: 12 }}>
+                      Aluno externo não precisa de professor. Vinculando um, ele passa a aparecer
+                      na lista de alunos desse professor e a Antessala dele é entregue a esse supervisor.
+                    </small>
+                  )}
+                  {form.role === 'therapist' && teachers.length === 0 && (
                     <small style={{ display: 'block', marginTop: 4, color: 'var(--danger, #c44)', fontSize: 12 }}>
-                      Cadastre um professor antes de criar alunos.
+                      Cadastre um professor antes de criar alunos internos.
                     </small>
                   )}
                 </div>

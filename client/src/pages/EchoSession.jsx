@@ -1032,7 +1032,7 @@ export default function EchoSession({ user, sessionType }) {
           })()}
 
           <div className="post-session-actions">
-            <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/simulacao' : (sessionType === 'freeplay' ? '/progressao' : '/neuro'))}>
+            <button className="btn btn-primary" onClick={() => navigate(isCompetitive ? '/inicio' : (sessionType === 'freeplay' ? '/progressao' : '/neuro'))}>
               Voltar à biblioteca
             </button>
           </div>

@@ -76,7 +76,7 @@ describe('auth', () => {
     const reset = await request(app)
       .post('/api/admin/users/3/reset-password')
       .set(authHeader(adminToken))
-      .send({ newPassword: 'novasenhaXYZ' });
+      .send({ newPassword: 'Nova@Senha1' });
     expect(reset.status).toBe(200);
 
     const oldFails = await request(app)
@@ -86,7 +86,7 @@ describe('auth', () => {
 
     const newWorks = await request(app)
       .post('/api/login')
-      .send({ username: 'aluno', password: 'novasenhaXYZ' });
+      .send({ username: 'aluno', password: 'Nova@Senha1' });
     expect(newWorks.status).toBe(200);
   });
 });

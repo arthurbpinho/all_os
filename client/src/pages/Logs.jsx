@@ -666,8 +666,13 @@ export default function Logs({ user, userId }) {
   // Aba dentro de "Minhas Sessões": sessões (Trilha/Simulação/Neuro) ou duelos.
   // "Logs de Duelo" deixou de ser item de menu próprio e virou esta aba.
   const [view, setView] = useState('sessions');
+  // MMR competitivo do próprio aluno. Veio da Página Inicial: lá é ruído em cima
+  // da lista de pacientes, aqui é o lugar natural — a tela onde ele acompanha o
+  // que já fez. Não existe pra visitante nem na visão de supervisor.
+  const [mmr, setMmr] = useState(null);
 
   const isSupervisorView = !userId;
+  const isVisitor = user?.role === 'visitor';
 
   useEffect(() => {
     setLoading(true);
@@ -683,6 +688,15 @@ export default function Logs({ user, userId }) {
       .then((p) => { if (p && p.ttlDays) setTtlDays(p.ttlDays); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (isSupervisorView || isVisitor) { setMmr(null); return; }
+    let cancelled = false;
+    api.getMyMmr()
+      .then((data) => { if (!cancelled) setMmr(data || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isSupervisorView, isVisitor]);
 
   // Agrupamento por terapeuta — só no view de supervisor (admin/professor sem filtro).
   // Dentro de cada grupo, ordena por data desc; entre grupos, ordena por última atividade desc.
@@ -721,6 +735,22 @@ export default function Logs({ user, userId }) {
         <p>{subtitle}</p>
         <div className="ornament" />
       </div>
+
+      {mmr && (
+        <div className="card tight" style={{ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 14 }}>
+          <span style={{ color: 'var(--muted)', fontSize: 13 }}>Seu MMR</span>
+          {mmr.calibrating ? (
+            <span style={{ fontWeight: 600, color: 'var(--ink-soft)' }}>
+              Em calibração — {mmr.matchesRemaining} {mmr.matchesRemaining === 1 ? 'partida restante' : 'partidas restantes'}
+            </span>
+          ) : (
+            <span style={{ fontWeight: 700, fontSize: 22, color: 'var(--marrs-deep)' }}>{mmr.mmr}</span>
+          )}
+          <span style={{ marginLeft: 'auto', color: 'var(--muted)', fontSize: 13 }}>
+            {mmr.n} {mmr.n === 1 ? 'partida competitiva' : 'partidas competitivas'}
+          </span>
+        </div>
+      )}
 
       {error && <div className="alert error">{error}</div>}
 

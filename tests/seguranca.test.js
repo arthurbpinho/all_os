@@ -13,12 +13,50 @@ describe('segurança — política de senha', () => {
     const criar = (password) => request(app).post('/api/admin/users').set(authHeader(admin))
       .send({ username: `novo${password.length}`, name: 'Novo', role: 'therapist', teacherId: '2', password });
 
-    const curta = await criar('1234567');       // 7
+    const curta = await criar('Ab1@cde');       // 7
     expect(curta.status).toBe(400);
     expect(curta.body.error).toMatch(/ao menos 8/);
 
-    const ok = await criar('12345678');         // 8
+    const ok = await criar('Ab1@cdef');         // 8
     expect(ok.status).toBe(200);
+  });
+
+  // A composição (letra + número + especial) nasceu com o cadastro público, mas
+  // vale pra conta criada pelo admin também — senão o aluno que se cadastra
+  // sozinho teria senha mais forte que o supervisor cadastrado à mão.
+  it('composição: exige letra, número e caractere especial em conta criada pelo admin', async () => {
+    const admin = await loginAs('admin');
+    const criar = (nome, password) => request(app).post('/api/admin/users').set(authHeader(admin))
+      .send({ username: nome, name: 'Novo Aluno', role: 'therapist', teacherId: '2', password });
+
+    const semLetra = await criar('sl1', '1234567@');
+    expect(semLetra.status).toBe(400);
+    expect(semLetra.body.error).toMatch(/1 letra/);
+
+    const semNumero = await criar('sn1', 'abcdefg@');
+    expect(semNumero.status).toBe(400);
+    expect(semNumero.body.error).toMatch(/1 número/);
+
+    const semEspecial = await criar('se1', 'abcdefg1');
+    expect(semEspecial.status).toBe(400);
+    expect(semEspecial.body.error).toMatch(/caractere especial/);
+
+    const comum = await criar('cm1', 'senha1234');
+    expect(comum.status).toBe(400);
+    expect(comum.body.error).toMatch(/muito comum/i);
+
+    const ok = await criar('okz', 'Ab1@cdef');
+    expect(ok.status).toBe(200);
+  });
+
+  // Senha que contém o próprio nome de usuário é o primeiro palpite de qualquer
+  // ataque direcionado.
+  it('senha não pode conter o nome de usuário', async () => {
+    const admin = await loginAs('admin');
+    const res = await request(app).post('/api/admin/users').set(authHeader(admin))
+      .send({ username: 'marcia', name: 'Marcia Silva', role: 'therapist', teacherId: '2', password: 'Marcia@2026' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/nome de usuário/i);
   });
 
   it('supervisor e admin exigem 12 caracteres', async () => {
@@ -27,11 +65,11 @@ describe('segurança — política de senha', () => {
       .send({ username: `u${role}${password.length}`, name: 'Novo', role, password });
 
     for (const role of ['supervisor', 'admin']) {
-      const oito = await criar(role, '12345678');       // passaria pra aluno
+      const oito = await criar(role, 'Ab1@cdef');       // passaria pra aluno
       expect(oito.status).toBe(400);
       expect(oito.body.error).toMatch(/ao menos 12/);
 
-      const doze = await criar(role, '123456789012');
+      const doze = await criar(role, 'Ab1@cdefghij');
       expect(doze.status).toBe(200);
     }
   });
@@ -39,7 +77,7 @@ describe('segurança — política de senha', () => {
   it('admin não consegue rebaixar a própria senha para 8 pela tela de Perfil', async () => {
     const admin = await loginAs('admin');
     const res = await request(app).post('/api/me/password').set(authHeader(admin))
-      .send({ currentPassword: 'testpass1234', newPassword: '12345678' });
+      .send({ currentPassword: 'testpass1234', newPassword: 'Ab1@cdef' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/ao menos 12/);
   });
@@ -48,13 +86,13 @@ describe('segurança — política de senha', () => {
     const admin = await loginAs('admin');
     // Alvo é o professor (id 2) → piso 12, mesmo quem reseta sendo admin.
     const curta = await request(app).post('/api/admin/users/2/reset-password').set(authHeader(admin))
-      .send({ newPassword: '12345678' });
+      .send({ newPassword: 'Ab1@cdef' });
     expect(curta.status).toBe(400);
     expect(curta.body.error).toMatch(/ao menos 12/);
 
     // Aluno (id 3) → piso 8.
     const aluno = await request(app).post('/api/admin/users/3/reset-password').set(authHeader(admin))
-      .send({ newPassword: '12345678' });
+      .send({ newPassword: 'Ab1@cdef' });
     expect(aluno.status).toBe(200);
   });
 });
@@ -142,27 +180,6 @@ describe('segurança — erro genérico + Logs de Erro', () => {
     expect(limpo.body.removidos).toBe(1);
     const painel = await request(app).get('/api/admin/error-logs').set(authHeader(admin));
     expect(painel.body.errors.length).toBe(0);
-  });
-});
-
-describe('atualizações do sistema — só equipe', () => {
-  beforeEach(() => resetData());
-
-  // Notas de versão são comunicação interna de desenvolvimento. O painel some
-  // no cliente pra aluno/visitante, e o endpoint fecha junto — esconder só na
-  // tela deixaria o conteúdo acessível a qualquer sessão.
-  it('admin e supervisor leem; aluno e visitante recebem 403', async () => {
-    for (const quem of ['admin', 'prof']) {
-      const token = await loginAs(quem);
-      const res = await request(app).get('/api/updates').set(authHeader(token));
-      expect(res.status).toBe(200);
-      expect(Array.isArray(res.body)).toBe(true);
-    }
-    const aluno = await loginAs('aluno');
-    expect((await request(app).get('/api/updates').set(authHeader(aluno))).status).toBe(403);
-
-    const visitante = await loginVisitor();
-    expect((await request(app).get('/api/updates').set(authHeader(visitante))).status).toBe(403);
   });
 });
 

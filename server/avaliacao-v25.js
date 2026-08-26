@@ -193,6 +193,34 @@ const PIPELINE_VERSIONS = {
     etiquetaNaAnalise: true,
     duasFases: true,
   },
+  // v29 — a mais NOVA das quatro, apesar do número (a numeração é do rascunho
+  // do prompt, não da ordem em que cada um entrou aqui). Vem depois do v32 e
+  // volta a UMA chamada por nó: é o v31 com as travas da F3 e da F4 na redação
+  // do v32, e com os dois eixos de decisão separados de forma explícita — a
+  // trava pergunta se aquilo aconteceu e funcionou, a régua pergunta se aquilo
+  // é o que caracteriza o trabalho. O v32 fazia o teste do "caracterizar" nas
+  // duas fases e cobrava a mesma exigência duas vezes.
+  //
+  // Para o CÓDIGO, v29 é igual ao v31: uma chamada por nó, sem variantes, sem
+  // confiança, mesma saída (`Fn abre` / `Fn realizada` + ANÁLISE por último) e
+  // mesma derivação de faixa. Por isso divide com ele o formatoSaida
+  // 'travas-v31' — o parser é o mesmo, e duplicá-lo só criaria dois nomes para
+  // um contrato só.
+  v29: {
+    id: 'v29',
+    dirs: ['v29'],
+    montado: 'prompt-no-v29-montado.md',
+    criterios: 'criterios-no-v29.md',
+    sintetizador: 'sintetizador-v29.md',
+    nCriterios: 15,
+    confiancaBaixaExclui: false, // não há confiança nesta versão
+    capturaReasoning: true,
+    saudacao: SAUDACAO_V28,
+    travasEstruturais: true,
+    variantes: false,
+    formatoSaida: 'travas-v31',
+    etiquetaNaAnalise: true,
+  },
 };
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
 const DEFAULT_VERSION = 'v25';

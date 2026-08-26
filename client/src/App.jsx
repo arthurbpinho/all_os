@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import Login from './pages/Login';
-import Home from './pages/Home';
 import SkillMap from './pages/SkillMap';
 import FreePlay from './pages/FreePlay';
 import Competitive from './pages/Competitive';
@@ -30,12 +29,15 @@ import DuelAccept from './pages/DuelAccept';
 import Terapeutas from './pages/Terapeutas';
 import LogsSociais from './pages/LogsSociais';
 import ProcessoSeletivo from './pages/ProcessoSeletivo';
+import Cadastro from './pages/Cadastro';
+import ConfirmarEmail from './pages/ConfirmarEmail';
+import EsqueciSenha from './pages/EsqueciSenha';
+import RedefinirSenha from './pages/RedefinirSenha';
 import Antessala from './pages/Antessala';
 import Suporte from './pages/Suporte';
 import SelecaoDashboard from './pages/SelecaoDashboard';
 import SelecaoLogs from './pages/SelecaoLogs';
 import NotificationBell from './components/NotificationBell';
-import SystemUpdates from './components/SystemUpdates';
 import ThemeToggle from './components/ThemeToggle';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 import { ICONS } from './icons';
@@ -43,6 +45,15 @@ import { ICONS } from './icons';
 // A tela de login virou uma ROTA em vez do portão de entrada: quem chega sem
 // conta cai direto no modo visitante e chega aqui pelo botão "Entrar" do topo.
 const LOGIN_PATH = '/login';
+
+// Telas de quem ainda não tem (ou perdeu) a conta. Ficam FORA do shell do app e
+// não disparam sessão de visitante: pedir um token de visitante pra alguém que
+// está criando conta gastaria cota do limite por IP sem nenhum ganho — e numa
+// faculdade, onde a sala toda sai pelo mesmo IP, isso importa.
+const ROTAS_PUBLICAS = ['/cadastro', '/confirmar-email', '/esqueci-senha', '/redefinir-senha'];
+function ehRotaPublica(pathname) {
+  return ROTAS_PUBLICAS.some((r) => pathname === r || pathname.startsWith(r + '/'));
+}
 
 export default function App() {
   const [user, setUser] = useState(() => {
@@ -57,6 +68,20 @@ export default function App() {
 
   const [streak, setStreak] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // Sidebar retrátil (só desktop ≥1025px — no tablet ela já é coluna de ícones
+  // por CSS, e no celular é drawer). Vale entre sessões: quem encolheu não quer
+  // achar tudo expandido de novo no próximo acesso.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('allos_sidebar_collapsed') === '1'; } catch { return false; }
+  });
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((v) => {
+      const next = !v;
+      try { localStorage.setItem('allos_sidebar_collapsed', next ? '1' : '0'); } catch { /* modo privado */ }
+      return next;
+    });
+  };
 
   // Fecha drawer mobile sempre que a rota mudar
   useEffect(() => { setMobileNavOpen(false); }, [location.pathname]);
@@ -95,6 +120,7 @@ export default function App() {
     // vai justamente pra sair do modo visitante, e o seletivo tem auth própria.
     if (location.pathname === LOGIN_PATH) return;
     if (location.pathname.startsWith('/processo-seletivo')) return;
+    if (ehRotaPublica(location.pathname)) return;
 
     visitorPedidoRef.current = true;
     let cancelled = false;
@@ -135,11 +161,14 @@ export default function App() {
     return () => { cancelled = true; };
   }, [user?.id, location.pathname]);
 
-  const handleLogin = (u) => {
+  // `navegar: false` é o caso do ConfirmarEmail: a pessoa entra logada, mas
+  // precisa ver a tela de "conta confirmada" antes de ir pro app. Navegar aqui
+  // tornaria essa tela inalcançável.
+  const handleLogin = (u, { navegar = true } = {}) => {
     setUser(u);
     localStorage.setItem('allos_user', JSON.stringify(u));
     // O /login é uma rota agora — depois de entrar precisa sair dela.
-    navigate('/');
+    if (navegar) navigate('/');
   };
 
   const handleUpdateUser = (updated) => {
@@ -164,6 +193,19 @@ export default function App() {
   if (location.pathname.startsWith('/processo-seletivo')) {
     return <ProcessoSeletivo />;
   }
+  // Cadastro e recuperação de conta: também fora do shell, e ANTES do gate de
+  // auth. Confirmar o cadastro já loga a pessoa, então o ConfirmarEmail recebe
+  // o mesmo handleLogin usado pela tela de login.
+  if (ehRotaPublica(location.pathname)) {
+    return (
+      <Routes>
+        <Route path="/cadastro" element={<Cadastro />} />
+        <Route path="/confirmar-email" element={<ConfirmarEmail onLogin={(u) => handleLogin(u, { navegar: false })} />} />
+        <Route path="/esqueci-senha" element={<EsqueciSenha />} />
+        <Route path="/redefinir-senha" element={<RedefinirSenha />} />
+      </Routes>
+    );
+  }
   // Tela de login: agora é uma rota, não o portão de entrada. Vale também com
   // sessão de visitante ativa — é assim que o visitante troca por uma conta real.
   if (location.pathname === LOGIN_PATH) {
@@ -176,14 +218,18 @@ export default function App() {
 
   const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
 
-  const isTherapist = user.role === 'therapist';
+  // Aluno externo usa o menu do aluno. A única diferença é não pressupor
+  // vínculo com a Allos — o que muda no servidor (nasce sem supervisor), não na
+  // navegação. `isTherapist` cobre os dois papéis para não ter que listar os
+  // dois em cada item do menu.
+  const isTherapist = user.role === 'therapist' || user.role === 'external';
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
   const isVisitor = user.role === 'visitor';
   const isEvaluator = user.role === 'evaluator';
 
   return (
-    <div className="app-layout">
+    <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       {/* Cabeçalho único do app. As ações (tema, atualizações, sino, "Entrar")
           vivem DENTRO dele, e não soltas em position:fixed por cima — era isso
           que fazia elas cobrirem o logo "all_OS" no celular quando o papel do
@@ -208,9 +254,6 @@ export default function App() {
         <div className="mobile-topbar-logo">all<span className="accent">_OS</span></div>
         <div className="topbar-actions">
           <ThemeToggle />
-          {/* Notas de versão: só equipe (admin/supervisor). Aluno e visitante não
-              veem — é comunicação interna de desenvolvimento, não conteúdo deles. */}
-          {(isAdmin || isSupervisor) && <SystemUpdates />}
           {!isVisitor && <NotificationBell user={user} />}
           {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
           {isVisitor && (
@@ -237,10 +280,24 @@ export default function App() {
         aria-hidden="true"
       />
 
-      <aside className={`sidebar ${mobileNavOpen ? 'open' : ''}`}>
+      <aside className={`sidebar ${mobileNavOpen ? 'open' : ''} ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-logo">
           <h1>all<span className="accent">_OS</span></h1>
           <p>Simulação Clínica</p>
+          {/* Encolhe/expande a barra. A seta aponta pra onde a barra vai: "<"
+              recolhe, ">" devolve (o CSS gira a mesma seta em 180°). */}
+          <button
+            type="button"
+            className="sidebar-collapse-btn"
+            onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? 'Expandir menu' : 'Encolher menu'}
+            aria-expanded={!sidebarCollapsed}
+            title={sidebarCollapsed ? 'Expandir menu' : 'Encolher menu'}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <polyline points="15 5 8 12 15 19" />
+            </svg>
+          </button>
         </div>
 
         <nav className="sidebar-nav">
@@ -248,15 +305,27 @@ export default function App() {
             <>
               <div className="nav-section">Prática</div>
               {(isTherapist || isAdmin || isVisitor) && (
-                <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''}>
+                <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''} title="Início">
                   {ICONS.home}<span>Início</span>
+                </Link>
+              )}
+              {/* Treinamento voltou pro menu porque a tela de Início que o
+                  abria (as duas "portas") deixou de existir: o /inicio agora é
+                  a lista de pacientes. A Trilha é o hub dos outros modos —
+                  Progressão, Duelo e Antessala moram dentro dela. O visitante
+                  não entra na Trilha, então cai direto na Progressão, que é o
+                  que ele pode usar. */}
+              {(isTherapist || isAdmin || isVisitor) && (
+                <Link
+                  to={isVisitor ? '/progressao' : '/skills'}
+                  className={isActive('/skills') || isActive('/progressao') ? 'active' : ''}
+                  title="Treinamento"
+                >
+                  {ICONS.skill}<span>Treinamento</span>
                 </Link>
               )}
             </>
           )}
-          {/* Trilha e Antessala saíram do menu: agora são abertas pelos cards da
-              seção "Como evoluir" na tela de Início, do mesmo jeito que Treinamento,
-              Competitivo e Duelo já eram abertos pelos cards de "Como jogar". */}
 
           {/* Comunidade ACIMA de Histórico. Objetivos veio da Prática (mesma
               audiência: aluno/admin — não visitante, não supervisor). O avaliador
@@ -264,11 +333,11 @@ export default function App() {
           {!isVisitor && !isEvaluator && (
             <>
               <div className="nav-section">Comunidade</div>
-              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''}>
+              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''} title="Ranking">
                 {ICONS.supervisor}<span>Ranking</span>
               </Link>
               {(isTherapist || isAdmin) && (
-                <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''}>
+                <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''} title="Objetivos">
                   {ICONS.flame}<span>Objetivos</span>
                 </Link>
               )}
@@ -281,23 +350,23 @@ export default function App() {
               {/* "Logs de Duelo" deixou de ser item próprio — agora é uma aba
                   dentro de "Minhas Sessões". A rota /duelo/logs segue existindo. */}
               {(isTherapist || isVisitor) && (
-                <Link to="/logs" className={isActive('/logs') ? 'active' : ''}>
+                <Link to="/logs" className={isActive('/logs') ? 'active' : ''} title="Minhas Sessões">
                   {ICONS.log}<span>Minhas Sessões</span>
                 </Link>
               )}
               {isSupervisor && (
-                <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
+                <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''} title="Logs dos Alunos">
                   {ICONS.supervisor}<span>Logs dos Alunos</span>
                 </Link>
               )}
               {/* Antessala: o supervisor lê aqui os mapas entregues pelos alunos. */}
               {isSupervisor && (
-                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''}>
+                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''} title="Antessala">
                   {ICONS.antessala}<span>Antessala</span>
                 </Link>
               )}
               {(isSupervisor || isAdmin) && (
-                <Link to="/terapeutas" className={isActive('/terapeutas') ? 'active' : ''}>
+                <Link to="/terapeutas" className={isActive('/terapeutas') ? 'active' : ''} title="Terapeutas">
                   {ICONS.social}<span>Terapeutas</span>
                 </Link>
               )}
@@ -307,20 +376,20 @@ export default function App() {
           {(isSupervisor || isAdmin) && (
             <>
               <div className="nav-section">Avaliação</div>
-              <Link to="/avaliacao" className={isActive('/avaliacao') ? 'active' : ''}>
+              <Link to="/avaliacao" className={isActive('/avaliacao') ? 'active' : ''} title="Avaliar Sessão">
                 {ICONS.evaluate}<span>Avaliar Sessão</span>
               </Link>
               {/* Laboratório de custo do PACIENTE (a IA que conversa com o aluno).
                   Irmão da Avaliar Sessão, mas mede custo × qualidade da fala do
                   personagem, com o custo em tempo real e sem avaliador. */}
-              <Link to="/simulacao-independente" className={isActive('/simulacao-independente') ? 'active' : ''}>
+              <Link to="/simulacao-independente" className={isActive('/simulacao-independente') ? 'active' : ''} title="Simulação Independente">
                 {ICONS.freeplay}<span>Simulação Independente</span>
               </Link>
               {/* Mesmo laboratório do paciente, com o ALUNO automatizado: sobe o log
                   de um atendimento, a IA reproduz a persona de quem atendeu e
                   refaz o caso por N interações. Mede custo e sustentação do
                   paciente num atendimento inteiro. Sem avaliação. */}
-              <Link to="/benchmark-simulacao" className={isActive('/benchmark-simulacao') ? 'active' : ''}>
+              <Link to="/benchmark-simulacao" className={isActive('/benchmark-simulacao') ? 'active' : ''} title="Benchmarking de Simulação">
                 {ICONS.log}<span>Benchmarking de Simulação</span>
               </Link>
             </>
@@ -332,10 +401,10 @@ export default function App() {
           {(isSupervisor || isAdmin) && (
             <>
               <div className="nav-section">Neuroavaliação</div>
-              <Link to="/admin/neuro" className={isActive('/admin/neuro') ? 'active' : ''}>
+              <Link to="/admin/neuro" className={isActive('/admin/neuro') ? 'active' : ''} title="Personagens Neuro">
                 {ICONS.characters}<span>Personagens Neuro</span>
               </Link>
-              <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''}>
+              <Link to="/neuro" className={isActive('/neuro') ? 'active' : ''} title="Neuroavaliação">
                 {ICONS.neuro}<span>Neuroavaliação</span>
               </Link>
             </>
@@ -344,10 +413,10 @@ export default function App() {
           {(isEvaluator || isAdmin) && (
             <>
               <div className="nav-section">Processo Seletivo</div>
-              <Link to="/selecao/dashboard" className={isActive('/selecao/dashboard') ? 'active' : ''}>
+              <Link to="/selecao/dashboard" className={isActive('/selecao/dashboard') ? 'active' : ''} title="Dashboard">
                 {ICONS.evaluate}<span>Dashboard</span>
               </Link>
-              <Link to="/selecao/logs" className={isActive('/selecao/logs') ? 'active' : ''}>
+              <Link to="/selecao/logs" className={isActive('/selecao/logs') ? 'active' : ''} title="Logs de avaliações">
                 {ICONS.log}<span>Logs de avaliações</span>
               </Link>
             </>
@@ -356,36 +425,36 @@ export default function App() {
           {isAdmin && (
             <>
               <div className="nav-section">Administração</div>
-              <Link to="/admin/users" className={isActive('/admin/users') ? 'active' : ''}>
+              <Link to="/admin/users" className={isActive('/admin/users') ? 'active' : ''} title="Contas">
                 {ICONS.supervisor}<span>Contas</span>
               </Link>
-              <Link to="/admin/exercises" className={isActive('/admin/exercises') ? 'active' : ''}>
+              <Link to="/admin/exercises" className={isActive('/admin/exercises') ? 'active' : ''} title="Exercícios da Trilha">
                 {ICONS.admin}<span>Exercícios da Trilha</span>
               </Link>
-              <Link to="/admin/trilha-logs" className={isActive('/admin/trilha-logs') ? 'active' : ''}>
+              <Link to="/admin/trilha-logs" className={isActive('/admin/trilha-logs') ? 'active' : ''} title="Logs da Trilha">
                 {ICONS.log}<span>Logs da Trilha</span>
               </Link>
-              <Link to="/admin/freeplay" className={isActive('/admin/freeplay') ? 'active' : ''}>
+              <Link to="/admin/freeplay" className={isActive('/admin/freeplay') ? 'active' : ''} title="Personagens da Simulação">
                 {ICONS.characters}<span>Personagens da Simulação</span>
               </Link>
-              <Link to="/admin/entrevistador" className={isActive('/admin/entrevistador') ? 'active' : ''}>
+              <Link to="/admin/entrevistador" className={isActive('/admin/entrevistador') ? 'active' : ''} title="Entrevistador">
                 {ICONS.supervisor}<span>Entrevistador</span>
               </Link>
               {/* Qual IA avalia e qual interpreta o paciente, por modo do app. */}
-              <Link to="/admin/modelos" className={isActive('/admin/modelos') ? 'active' : ''}>
+              <Link to="/admin/modelos" className={isActive('/admin/modelos') ? 'active' : ''} title="Modelos de IA">
                 {ICONS.evaluate}<span>Modelos de IA</span>
               </Link>
               {/* Os .md do avaliador/entrevistador vivem no volume, fora do
                   git — este é o único caminho de edição pela interface. */}
-              <Link to="/admin/prompts" className={isActive('/admin/prompts') ? 'active' : ''}>
+              <Link to="/admin/prompts" className={isActive('/admin/prompts') ? 'active' : ''} title="Prompts">
                 {ICONS.log}<span>Prompts</span>
               </Link>
-              <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''}>
+              <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''} title="Todos os Logs">
                 {ICONS.log}<span>Todos os Logs</span>
               </Link>
               {/* Erros que os usuários encontraram. Eles só recebem um código;
                   o detalhe (mensagem real, stack, quem, onde) fica aqui. */}
-              <Link to="/admin/erros" className={isActive('/admin/erros') ? 'active' : ''}>
+              <Link to="/admin/erros" className={isActive('/admin/erros') ? 'active' : ''} title="Logs de Erro">
                 {ICONS.alert}<span>Logs de Erro</span>
               </Link>
             </>
@@ -421,7 +490,7 @@ export default function App() {
                 <div className="profile-mini-role">
                   {streak?.isAlive
                     ? `${streak.current} ${streak.current === 1 ? 'semana consecutiva' : 'semanas consecutivas'}`
-                    : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'supervisor' ? 'Supervisor' : user.role === 'evaluator' ? 'Avaliador' : 'Administrador')}
+                    : (user.role === 'therapist' ? 'Terapeuta' : user.role === 'external' ? 'Aluno Externo' : user.role === 'supervisor' ? 'Supervisor' : user.role === 'evaluator' ? 'Avaliador' : 'Administrador')}
                 </div>
               </div>
             </Link>
@@ -445,17 +514,19 @@ export default function App() {
           </div>
         )}
         <Routes>
-          <Route path="/inicio" element={<Home user={user} />} />
           <Route path="/skills" element={<SkillMap user={user} />} />
           <Route path="/chat/exercise/:id" element={<ChatSession user={user} />} />
           <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
           <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
-          {/* Nomes visíveis mudaram (Competitivo → Simulação, Treinamento →
-              Progressão) e as rotas acompanharam. As antigas seguem respondendo
-              porque estão em links compartilhados, notificações antigas e no
-              histórico do navegador de quem já usa o app. */}
-          <Route path="/simulacao" element={<Competitive user={user} />} />
-          <Route path="/competitivo" element={<Navigate to="/simulacao" replace />} />
+          {/* Nomes visíveis mudaram (Competitivo → Simulação → Página Inicial,
+              Treinamento → Progressão) e as rotas acompanharam. As antigas
+              seguem respondendo porque estão em links compartilhados,
+              notificações antigas e no histórico do navegador de quem já usa o
+              app. A Página Inicial é a antiga Simulação: mesma tela, agora em
+              /inicio — a tela de "portas" que ficava aí foi removida. */}
+          <Route path="/inicio" element={<Competitive user={user} />} />
+          <Route path="/simulacao" element={<Navigate to="/inicio" replace />} />
+          <Route path="/competitivo" element={<Navigate to="/inicio" replace />} />
           <Route path="/progressao" element={<FreePlay user={user} />} />
           <Route path="/freeplay" element={<Navigate to="/progressao" replace />} />
           <Route path="/duelo" element={<Duelo user={user} />} />
@@ -500,6 +571,6 @@ function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
   if (user.role === 'evaluator') return '/selecao/dashboard';
-  // Aluno e visitante: caem na homepage (Início) — slogan + missão diária + modos.
+  // Aluno e visitante: caem na Página Inicial (/inicio) — a lista de pacientes.
   return '/inicio';
 }

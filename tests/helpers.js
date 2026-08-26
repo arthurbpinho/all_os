@@ -25,6 +25,21 @@ process.env.GLM_API_KEY = '';
 // Limitador de TPM desligado nos testes: eles não falam com a rede, e o
 // limitador dormiria esperando a janela de 60s abrir.
 process.env.AVALIACAO_V25_TPM_LIMITER = '0';
+// E-mail e captcha DESLIGADOS na suite. Mesmo motivo do '' acima em vez de
+// delete: o dotenv.config() do server/index.js re-injeta o .env real, e com ele
+// configurado a suite mandaria e-mail de verdade pela caixa da Allos (para
+// endereços fictícios, que viram bounce) e bateria no Cloudflare a cada teste
+// de cadastro. Com as envs vazias, o mailer captura em memória — que é como os
+// testes leem o token do link — e o captcha é pulado.
+process.env.GRAPH_TENANT_ID = '';
+process.env.GRAPH_CLIENT_ID = '';
+process.env.GRAPH_CLIENT_SECRET = '';
+process.env.GRAPH_CERT_KEY_FILE = '';
+process.env.GRAPH_CERT_PRIVATE_KEY = '';
+process.env.GRAPH_CERT_THUMBPRINT = '';
+process.env.MAIL_FROM = '';
+process.env.TURNSTILE_SITE_KEY = '';
+process.env.TURNSTILE_SECRET_KEY = '';
 
 // O require do app DEVE vir depois das envs acima.
 const app = require('../server/index.js');

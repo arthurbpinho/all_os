@@ -79,7 +79,7 @@ export default function Progression({ user }) {
             <button className="btn btn-primary" onClick={startNewSession}>
               Avaliar outro paciente
             </button>
-            <button className="btn btn-outline" onClick={() => navigate('/simulacao')}>
+            <button className="btn btn-outline" onClick={() => navigate('/inicio')}>
               Voltar ao menu
             </button>
           </div>
