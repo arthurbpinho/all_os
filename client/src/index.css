@@ -5594,6 +5594,33 @@ select option { background: var(--cream); color: var(--ink); }
   padding: 2px 8px; border-radius: 999px;
   color: var(--marrs-dark); background: var(--marrs-tint);
 }
+/* Selo de discussão fixada. Laranja porque é decisão da administração, não uma
+   propriedade do conteúdo — o mesmo vocabulário do "continuar lendo" e da
+   bolinha de "em desenvolvimento". */
+.comunidade-tag-fixada {
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600;
+  padding: 2px 8px; border-radius: 999px;
+  color: var(--warn); background: var(--terra-tint);
+}
+[data-theme="dark"] .comunidade-tag-fixada { color: #eb9b4a; }
+
+/* Ação de fixar: fica na ponta direita do rodapé, longe do link de
+   comentários, pra não competir com o que o leitor comum usa. */
+.comunidade-acao-fixar {
+  margin-left: auto;
+  padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent;
+  color: var(--ink-soft); font-family: var(--body); font-size: 12px;
+  cursor: pointer; white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+}
+.comunidade-acao-fixar:hover:not(:disabled) { border-color: var(--warn); color: var(--warn); }
+.comunidade-acao-fixar:disabled { cursor: default; opacity: 0.55; }
+
+/* Card fixado: uma faixa fina à esquerda. Discreto de propósito — o selo já
+   diz o que é, e um card inteiro destacado brigaria com o destaque
+   institucional (kind-allos) que já existe. */
+.comunidade-card.fixada { border-left: 3px solid var(--warn); }
 
 /* Destaque institucional e de supervisor: a tinta de fundo + o brilho em volta
    do card inteiro, para que a publicação salte na lista antes da leitura. */

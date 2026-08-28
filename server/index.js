@@ -10251,6 +10251,8 @@ app.get('/api/comunidade', requireAuth, (req, res) => {
     // A tela precisa distinguir "não pode porque é visitante" de "não pode
     // porque está suspenso" — as duas mensagens são bem diferentes.
     blockedReason: podeVotar.ok ? null : podeVotar.error,
+    // Governa o botão de fixar no card (a discussão avulsa já mandava isto).
+    canModerate: req.user.role === 'admin',
   });
 });
 
@@ -10331,6 +10333,33 @@ app.delete('/api/comunidade/:id', requireAuth, async (req, res) => {
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json({ ok: true });
+});
+
+// Fixar/desfixar discussão — admin apenas. A discussão fixada sobe ao topo da
+// aba "Recentes" e NÃO mexe em "Em alta" (ver comunidade.ordenarFeed): aquela
+// aba é um placar da comunidade, e plantar um post no topo dela seria mentir
+// sobre o que ela mostra.
+//
+// `pinnedAt` existe para ordenar entre várias fixadas — fixar de novo promove
+// ao topo, que é como o admin reordena sem precisar de um campo de posição.
+app.post('/api/comunidade/:id/pin', requireAuth, requireRole('admin'), writeLimiter, async (req, res) => {
+  const fixar = !!(req.body && req.body.pinned);
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    if (fixar) {
+      d.pinned = true;
+      d.pinnedAt = new Date().toISOString();
+    } else {
+      delete d.pinned;
+      delete d.pinnedAt;
+    }
+    writeComunidade(store);
+    return { pinned: fixar };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json(resultado);
 });
 
 app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, async (req, res) => {

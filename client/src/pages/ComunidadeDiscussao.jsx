@@ -58,6 +58,18 @@ export default function ComunidadeDiscussao({ user }) {
     }
   }
 
+  // Fixar/desfixar daqui também: quem abriu a discussão pra ler é justamente
+  // quem decide que ela merece o topo do feed.
+  async function alternarFixado() {
+    setErro('');
+    try {
+      await api.pinDiscussion(d.id, !d.pinned);
+      await carregar();
+    } catch (e) {
+      setErro(e.message || 'Não foi possível fixar.');
+    }
+  }
+
   async function excluirDiscussao() {
     if (!window.confirm('Excluir esta discussão? Os comentários também somem.')) return;
     try {
@@ -111,6 +123,16 @@ export default function ComunidadeDiscussao({ user }) {
             <button type="button" className="btn btn-ghost btn-sm" onClick={compartilhar}>
               {copiado ? 'Link copiado!' : 'Compartilhar'}
             </button>
+            {canModerate && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={alternarFixado}
+                title={d.pinned ? 'Desfixar' : 'Sobe ao topo da aba Recentes (não muda "Em alta")'}
+              >
+                {d.pinned ? 'Desfixar' : 'Fixar'}
+              </button>
+            )}
             {(souAutor || canModerate) && (
               <button type="button" className="btn btn-ghost btn-sm perigo" onClick={excluirDiscussao}>
                 Excluir

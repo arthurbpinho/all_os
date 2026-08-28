@@ -667,6 +667,8 @@ export const api = {
   createDiscussion: (data) => request('/comunidade', { method: 'POST', body: data }),
   deleteDiscussion: (id) => request(`/comunidade/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   voteDiscussion: (id, value) => request(`/comunidade/${encodeURIComponent(id)}/vote`, { method: 'POST', body: { value } }),
+  // Fixar/desfixar discussão (admin): sobe ao topo em "Recentes" só.
+  pinDiscussion: (id, pinned) => request(`/comunidade/${encodeURIComponent(id)}/pin`, { method: 'POST', body: { pinned } }),
   votePoll: (id, optionId) => request(`/comunidade/${encodeURIComponent(id)}/poll`, { method: 'POST', body: { optionId } }),
   createComment: (id, data) => request(`/comunidade/${encodeURIComponent(id)}/comentarios`, { method: 'POST', body: data }),
   voteComment: (id, cid, value) =>

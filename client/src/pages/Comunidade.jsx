@@ -115,7 +115,14 @@ export default function Comunidade({ user }) {
       ) : (
         <div className="comunidade-feed">
           {dados.discussions.map((d) => (
-            <CardDiscussao key={d.id} d={d} podeVotar={dados.canPost} />
+            <CardDiscussao
+              key={d.id}
+              d={d}
+              podeVotar={dados.canPost}
+              podeModerar={dados.canModerate}
+              ordem={ordem}
+              onMudou={() => carregar(ordem)}
+            />
           ))}
         </div>
       )}
@@ -123,9 +130,23 @@ export default function Comunidade({ user }) {
   );
 }
 
-function CardDiscussao({ d, podeVotar }) {
+function CardDiscussao({ d, podeVotar, podeModerar, ordem, onMudou }) {
+  const [fixando, setFixando] = useState(false);
+
+  async function alternarFixado() {
+    setFixando(true);
+    try {
+      await api.pinDiscussion(d.id, !d.pinned);
+      await onMudou();
+    } catch {
+      // best-effort: o feed recarrega no próximo poll/troca de aba
+    } finally {
+      setFixando(false);
+    }
+  }
+
   return (
-    <article className={`comunidade-card kind-${d.author.kind}`}>
+    <article className={`comunidade-card kind-${d.author.kind} ${d.pinned ? 'fixada' : ''}`}>
       <VoteButtons
         score={d.score}
         myVote={d.myVote}
@@ -144,10 +165,33 @@ function CardDiscussao({ d, podeVotar }) {
           </p>
         )}
         <div className="comunidade-card-rodape">
+          {d.pinned && (
+            <span className="comunidade-tag-fixada" title="Aparece no topo da aba Recentes">
+              Fixada
+            </span>
+          )}
           {d.hasPoll && <span className="comunidade-tag-enquete">Enquete</span>}
           <Link className="comunidade-link-comentarios" to={`/comunidade/discussao/${d.id}`}>
             {d.commentCount === 0 ? 'Comentar' : `${d.commentCount} ${d.commentCount === 1 ? 'comentário' : 'comentários'}`}
           </Link>
+          {podeModerar && (
+            <button
+              type="button"
+              className="comunidade-acao-fixar"
+              onClick={alternarFixado}
+              disabled={fixando}
+              // Em "Em alta" o post não vai se mexer: fixar não mexe naquela
+              // ordem. Dizer isso no próprio botão evita o admin clicar e achar
+              // que não funcionou.
+              title={d.pinned
+                ? 'Desfixar'
+                : (ordem === 'top'
+                  ? 'Fixar — sobe ao topo na aba Recentes (não muda "Em alta")'
+                  : 'Fixar no topo')}
+            >
+              {fixando ? '…' : (d.pinned ? 'Desfixar' : 'Fixar')}
+            </button>
+          )}
         </div>
       </div>
     </article>
