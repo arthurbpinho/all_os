@@ -6129,3 +6129,19 @@ select option { background: var(--cream); color: var(--ink); }
   from { opacity: 0; }
   to   { opacity: 1; }
 }
+
+/* ── Edição de discussão pelo admin ─────────────────────────────────────── */
+.comunidade-editor-discussao { margin: 18px 0 4px; }
+.comunidade-editor-aviso {
+  margin: 0 0 8px; font-size: 12.5px; line-height: 1.5;
+  color: var(--ink-soft);
+  border-left: 3px solid var(--warn); padding: 8px 12px;
+  background: var(--terra-tint); border-radius: 0 var(--radius) var(--radius) 0;
+}
+/* "(editado)" ao lado do título: presente, mas discreto — informa sem competir
+   com o título. */
+.comunidade-editado {
+  margin-left: 8px; font-family: var(--body); font-size: 12.5px;
+  font-weight: 400; font-style: italic; color: var(--muted);
+  white-space: nowrap; vertical-align: middle;
+}

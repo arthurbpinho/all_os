@@ -16,6 +16,20 @@
   <meta name="application-name" content="all_OS" />
   <meta name="description" content="Plataforma de simulação clínica da Associação Allos." />
 
+  <!-- Preview de link (WhatsApp, Telegram, Slack, Facebook, LinkedIn). Estes
+       são os valores GENÉRICOS; a rota /comunidade/discussao/:id é servida pelo
+       servidor com o título da discussão no lugar (ver server/index.js,
+       "Preview de link da discussão"). O robô de preview não executa
+       JavaScript, então nada disso pode depender do React. -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="all_OS · Associação Allos" />
+  <meta property="og:title" content="all_OS · Plataforma de Simulação Clínica" />
+  <meta property="og:description" content="Plataforma de simulação clínica da Associação Allos." />
+  <meta property="og:locale" content="pt_BR" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="all_OS · Plataforma de Simulação Clínica" />
+  <meta name="twitter:description" content="Plataforma de simulação clínica da Associação Allos." />
+
   <!-- iOS: instala via Compartilhar → Adicionar à tela de início, abre em fullscreen -->
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />

@@ -10335,6 +10335,42 @@ app.delete('/api/comunidade/:id', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Editar discussão — admin apenas, e vale para a de qualquer pessoa (é o uso:
+// corrigir um título confuso, arrumar um texto). A ENQUETE não é tocada: mexer
+// nas opções depois de gente ter votado mudaria o significado de votos já
+// dados, e a pessoa que votou não teria como saber.
+//
+// `editedAt` é gravado e aparece na tela como "(editado)". Isso não é opcional:
+// o admin altera texto que outra pessoa assinou, e mudança sem rastro na
+// assinatura de alguém é o tipo de coisa que corrói a confiança no espaço.
+app.put('/api/comunidade/:id', requireAuth, requireRole('admin'), writeLimiter, async (req, res) => {
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+
+    const { erro, valor } = comunidade.validarEdicao(req.body, d);
+    if (erro) return { status: 400, error: erro };
+
+    // Sem mudança nenhuma, não suja a discussão com uma marca de edição.
+    if (valor.title === d.title && valor.body === (d.body || '')) {
+      return { discussao: d, semMudanca: true };
+    }
+    d.title = valor.title;
+    d.body = valor.body;
+    d.editedAt = new Date().toISOString();
+    writeComunidade(store);
+    return { discussao: d };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+
+  const users = readJSON('users.json');
+  const config = readComunidadeConfig();
+  res.json(comunidade.discussaoCompleta(resultado.discussao, {
+    users, config, viewerId: req.user.id, podeVotar: true, resolverFoto: fotoExibida,
+  }));
+});
+
 // Fixar/desfixar discussão — admin apenas. A discussão fixada sobe ao topo da
 // aba "Recentes" e NÃO mexe em "Em alta" (ver comunidade.ordenarFeed): aquela
 // aba é um placar da comunidade, e plantar um post no topo dela seria mentir
@@ -10894,8 +10930,88 @@ benchmarkRouter.post('/', benchmarkLimiter,
 
 // Serve static files in production
 const clientDist = path.join(__dirname, '..', 'client', 'dist');
+
+// --- Preview de link da discussão (Open Graph) ---
+//
+// O robô que monta o preview (WhatsApp, Telegram, Slack, Facebook) NÃO executa
+// JavaScript: ele lê o HTML exatamente como o servidor entregou. Como o app é
+// uma SPA que serve o MESMO index.html em toda rota, todo link de discussão
+// mostrava o título e a descrição genéricos da home. Não há correção possível
+// no cliente — quando o robô lê a página, o React nem rodou.
+//
+// Então esta rota serve o mesmo index.html com as meta tags trocadas. Só o
+// TÍTULO da discussão entra; a descrição é fixa, e isso é decisão de
+// privacidade, não preguiça: um trecho do corpo vazaria conteúdo clínico em
+// todo grupo de WhatsApp onde o link fosse colado. Quem abre o link já lê tudo
+// — quem só vê o preview, não.
+const PREVIEW_DESCRICAO = 'Participe da discussão. Visualize como visitante ou comente como aluno.';
+const PREVIEW_TITULO_MAX = 100; // preview truncado feio é pior que curto
+
+// O index.html é lido do disco e cacheado pelo mtime (mesma ideia da pool de
+// fotos): um deploy novo troca o arquivo e a próxima requisição relê.
+let indexHtmlCache = { mtime: -1, html: null };
+function lerIndexHtml() {
+  const arquivo = path.join(clientDist, 'index.html');
+  let mtime = 0;
+  try { mtime = fs.statSync(arquivo).mtimeMs; } catch { return null; }
+  if (mtime !== indexHtmlCache.mtime) {
+    try {
+      indexHtmlCache = { mtime, html: fs.readFileSync(arquivo, 'utf-8') };
+    } catch {
+      return null;
+    }
+  }
+  return indexHtmlCache.html;
+}
+
+// O título é escrito por usuário e vai para DENTRO de atributos HTML da minha
+// própria página: sem escapar, um título com aspas ou `<` injeta markup.
+function escaparHtml(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Troca título e descrição no HTML já pronto. Mexe nas tags que os robôs leem
+// (og:*, twitter:*) e também no <title>/description, que é o que o Google e a
+// aba do navegador usam.
+function htmlComPreview(html, { titulo, descricao, url }) {
+  const t = escaparHtml(titulo);
+  const d = escaparHtml(descricao);
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/i, `<title>${t}</title>`)
+    .replace(/(<meta name="description" content=")[^"]*(")/i, `$1${d}$2`)
+    .replace(/(<meta property="og:title" content=")[^"]*(")/i, `$1${t}$2`)
+    .replace(/(<meta property="og:description" content=")[^"]*(")/i, `$1${d}$2`)
+    .replace(/(<meta name="twitter:title" content=")[^"]*(")/i, `$1${t}$2`)
+    .replace(/(<meta name="twitter:description" content=")[^"]*(")/i, `$1${d}$2`)
+    .replace(/(<meta property="og:type" content=")[^"]*(")/i, '$1article$2')
+    .replace('</head>', `  <meta property="og:url" content="${escaparHtml(url)}" />\n</head>`);
+}
+
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
+
+  // ANTES do catch-all, senão o index.html estático responde primeiro.
+  app.get('/comunidade/discussao/:id', comunidadePublicaLimiter, (req, res, next) => {
+    const html = lerIndexHtml();
+    if (!html) return next();
+    let d = null;
+    try {
+      d = acharDiscussao(readComunidade(), req.params.id);
+    } catch {
+      d = null;
+    }
+    // Discussão inexistente ou já excluída cai no HTML genérico — o preview
+    // fica sem graça, mas o link continua abrindo o app (que mostra o 404 dele).
+    if (!d || !d.title) return res.type('html').send(html);
+    res.type('html').send(htmlComPreview(html, {
+      titulo: clampStr(d.title, PREVIEW_TITULO_MAX),
+      descricao: PREVIEW_DESCRICAO,
+      url: `${req.protocol}://${req.get('host')}/comunidade/discussao/${encodeURIComponent(d.id)}`,
+    }));
+  });
+
   app.get('*', (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 }
 
