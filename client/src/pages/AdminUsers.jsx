@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import PhotoCropper from '../components/PhotoCropper';
 
 const ROLE_LABELS = {
   admin: 'Administrador',
@@ -357,6 +358,8 @@ export default function AdminUsers({ user: currentUser }) {
         </form>
       </div>
 
+      <FotosPadrao />
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         {[
           { v: 'all',        label: `Todos (${users.length})` },
@@ -586,6 +589,126 @@ export default function AdminUsers({ user: currentUser }) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Pool de fotos padrão: as imagens que o app usa como avatar de quem não tem
+// foto própria — visitante (que nunca vai ter uma) e conta que ainda está com a
+// foto de fábrica. As imagens ficam no volume do servidor, não no repositório.
+//
+// A escolha é estável por pessoa: a mesma conta cai sempre na mesma imagem, e a
+// pool "rotaciona" no sentido de espalhar as pessoas pelas fotos. Trocar de
+// rosto a cada tela confundiria mais do que ajudaria.
+function FotosPadrao() {
+  const [fotos, setFotos] = useState([]);
+  const [max, setMax] = useState(10);
+  const [carregando, setCarregando] = useState(true);
+  const [ocupado, setOcupado] = useState(false);
+  const [recortando, setRecortando] = useState(false);
+  const [erro, setErro] = useState('');
+
+  async function carregar() {
+    try {
+      const r = await api.adminGetAvatarPool();
+      setFotos(r.photos || []);
+      setMax(r.max || 10);
+    } catch (e) {
+      setErro(e.message || 'Não foi possível carregar as fotos padrão.');
+    } finally {
+      setCarregando(false);
+    }
+  }
+
+  useEffect(() => { carregar(); }, []);
+
+  async function adicionar(dataUrl) {
+    setRecortando(false);
+    setErro('');
+    setOcupado(true);
+    try {
+      const r = await api.adminAddAvatarPool(dataUrl);
+      setFotos(r.photos || []);
+    } catch (e) {
+      setErro(e.message || 'Não foi possível enviar a imagem.');
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  async function remover(id) {
+    setErro('');
+    setOcupado(true);
+    try {
+      const r = await api.adminRemoveAvatarPool(id);
+      setFotos(r.photos || []);
+    } catch (e) {
+      setErro(e.message || 'Não foi possível remover a imagem.');
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+        Fotos padrão
+        <span style={{ fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 999, background: 'var(--sand)', color: 'var(--ink-soft)' }}>
+          {fotos.length}/{max}
+        </span>
+      </div>
+      <p style={{ margin: '0 0 14px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+        Até {max} imagens usadas como avatar de quem ainda não colocou foto — visitantes e contas
+        que seguem com a foto de fábrica. Cada pessoa recebe sempre a mesma imagem da pool, então
+        as fotos rotacionam entre as pessoas em vez de trocar a cada tela. Quem sobe a própria
+        foto no perfil sai da rotação. As imagens ficam no servidor, não no repositório.
+      </p>
+
+      {carregando ? (
+        <div style={{ color: 'var(--ink-soft)', fontSize: 13.5 }}><span className="spinner" /> Carregando…</div>
+      ) : (
+        <div className="avatar-pool">
+          {fotos.map((f) => (
+            <div key={f.id} className="avatar-pool-item">
+              <img src={f.url} alt="" />
+              <button
+                type="button"
+                className="avatar-pool-remover"
+                aria-label="Remover foto"
+                title="Remover foto"
+                disabled={ocupado}
+                onClick={() => remover(f.id)}
+              >×</button>
+            </div>
+          ))}
+          {fotos.length < max && (
+            <button
+              type="button"
+              className="avatar-pool-add"
+              onClick={() => setRecortando(true)}
+              disabled={ocupado}
+              title="Adicionar foto"
+            >+</button>
+          )}
+        </div>
+      )}
+
+      {fotos.length === 0 && !carregando && (
+        <p style={{ margin: '10px 0 0', fontSize: 13, color: 'var(--muted)' }}>
+          Sem fotos na pool, quem não tem foto continua aparecendo com a silhueta padrão.
+        </p>
+      )}
+
+      {erro && <div className="alert error" style={{ marginTop: 12 }}>{erro}</div>}
+
+      {recortando && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setRecortando(false); }}>
+          <div className="modal" style={{ maxWidth: 480 }}>
+            <h3>Nova foto padrão</h3>
+            <PhotoCropper onCrop={adicionar} onCancel={() => setRecortando(false)} />
           </div>
         </div>
       )}

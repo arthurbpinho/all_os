@@ -674,12 +674,17 @@ export const api = {
   deleteComment: (id, cid) =>
     request(`/comunidade/${encodeURIComponent(id)}/comentarios/${encodeURIComponent(cid)}`, { method: 'DELETE' }),
 
+  // --- Pool de fotos padrão (Administração → Contas) ---
+  // Até 10 imagens usadas como avatar de quem não tem foto própria (visitante e
+  // conta ainda com a foto de fábrica).
+  adminGetAvatarPool: () => request('/admin/avatar-pool'),
+  adminAddAvatarPool: (image) => request('/admin/avatar-pool', { method: 'POST', body: { image } }),
+  adminRemoveAvatarPool: (id) => request(`/admin/avatar-pool/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   // --- Administração da Comunidade (admin) ---
   adminGetComunidade: () => request('/admin/comunidade'),
   adminGetComunidadeUser: (userId) => request(`/admin/comunidade/usuario/${encodeURIComponent(userId)}`),
   adminSetInstitutionAvatar: (body) => request('/admin/comunidade/avatar-instituicao', { method: 'PUT', body }),
-  adminAddVisitorAvatar: (image) => request('/admin/comunidade/avatar-visitante', { method: 'POST', body: { image } }),
-  adminRemoveVisitorAvatar: (id) => request(`/admin/comunidade/avatar-visitante/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   adminBanComunidade: (data) => request('/admin/comunidade/ban', { method: 'POST', body: data }),
   adminUnbanComunidade: (userId) => request(`/admin/comunidade/ban/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
   adminPurgeComunidade: (data) => request('/admin/comunidade/purgar', { method: 'POST', body: data }),
@@ -693,4 +698,6 @@ export const api = {
   getVapidPublicKey: () => request('/push/vapid-public-key'),
   subscribePush: (subscription) => request('/push/subscribe', { method: 'POST', body: { subscription } }),
   unsubscribePush: (endpoint) => request('/push/unsubscribe', { method: 'POST', body: { endpoint } }),
+  // Push de teste pra si mesmo: diz se saiu, pra quantos aparelhos, e por que não.
+  testPush: () => request('/push/test', { method: 'POST', body: {} }),
 };

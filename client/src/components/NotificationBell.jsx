@@ -2,7 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { playNotificationChime } from '../sound';
-import { isPushSupported, getPermission, alreadyAsked, subscribeToPush } from '../push';
+import {
+  isPushSupported, getPermission, alreadyAsked, subscribeToPush,
+  ensurePushSubscription, getExistingSubscription,
+} from '../push';
 
 // Sino de notificações no canto superior direito. Faz polling das notificações
 // (duelo, conquista desbloqueada, sidequest atribuída/concluída) e abre um painel
@@ -112,26 +115,53 @@ export default function NotificationBell({ user }) {
   // IDs vistos no último poll. null = ainda não carregou (1ª vez não toca som,
   // senão tocaria pra cada notificação não-lida pré-existente).
   const seenIds = useRef(null);
-  // Oferece "ativar notificações push" só quando faz sentido: navegador
-  // suporta, ainda não perguntou nesse dispositivo, e o usuário nunca
-  // respondeu 'default' (negado fica quieto — o navegador não reabriria o
-  // prompt nativo mesmo se insistíssemos).
+  // Oferece "ativar notificações push" quando o navegador suporta e ESTE
+  // dispositivo ainda não tem assinatura ativa. A condição olha a assinatura,
+  // não só a permissão: antes ela era `permission === 'default'`, o que fazia o
+  // botão desaparecer no instante em que a permissão era concedida — inclusive
+  // quando a assinatura não tinha sido criada, que é justamente o estado
+  // quebrado em que o push nunca chega.
+  //   'denied'  → fica quieto (o navegador não reabre o prompt nativo).
+  //   'granted' → só aparece se faltar assinatura (e aí o reconcile abaixo já
+  //               costuma resolver antes, sem o botão).
+  //   'default' → aparece uma vez, governado por alreadyAsked().
   const [pushOffer, setPushOffer] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
+  // Assinado neste aparelho? Governa o botão de push de teste (só admin).
+  const [pushAssinado, setPushAssinado] = useState(false);
+  const [pushTeste, setPushTeste] = useState('');
 
   useEffect(() => {
-    setPushOffer(isPushSupported() && getPermission() === 'default' && !alreadyAsked());
+    let cancelado = false;
+    (async () => {
+      if (!isPushSupported()) return;
+      // Reconcilia primeiro: quem já concedeu a permissão fica assinado aqui,
+      // sem prompt e sem UI. É o que conserta o dispositivo cuja assinatura
+      // nunca chegou ao servidor (ou chegou e foi perdida).
+      if (getPermission() === 'granted') await ensurePushSubscription();
+      if (cancelado) return;
+
+      const permissao = getPermission();
+      if (permissao === 'denied') return;
+      const assinado = !!(await getExistingSubscription());
+      if (cancelado) return;
+      setPushAssinado(assinado);
+      setPushOffer(!assinado && (permissao === 'granted' || !alreadyAsked()));
+    })();
+    return () => { cancelado = true; };
   }, []);
 
   async function handleEnablePush() {
     setPushBusy(true);
     try {
-      await subscribeToPush();
+      const sub = await subscribeToPush();
+      // Some com a oferta só se assinou de verdade. Falhou? O botão fica, que é
+      // a única pista visível de que ainda não está ativo.
+      if (sub) { setPushOffer(false); setPushAssinado(true); }
     } catch {
       // best-effort — permissão negada ou falha de rede não deve travar o sino
     } finally {
       setPushBusy(false);
-      setPushOffer(false);
     }
   }
 
@@ -190,6 +220,21 @@ export default function NotificationBell({ user }) {
     }
   }
 
+  // Push de teste: o servidor envia de verdade e responde o que aconteceu. É a
+  // única forma de saber que o push está de pé sem esperar um evento real —
+  // que é como este recurso ficou meses quebrado sem ninguém notar.
+  async function testarPush() {
+    setPushTeste('enviando…');
+    try {
+      const r = await api.testPush();
+      setPushTeste(r.failed
+        ? `falhou em ${r.failed} de ${r.devices} aparelho(s) — código ${r.failureStatuses.join(', ')}`
+        : `enviado para ${r.sent} aparelho(s)`);
+    } catch (e) {
+      setPushTeste(e.message || 'não foi possível enviar');
+    }
+  }
+
   async function markAll() {
     try { await api.markAllNotificationsRead(); } catch {}
     load();
@@ -224,6 +269,12 @@ export default function NotificationBell({ user }) {
               <button className="notif-markall" onClick={handleEnablePush} disabled={pushBusy}>
                 {pushBusy ? 'Ativando…' : 'Ativar'}
               </button>
+            </div>
+          )}
+          {user?.role === 'admin' && pushAssinado && (
+            <div className="notif-push-offer">
+              <span>{pushTeste ? `Push: ${pushTeste}` : 'Push ativo neste aparelho.'}</span>
+              <button className="notif-markall" onClick={testarPush}>testar</button>
             </div>
           )}
           <div className="notif-list">

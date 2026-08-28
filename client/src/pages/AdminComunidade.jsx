@@ -284,18 +284,16 @@ function PainelMembro({ autor, onFechar, onMudou }) {
 }
 
 function Identidade({ dados, onMudou }) {
-  const [recortando, setRecortando] = useState(null); // 'instituicao' | 'visitante'
+  const [recortando, setRecortando] = useState(false);
   const [erro, setErro] = useState('');
   const [ocupado, setOcupado] = useState(false);
 
   async function salvarRecorte(dataUrl) {
-    const destino = recortando;
-    setRecortando(null);
+    setRecortando(false);
     setErro('');
     setOcupado(true);
     try {
-      if (destino === 'instituicao') await api.adminSetInstitutionAvatar({ image: dataUrl });
-      else await api.adminAddVisitorAvatar(dataUrl);
+      await api.adminSetInstitutionAvatar({ image: dataUrl });
       await onMudou();
     } catch (e) {
       setErro(e.message || 'Não foi possível salvar a imagem.');
@@ -319,7 +317,7 @@ function Identidade({ dados, onMudou }) {
               : <span className="comunidade-logo-allos">a<span>_</span></span>}
           </span>
           <div className="comunidade-admin-avatar-acoes">
-            <button className="btn btn-primary btn-sm" onClick={() => setRecortando('instituicao')} disabled={ocupado}>
+            <button className="btn btn-primary btn-sm" onClick={() => setRecortando(true)} disabled={ocupado}>
               {dados.institutionAvatar ? 'Trocar imagem' : 'Enviar imagem'}
             </button>
             {dados.institutionAvatar && (
@@ -333,44 +331,13 @@ function Identidade({ dados, onMudou }) {
         </div>
       </div>
 
-      <div className="card">
-        <h3>Avatares de visitante</h3>
-        <p className="comunidade-muted">
-          Pool de até {dados.maxVisitorAvatars} imagens. Quem entra sem conta recebe uma delas.
-          Hoje o visitante apenas lê a Comunidade — a pool fica pronta para quando a
-          participação sem conta for liberada.
-        </p>
-        <div className="comunidade-admin-pool">
-          {dados.visitorAvatars.map((a) => (
-            <div key={a.id} className="comunidade-admin-pool-item">
-              <span className="comunidade-avatar kind-external"><img src={a.url} alt="" /></span>
-              <button
-                type="button"
-                className="comunidade-admin-pool-remover"
-                aria-label="Remover imagem"
-                disabled={ocupado}
-                onClick={() => api.adminRemoveVisitorAvatar(a.id).then(onMudou).catch((e) => setErro(e.message))}
-              >×</button>
-            </div>
-          ))}
-          {dados.visitorAvatars.length < dados.maxVisitorAvatars && (
-            <button
-              type="button"
-              className="comunidade-admin-pool-add"
-              onClick={() => setRecortando('visitante')}
-              disabled={ocupado}
-            >+</button>
-          )}
-        </div>
-      </div>
-
       {erro && <div className="alert error">{erro}</div>}
 
       {recortando && (
-        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setRecortando(null); }}>
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setRecortando(false); }}>
           <div className="modal" style={{ maxWidth: 480 }}>
-            <h3>{recortando === 'instituicao' ? 'Imagem da Associação Allos' : 'Nova imagem de visitante'}</h3>
-            <PhotoCropper onCrop={salvarRecorte} onCancel={() => setRecortando(null)} />
+            <h3>Imagem da Associação Allos</h3>
+            <PhotoCropper onCrop={salvarRecorte} onCancel={() => setRecortando(false)} />
           </div>
         </div>
       )}

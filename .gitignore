@@ -71,6 +71,13 @@ SEGURANCA.md
 # nada precisa estar versionado aqui.
 server/data/comunidade.json
 server/data/comunidade-config.json
+# Avatar da Associação Allos, subido pelo admin em runtime.
+server/data/comunidade-avatars/
+# Pool de fotos padrão (Administração → Contas): as imagens que servem de avatar
+# pra quem não tem foto própria. Sobem pelo painel e ficam no volume DATA_DIR —
+# nem os bytes nem a lista entram no repo.
+server/data/avatar-pool/
+server/data/avatar-pool.json
 # Estado de runtime que estava versionado por engano (removido do índice em
 # 2026-08-28). O servidor recria os três no boot — o banco inicial de exercícios
 # virou SIDEQUEST_BANK_SEED em server/index.js.

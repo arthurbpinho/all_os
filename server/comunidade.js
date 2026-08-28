@@ -20,7 +20,6 @@ const POLL_MIN_OPTIONS = 2;
 const POLL_MAX_OPTIONS = 10;
 const POLL_OPTION_MAX = 120;
 const MAX_COMMENTS_POR_DISCUSSAO = 2000;
-const MAX_AVATARES_VISITANTE = 10;
 
 // Papéis que NÃO participam (só leem). Visitante é a sessão anônima que o app
 // cria sozinho; ele enxerga a Comunidade inteira mas não escreve nada.
@@ -55,6 +54,19 @@ const AUTHOR_SUBTITLE = {
   recruiter: 'Recruiter da Allos',
   member: '',
   external: '',
+};
+
+// Rótulo do papel, para a etiqueta que aparece ao passar o mouse no avatar ou
+// no nome. É separado do `kind` porque o kind é VISUAL e agrupa: admin e aluno
+// da Allos são os dois `member` (mesmo anel fosco), e a etiqueta precisa
+// distinguir os dois. Resolvido aqui, no servidor, pelo mesmo motivo do kind —
+// a regra de papel→rótulo não deve existir em dois lugares.
+const ROLE_LABEL = {
+  admin: 'Administrador',
+  supervisor: 'Supervisor da Allos',
+  evaluator: 'Recruiter da Allos',
+  therapist: 'Aluno da Allos',
+  external: 'Aluno Externo',
 };
 
 const INSTITUTION_NAME = 'Associação Allos';
@@ -102,6 +114,10 @@ function validarDiscussao(body) {
     }
     poll = {
       options: options.map((text, i) => ({ id: `o${i + 1}`, text })),
+      // Escolha do autor no momento da criação: única (padrão) ou múltipla.
+      // Fica no post e não muda depois — trocar o tipo com votos já dentro
+      // mudaria o significado dos números que as pessoas já viram.
+      multi: !!(b.poll && b.poll.multi),
       votes: {},
     };
   }
@@ -181,7 +197,11 @@ function mensagemBan(ban) {
 // O snapshot do post guarda só o `role`, que não identifica ninguém e mantém o
 // selo coerente quando a conta some. Publicação institucional é a exceção que
 // sobrevive à pessoa: ela é da Associação, não de quem digitou.
-function autorPublico(item, users, config, viewerId = null) {
+// `resolverFoto(userId, profilePhoto)` é injetada pelo index.js: devolve a foto
+// a exibir, trocando pela pool de fotos padrão quem não tem foto própria. Vem
+// de fora porque a regra de "sem foto própria" (que inclui a foto de fábrica) e
+// a pool em si moram no index.js — este módulo não lê disco.
+function autorPublico(item, users, config, viewerId = null, resolverFoto = null) {
   const snap = item.author || {};
   const u = users.find((x) => x.id === item.authorId) || null;
   const role = u ? u.role : snap.role;
@@ -192,18 +212,24 @@ function autorPublico(item, users, config, viewerId = null) {
       kind,
       name: INSTITUTION_NAME,
       subtitle: '',
+      // Publicação institucional é da Associação: a etiqueta diz isso, e não o
+      // papel de quem digitou (que aqui é deliberadamente anônimo).
+      roleLabel: INSTITUTION_NAME,
       photo: (config && config.institutionAvatar) || null,
       userId: null, // publicação institucional não expõe qual admin escreveu
     };
   }
   if (!u) {
-    return { kind, name: 'Conta removida', subtitle: '', photo: null, userId: null };
+    return { kind, name: 'Conta removida', subtitle: '', roleLabel: '', photo: null, userId: null };
   }
   return {
     kind,
     name: u.name || 'Conta removida',
     subtitle: AUTHOR_SUBTITLE[kind] || '',
-    photo: u.profilePhoto || null,
+    roleLabel: ROLE_LABEL[u.role] || '',
+    // Sem foto própria entra a da pool — é o que dá rosto ao aluno que nunca
+    // subiu uma. Só na EXIBIÇÃO: nada disso é gravado no post.
+    photo: (resolverFoto ? resolverFoto(item.authorId, u.profilePhoto) : u.profilePhoto) || null,
     // O id serve só para o leitor saber se o texto é dele (botão de excluir).
     // Leitor anônimo não age em nada, então não recebe — é a ponte nome→id de
     // graça que o link público não precisa entregar a quem passa na rua.
@@ -211,18 +237,59 @@ function autorPublico(item, users, config, viewerId = null) {
   };
 }
 
+// O voto de UMA pessoa, normalizado em lista de ids. Enquete de opção única
+// grava uma string ("o2") e a de múltipla escolha grava um array (["o1","o3"]);
+// as duas formas convivem no mesmo arquivo porque as enquetes criadas antes da
+// múltipla escolha existir continuam com string gravada — ler os dois formatos
+// aqui é o que evita uma migração do comunidade.json.
+function idsVotados(v) {
+  if (Array.isArray(v)) return v.filter((x) => typeof x === 'string');
+  if (typeof v === 'string' && v) return [v];
+  return [];
+}
+
+// Aplica o voto de um usuário e devolve true se a opção existe.
+//
+// Opção única: substitui (revotar troca; mandar o mesmo id de novo mantém o
+// voto, o que evita zerar por duplo clique).
+// Múltipla escolha: alterna a opção clicada. Desmarcar a última apaga a
+// participação inteira — a pessoa volta a "não votou", e volta a não ver o
+// resultado, que é o mesmo contrato de quem nunca clicou.
+function aplicarVotoEnquete(poll, userId, optionId) {
+  if (!poll || !poll.options.some((o) => o.id === optionId)) return false;
+  if (!poll.votes || typeof poll.votes !== 'object') poll.votes = {};
+  if (!poll.multi) {
+    poll.votes[userId] = optionId;
+    return true;
+  }
+  const atuais = idsVotados(poll.votes[userId]);
+  const proximos = atuais.includes(optionId)
+    ? atuais.filter((id) => id !== optionId)
+    : [...atuais, optionId];
+  if (proximos.length === 0) delete poll.votes[userId];
+  // Reordena pela ordem das opções pra lista gravada não depender da ordem
+  // de cliques (facilita comparar/depurar o JSON).
+  else poll.votes[userId] = poll.options.map((o) => o.id).filter((id) => proximos.includes(id));
+  return true;
+}
+
 // Enquete na visão de quem está lendo. Os percentuais só saem depois do voto
 // (ou para quem não pode votar — read-only não tem como "votar depois", então
 // esconder o resultado dele seria só esconder).
+//
+// `total` é o número de PESSOAS que votaram, nas duas modalidades, e o
+// percentual de cada opção é sobre esse total. Na múltipla escolha isso faz a
+// soma passar de 100%, que é o esperado: cada percentual responde "quantos dos
+// que votaram marcaram esta opção?".
 function enquetePublica(poll, viewerId, podeVotar) {
   if (!poll) return null;
   const votes = poll.votes || {};
   const total = Object.keys(votes).length;
-  const escolha = viewerId ? (votes[viewerId] || null) : null;
-  const revelar = !!escolha || !podeVotar;
+  const minhas = viewerId ? idsVotados(votes[viewerId]) : [];
+  const revelar = minhas.length > 0 || !podeVotar;
   return {
     options: poll.options.map((o) => {
-      const count = Object.values(votes).filter((v) => v === o.id).length;
+      const count = Object.values(votes).filter((v) => idsVotados(v).includes(o.id)).length;
       return {
         id: o.id,
         text: o.text,
@@ -230,7 +297,11 @@ function enquetePublica(poll, viewerId, podeVotar) {
       };
     }),
     total,
-    myVote: escolha,
+    multi: !!poll.multi,
+    myVotes: minhas,
+    // Mantido para a opção única (é o que a tela usa há mais tempo); na
+    // múltipla escolha não há "o" voto, então vem null e quem lê usa myVotes.
+    myVote: poll.multi ? null : (minhas[0] || null),
     revealed: revelar,
   };
 }
@@ -239,14 +310,14 @@ function enquetePublica(poll, viewerId, podeVotar) {
 // mais antigo primeiro, pra conversa não embaralhar a cada voto), e as
 // respostas de cada raiz sempre em ordem cronológica — resposta é diálogo,
 // reordenar por voto tornaria a leitura incoerente.
-function comentariosPublicos(comments, { users, config, viewerId }) {
+function comentariosPublicos(comments, { users, config, viewerId, resolverFoto }) {
   const lista = Array.isArray(comments) ? comments : [];
   const proj = (c) => ({
     id: c.id,
     body: c.deleted ? '' : c.body,
     deleted: !!c.deleted,
     createdAt: c.createdAt,
-    author: c.deleted ? null : autorPublico(c, users, config, viewerId),
+    author: c.deleted ? null : autorPublico(c, users, config, viewerId, resolverFoto),
     score: score(c.votes),
     myVote: meuVoto(c.votes, viewerId),
   });
@@ -275,7 +346,7 @@ function comentariosPublicos(comments, { users, config, viewerId }) {
 }
 
 // Resumo para a listagem do feed (sem comentários, sem opções de enquete).
-function discussaoResumo(d, { users, config, viewerId }) {
+function discussaoResumo(d, { users, config, viewerId, resolverFoto }) {
   const comentarios = Array.isArray(d.comments) ? d.comments : [];
   return {
     id: d.id,
@@ -284,24 +355,24 @@ function discussaoResumo(d, { users, config, viewerId }) {
     truncated: (d.body || '').length > 280,
     hasPoll: !!d.poll,
     createdAt: d.createdAt,
-    author: autorPublico(d, users, config, viewerId),
+    author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
     myVote: meuVoto(d.votes, viewerId),
     commentCount: comentarios.filter((c) => !c.deleted).length,
   };
 }
 
-function discussaoCompleta(d, { users, config, viewerId, podeVotar }) {
+function discussaoCompleta(d, { users, config, viewerId, podeVotar, resolverFoto }) {
   return {
     id: d.id,
     title: d.title,
     body: d.body,
     createdAt: d.createdAt,
-    author: autorPublico(d, users, config, viewerId),
+    author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
     myVote: meuVoto(d.votes, viewerId),
     poll: enquetePublica(d.poll, viewerId, podeVotar),
-    comments: comentariosPublicos(d.comments, { users, config, viewerId }),
+    comments: comentariosPublicos(d.comments, { users, config, viewerId, resolverFoto }),
   };
 }
 
@@ -330,15 +401,16 @@ module.exports = {
   POLL_MAX_OPTIONS,
   POLL_OPTION_MAX,
   MAX_COMMENTS_POR_DISCUSSAO,
-  MAX_AVATARES_VISITANTE,
   INSTITUTION_NAME,
   AUTHOR_SUBTITLE,
+  ROLE_LABEL,
   podeParticipar,
   authorKind,
   validarDiscussao,
   validarComentario,
   normalizarVoto,
   aplicarVoto,
+  aplicarVotoEnquete,
   score,
   meuVoto,
   banAtivo,

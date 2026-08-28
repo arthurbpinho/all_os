@@ -50,6 +50,33 @@ describe('Web Push — assinatura', () => {
   });
 });
 
+// O push de teste existe porque o envio real falha em SILÊNCIO: sem VAPID, sem
+// assinatura ou com chave trocada, o servidor simplesmente não manda nada. Estes
+// testes cobrem as guardas — o caminho de sucesso não é coberto de propósito,
+// porque ele fala com o serviço de push do navegador (rede), e a suite não sai
+// pra rede.
+describe('Web Push — push de teste', () => {
+  beforeEach(() => resetData());
+
+  it('exige auth', async () => {
+    const r = await request(app).post('/api/push/test').send({});
+    expect(r.status).toBe(401);
+  });
+
+  it('visitante não pode', async () => {
+    const vt = await loginVisitor();
+    const r = await request(app).post('/api/push/test').set(authHeader(vt)).send({});
+    expect(r.status).toBe(403);
+  });
+
+  it('sem nenhum aparelho assinado, diz isso em vez de "enviado"', async () => {
+    const t = await loginAs('aluno');
+    const r = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/nenhum dispositivo assinado/i);
+  });
+});
+
 describe('Notificação de avaliação — fila → pronta', () => {
   beforeEach(() => resetData());
 

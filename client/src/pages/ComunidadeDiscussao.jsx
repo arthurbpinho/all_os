@@ -172,8 +172,10 @@ function contarTodos(comments) {
   return comments.reduce((n, c) => n + (c.deleted ? 0 : 1) + c.replies.length, 0);
 }
 
-// Enquete: escolha única, resultado revelado depois do voto (o servidor decide
-// isso e manda `revealed`), e o voto pode ser trocado clicando em outra opção.
+// Enquete: resultado revelado depois do voto (o servidor decide isso e manda
+// `revealed`). Quem criou escolheu entre opção única — clicar em outra troca o
+// voto — e múltipla escolha, onde cada clique marca/desmarca uma opção. Nos dois
+// casos o cliente manda só o id clicado; o servidor sabe o que fazer com ele.
 function Enquete({ id, poll, podeVotar, onVotou }) {
   const [enviando, setEnviando] = useState(null);
   const [estado, setEstado] = useState(poll);
@@ -201,16 +203,21 @@ function Enquete({ id, poll, podeVotar, onVotou }) {
   return (
     <div className="comunidade-enquete">
       {estado.options.map((o) => {
-        const escolhida = estado.myVote === o.id;
+        const escolhida = (estado.myVotes || []).includes(o.id);
         return (
           <button
             key={o.id}
             type="button"
-            className={`comunidade-enquete-opcao ${escolhida ? 'escolhida' : ''} ${estado.revealed ? 'revelada' : ''}`}
+            className={`comunidade-enquete-opcao ${escolhida ? 'escolhida' : ''} ${estado.revealed ? 'revelada' : ''} ${estado.multi ? 'multi' : ''}`}
             onClick={() => votar(o.id)}
             disabled={!podeVotar || !!enviando}
             aria-pressed={escolhida}
           >
+            {/* Na múltipla escolha a marca é o que avisa, antes de qualquer
+                clique, que dá pra marcar mais de uma. */}
+            {estado.multi && (
+              <span className="comunidade-enquete-marca" aria-hidden="true">{escolhida ? '✓' : ''}</span>
+            )}
             {/* A barra é o próprio fundo da opção, então o percentual não
                 precisa de um gráfico ao lado ocupando largura no celular. */}
             {estado.revealed && (
@@ -223,6 +230,7 @@ function Enquete({ id, poll, podeVotar, onVotou }) {
       })}
       <div className="comunidade-enquete-rodape">
         {estado.total} {estado.total === 1 ? 'voto' : 'votos'}
+        {estado.multi && ' · múltipla escolha'}
         {!estado.revealed && podeVotar && ' · vote para ver o resultado'}
       </div>
       {erro && <div className="alert error">{erro}</div>}

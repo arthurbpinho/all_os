@@ -1,3 +1,5 @@
+import HoverTag from './HoverTag';
+
 // Assinatura de um autor na Comunidade: avatar, nome e o selo do papel.
 //
 // O `kind` vem PRONTO do servidor (server/comunidade.js → authorKind) — o
@@ -60,18 +62,25 @@ export default function CommunityAuthor({ author, createdAt, compact = false }) 
     );
   }
 
-  const { kind, name, subtitle, photo } = author;
+  const { kind, name, subtitle, photo, roleLabel } = author;
+  // A etiqueta cobre o avatar e o nome separadamente, não os dois juntos: um
+  // gatilho único que embrulhasse a linha inteira abriria a etiqueta também
+  // sobre o selo e o horário, que não têm nada a ver com o papel de ninguém.
   return (
     <div className={`comunidade-autor ${compact ? 'compact' : ''}`}>
-      <span className={`comunidade-avatar kind-${kind}`}>
-        {photo
-          ? <img src={photo} alt="" />
-          : (kind === 'allos'
-            ? <LogoAllos />
-            : <span className="comunidade-avatar-iniciais">{iniciais(name)}</span>)}
-      </span>
+      <HoverTag text={roleLabel} className="comunidade-autor-gatilho">
+        <span className={`comunidade-avatar kind-${kind}`}>
+          {photo
+            ? <img src={photo} alt="" />
+            : (kind === 'allos'
+              ? <LogoAllos />
+              : <span className="comunidade-avatar-iniciais">{iniciais(name)}</span>)}
+        </span>
+      </HoverTag>
       <div className="comunidade-autor-info">
-        <span className="comunidade-autor-nome">{name}</span>
+        <HoverTag text={roleLabel} className="comunidade-autor-gatilho" focavel>
+          <span className="comunidade-autor-nome">{name}</span>
+        </HoverTag>
         {subtitle && <span className={`comunidade-selo selo-${kind}`}>{subtitle}</span>}
         {createdAt && <span className="comunidade-tempo">{tempoRelativo(createdAt)}</span>}
       </div>
