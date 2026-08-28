@@ -479,6 +479,104 @@ describe('fixar discussão', () => {
   });
 });
 
+describe('editar discussão (admin)', () => {
+  async function umPost(extra = {}) {
+    const aluno = await loginAs('aluno');
+    await criarDiscussao(aluno, { title: 'Título original', body: 'Texto original.', ...extra });
+    return aluno;
+  }
+  const editar = (token, id, body) => request(app)
+    .put(`/api/comunidade/${id}`).set(authHeader(token)).send(body);
+
+  test('só admin edita — nem o próprio autor', async () => {
+    const aluno = await umPost();
+    expect((await editar(aluno, '1', { title: 'Novo título', body: 'Novo texto.' })).status).toBe(403);
+    const prof = await loginAs('prof');
+    expect((await editar(prof, '1', { title: 'Novo título', body: 'Novo texto.' })).status).toBe(403);
+    const admin = await loginAs('admin');
+    expect((await editar(admin, '1', { title: 'Novo título', body: 'Novo texto.' })).status).toBe(200);
+  });
+
+  test('salva título e texto e marca como editado', async () => {
+    await umPost();
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'Título corrigido', body: 'Texto corrigido.' });
+    expect(r.body.title).toBe('Título corrigido');
+    expect(r.body.body).toBe('Texto corrigido.');
+    expect(typeof r.body.editedAt).toBe('string');
+
+    // A marca chega ao feed e ao link público — a edição não é silenciosa.
+    const feed = await request(app).get('/api/comunidade').set(authHeader(admin));
+    expect(feed.body.discussions[0].editedAt).toBeTruthy();
+    const anon = await request(app).get('/api/comunidade/1');
+    expect(anon.body.discussion.editedAt).toBeTruthy();
+  });
+
+  test('editar NÃO troca o autor da discussão', async () => {
+    await umPost();
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'Mexido pelo admin', body: 'Texto novo.' });
+    // Continua assinada por quem escreveu: editar é correção, não apropriação.
+    expect(r.body.author.name).toBe('Aluno A');
+    expect(r.body.author.kind).toBe('member');
+  });
+
+  test('salvar sem mudar nada não marca como editado', async () => {
+    await umPost();
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'Título original', body: 'Texto original.' });
+    expect(r.status).toBe(200);
+    expect(r.body.editedAt).toBeNull();
+  });
+
+  test('título curto é recusado', async () => {
+    await umPost();
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'ab', body: 'Texto qualquer.' });
+    expect(r.status).toBe(400);
+  });
+
+  test('sem enquete, texto vazio é recusado; com enquete, é aceito', async () => {
+    await umPost();
+    const admin = await loginAs('admin');
+    expect((await editar(admin, '1', { title: 'Título bom', body: '' })).status).toBe(400);
+
+    // Discussão 2: só enquete, sem corpo — editar pode deixar o corpo vazio.
+    const aluno = await loginAs('aluno');
+    await criarDiscussao(aluno, { title: 'Qual horário?', poll: { options: ['Terça', 'Quinta'] } });
+    const r = await editar(admin, '2', { title: 'Qual horário mesmo?', body: '' });
+    expect(r.status).toBe(200);
+    expect(r.body.title).toBe('Qual horário mesmo?');
+  });
+
+  test('a enquete e os votos sobrevivem intactos à edição', async () => {
+    const aluno = await loginAs('aluno');
+    await criarDiscussao(aluno, { title: 'Qual horário?', poll: { options: ['Terça', 'Quinta'] } });
+    await request(app).post('/api/comunidade/1/poll').set(authHeader(aluno)).send({ optionId: 'o1' });
+
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'Qual horário afinal?', body: 'Contexto novo.' });
+    expect(r.body.poll.options.map((o) => o.text)).toEqual(['Terça', 'Quinta']);
+    expect(r.body.poll.total).toBe(1);
+  });
+
+  test('comentários e votos da discussão sobrevivem à edição', async () => {
+    const aluno = await umPost();
+    await request(app).post('/api/comunidade/1/comentarios').set(authHeader(aluno)).send({ body: 'um comentário' });
+    await request(app).post('/api/comunidade/1/vote').set(authHeader(aluno)).send({ value: 1 });
+
+    const admin = await loginAs('admin');
+    const r = await editar(admin, '1', { title: 'Outro título', body: 'Outro texto.' });
+    expect(r.body.comments).toHaveLength(1);
+    expect(r.body.score).toBe(1);
+  });
+
+  test('editar discussão inexistente é 404', async () => {
+    const admin = await loginAs('admin');
+    expect((await editar(admin, '999', { title: 'Qualquer', body: 'Coisa.' })).status).toBe(404);
+  });
+});
+
 describe('selo do autor', () => {
   test('cada papel recebe o seu kind e subtítulo', async () => {
     const casos = [

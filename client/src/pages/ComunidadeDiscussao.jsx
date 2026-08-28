@@ -24,6 +24,7 @@ export default function ComunidadeDiscussao({ user }) {
   const [carregando, setCarregando] = useState(true);
   const [erro, setErro] = useState('');
   const [copiado, setCopiado] = useState(false);
+  const [editando, setEditando] = useState(false);
 
   const carregar = useCallback(() => {
     return api.getDiscussion(id)
@@ -123,6 +124,11 @@ export default function ComunidadeDiscussao({ user }) {
             <button type="button" className="btn btn-ghost btn-sm" onClick={compartilhar}>
               {copiado ? 'Link copiado!' : 'Compartilhar'}
             </button>
+            {canModerate && !editando && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditando(true)}>
+                Editar
+              </button>
+            )}
             {canModerate && (
               <button
                 type="button"
@@ -141,9 +147,25 @@ export default function ComunidadeDiscussao({ user }) {
           </div>
         </header>
 
-        <h2 className="comunidade-thread-titulo">{d.title}</h2>
-        {d.body && (
-          <div className="comunidade-thread-texto"><RichText text={d.body} /></div>
+        {editando ? (
+          <EditarDiscussao
+            d={d}
+            onSalvo={(atualizada) => { setDados((x) => ({ ...x, discussion: atualizada })); setEditando(false); }}
+            onCancelar={() => setEditando(false)}
+          />
+        ) : (
+          <>
+            <h2 className="comunidade-thread-titulo">
+              {d.title}
+              {/* A marca de edição é obrigatória aqui: quem edita é o admin, e o
+                  texto é assinado por outra pessoa. Alterar sem rastro seria
+                  reescrever a fala de alguém. */}
+              {d.editedAt && <span className="comunidade-editado" title={`Editado em ${new Date(d.editedAt).toLocaleString('pt-BR')}`}>(editado)</span>}
+            </h2>
+            {d.body && (
+              <div className="comunidade-thread-texto"><RichText text={d.body} /></div>
+            )}
+          </>
         )}
 
         {d.poll && <Enquete id={d.id} poll={d.poll} podeVotar={canPost} onVotou={carregar} />}
@@ -388,5 +410,80 @@ function Comentario({ c, discussionId, user, canPost, canModerate, onMudou, anin
         />
       ))}
     </div>
+  );
+}
+
+// Edição da discussão pelo admin. Só título e texto: a enquete fica de fora de
+// propósito (mexer nas opções depois de gente ter votado mudaria o significado
+// dos votos já dados), e o servidor recusa qualquer tentativa de alterá-la.
+const EDIT_TITULO_MAX = 200;
+const EDIT_CORPO_MAX = 10000;
+
+function EditarDiscussao({ d, onSalvo, onCancelar }) {
+  const [title, setTitle] = useState(d.title || '');
+  const [body, setBody] = useState(d.body || '');
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState('');
+
+  const semMudanca = title === (d.title || '') && body === (d.body || '');
+
+  async function salvar(e) {
+    e.preventDefault();
+    setErro('');
+    setSalvando(true);
+    try {
+      onSalvo(await api.editDiscussion(d.id, { title, body }));
+    } catch (err) {
+      setErro(err.message || 'Não foi possível salvar.');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <form className="comunidade-editor-discussao" onSubmit={salvar}>
+      <div className="form-group">
+        <label htmlFor="edit-titulo">Título</label>
+        <input
+          id="edit-titulo"
+          value={title}
+          onChange={(e) => setTitle(e.target.value.slice(0, EDIT_TITULO_MAX))}
+          maxLength={EDIT_TITULO_MAX}
+          autoFocus
+        />
+        <div className="contador">{title.length}/{EDIT_TITULO_MAX}</div>
+      </div>
+
+      <div className="form-group">
+        <label htmlFor="edit-corpo">
+          Texto {d.poll && <span className="opcional">(opcional — esta discussão tem enquete)</span>}
+        </label>
+        <textarea
+          id="edit-corpo"
+          rows={8}
+          value={body}
+          onChange={(e) => setBody(e.target.value.slice(0, EDIT_CORPO_MAX))}
+          placeholder="*itálico* e **negrito** funcionam."
+          maxLength={EDIT_CORPO_MAX}
+        />
+        <div className="contador">{body.length}/{EDIT_CORPO_MAX}</div>
+      </div>
+
+      {d.poll && (
+        <p className="comunidade-editor-aviso">
+          A enquete não é alterada aqui. Trocar as opções depois de haver votos mudaria
+          o significado do que as pessoas já votaram.
+        </p>
+      )}
+
+      {erro && <div className="alert error">{erro}</div>}
+
+      <div className="modal-actions">
+        <button type="button" className="btn btn-ghost" onClick={onCancelar} disabled={salvando}>Cancelar</button>
+        <button type="submit" className="btn btn-primary" disabled={salvando || semMudanca || title.trim().length < 3}>
+          {salvando ? 'Salvando…' : 'Salvar'}
+        </button>
+      </div>
+    </form>
   );
 }

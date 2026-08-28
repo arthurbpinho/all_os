@@ -131,6 +131,22 @@ function validarDiscussao(body) {
   return { valor: { title, body: corpo, poll } };
 }
 
+// Valida a EDIÇÃO de uma discussão (título + texto). Separado de
+// validarDiscussao porque as regras não são as mesmas: aqui a enquete não é
+// tocada — nem criada, nem alterada, nem removida — e por isso o texto pode
+// continuar vazio se a discussão já tem enquete. Editar as opções de uma
+// enquete depois de gente ter votado mudaria o significado de votos já dados.
+function validarEdicao(body, discussao) {
+  const b = body || {};
+  const title = texto(b.title, TITLE_MAX);
+  const corpo = texto(b.body, BODY_MAX);
+  if (title.length < 3) return { erro: 'Dê um título à discussão (mínimo 3 caracteres).' };
+  if (!discussao || !discussao.poll) {
+    if (corpo.length < 3) return { erro: 'Escreva o conteúdo da discussão.' };
+  }
+  return { valor: { title, body: corpo } };
+}
+
 function validarComentario(body) {
   const corpo = texto(body && body.body, COMMENT_MAX);
   if (corpo.length < 1) return { erro: 'Escreva algo antes de enviar.' };
@@ -356,6 +372,7 @@ function discussaoResumo(d, { users, config, viewerId, resolverFoto }) {
     hasPoll: !!d.poll,
     pinned: !!d.pinned,
     createdAt: d.createdAt,
+    editedAt: d.editedAt || null,
     author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
     myVote: meuVoto(d.votes, viewerId),
@@ -370,6 +387,7 @@ function discussaoCompleta(d, { users, config, viewerId, podeVotar, resolverFoto
     body: d.body,
     pinned: !!d.pinned,
     createdAt: d.createdAt,
+    editedAt: d.editedAt || null,
     author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
     myVote: meuVoto(d.votes, viewerId),
@@ -424,6 +442,7 @@ module.exports = {
   podeParticipar,
   authorKind,
   validarDiscussao,
+  validarEdicao,
   validarComentario,
   normalizarVoto,
   aplicarVoto,
