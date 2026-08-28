@@ -71,3 +71,13 @@ SEGURANCA.md
 # nada precisa estar versionado aqui.
 server/data/comunidade.json
 server/data/comunidade-config.json
+# Estado de runtime que estava versionado por engano (removido do índice em
+# 2026-08-28). O servidor recria os três no boot — o banco inicial de exercícios
+# virou SIDEQUEST_BANK_SEED em server/index.js.
+#   sidequests.json         → `completed` guarda a justificativa da conclusão,
+#                             que descreve o atendimento do aluno.
+#   feedback.json           → mensagens escritas pelos usuários.
+#   achievement-unlocks.json→ quais conquistas cada conta já recebeu.
+server/data/sidequests.json
+server/data/feedback.json
+server/data/achievement-unlocks.json
