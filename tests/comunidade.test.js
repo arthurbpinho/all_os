@@ -378,6 +378,107 @@ describe('comentários', () => {
   });
 });
 
+describe('fixar discussão', () => {
+  async function tresPosts() {
+    const aluno = await loginAs('aluno');
+    await criarDiscussao(aluno, { title: 'Primeira', body: 'texto da primeira' });
+    await criarDiscussao(aluno, { title: 'Segunda', body: 'texto da segunda' });
+    await criarDiscussao(aluno, { title: 'Terceira', body: 'texto da terceira' });
+    return aluno;
+  }
+  const fixar = (token, id, pinned = true) => request(app)
+    .post(`/api/comunidade/${id}/pin`).set(authHeader(token)).send({ pinned });
+  const feed = (token, sort) => request(app)
+    .get(`/api/comunidade${sort ? `?sort=${sort}` : ''}`).set(authHeader(token));
+
+  test('só admin fixa', async () => {
+    const aluno = await tresPosts();
+    expect((await fixar(aluno, '1')).status).toBe(403);
+    const prof = await loginAs('prof');
+    expect((await fixar(prof, '1')).status).toBe(403);
+    const admin = await loginAs('admin');
+    expect((await fixar(admin, '1')).status).toBe(200);
+  });
+
+  test('em "Recentes" a fixada sobe ao topo, mesmo sendo a mais antiga', async () => {
+    const aluno = await tresPosts();
+    // Sem fixar: ordem é a cronológica invertida.
+    let r = await feed(aluno);
+    expect(r.body.discussions.map((d) => d.title)).toEqual(['Terceira', 'Segunda', 'Primeira']);
+
+    const admin = await loginAs('admin');
+    await fixar(admin, '1'); // "Primeira", a mais antiga
+    r = await feed(aluno);
+    expect(r.body.discussions.map((d) => d.title)).toEqual(['Primeira', 'Terceira', 'Segunda']);
+    expect(r.body.discussions[0].pinned).toBe(true);
+    expect(r.body.discussions[1].pinned).toBe(false);
+  });
+
+  // O ponto do recurso: "Em alta" é um placar da comunidade, e fixar não
+  // planta nada no topo dele.
+  test('em "Em alta" fixar NÃO muda a ordem', async () => {
+    const aluno = await tresPosts();
+    const outro = await loginAs('aluno2');
+    // Dá voto pra "Terceira" ficar em alta; "Primeira" (que vamos fixar) não
+    // tem voto nenhum.
+    await request(app).post('/api/comunidade/3/vote').set(authHeader(outro)).send({ value: 1 });
+
+    const antes = (await feed(aluno, 'top')).body.discussions.map((d) => d.title);
+    const admin = await loginAs('admin');
+    await fixar(admin, '1');
+    const depois = (await feed(aluno, 'top')).body.discussions.map((d) => d.title);
+    expect(depois).toEqual(antes);
+    expect(depois[0]).toBe('Terceira');
+    // O selo continua vindo (é propriedade do post), só não reordena.
+    expect(depois.indexOf('Primeira')).toBeGreaterThan(0);
+    const primeira = (await feed(aluno, 'top')).body.discussions.find((d) => d.title === 'Primeira');
+    expect(primeira.pinned).toBe(true);
+  });
+
+  test('desfixar devolve a ordem cronológica', async () => {
+    const aluno = await tresPosts();
+    const admin = await loginAs('admin');
+    await fixar(admin, '1');
+    await fixar(admin, '1', false);
+    const r = await feed(aluno);
+    expect(r.body.discussions.map((d) => d.title)).toEqual(['Terceira', 'Segunda', 'Primeira']);
+    expect(r.body.discussions.every((d) => d.pinned === false)).toBe(true);
+  });
+
+  test('entre várias fixadas, a fixada mais recentemente fica em cima', async () => {
+    const aluno = await tresPosts();
+    const admin = await loginAs('admin');
+    await fixar(admin, '1');
+    await new Promise((r) => setTimeout(r, 5)); // pinnedAt tem resolução de ms
+    await fixar(admin, '2');
+    const r = await feed(aluno);
+    expect(r.body.discussions.map((d) => d.title)).toEqual(['Segunda', 'Primeira', 'Terceira']);
+  });
+
+  test('a discussão avulsa (e o link público) diz se está fixada', async () => {
+    await tresPosts();
+    const admin = await loginAs('admin');
+    await fixar(admin, '1');
+    const anon = await request(app).get('/api/comunidade/1');
+    expect(anon.body.discussion.pinned).toBe(true);
+    const outra = await request(app).get('/api/comunidade/2');
+    expect(outra.body.discussion.pinned).toBe(false);
+  });
+
+  test('fixar discussão que não existe é 404', async () => {
+    const admin = await loginAs('admin');
+    expect((await fixar(admin, '999')).status).toBe(404);
+  });
+
+  test('o feed diz ao admin que ele pode moderar (governa o botão)', async () => {
+    await tresPosts();
+    const admin = await loginAs('admin');
+    expect((await feed(admin)).body.canModerate).toBe(true);
+    const aluno = await loginAs('aluno');
+    expect((await feed(aluno)).body.canModerate).toBe(false);
+  });
+});
+
 describe('selo do autor', () => {
   test('cada papel recebe o seu kind e subtítulo', async () => {
     const casos = [

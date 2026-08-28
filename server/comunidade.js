@@ -354,6 +354,7 @@ function discussaoResumo(d, { users, config, viewerId, resolverFoto }) {
     excerpt: clamp(d.body, 280),
     truncated: (d.body || '').length > 280,
     hasPoll: !!d.poll,
+    pinned: !!d.pinned,
     createdAt: d.createdAt,
     author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
@@ -367,6 +368,7 @@ function discussaoCompleta(d, { users, config, viewerId, podeVotar, resolverFoto
     id: d.id,
     title: d.title,
     body: d.body,
+    pinned: !!d.pinned,
     createdAt: d.createdAt,
     author: autorPublico(d, users, config, viewerId, resolverFoto),
     score: score(d.votes),
@@ -379,6 +381,11 @@ function discussaoCompleta(d, { users, config, viewerId, podeVotar, resolverFoto
 // Ordenação do feed. 'top' usa uma janela de 7 dias porque um placar puramente
 // acumulado congela o topo da comunidade nos primeiros posts populares e some
 // com quem chegou hoje; fora da janela, cai pro critério de recência.
+//
+// Discussão FIXADA (só admin fixa) sobe ao topo em 'recent' e é IGNORADA em
+// 'top' — de propósito. "Em alta" é um placar: se o admin pudesse plantar um
+// post no topo dele, a aba deixaria de dizer o que diz. Quem quer ver o que a
+// comunidade está votando continua vendo exatamente isso.
 function ordenarFeed(discussions, sort) {
   const lista = discussions.slice();
   if (sort === 'top') {
@@ -390,7 +397,17 @@ function ordenarFeed(discussions, sort) {
         || (new Date(b.createdAt) - new Date(a.createdAt));
     });
   }
-  return lista.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  // Entre as fixadas, a fixada MAIS RECENTEMENTE fica em cima: é o que dá ao
+  // admin controle da ordem sem precisar de um campo de posição — fixar de novo
+  // é o jeito de promover uma que já estava fixada.
+  return lista.sort((a, b) => {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    if (a.pinned && b.pinned) {
+      const dif = new Date(b.pinnedAt || 0) - new Date(a.pinnedAt || 0);
+      if (dif) return dif;
+    }
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
 }
 
 module.exports = {
