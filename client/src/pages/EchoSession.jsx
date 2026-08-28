@@ -12,6 +12,8 @@ import { makeLogItems, evalSection as evalSectionTxt } from '../logFiles';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
+import SessionQuotaModal from '../components/SessionQuotaModal';
+import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 
 // Bloco de texto (Neuroavaliação) que descreve a seleção de testes do aluno para
 // o avaliador — vai no fim da transcrição enviada à correção. O gabarito (bateria
@@ -102,6 +104,10 @@ export default function EchoSession({ user, sessionType }) {
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [skipping, setSkipping] = useState(false);
   const [showSessionLimit, setShowSessionLimit] = useState(false);
+  // Cota diária do Aluno Externo: mensagem vinda do servidor quando ele tenta
+  // abrir a 4ª sessão em 24h. Vazio = sem aviso.
+  const [quotaMessage, setQuotaMessage] = useState('');
+  const abrindoRef = useRef(false); // abertura de sessão em voo (anti duplo clique)
 
   // Pós-sessão: salvamento do log + avaliação IA (avaliador v9 global).
   const [savingLog, setSavingLog] = useState(false);
@@ -349,8 +355,22 @@ export default function EchoSession({ user, sessionType }) {
   }
 
   async function handleStartSession() {
-    if (!item) return;
+    // O ref (e não só o state) segura o duplo clique: entre a checagem da cota
+    // e o setSessionStarted há um await, e sem ele dois cliques rápidos abririam
+    // — e cobrariam — duas sessões.
+    if (!item || sessionStarted || abrindoRef.current) return;
+    abrindoRef.current = true;
     setError('');
+
+    // Cota do Aluno Externo: pergunta ao servidor ANTES de montar o chat, pra o
+    // aviso aparecer aqui em vez de virar uma bolha de erro dentro da sessão.
+    const bloqueio = await sessionQuotaBlockMessage({ type: sessionType, itemId: id });
+    if (bloqueio) {
+      abrindoRef.current = false;
+      setQuotaMessage(bloqueio);
+      return;
+    }
+
     try {
       setSessionStarted(true);
 
@@ -363,12 +383,26 @@ export default function EchoSession({ user, sessionType }) {
         const reply = await sendToAI('Iniciar', []);
         setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
       } catch (err) {
-        setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+        // Cota estourada entre a checagem e o primeiro turno (outra aba, dois
+        // cliques): desfaz a abertura e mostra o mesmo aviso.
+        const cota = sessionQuotaMessageFromError(err);
+        if (cota) {
+          setSessionStarted(false);
+          setMessages([]);
+          // O autosave pode ter gravado a sessão só com o "Iniciar"; sem isso
+          // ela voltaria como sessão em andamento na próxima visita.
+          clearActiveSession(user?.id, sessionType, autoItemId);
+          setQuotaMessage(cota);
+        } else {
+          setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+        }
       } finally {
+        abrindoRef.current = false;
         setIsTyping(false);
         textareaRef.current?.focus();
       }
     } catch (err) {
+      abrindoRef.current = false;
       setError('Erro ao iniciar atendimento: ' + err.message);
     }
   }
@@ -931,7 +965,7 @@ export default function EchoSession({ user, sessionType }) {
             <div className={`sidequest-result ${sidequestOutcome.completed ? 'completed' : 'incomplete'}`}>
               {sidequestOutcome.completed ? (
                 <>
-                  <div className="sidequest-result-badge">✦ Sidequest concluída</div>
+                  <div className="sidequest-result-badge">✦ Exercício concluído</div>
                   <h4>{sidequestOutcome.title}</h4>
                   <p>
                     Você desbloqueou o título <strong>{sidequestOutcome.rewardTitleLabel}</strong>.
@@ -940,7 +974,7 @@ export default function EchoSession({ user, sessionType }) {
                 </>
               ) : (
                 <>
-                  <div className="sidequest-result-badge incomplete">Sidequest ainda não concluída</div>
+                  <div className="sidequest-result-badge incomplete">Exercício ainda não concluído</div>
                   <h4>{sidequestOutcome.title}</h4>
                   {sidequestOutcome.reason && (
                     <p className="sidequest-result-reason">{sidequestOutcome.reason}</p>
@@ -1261,7 +1295,7 @@ export default function EchoSession({ user, sessionType }) {
           >
             <svg className="sidequest-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 6 15 12 9 18" /></svg>
             <span className="sidequest-banner-headtext">
-              <span className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</span>
+              <span className="sidequest-banner-label">✦ Exercício ativo · objetivo principal</span>
               <span className="sidequest-banner-title">{sidequest.title}</span>
             </span>
           </button>
@@ -1549,6 +1583,8 @@ export default function EchoSession({ user, sessionType }) {
           </div>
         </div>
       )}
+
+      <SessionQuotaModal message={quotaMessage} onClose={() => setQuotaMessage('')} />
 
       {/* Modal de limite de sessões (período de teste) */}
       {showSessionLimit && (

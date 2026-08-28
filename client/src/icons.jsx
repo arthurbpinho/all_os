@@ -118,6 +118,13 @@ export const ICONS = {
     </svg>
   ),
   // Antessala (pré-supervisão): rede de nós — evoca o mapa radial do caso.
+  // Balões de conversa sobrepostos — Comunidade (feed de discussões).
+  comunidade: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 11a3 3 0 0 1-3 3H7l-3.5 3v-9a3 3 0 0 1 3-3h4.5a3 3 0 0 1 3 3z" />
+      <path d="M9 5.5V5a3 3 0 0 1 3-3h5.5a3 3 0 0 1 3 3v6l-2.5-2" />
+    </svg>
+  ),
   antessala: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
       <circle cx="12" cy="12" r="3" />

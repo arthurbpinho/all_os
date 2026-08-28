@@ -28,10 +28,28 @@ import { PatientAvatar } from '../components/PatientAvatar';
 //                e calibrar o TRI dele mais rápido. Puro truque visual, nenhuma
 //                regra depende disso — e o reordenamento é SÓ desta tela: as
 //                outras (Progressão, Duelo, admin) mantêm a ordem de cadastro.
+// Saudação pela hora do dia. É o detalhe que mais faz uma tela parecer a SUA
+// página inicial em vez de mais uma seção do app.
+function saudacao() {
+  const h = new Date().getHours();
+  if (h < 5) return 'Boa madrugada';
+  if (h < 12) return 'Bom dia';
+  if (h < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
+
+function primeiroNome(nome) {
+  return String(nome || '').trim().split(/\s+/)[0] || '';
+}
+
 export default function Competitive({ user }) {
   const [characters, setCharacters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Indicadores da própria conta na faixa do topo. Silenciosos: se qualquer um
+  // falhar (ou for visitante, que não tem histórico), a faixa some em vez de
+  // mostrar erro — nada aqui é essencial pra atender um paciente.
+  const [resumo, setResumo] = useState(null);
   const navigate = useNavigate();
 
   // Visitante não fecha partida competitiva (POST /api/competitive/finish barra
@@ -51,6 +69,18 @@ export default function Competitive({ user }) {
       .finally(() => setLoading(false));
   }, [user]);
 
+  useEffect(() => {
+    if (!user?.id || isVisitor) { setResumo(null); return; }
+    let cancelado = false;
+    Promise.all([
+      api.getGamification(user.id).catch(() => null),
+      api.getMyMmr().catch(() => null),
+    ]).then(([g, mmr]) => {
+      if (!cancelado) setResumo({ streak: g?.streak || null, stats: g?.stats || null, mmr });
+    });
+    return () => { cancelado = true; };
+  }, [user?.id, isVisitor]);
+
   return (
     <div className="inicio-page">
       <InstallAppBanner />
@@ -58,8 +88,23 @@ export default function Competitive({ user }) {
       <div className="inicio-hero">
         <div className="page-header inicio-hero-text">
           <div className="eyebrow">Prática · Simulação</div>
-          <h2><Typewriter text="Página " /><span className="accent"><Typewriter text="Inicial" delayStart={220} /></span></h2>
-          <p>
+          {/* Conta sem nome preenchido não pode virar "Boa noite, " com a
+              vírgula solta — nesse caso a saudação vai sozinha. */}
+          {(() => {
+            const quem = isVisitor ? 'visitante' : primeiroNome(user?.name);
+            return (
+              <h2>
+                <Typewriter text={quem ? `${saudacao()}, ` : saudacao()} />
+                {quem && (
+                  <span className="accent"><Typewriter text={quem} delayStart={260} /></span>
+                )}
+              </h2>
+            );
+          })()}
+
+          {resumo && <ResumoDaConta resumo={resumo} />}
+
+          <p className="inicio-lead">
             Esse é o ambiente de desenvolvimento prático de clínica utilizado na formação da
             Associação Allos. Além de testar seus conhecimentos práticos atendendo os pacientes
             simulados, recomendamos que você conheça a nossa formação totalmente gratuita no botão
@@ -117,7 +162,16 @@ export default function Competitive({ user }) {
           Nenhum personagem cadastrado ainda.
         </div>
       ) : (
-        <div className="card-grid">
+        <>
+          {/* A lista precisa de um começo. Sem este título ela colava no texto
+              institucional e a tela virava um bloco só, sem zonas. */}
+          <div className="inicio-secao">
+            <h3 className="section-heading">Escolha um paciente</h3>
+            <span className="inicio-secao-contagem">
+              {characters.length} {characters.length === 1 ? 'paciente disponível' : 'pacientes disponíveis'}
+            </span>
+          </div>
+          <div className="card-grid">
           {characters.map((char) => {
             const record = char.record;
             return (
@@ -171,10 +225,56 @@ export default function Competitive({ user }) {
               </div>
             );
           })}
-        </div>
+          </div>
+        </>
       )}
 
       <PageFooter onSuporte={() => navigate('/suporte')} />
+    </div>
+  );
+}
+
+// Faixa de indicadores da conta, logo abaixo da saudação: constância,
+// atendimentos e MMR. É o que transforma a tela em "a sua página" — sem nenhum
+// dado seu, ela é só um catálogo de pacientes.
+//
+// Cada chip só aparece se tiver o que dizer: conta nova não precisa de três
+// zeros em fila, e o MMR fica escondido durante a calibração (o número não
+// existe ainda; ver mmr.playerView).
+function ResumoDaConta({ resumo }) {
+  const { streak, stats, mmr } = resumo;
+  const chips = [];
+
+  if (streak?.isAlive && streak.current > 0) {
+    chips.push({
+      k: 'streak',
+      valor: streak.current,
+      rotulo: streak.current === 1 ? 'semana de constância' : 'semanas de constância',
+    });
+  }
+  if (stats?.totalSessions > 0) {
+    chips.push({
+      k: 'sessoes',
+      valor: stats.totalSessions,
+      rotulo: stats.totalSessions === 1 ? 'atendimento concluído' : 'atendimentos concluídos',
+    });
+  }
+  if (Number.isFinite(stats?.averageScore)) {
+    chips.push({ k: 'media', valor: stats.averageScore, rotulo: 'nota média' });
+  }
+  if (mmr && !mmr.calibrating && Number.isFinite(mmr.mmr)) {
+    chips.push({ k: 'mmr', valor: mmr.mmr, rotulo: 'MMR' });
+  }
+
+  if (!chips.length) return null;
+  return (
+    <div className="inicio-resumo">
+      {chips.map((c) => (
+        <div key={c.k} className="inicio-resumo-chip">
+          <strong>{c.valor}</strong>
+          <span>{c.rotulo}</span>
+        </div>
+      ))}
     </div>
   );
 }

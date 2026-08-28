@@ -34,6 +34,7 @@ function iconFor(n) {
     case 'admin_notice': return '📢';
     case 'evaluation_queued': return '⏳';
     case 'evaluation_ready': return '📋';
+    case 'comunidade_reply': return '💬';
     default: return '•';
   }
 }
@@ -70,14 +71,14 @@ function bodyFor(n) {
     case 'sidequest_assigned':
       return (
         <>
-          Nova sidequest: <strong>{n.title}</strong>
+          Novo exercício: <strong>{n.title}</strong>
           {n.assignedByName ? <> · de {n.assignedByName}</> : null}
         </>
       );
     case 'sidequest_completed':
       return (
         <>
-          Sidequest concluída: <strong>{n.title}</strong>
+          Exercício concluído: <strong>{n.title}</strong>
           {n.rewardTitleLabel ? <> · título <em>{n.rewardTitleLabel}</em></> : null}
         </>
       );
@@ -91,6 +92,12 @@ function bodyFor(n) {
     case 'evaluation_queued':
     case 'evaluation_ready':
       return n.message;
+    case 'comunidade_reply':
+      return (
+        <>
+          <strong>{n.fromName}</strong> comentou em “{n.title}”.
+        </>
+      );
     default:
       return n.title || 'Notificação';
   }
@@ -178,6 +185,8 @@ export default function NotificationBell({ user }) {
       navigate('/progressao');
     } else if (n.type === 'evaluation_ready') {
       navigate('/logs');
+    } else if (n.type === 'comunidade_reply') {
+      navigate(`/comunidade/discussao/${n.discussionId}`);
     }
   }
 

@@ -36,6 +36,7 @@ const {
 } = require('./neuro-tests');
 const webpush = require('web-push');
 const contas = require('./cadastro');
+const sessionQuota = require('./session-quota');
 const mailer = require('./email');
 const turnstile = require('./turnstile');
 
@@ -333,6 +334,20 @@ const visitorLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   keyGenerator: ipKey,
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
+// Leitura pública de uma discussão da Comunidade (a única rota do app que
+// responde sem sessão nenhuma). Chaveia por IP e é generoso de propósito: um
+// link circulando num grupo grande é o uso ESPERADO, e numa faculdade a turma
+// toda sai pelo mesmo IP. O teto existe só pra que a rota não vire um
+// amplificador barato — cada request lê e parseia o comunidade.json inteiro.
+const comunidadePublicaLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { error: 'Muitas requisições. Tente novamente em alguns minutos.' },
+});
+
 // Post-auth: protege a chave Anthropic (e a OpenAI do Whisper) de abuse, e
 // segura escrita massiva em logs.
 //
@@ -543,6 +558,12 @@ const DEFAULT_PROFILE = {
   profilePhoto: '/profiles_icon/isaacdeterno.jpeg',
   updateAllOS: false,
   updateAllos: false,
+  // Exercícios (as antigas sidequests) ligados por padrão: quem nunca abriu o
+  // Perfil continua recebendo o objetivo no atendimento, como sempre recebeu.
+  sidequestsEnabled: true,
+  // Abordagem teórica declarada pela pessoa. Campo EM DESENVOLVIMENTO na tela:
+  // existe para a pesquisa em psicologia comparada, e por ora só o admin edita.
+  abordagem: '',
 };
 
 // 'evaluator' (Avaliador) acompanha o Processo Seletivo (Dashboard + Logs de
@@ -753,6 +774,17 @@ if (!fs.existsSync(path.join(DATA_DIR, 'duels.json'))) {
 // { <userId>: [ {id, type, ...} ] }. Visitantes (id efêmero) não recebem.
 if (!fs.existsSync(path.join(DATA_DIR, 'notifications.json'))) {
   writeJSON('notifications.json', {});
+}
+
+// Comunidade: o feed de discussões e a configuração da moderação. Ficam em
+// arquivos separados porque a config (avatares + banimentos) é lida em toda
+// requisição e escrita só pelo admin — no mesmo arquivo, cada comentário
+// reescreveria a lista de banimentos junto.
+if (!fs.existsSync(path.join(DATA_DIR, 'comunidade.json'))) {
+  writeJSON('comunidade.json', { nextId: 1, discussions: [] });
+}
+if (!fs.existsSync(path.join(DATA_DIR, 'comunidade-config.json'))) {
+  writeJSON('comunidade-config.json', { institutionAvatar: null, visitorAvatars: [], bans: {} });
 }
 
 // Assinaturas de Web Push por usuário — { <userId>: [ {endpoint, keys, ua,
@@ -1071,7 +1103,12 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
   const erroSenha = validarSenha(newPassword, req.user.role, req.user.username);
   if (erroSenha) return res.status(400).json({ error: erroSenha.replace('Senha deve', 'Nova senha deve') });
   const ok = await bcrypt.compare(String(currentPassword), req.user.passwordHash || '');
-  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+  // 400, não 401: o cliente (api.js) trata TODO 401 como sessão expirada e
+  // desloga na hora (ver onSessionExpired em App.jsx) — 401 é certo pro
+  // requireAuth (token inválido), mas aqui só a senha está errada, a sessão
+  // continua válida. Achado ao testar a exclusão de conta, que tinha o mesmo
+  // bug (ver DELETE /api/me) — corrigido igual aqui e em /api/me/email.
+  if (!ok) return res.status(400).json({ error: 'Senha atual incorreta' });
   const users = readJSON('users.json');
   const idx = users.findIndex(u => u.id === req.user.id);
   if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
@@ -1085,6 +1122,52 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
     mailer.enviarAvisoSenhaAlterada({ to: users[idx].email, nome: users[idx].name }).catch(() => {});
   }
   res.json({ ok: true, token });
+});
+
+// Exclusão da PRÓPRIA conta. Distinta da exclusão de DADOS (política de
+// privacidade): isto aqui derruba o login e some da lista de usuários — os
+// logs, conquistas e conversas já gravados continuam em disco, e a exclusão
+// deles é sob pedido por e-mail a suporte@allos.org.br (rastro auditável,
+// evita que um clique excluam provas de avaliação em disputa).
+//
+// Exige a senha atual pra uma sessão roubada não conseguir apagar a conta
+// sozinha. Bloqueada pra admin (o painel já bloqueia o admin excluir a si
+// mesmo, mesma razão: evita lockout) e pra supervisor com alunos vinculados
+// (eles ficariam órfãos).
+//
+// Senha errada aqui é 400, NÃO 401: o cliente (api.js) trata TODO 401 como
+// sessão expirada e desloga na hora (ver onSessionExpired em App.jsx) — 401
+// faz sentido pro middleware requireAuth (token inválido), mas usado aqui
+// derrubaria a sessão de quem só digitou a senha errada tentando confirmar a
+// exclusão, quando o esperado é mostrar "senha incorreta" e deixar tentar de
+// novo. (/api/me/password e /api/me/email têm o mesmo 401 nesse mesmo lugar —
+// bug pré-existente, fora do escopo deste endpoint novo.)
+app.delete('/api/me', requireAuth, async (req, res) => {
+  if (req.user.isVisitor) {
+    return res.status(400).json({ error: 'Sessão de visitante não tem conta para excluir.' });
+  }
+  if (req.user.role === 'admin') {
+    return res.status(400).json({ error: 'Conta de administrador não pode ser autoexcluída — peça a outro admin.' });
+  }
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ error: 'Confirme sua senha atual.' });
+  const ok = await bcrypt.compare(String(password), req.user.passwordHash || '');
+  if (!ok) return res.status(400).json({ error: 'Senha incorreta.' });
+
+  const users = readJSON('users.json');
+  if (req.user.role === 'supervisor') {
+    const linked = users.filter((u) => u.teacherId === req.user.id);
+    if (linked.length > 0) {
+      return res.status(400).json({
+        error: `Você tem ${linked.length} aluno(s) vinculado(s). Peça a um administrador para reatribuí-los antes de excluir sua conta.`,
+      });
+    }
+  }
+  const idx = users.findIndex((u) => u.id === req.user.id);
+  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  users.splice(idx, 1);
+  writeJSON('users.json', users);
+  res.json({ ok: true });
 });
 
 
@@ -1118,11 +1201,13 @@ const TERMOS_VERSAO = process.env.TERMOS_VERSAO || '1';
 // env sem precisar de deploy de código.
 const CADASTRO_ABERTO = process.env.CADASTRO_EXTERNO_ABERTO !== 'false';
 
-// URLs dos documentos legais. Enquanto vazias, o formulário mostra o texto do
-// aceite SEM link — melhor que um link que cai na home do app. Ao publicar os
-// documentos, basta setar as duas envs; nada de deploy de código.
-const TERMOS_URL = process.env.TERMOS_URL || '';
-const PRIVACIDADE_URL = process.env.PRIVACIDADE_URL || '';
+// URLs dos documentos legais. Por padrão apontam para as páginas dentro do
+// próprio app (client/src/pages/TermosDeUso.jsx e PoliticaPrivacidade.jsx) —
+// caminho relativo, então funciona em qualquer domínio que sirva o app. As
+// envs seguem existindo pra sobrescrever com um link externo (ex.: PDF
+// hospedado fora), sem precisar de deploy de código.
+const TERMOS_URL = process.env.TERMOS_URL || '/termos-de-uso';
+const PRIVACIDADE_URL = process.env.PRIVACIDADE_URL || '/politica-de-privacidade';
 
 // Toda leitura já poda o que venceu — os três arquivos são pequenos e
 // reescritos inteiros, então não precisa de rotina de limpeza agendada.
@@ -1493,7 +1578,8 @@ app.post('/api/me/email', requireAuth, emailAuthLimiter, async (req, res) => {
   }
   // Senha atual: sem isso, uma sessão roubada trocaria o e-mail sozinha.
   const ok = await bcrypt.compare(String(senhaAtual || ''), req.user.passwordHash || '');
-  if (!ok) return res.status(401).json({ error: 'Senha atual incorreta' });
+  // 400, não 401 — ver o mesmo comentário em /api/me/password.
+  if (!ok) return res.status(400).json({ error: 'Senha atual incorreta' });
 
   try {
     const pedido = await withFileLock(TROCAS_EMAIL_FILE, async () => {
@@ -1692,9 +1778,13 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
   // senha": deixar trocar direto seria sequestro de conta em dois passos —
   // troco pro meu endereço, peço reset, recebo a senha. A troca passa por
   // POST /api/me/email, que confirma o endereço novo por link e avisa o antigo.
-  const allowed = ['name', 'gender', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance'];
+  const allowed = ['name', 'gender', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance', 'sidequestsEnabled', 'abordagem'];
   const patch = {};
   for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
+  // Os dois campos novos vêm de controles simples da tela, mas o endpoint é
+  // público a qualquer cliente — normaliza em vez de confiar no formato.
+  if ('sidequestsEnabled' in patch) patch.sidequestsEnabled = !!patch.sidequestsEnabled;
+  if ('abordagem' in patch) patch.abordagem = clampStr(String(patch.abordagem ?? '').trim(), 120);
   users[idx] = { ...users[idx], ...patch };
   writeJSON('users.json', users);
   res.json(publicUser(users[idx]));
@@ -1703,6 +1793,22 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
 // --- Admin: gestão de contas ---
 const usernameRegex = /^[a-zA-Z0-9._-]{3,32}$/;
 
+// Id de conta nova. MONOTÔNICO: nunca devolve um id que já pertenceu a alguém.
+//
+// Antes isto era `max(ids) + 1`, e o máximo CAI quando a conta de id mais alto é
+// excluída — então o próximo cadastro (inclusive o auto-cadastro público)
+// recebia o id da conta apagada e herdava tudo que é indexado por userId: os
+// logs das sessões e as avaliações, o MMR, as notificações, as conquistas. Na
+// Comunidade era pior ainda: o "Conta removida" voltava a exibir um nome, o da
+// pessoa NOVA, sobre os textos da antiga.
+//
+// O contador vive em counters.json sob a chave reservada `__meta` (as demais
+// chaves do arquivo são userIds, que são numéricos — não há como colidir) e só
+// sobe. `Math.max` com o maior id em disco cobre a primeira execução e qualquer
+// conta criada fora deste caminho.
+//
+// Chamar SEMPRE dentro do lock de users.json: sem isso dois cadastros
+// simultâneos leem o mesmo contador e nascem com o mesmo id.
 function nextUserId(users) {
   // Filtra apenas IDs numéricos. Se algum user legacy tiver id não-numérico
   // (ex: visitor-xxx persistido por erro), o Number() retorna NaN — antes,
@@ -1712,7 +1818,13 @@ function nextUserId(users) {
     if (!Number.isFinite(n)) return max;
     return n > max ? n : max;
   }, 0);
-  return String(maxNumeric + 1);
+  const counters = readJSON('counters.json', {});
+  const meta = (counters.__meta && typeof counters.__meta === 'object') ? counters.__meta : {};
+  const ultimo = Number.isFinite(meta.lastUserId) ? meta.lastUserId : 0;
+  const proximo = Math.max(maxNumeric, ultimo) + 1;
+  counters.__meta = { ...meta, lastUserId: proximo };
+  writeJSON('counters.json', counters);
+  return String(proximo);
 }
 
 function validateNewUserPayload(body, users, { isUpdate = false, currentUser = null } = {}) {
@@ -1949,6 +2061,10 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
       mmr: readJSON('mmr.json', { players: {}, characters: {} }),
       duels: readJSON('duels.json', []),
       notifications: readJSON('notifications.json', {}),
+      comunidade: readJSON('comunidade.json', { nextId: 1, discussions: [] }),
+      // A config leva os banimentos junto: restaurar um backup sem eles
+      // desbanaria todo mundo em silêncio.
+      comunidadeConfig: readJSON('comunidade-config.json', {}),
     },
   };
   // Content-Disposition: força download como arquivo em vez de renderizar JSON
@@ -2348,7 +2464,7 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
       id: q.rewardTitleId,
       icon: '✦',
       title: q.rewardTitleLabel,
-      description: `Sidequest concluída: ${q.title}`,
+      description: `Exercício concluído: ${q.title}`,
       tier: q.rewardTitleTier || 'quest',
       unlocked: true,
       claimed: true,
@@ -3423,6 +3539,13 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   logs.push(log);
   writeJSON('logs.json', logs);
 
+  // Atendimento finalizado: fecha a sessão daquela chave na cota do Aluno
+  // Externo. O slot já gasto continua contando; o que muda é que reabrir aquele
+  // paciente passa a custar um slot novo, em vez de seguir de graça pra sempre.
+  // Best-effort — falhar aqui não pode derrubar o salvamento do log.
+  closeSessionQuota(req.user, sessionQuota.sessionKey({ type: log.type, itemId: log.itemId }))
+    .catch(() => {});
+
   // "Sua avaliação está pronta" — atualiza (não duplica) a notificação "na
   // fila" disparada no início de /api/evaluate (mesmo refId 'eval:'+userId).
   // Competitivo fica de fora: chega aqui só por esta rota quando NÃO é
@@ -4495,6 +4618,76 @@ function resolveChatSystemPrompt({ context, mode, user }) {
   return { status: 400, error: 'Modo de chat inválido' };
 }
 
+// --- Cota diária de sessões do Aluno Externo ---
+// Regra e janela em server/session-quota.js. Aqui fica só o I/O:
+// external-session-starts.json = { "<userId>": [<timestamp ms>, ...] }.
+
+const SESSION_STARTS_FILE = 'external-session-starts.json';
+
+function readSessionStarts() {
+  return readJSON(SESSION_STARTS_FILE, {});
+}
+
+// Estado da cota de um usuário do JWT. Papel sem cota devolve o mesmo shape,
+// com enabled:false — a UI não precisa saber quem tem limite.
+function sessionQuotaFor(user) {
+  if (!sessionQuota.hasSessionQuota(user && user.role)) return sessionQuota.unlimitedState();
+  return sessionQuota.quotaState(readSessionStarts()[user.id]);
+}
+
+// Cobra um slot para a CHAVE de sessão (tipo+paciente). Sob lock porque é
+// ler→modificar→gravar: dois cliques em "Iniciar" ao mesmo tempo não podem
+// virar um registro só.
+//
+// Se a chave já está aberta, não cobra nada — é a conversa em andamento. Quem
+// decide isso é o registro do servidor, NUNCA o histórico que veio no corpo da
+// requisição (ver a nota em session-quota.js sobre o bypass que isso fecha).
+//
+// Devolve { ok, state }: `ok` diz se ESTA abertura foi autorizada, e não se
+// ainda sobra cota — a terceira sessão é liberada e já deixa o estado esgotado.
+async function consumeSessionQuota(user, key) {
+  return withFileLock(SESSION_STARTS_FILE, () => {
+    const all = readSessionStarts();
+    if (sessionQuota.hasOpenSession(all[user.id], key)) {
+      return { ok: true, state: sessionQuota.quotaState(all[user.id]) };
+    }
+    const antes = sessionQuota.quotaState(all[user.id]);
+    if (antes.blocked) return { ok: false, state: antes };
+    all[user.id] = sessionQuota.registerStart(all[user.id], key);
+    writeJSON(SESSION_STARTS_FILE, all);
+    return { ok: true, state: sessionQuota.quotaState(all[user.id]) };
+  });
+}
+
+// Fecha a sessão daquela chave quando o atendimento é finalizado (log salvo).
+// O slot continua gasto; o que muda é que reabrir aquele paciente passa a
+// custar um slot novo, em vez de continuar de graça pra sempre.
+async function closeSessionQuota(user, key) {
+  if (!sessionQuota.hasSessionQuota(user && user.role) || !key) return;
+  await withFileLock(SESSION_STARTS_FILE, () => {
+    const all = readSessionStarts();
+    if (!all[user.id]) return;
+    all[user.id] = sessionQuota.closeSession(all[user.id], key);
+    writeJSON(SESSION_STARTS_FILE, all);
+  });
+}
+
+// O cliente consulta ANTES de abrir a sessão pra já mostrar o aviso em vez de
+// entrar num chat que o servidor vai barrar no primeiro turno.
+//
+// Aceita ?type=&itemId= — a sessão que ele está prestes a abrir. Sem isso a
+// resposta seria "bloqueado" para quem esgotou a cota mas está RETOMANDO um
+// atendimento já aberto, e a tela o impediria de terminar o que começou (o
+// /api/chat deixaria passar, porque lá a chave aberta é isenta).
+app.get('/api/session-quota', requireAuth, (req, res) => {
+  const estado = sessionQuotaFor(req.user);
+  const chave = sessionQuota.sessionKey({ type: req.query.type, itemId: req.query.itemId });
+  if (estado.blocked && chave && sessionQuota.hasOpenSession(readSessionStarts()[req.user.id], chave)) {
+    return res.json({ ...estado, blocked: false });
+  }
+  res.json(estado);
+});
+
 app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   const { messages, context, mode, maxTokens } = req.body || {};
 
@@ -4511,6 +4704,18 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
 
   if (!Array.isArray(messages)) {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
+  }
+
+  // Cota do Aluno Externo: 3 atendimentos por 24h. O slot é cobrado ao ABRIR uma
+  // sessão — e quem decide o que é "abrir" é o registro do servidor (a chave
+  // tipo+paciente já está aberta?), nunca o histórico que veio no corpo. Conversa
+  // em andamento passa direto, pra ninguém ficar preso no meio do atendimento.
+  // Esta é a trava de verdade; o modal do cliente é só cortesia.
+  if (sessionQuota.hasSessionQuota(req.user.role)) {
+    const cota = await consumeSessionQuota(req.user, sessionQuota.sessionKey(context));
+    if (!cota.ok) {
+      return res.status(429).json({ error: cota.state.message, sessionQuota: cota.state });
+    }
   }
 
   // Default 1500 pra pacientes (Trilha/Simulação/Neuro) — resposta de
@@ -7968,6 +8173,7 @@ function notificationUrl(n) {
     case 'sidequest_assigned': return '/progressao';
     case 'evaluation_queued':
     case 'evaluation_ready': return '/logs';
+    case 'comunidade_reply': return `/comunidade/discussao/${n.discussionId}`;
     default: return '/';
   }
 }
@@ -7989,15 +8195,17 @@ function notificationPushPayload(n) {
     case 'achievement_unlocked':
       return { ...base, title: 'Conquista liberada', body: n.title || '' };
     case 'sidequest_assigned':
-      return { ...base, title: 'Nova sidequest', body: n.title || '' };
+      return { ...base, title: 'Novo exercício', body: n.title || '' };
     case 'sidequest_completed':
-      return { ...base, title: 'Sidequest concluída', body: n.title || '' };
+      return { ...base, title: 'Exercício concluído', body: n.title || '' };
     case 'admin_notice':
       return { ...base, title: n.title || 'Aviso', body: n.message || '' };
     case 'evaluation_queued':
       return { ...base, title: 'Avaliação enviada', body: n.message || '' };
     case 'evaluation_ready':
       return { ...base, title: 'Avaliação concluída', body: n.message || '' };
+    case 'comunidade_reply':
+      return { ...base, title: 'Nova resposta na Comunidade', body: `${n.fromName} comentou em "${n.title || 'sua discussão'}".` };
     default:
       return { ...base, title: n.title || 'Notificação', body: n.message || '' };
   }
@@ -9055,10 +9263,28 @@ function getActiveDailyMission(userId) {
   return dm;
 }
 
+// A pessoa quer receber Exercício (a antiga sidequest) no atendimento?
+// Interruptor do próprio usuário, no Perfil. Vale para os DOIS tipos de
+// objetivo — a sidequest do supervisor e a missão diária: da cadeira do aluno
+// os dois são a mesma coisa (um objetivo que vira o foco da sessão), então
+// desligar um e receber o outro no lugar não faria sentido nenhum.
+//
+// Ausente = ligado: contas criadas antes deste campo continuam como estavam.
+function exerciciosLigados(userId) {
+  if (!userId || String(userId).startsWith('visitor-')) return true;
+  try {
+    const u = readJSON('users.json').find((x) => x.id === userId);
+    return !u || u.sidequestsEnabled !== false;
+  } catch {
+    return true; // na dúvida, comporta-se como antes do interruptor existir
+  }
+}
+
 // Missão do Treinamento: UMA ou OUTRA, nunca as duas. Fonte única de verdade —
 // prompt do avaliador, conclusão pós-sessão e /api/me/daily-mission passam aqui.
 // Devolve { sidequest, daily } com no máximo um dos dois preenchido.
 function resolveTrainingMission(userId) {
+  if (!exerciciosLigados(userId)) return { sidequest: null, daily: null };
   const sidequest = getActiveSidequest(userId);
   if (sidequest) return { sidequest, daily: null };
   return { sidequest: null, daily: getActiveDailyMission(userId) };
@@ -9218,9 +9444,13 @@ app.post('/api/sidequests/unassign', requireAuth, (req, res) => {
 app.get('/api/me/sidequest', requireAuth, (req, res) => {
   if (req.user.role === 'visitor') return res.json({ active: null, completed: [] });
   const data = readSidequests();
+  // Desligado no Perfil: a sidequest continua ATRIBUÍDA (o supervisor não a
+  // perde), só não é servida — some do banner e do prompt. Religar devolve.
+  const ligado = req.user.sidequestsEnabled !== false;
   res.json({
-    active: publicSidequest(data.active[req.user.id] || null),
+    active: ligado ? publicSidequest(data.active[req.user.id] || null) : null,
     completed: data.completed[req.user.id] || [],
+    enabled: ligado,
   });
 });
 
@@ -9229,6 +9459,9 @@ app.get('/api/me/sidequest', requireAuth, (req, res) => {
 // resolveTrainingMission): responde mission null + pausedBySidequest, e a tela
 // mostra só a sidequest.
 app.get('/api/me/daily-mission', requireAuth, (req, res) => {
+  if (req.user.role !== 'visitor' && req.user.sidequestsEnabled === false) {
+    return res.json({ mission: null, completed: false, disabled: true });
+  }
   if (req.user.role !== 'visitor' && getActiveSidequest(req.user.id)) {
     return res.json({ mission: null, completed: false, pausedBySidequest: true });
   }
@@ -9634,6 +9867,588 @@ app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external
   });
   res.status(status).json(out);
 });
+
+// ----------------------------------------------------------------------------
+// COMUNIDADE — discussões, comentários, votos e enquetes
+// ----------------------------------------------------------------------------
+// Espaço de troca entre os membros + comunicação institucional da Allos. Uma
+// "discussão" é o que o Reddit chama de thread: título, texto (ou enquete),
+// votos e comentários.
+//
+// A regra de acesso que dita o desenho: TODA discussão tem link próprio
+// (/comunidade/discussao/:id) que abre para QUALQUER pessoa, sem conta e sem
+// sessão de visitante — é o botão "compartilhar" funcionando de verdade, com um
+// link que serve para mandar no WhatsApp. Por isso GET de uma discussão é a
+// única rota deste bloco sem requireAuth (usa optionalAuth, que só popula
+// req.user quando há token válido). Escrever exige conta real: visitante lê
+// tudo e não escreve nada.
+//
+// Dois arquivos no DATA_DIR:
+//   comunidade.json        → { nextId, discussions: [...] }
+//   comunidade-config.json → { institutionAvatar, visitorAvatars[], bans{} }
+// A separação é proposital: a config é escrita só pelo admin e lida em toda
+// requisição; misturá-la ao feed faria cada comentário reescrever a lista de
+// banimentos junto.
+const comunidade = require('./comunidade');
+
+const COMUNIDADE_FILE = 'comunidade.json';
+const COMUNIDADE_CONFIG_FILE = 'comunidade-config.json';
+
+// Avatares da Comunidade (logo da Associação + pool do visitante) vivem no
+// volume, como as fotos de paciente — sobrevivem a redeploy do Railway.
+const COMUNIDADE_AVATARS_DIR = path.join(DATA_DIR, 'comunidade-avatars');
+if (!fs.existsSync(COMUNIDADE_AVATARS_DIR)) fs.mkdirSync(COMUNIDADE_AVATARS_DIR, { recursive: true });
+app.use('/comunidade-avatars', express.static(COMUNIDADE_AVATARS_DIR, { maxAge: '7d' }));
+
+function readComunidade() {
+  const d = readJSON(COMUNIDADE_FILE, { nextId: 1, discussions: [] });
+  if (!Array.isArray(d.discussions)) d.discussions = [];
+  if (!Number.isFinite(d.nextId)) d.nextId = 1;
+  return d;
+}
+function writeComunidade(d) { writeJSON(COMUNIDADE_FILE, d); }
+function readComunidadeConfig() {
+  const c = readJSON(COMUNIDADE_CONFIG_FILE, {});
+  return {
+    institutionAvatar: c.institutionAvatar || null,
+    visitorAvatars: Array.isArray(c.visitorAvatars) ? c.visitorAvatars : [],
+    bans: (c.bans && typeof c.bans === 'object') ? c.bans : {},
+  };
+}
+function writeComunidadeConfig(c) { writeJSON(COMUNIDADE_CONFIG_FILE, c); }
+
+// Auth OPCIONAL: popula req.user quando há um token válido e segue em frente
+// quando não há. É o que permite a mesma rota servir o membro logado (com o
+// voto dele marcado) e quem abriu o link compartilhado sem conta nenhuma.
+// Token inválido ou expirado é tratado como ausência de sessão — nunca 401:
+// aqui um 401 derrubaria a leitura pública, que é justamente o ponto da rota.
+function optionalAuth(req, res, next) {
+  const token = getTokenFromReq(req);
+  if (!token) return next();
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.role === 'visitor') {
+      req.user = {
+        id: payload.sub,
+        username: payload.username || payload.sub,
+        name: payload.name || 'Visitante',
+        role: 'visitor',
+        teacherId: null,
+        isVisitor: true,
+      };
+      return next();
+    }
+    const users = readJSON('users.json');
+    const user = users.find((u) => u.id === payload.sub);
+    if (user && (payload.tv || 0) === (user.tokenVersion || 0)) req.user = user;
+  } catch { /* segue como leitor anônimo */ }
+  next();
+}
+
+// Quem pode escrever AGORA: papel participante e sem banimento vigente.
+// Devolve { ok } ou { ok:false, status, error } pronto pra resposta.
+function podeEscrever(user, config) {
+  if (!user) return { ok: false, status: 401, error: 'Crie uma conta para participar da Comunidade.' };
+  if (!comunidade.podeParticipar(user.role)) {
+    return { ok: false, status: 403, error: 'Crie uma conta para participar da Comunidade.' };
+  }
+  const ban = comunidade.banAtivo(config, user.id);
+  if (ban) return { ok: false, status: 403, error: comunidade.mensagemBan(ban) };
+  return { ok: true };
+}
+
+// Snapshot do autor gravado junto do post: SÓ o papel, nunca nome ou foto.
+// Nome e foto vêm da conta viva a cada leitura (ver autorPublico), o que faz a
+// exclusão de conta apagar de fato a identidade de quem escreveu. O papel fica
+// para manter o selo coerente quando a conta some.
+function autorSnapshot(user) {
+  return { role: user.role };
+}
+
+function acharDiscussao(store, id) {
+  return store.discussions.find((d) => String(d.id) === String(id)) || null;
+}
+
+// --- Leitura ---
+
+// Feed. Exige sessão (inclusive a de visitante, que o app cria sozinho) porque
+// é a porta de entrada dentro do app; o link público é o da discussão avulsa.
+app.get('/api/comunidade', requireAuth, (req, res) => {
+  const store = readComunidade();
+  const config = readComunidadeConfig();
+  const users = readJSON('users.json');
+  const sort = req.query.sort === 'top' ? 'top' : 'recent';
+  const podeVotar = podeEscrever(req.user, config);
+  const ctx = { users, config, viewerId: req.user.id };
+  res.json({
+    discussions: comunidade.ordenarFeed(store.discussions, sort)
+      .map((d) => comunidade.discussaoResumo(d, ctx)),
+    canPost: podeVotar.ok,
+    // A tela precisa distinguir "não pode porque é visitante" de "não pode
+    // porque está suspenso" — as duas mensagens são bem diferentes.
+    blockedReason: podeVotar.ok ? null : podeVotar.error,
+  });
+});
+
+// Discussão avulsa — PÚBLICA de propósito (ver o comentário do topo do bloco).
+app.get('/api/comunidade/:id', comunidadePublicaLimiter, optionalAuth, (req, res) => {
+  const store = readComunidade();
+  const d = acharDiscussao(store, req.params.id);
+  if (!d) return res.status(404).json({ error: 'Discussão não encontrada.' });
+  const config = readComunidadeConfig();
+  const users = readJSON('users.json');
+  const permissao = podeEscrever(req.user, config);
+  res.json({
+    discussion: comunidade.discussaoCompleta(d, {
+      users, config, viewerId: req.user ? req.user.id : null, podeVotar: permissao.ok,
+    }),
+    canPost: permissao.ok,
+    blockedReason: permissao.ok ? null : permissao.error,
+    // Distingue "leitor sem sessão nenhuma" (banner de cadastro) de "visitante
+    // ou suspenso" (mensagem própria). Sem isso a tela não sabe qual mostrar.
+    anonymous: !req.user,
+    // Só o admin vê os botões de excluir de todo mundo.
+    canModerate: !!(req.user && req.user.role === 'admin'),
+  });
+});
+
+// --- Escrita ---
+
+app.post('/api/comunidade', requireAuth, writeLimiter, async (req, res) => {
+  const config = readComunidadeConfig();
+  const permissao = podeEscrever(req.user, config);
+  if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
+
+  const { erro, valor } = comunidade.validarDiscussao(req.body);
+  if (erro) return res.status(400).json({ error: erro });
+
+  // Publicar como Associação Allos é escolha do admin no formulário (ele também
+  // participa como pessoa em discussão casual). Congelado no post: é uma decisão
+  // editorial daquele texto, não um atributo da conta.
+  const asInstitution = !!(req.body && req.body.asInstitution) && req.user.role === 'admin';
+
+  const criada = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = {
+      id: String(store.nextId),
+      title: valor.title,
+      body: valor.body,
+      poll: valor.poll,
+      authorId: req.user.id,
+      author: autorSnapshot(req.user),
+      asInstitution,
+      createdAt: new Date().toISOString(),
+      votes: {},
+      comments: [],
+    };
+    store.nextId += 1;
+    store.discussions.push(d);
+    writeComunidade(store);
+    return d;
+  });
+
+  const users = readJSON('users.json');
+  res.json(comunidade.discussaoResumo(criada, { users, config, viewerId: req.user.id }));
+});
+
+// Excluir discussão: o autor tira a própria, o admin tira qualquer uma
+// (moderação mora nos próprios posts, não numa tela separada).
+app.delete('/api/comunidade/:id', requireAuth, async (req, res) => {
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    if (req.user.role !== 'admin' && d.authorId !== req.user.id) {
+      return { status: 403, error: 'Você só pode excluir as suas discussões.' };
+    }
+    store.discussions = store.discussions.filter((x) => String(x.id) !== String(d.id));
+    writeComunidade(store);
+    return { ok: true };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json({ ok: true });
+});
+
+app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, async (req, res) => {
+  const config = readComunidadeConfig();
+  const permissao = podeEscrever(req.user, config);
+  if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
+
+  const valor = comunidade.normalizarVoto(req.body && req.body.value);
+  if (valor === null) return res.status(400).json({ error: 'Voto inválido.' });
+
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    d.votes = comunidade.aplicarVoto(d.votes, req.user.id, valor);
+    writeComunidade(store);
+    return { score: comunidade.score(d.votes), myVote: comunidade.meuVoto(d.votes, req.user.id) };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json(resultado);
+});
+
+// Voto na enquete. Escolha única e trocável: gravamos o id da opção por usuário,
+// então revotar substitui em vez de somar (não existe "desvotar" — mandar o
+// mesmo id de novo mantém o voto, o que evita zerar por duplo clique).
+app.post('/api/comunidade/:id/poll', requireAuth, writeLimiter, async (req, res) => {
+  const config = readComunidadeConfig();
+  const permissao = podeEscrever(req.user, config);
+  if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
+
+  const optionId = String((req.body && req.body.optionId) || '');
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    if (!d.poll) return { status: 400, error: 'Esta discussão não tem enquete.' };
+    if (!d.poll.options.some((o) => o.id === optionId)) {
+      return { status: 400, error: 'Opção inválida.' };
+    }
+    if (!d.poll.votes || typeof d.poll.votes !== 'object') d.poll.votes = {};
+    d.poll.votes[req.user.id] = optionId;
+    writeComunidade(store);
+    return { poll: comunidade.enquetePublica(d.poll, req.user.id, true) };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json(resultado);
+});
+
+// Comentar. `parentId` responde a um comentário — e só a UM nível: responder a
+// uma resposta reancora na raiz dela. Sem isso a indentação cresce sem fim e a
+// leitura no celular quebra.
+app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (req, res) => {
+  const config = readComunidadeConfig();
+  const permissao = podeEscrever(req.user, config);
+  if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
+
+  const { erro, valor } = comunidade.validarComentario(req.body);
+  if (erro) return res.status(400).json({ error: erro });
+  const asInstitution = !!(req.body && req.body.asInstitution) && req.user.role === 'admin';
+
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    if (!Array.isArray(d.comments)) d.comments = [];
+    if (d.comments.length >= comunidade.MAX_COMMENTS_POR_DISCUSSAO) {
+      return { status: 400, error: 'Esta discussão atingiu o limite de comentários.' };
+    }
+
+    let parentId = null;
+    const pedido = req.body && req.body.parentId;
+    if (pedido) {
+      const pai = d.comments.find((c) => c.id === String(pedido));
+      if (!pai) return { status: 400, error: 'O comentário respondido não existe mais.' };
+      parentId = pai.parentId || pai.id; // reancora na raiz: só um nível
+    }
+
+    const c = {
+      id: 'c' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex'),
+      body: valor.body,
+      parentId,
+      authorId: req.user.id,
+      author: autorSnapshot(req.user),
+      asInstitution,
+      createdAt: new Date().toISOString(),
+      votes: {},
+    };
+    d.comments.push(c);
+    writeComunidade(store);
+    return { discussao: d };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+
+  // Avisa quem vai querer saber: o dono da discussão e, numa resposta, o dono do
+  // comentário respondido. Nunca a si mesmo, e nunca duas vezes pra mesma pessoa.
+  const d = resultado.discussao;
+  const novo = d.comments[d.comments.length - 1];
+  const alvos = new Set();
+  if (d.authorId && d.authorId !== req.user.id) alvos.add(d.authorId);
+  if (novo.parentId) {
+    const pai = d.comments.find((c) => c.id === novo.parentId);
+    if (pai && pai.authorId && pai.authorId !== req.user.id) alvos.add(pai.authorId);
+  }
+  for (const uid of alvos) {
+    pushNotification(uid, {
+      type: 'comunidade_reply',
+      discussionId: d.id,
+      title: d.title,
+      fromName: asInstitution ? comunidade.INSTITUTION_NAME : (req.user.name || ''),
+    });
+  }
+
+  const users = readJSON('users.json');
+  res.json(comunidade.discussaoCompleta(d, {
+    users, config, viewerId: req.user.id, podeVotar: true,
+  }));
+});
+
+app.post('/api/comunidade/:id/comentarios/:cid/vote', requireAuth, writeLimiter, async (req, res) => {
+  const config = readComunidadeConfig();
+  const permissao = podeEscrever(req.user, config);
+  if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
+
+  const valor = comunidade.normalizarVoto(req.body && req.body.value);
+  if (valor === null) return res.status(400).json({ error: 'Voto inválido.' });
+
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    const c = (d.comments || []).find((x) => x.id === req.params.cid);
+    if (!c) return { status: 404, error: 'Comentário não encontrado.' };
+    c.votes = comunidade.aplicarVoto(c.votes, req.user.id, valor);
+    writeComunidade(store);
+    return { score: comunidade.score(c.votes), myVote: comunidade.meuVoto(c.votes, req.user.id) };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json(resultado);
+});
+
+// Excluir comentário. Vira lápide (deleted) em vez de sumir: se ele tinha
+// respostas, apagá-lo de vez deixaria as respostas órfãs e sem contexto. A
+// projeção esconde a lápide quando não sobrou nenhuma resposta pendurada.
+app.delete('/api/comunidade/:id/comentarios/:cid', requireAuth, async (req, res) => {
+  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    const d = acharDiscussao(store, req.params.id);
+    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+    const c = (d.comments || []).find((x) => x.id === req.params.cid);
+    if (!c) return { status: 404, error: 'Comentário não encontrado.' };
+    if (req.user.role !== 'admin' && c.authorId !== req.user.id) {
+      return { status: 403, error: 'Você só pode excluir os seus comentários.' };
+    }
+    c.deleted = true;
+    c.body = '';
+    delete c.author;
+    writeComunidade(store);
+    return { ok: true };
+  });
+  if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
+  res.json({ ok: true });
+});
+
+// --- Administração da Comunidade (admin apenas) ---
+
+// Painel: config de avatares + banimentos vigentes + quem já publicou algo
+// (é essa lista que alimenta o seletor de "banir usuário" — banir quem nunca
+// escreveu não tem uso, e listar a base inteira aqui seria vazamento à toa).
+app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), (req, res) => {
+  const store = readComunidade();
+  const config = readComunidadeConfig();
+  const users = readJSON('users.json');
+  const agora = Date.now();
+
+  const contagem = new Map(); // userId -> { discussions, comments }
+  const bump = (id, campo) => {
+    if (!id) return;
+    if (!contagem.has(id)) contagem.set(id, { discussions: 0, comments: 0 });
+    contagem.get(id)[campo] += 1;
+  };
+  for (const d of store.discussions) {
+    bump(d.authorId, 'discussions');
+    for (const c of (d.comments || [])) if (!c.deleted) bump(c.authorId, 'comments');
+  }
+
+  const autores = [...contagem.entries()].map(([id, n]) => {
+    const u = users.find((x) => x.id === id) || null;
+    const ban = comunidade.banAtivo(config, id, agora);
+    return {
+      id,
+      name: u ? u.name : 'Conta removida',
+      username: u ? u.username : '',
+      role: u ? u.role : null,
+      discussions: n.discussions,
+      comments: n.comments,
+      ban: ban ? { until: ban.until, reason: ban.reason || '' } : null,
+    };
+  }).sort((a, b) => (b.discussions + b.comments) - (a.discussions + a.comments));
+
+  res.json({
+    institutionAvatar: config.institutionAvatar,
+    visitorAvatars: config.visitorAvatars,
+    maxVisitorAvatars: comunidade.MAX_AVATARES_VISITANTE,
+    autores,
+    bans: Object.entries(config.bans)
+      .filter(([id]) => comunidade.banAtivo(config, id, agora))
+      .map(([id, b]) => {
+        const u = users.find((x) => x.id === id) || null;
+        return { userId: id, name: u ? u.name : 'Conta removida', until: b.until, reason: b.reason || '' };
+      }),
+  });
+});
+
+// Avatar da Associação Allos (o que aparece nas publicações institucionais).
+// Mesmo contrato da foto de paciente: o cliente manda o JPEG já recortado como
+// data URL, o servidor só grava os bytes. `clear:true` remove.
+app.put('/api/admin/comunidade/avatar-instituicao', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
+  const config = readComunidadeConfig();
+  const arquivo = path.join(COMUNIDADE_AVATARS_DIR, 'instituicao.jpg');
+
+  if (req.body && req.body.clear) {
+    try { if (fs.existsSync(arquivo)) fs.unlinkSync(arquivo); } catch { /* ignora */ }
+    config.institutionAvatar = null;
+    writeComunidadeConfig(config);
+    return res.json({ institutionAvatar: null });
+  }
+
+  const img = decodeImageDataUrl(req.body && req.body.image);
+  if (!img) return res.status(400).json({ error: 'Envie a imagem como data URL (JPEG, PNG ou WebP).' });
+  if (img.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Imagem muito grande.' });
+  try {
+    fs.writeFileSync(arquivo, img);
+  } catch (err) {
+    return res.status(500).json(falhou(req, err, 'admin/comunidade-avatar-instituicao'));
+  }
+  config.institutionAvatar = `/comunidade-avatars/instituicao.jpg?v=${Date.now()}`;
+  writeComunidadeConfig(config);
+  res.json({ institutionAvatar: config.institutionAvatar });
+});
+
+// Pool de avatares do visitante (até 10). Cada visitante recebe um deles de
+// forma estável dentro da sessão dele. Groundwork: hoje visitante só LÊ a
+// Comunidade, então a pool ainda não aparece em lugar nenhum — o admin já pode
+// montá-la para quando a participação sem conta for liberada.
+app.post('/api/admin/comunidade/avatar-visitante', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
+  const config = readComunidadeConfig();
+  if (config.visitorAvatars.length >= comunidade.MAX_AVATARES_VISITANTE) {
+    return res.status(400).json({ error: `A pool aceita no máximo ${comunidade.MAX_AVATARES_VISITANTE} imagens.` });
+  }
+  const img = decodeImageDataUrl(req.body && req.body.image);
+  if (!img) return res.status(400).json({ error: 'Envie a imagem como data URL (JPEG, PNG ou WebP).' });
+  if (img.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Imagem muito grande.' });
+
+  const id = 'v' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+  try {
+    fs.writeFileSync(path.join(COMUNIDADE_AVATARS_DIR, `${id}.jpg`), img);
+  } catch (err) {
+    return res.status(500).json(falhou(req, err, 'admin/comunidade-avatar-visitante'));
+  }
+  config.visitorAvatars.push({ id, url: `/comunidade-avatars/${id}.jpg` });
+  writeComunidadeConfig(config);
+  res.json({ visitorAvatars: config.visitorAvatars });
+});
+
+app.delete('/api/admin/comunidade/avatar-visitante/:id', requireAuth, requireRole('admin'), (req, res) => {
+  const config = readComunidadeConfig();
+  // O id compõe o nome do arquivo — sem esta checagem, um ".." na URL viraria
+  // unlink fora da pasta.
+  if (!/^[A-Za-z0-9]+$/.test(req.params.id)) return res.status(400).json({ error: 'Id inválido.' });
+  const antes = config.visitorAvatars.length;
+  config.visitorAvatars = config.visitorAvatars.filter((a) => a.id !== req.params.id);
+  if (config.visitorAvatars.length === antes) return res.status(404).json({ error: 'Imagem não encontrada.' });
+  try {
+    const p = path.join(COMUNIDADE_AVATARS_DIR, `${req.params.id}.jpg`);
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch { /* ignora */ }
+  writeComunidadeConfig(config);
+  res.json({ visitorAvatars: config.visitorAvatars });
+});
+
+const BAN_MAX_DIAS = 3650; // 10 anos: na prática "permanente", mas com data
+
+// Banir por N dias. `purge:true` apaga junto TUDO que a pessoa publicou —
+// é o caso de spam, em que deixar o conteúdo no ar esvazia o banimento.
+app.post('/api/admin/comunidade/ban', requireAuth, requireRole('admin'), async (req, res) => {
+  const body = req.body || {};
+  const userId = String(body.userId || '');
+  const dias = Math.round(Number(body.days));
+  if (!userId) return res.status(400).json({ error: 'Informe o usuário.' });
+  if (!Number.isFinite(dias) || dias < 1 || dias > BAN_MAX_DIAS) {
+    return res.status(400).json({ error: `Informe a duração em dias (1 a ${BAN_MAX_DIAS}).` });
+  }
+  const users = readJSON('users.json');
+  const alvo = users.find((u) => u.id === userId);
+  if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado.' });
+  if (alvo.role === 'admin') return res.status(400).json({ error: 'Não dá para banir um administrador.' });
+
+  const config = readComunidadeConfig();
+  config.bans[userId] = {
+    until: new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toISOString(),
+    reason: clampStr(body.reason, 300).trim(),
+    by: req.user.id,
+    at: new Date().toISOString(),
+  };
+  writeComunidadeConfig(config);
+
+  let removidos = 0;
+  if (body.purge) removidos = await purgarConteudo(userId);
+  res.json({ ok: true, until: config.bans[userId].until, removidos });
+});
+
+app.delete('/api/admin/comunidade/ban/:userId', requireAuth, requireRole('admin'), (req, res) => {
+  const config = readComunidadeConfig();
+  if (!config.bans[req.params.userId]) return res.status(404).json({ error: 'Este usuário não está banido.' });
+  delete config.bans[req.params.userId];
+  writeComunidadeConfig(config);
+  res.json({ ok: true });
+});
+
+// Apaga conteúdo de um usuário: tudo (`ids` ausente) ou só as discussões
+// listadas em `ids`. Comentários viram lápide pelo mesmo motivo do DELETE
+// avulso — as respostas pendentes deles precisam continuar legíveis.
+async function purgarConteudo(userId, ids = null) {
+  const alvo = ids ? new Set(ids.map(String)) : null;
+  return withFileLock(COMUNIDADE_FILE, () => {
+    const store = readComunidade();
+    let n = 0;
+    store.discussions = store.discussions.filter((d) => {
+      if (d.authorId === userId && (!alvo || alvo.has(String(d.id)))) { n += 1; return false; }
+      return true;
+    });
+    if (!alvo) {
+      for (const d of store.discussions) {
+        for (const c of (d.comments || [])) {
+          if (c.authorId === userId && !c.deleted) {
+            c.deleted = true; c.body = ''; delete c.author; n += 1;
+          }
+        }
+      }
+    }
+    writeComunidade(store);
+    return n;
+  });
+}
+
+// Lista o que um usuário publicou, para o admin escolher o que apagar.
+app.get('/api/admin/comunidade/usuario/:userId', requireAuth, requireRole('admin'), (req, res) => {
+  const store = readComunidade();
+  const minhas = store.discussions
+    .filter((d) => d.authorId === req.params.userId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((d) => ({
+      id: d.id,
+      title: d.title,
+      createdAt: d.createdAt,
+      score: comunidade.score(d.votes),
+      commentCount: (d.comments || []).filter((c) => !c.deleted).length,
+    }));
+  const comentarios = [];
+  for (const d of store.discussions) {
+    for (const c of (d.comments || [])) {
+      if (c.authorId === req.params.userId && !c.deleted) {
+        comentarios.push({
+          id: c.id, discussionId: d.id, discussionTitle: d.title,
+          body: clampStr(c.body, 300), createdAt: c.createdAt,
+        });
+      }
+    }
+  }
+  comentarios.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  res.json({ discussions: minhas, comments: comentarios });
+});
+
+app.post('/api/admin/comunidade/purgar', requireAuth, requireRole('admin'), async (req, res) => {
+  const body = req.body || {};
+  const userId = String(body.userId || '');
+  if (!userId) return res.status(400).json({ error: 'Informe o usuário.' });
+  const ids = Array.isArray(body.discussionIds) ? body.discussionIds : null;
+  const removidos = await purgarConteudo(userId, ids);
+  res.json({ ok: true, removidos });
+});
+
 
 // ============================================================================
 // BENCHMARK DO PACIENTE SIMULADO — relatório estático atrás de senha

@@ -74,7 +74,13 @@ async function request(path, options = {}) {
     // HTML de proxy etc.), inclui o status pra não virar um "Erro desconhecido"
     // opaco — facilita diagnosticar (ex.: 404 = servidor não reiniciado).
     const err = await res.json().catch(() => null);
-    throw new Error((err && err.error) || `Erro ${res.status}${res.statusText ? ' ' + res.statusText : ''} na requisição`);
+    const e = new Error((err && err.error) || `Erro ${res.status}${res.statusText ? ' ' + res.statusText : ''} na requisição`);
+    // Status e corpo ficam disponíveis pra quem precisa reagir ao ERRO
+    // específico (ex.: 429 da cota do Aluno Externo, que vira modal em vez de
+    // uma bolha "Erro: ..." no chat).
+    e.status = res.status;
+    e.body = err;
+    throw e;
   }
   return res.json();
 }
@@ -155,6 +161,10 @@ export const api = {
     if (data && data.token) setToken(data.token);
     return data;
   },
+
+  // Exclusão da PRÓPRIA conta — pede senha atual (ver server/index.js pros
+  // limites: admin e supervisor com alunos vinculados são bloqueados lá).
+  deleteMyAccount: (password) => request('/me', { method: 'DELETE', body: { password } }),
 
   // --- Cadastro público (Aluno Externo) e recuperação de conta ---
   // Todas sem token: são as rotas de quem ainda não tem (ou perdeu) a conta.
@@ -316,6 +326,19 @@ export const api = {
   // conta própria (role e context.type são fatos, não dica do cliente).
   chat: (messages, context, maxTokens) =>
     request('/chat', { method: 'POST', body: { messages, context, maxTokens } }),
+
+  // Cota diária de sessões (só o Aluno Externo tem; nos outros papéis volta
+  // enabled:false). Consultada antes de abrir uma sessão pra avisar ali mesmo,
+  // em vez de deixar a pessoa entrar num chat que o servidor vai barrar.
+  // O contexto ({type,itemId}) diz QUAL sessão vai ser aberta: retomar uma já
+  // aberta é liberado mesmo com a cota esgotada (ver server/session-quota.js).
+  sessionQuota: (ctx) => {
+    const q = new URLSearchParams();
+    if (ctx && ctx.type) q.set('type', ctx.type);
+    if (ctx && ctx.itemId) q.set('itemId', ctx.itemId);
+    const qs = q.toString();
+    return request('/session-quota' + (qs ? `?${qs}` : ''));
+  },
 
   // Chat com o entrevistador (admin-only). O servidor usa o prompt do
   // entrevistador internamente.
@@ -633,6 +656,33 @@ export const api = {
   deleteAntessalaCase: (id) => request(`/antessala/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   // { questions: string[], text } — perguntas para o aluno aprofundar a etapa.
   reflectAntessala: (step, doc) => request('/antessala/reflect', { method: 'POST', body: { step, doc } }),
+
+  // --- Comunidade ---
+  // getDiscussion é a ÚNICA chamada do app que funciona sem sessão: é o link
+  // compartilhado (/comunidade/discussao/:id), que abre pra qualquer pessoa em
+  // modo leitura. O `request` já manda o Authorization só quando existe token,
+  // então a mesma função serve o membro logado e o visitante de fora.
+  getComunidade: (sort = 'recent') => request(`/comunidade?sort=${encodeURIComponent(sort)}`),
+  getDiscussion: (id) => request(`/comunidade/${encodeURIComponent(id)}`),
+  createDiscussion: (data) => request('/comunidade', { method: 'POST', body: data }),
+  deleteDiscussion: (id) => request(`/comunidade/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  voteDiscussion: (id, value) => request(`/comunidade/${encodeURIComponent(id)}/vote`, { method: 'POST', body: { value } }),
+  votePoll: (id, optionId) => request(`/comunidade/${encodeURIComponent(id)}/poll`, { method: 'POST', body: { optionId } }),
+  createComment: (id, data) => request(`/comunidade/${encodeURIComponent(id)}/comentarios`, { method: 'POST', body: data }),
+  voteComment: (id, cid, value) =>
+    request(`/comunidade/${encodeURIComponent(id)}/comentarios/${encodeURIComponent(cid)}/vote`, { method: 'POST', body: { value } }),
+  deleteComment: (id, cid) =>
+    request(`/comunidade/${encodeURIComponent(id)}/comentarios/${encodeURIComponent(cid)}`, { method: 'DELETE' }),
+
+  // --- Administração da Comunidade (admin) ---
+  adminGetComunidade: () => request('/admin/comunidade'),
+  adminGetComunidadeUser: (userId) => request(`/admin/comunidade/usuario/${encodeURIComponent(userId)}`),
+  adminSetInstitutionAvatar: (body) => request('/admin/comunidade/avatar-instituicao', { method: 'PUT', body }),
+  adminAddVisitorAvatar: (image) => request('/admin/comunidade/avatar-visitante', { method: 'POST', body: { image } }),
+  adminRemoveVisitorAvatar: (id) => request(`/admin/comunidade/avatar-visitante/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  adminBanComunidade: (data) => request('/admin/comunidade/ban', { method: 'POST', body: data }),
+  adminUnbanComunidade: (userId) => request(`/admin/comunidade/ban/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+  adminPurgeComunidade: (data) => request('/admin/comunidade/purgar', { method: 'POST', body: data }),
 
   // --- Notificações in-app ---
   getNotifications: () => request('/notifications'),

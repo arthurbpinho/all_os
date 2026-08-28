@@ -2427,6 +2427,14 @@ select option { background: var(--cream); color: var(--ink); }
   gap: 18px;
   align-items: flex-start;
 }
+.profile-danger {
+  border-color: var(--danger);
+  background: rgba(184, 58, 58, 0.05);
+}
+.profile-danger .section-title {
+  color: var(--danger);
+  border-bottom-color: rgba(184, 58, 58, 0.25);
+}
 @media (max-width: 700px) {
   .profile-row { flex-direction: column; }
 }
@@ -5272,4 +5280,718 @@ select option { background: var(--cream); color: var(--ink); }
 .legal-pendente {
   border-bottom: 1px dotted var(--muted);
   cursor: help;
+}
+
+/* ============================================================
+   Páginas legais (Termos de Uso / Política de Privacidade)
+   ============================================================ */
+.legal-page {
+  min-height: 100vh;
+  background: var(--cream);
+  padding: 48px 24px 80px;
+  display: flex;
+  justify-content: center;
+}
+.legal-card {
+  width: 100%;
+  max-width: 760px;
+  background: var(--cream);
+}
+.legal-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  text-decoration: none;
+  font-size: 13.5px;
+  margin-bottom: 28px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+.legal-back:hover { color: var(--marrs-deep); }
+.legal-eyebrow {
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--marrs);
+  margin-bottom: 8px;
+}
+.legal-card h1 {
+  font-family: var(--serif);
+  font-size: 34px;
+  color: var(--marrs-deep);
+  margin-bottom: 6px;
+}
+.legal-updated { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+.legal-nav {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 32px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--sand);
+  font-size: 13.5px;
+}
+.legal-nav a { color: var(--ink-soft); text-decoration: none; border-bottom: 1px solid transparent; }
+.legal-nav a:hover, .legal-nav a.active { color: var(--marrs-deep); border-bottom-color: var(--marrs); }
+
+.legal-content { color: var(--ink); font-size: 15px; line-height: 1.75; }
+.legal-content h2 {
+  font-family: var(--serif);
+  font-size: 21px;
+  color: var(--marrs-deep);
+  margin: 34px 0 12px;
+}
+.legal-content h2:first-child { margin-top: 0; }
+.legal-content h3 {
+  font-size: 15.5px;
+  color: var(--ink);
+  margin: 20px 0 8px;
+}
+.legal-content p { margin: 0 0 14px; color: var(--ink-soft); }
+.legal-content ul, .legal-content ol { margin: 0 0 14px; padding-left: 22px; color: var(--ink-soft); }
+.legal-content li { margin-bottom: 6px; }
+.legal-content strong { color: var(--ink); }
+.legal-content a { color: var(--marrs-deep); }
+.legal-content table { width: 100%; border-collapse: collapse; margin: 0 0 18px; font-size: 14px; }
+.legal-content th, .legal-content td {
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--sand);
+  color: var(--ink-soft);
+  vertical-align: top;
+}
+.legal-content th { color: var(--ink); background: var(--sand-2); font-weight: 600; }
+.legal-content .legal-highlight {
+  background: var(--marrs-tint);
+  border: 1px solid var(--marrs);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin: 0 0 18px;
+}
+.legal-content .legal-highlight p:last-child { margin-bottom: 0; }
+
+/* ────────────────────────────────────────
+   COMUNIDADE
+   Feed de discussões, thread com comentários e o painel de moderação.
+
+   A hierarquia visual pedida distingue QUEM publicou, em duas camadas:
+   o fundo do card (só a Associação Allos e o supervisor recebem tinta) e o
+   anel do avatar. Tudo sai de `kind-*`, que vem pronto do servidor — o
+   cliente nunca deduz o selo a partir do papel.
+
+     .kind-allos      Associação Allos — fundo verde + anel verde brilhante
+     .kind-supervisor Supervisor       — fundo laranja + anel laranja brilhante
+     .kind-recruiter  Recruiter        — fundo normal + anel verde brilhante
+     .kind-member     Membro da Allos  — fundo normal + anel verde fosco
+     .kind-external   Aluno externo    — fundo normal, sem anel
+   ──────────────────────────────────────── */
+
+/* Tokens do "brilho": o glow é sombra externa + borda. No tema escuro ele
+   precisa ser mais forte pra sobreviver ao fundo, então os valores são
+   redefinidos abaixo em vez de dependerem só da opacidade. */
+:root {
+  --com-glow-verde:   0 0 0 2px var(--marrs), 0 0 10px 2px rgba(0, 143, 143, 0.45);
+  --com-glow-laranja: 0 0 0 2px var(--terra-soft), 0 0 10px 2px rgba(224, 122, 95, 0.45);
+  --com-fundo-allos:    rgba(0, 143, 143, 0.07);
+  --com-fundo-supervisor: rgba(224, 122, 95, 0.07);
+}
+[data-theme="dark"] {
+  --com-glow-verde:   0 0 0 2px #2ec4b6, 0 0 12px 3px rgba(46, 196, 182, 0.55);
+  --com-glow-laranja: 0 0 0 2px #e8875f, 0 0 12px 3px rgba(232, 135, 95, 0.55);
+  --com-fundo-allos:    rgba(0, 175, 168, 0.10);
+  --com-fundo-supervisor: rgba(224, 122, 95, 0.10);
+}
+
+.comunidade { max-width: 780px; }
+
+/* --- Assinatura do autor (avatar + nome + selo) --- */
+.comunidade-autor { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.comunidade-autor-info {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 0;
+}
+.comunidade-autor-nome {
+  font-weight: 600; font-size: 14px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+}
+.comunidade-autor-nome.apagado { color: var(--muted); font-weight: 500; font-style: italic; }
+.comunidade-autor.compact .comunidade-autor-nome { font-size: 13px; }
+.comunidade-tempo { font-size: 12px; color: var(--muted); }
+
+.comunidade-selo {
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+  font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+}
+.comunidade-selo.selo-supervisor { color: var(--terra); background: var(--terra-tint); }
+.comunidade-selo.selo-recruiter  { color: var(--marrs-dark); background: var(--marrs-tint); }
+
+/* --- Avatar e seus anéis --- */
+.comunidade-avatar {
+  width: 34px; height: 34px; flex: none;
+  border-radius: 50%; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--sand-2); color: var(--ink-soft);
+  font-size: 12px; font-weight: 600;
+}
+.comunidade-avatar.grande { width: 64px; height: 64px; font-size: 20px; }
+.comunidade-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.comunidade-autor.compact .comunidade-avatar { width: 28px; height: 28px; font-size: 11px; }
+
+.comunidade-avatar.kind-allos      { box-shadow: var(--com-glow-verde); background: var(--marrs-50); }
+.comunidade-avatar.kind-supervisor { box-shadow: var(--com-glow-laranja); }
+.comunidade-avatar.kind-recruiter  { box-shadow: var(--com-glow-verde); }
+/* Membro é da Allos, mas sem brilho: anel fosco, sem sombra externa. */
+.comunidade-avatar.kind-member     { box-shadow: 0 0 0 2px var(--marrs-soft); }
+.comunidade-avatar.kind-external   { box-shadow: 0 0 0 1px var(--line); }
+
+/* Marca do app quando o admin ainda não subiu a imagem da Associação. */
+.comunidade-logo-allos {
+  font-family: var(--serif); font-size: 17px; font-weight: 700;
+  color: var(--marrs-dark); line-height: 1;
+}
+.comunidade-logo-allos span { color: var(--terra-soft); }
+.comunidade-avatar.grande .comunidade-logo-allos { font-size: 30px; }
+
+/* --- Votos --- */
+.voto { display: flex; align-items: center; gap: 2px; }
+.voto.vertical { flex-direction: column; }
+.voto-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: none; background: none; border-radius: 6px;
+  color: var(--muted); cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.voto-btn:hover:not(:disabled) { background: var(--cream-2); color: var(--ink); }
+.voto-btn:disabled { opacity: 0.4; cursor: default; }
+.voto-btn.ativo.up   { color: var(--marrs); background: var(--marrs-tint); }
+.voto-btn.ativo.down { color: var(--terra); background: var(--terra-tint); }
+.voto-placar {
+  font-size: 13px; font-weight: 700; color: var(--ink-soft);
+  min-width: 22px; text-align: center; font-variant-numeric: tabular-nums;
+}
+.voto-placar.up   { color: var(--marrs); }
+.voto-placar.down { color: var(--terra); }
+
+/* --- Compositor --- */
+.comunidade-compositor-atalho {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 14px 18px; margin-bottom: 18px;
+  background: var(--sand-2); border: 1px solid var(--sand);
+  border-radius: var(--radius); cursor: pointer; text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+}
+.comunidade-compositor-atalho:hover { border-color: var(--marrs); background: var(--cream-2); }
+.comunidade-compositor-avatar {
+  width: 34px; height: 34px; flex: none; border-radius: 50%; overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--cream); color: var(--muted);
+}
+.comunidade-compositor-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.comunidade-compositor-texto { flex: 1; color: var(--muted); font-size: 14px; }
+
+.comunidade-compositor { margin-bottom: 18px; display: flex; flex-direction: column; gap: 16px; }
+.comunidade-compositor h3 { margin: 0; }
+.comunidade-compositor .form-group label {
+  display: block; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+  font-weight: 500; color: var(--ink-soft); margin-bottom: 6px;
+}
+.comunidade-compositor .form-group .opcional {
+  letter-spacing: 0; text-transform: none; color: var(--muted); font-weight: 400;
+}
+.comunidade-compositor input[type="text"],
+.comunidade-compositor input:not([type]),
+.comunidade-compositor textarea { width: 100%; }
+.comunidade-compositor textarea { resize: vertical; min-height: 90px; }
+.contador { font-size: 11px; color: var(--muted); text-align: right; margin-top: 4px; }
+
+/* Publicar como: Associação Allos ou como a própria pessoa. */
+.comunidade-como-publicar { display: flex; gap: 8px; flex-wrap: wrap; }
+.comunidade-como-publicar button {
+  padding: 8px 16px; font-size: 13px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--ink-soft);
+  cursor: pointer; font-family: var(--body);
+}
+.comunidade-como-publicar button.ativo {
+  border-color: var(--marrs); background: var(--marrs-tint);
+  color: var(--marrs-dark); font-weight: 600;
+}
+
+.comunidade-check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-soft); cursor: pointer; }
+.comunidade-check input[type="checkbox"] {
+  width: 16px; height: 16px; flex: none; cursor: pointer; accent-color: var(--marrs);
+  appearance: auto; -webkit-appearance: checkbox;
+}
+
+.comunidade-editor-enquete { display: flex; flex-direction: column; gap: 8px; }
+.comunidade-opcao-linha { display: flex; gap: 8px; align-items: center; }
+.comunidade-opcao-linha input { flex: 1; }
+
+/* --- Ordenação do feed --- */
+.comunidade-ordem { display: flex; gap: 4px; margin-bottom: 14px; }
+.comunidade-ordem button {
+  padding: 6px 16px; font-size: 13px; border-radius: 999px;
+  border: 1px solid transparent; background: none; color: var(--ink-soft);
+  cursor: pointer; font-family: var(--body);
+}
+.comunidade-ordem button:hover { color: var(--marrs-dark); }
+.comunidade-ordem button.ativo {
+  background: var(--marrs-tint); color: var(--marrs-dark);
+  font-weight: 600; border-color: var(--marrs);
+}
+
+/* --- Card do feed --- */
+.comunidade-feed { display: flex; flex-direction: column; gap: 12px; }
+.comunidade-card {
+  display: flex; gap: 14px; padding: 16px 18px;
+  background: var(--sand-2); border: 1px solid var(--sand);
+  border-radius: var(--radius);
+  transition: border-color 0.15s;
+}
+.comunidade-card:hover { border-color: var(--line); }
+.comunidade-card-corpo { flex: 1; min-width: 0; }
+.comunidade-card-titulo { margin: 8px 0 6px; font-size: 18px; line-height: 1.3; }
+.comunidade-card-titulo a { color: var(--ink); text-decoration: none; }
+.comunidade-card-titulo a:hover { color: var(--marrs-dark); }
+.comunidade-card-resumo {
+  margin: 0 0 10px; font-size: 14px; line-height: 1.55; color: var(--ink-soft);
+  white-space: pre-wrap;
+}
+.comunidade-continuar { color: var(--marrs-dark); white-space: nowrap; }
+.comunidade-card-rodape { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.comunidade-link-comentarios { font-size: 13px; color: var(--ink-soft); text-decoration: none; }
+.comunidade-link-comentarios:hover { color: var(--marrs-dark); }
+.comunidade-tag-enquete {
+  font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600;
+  padding: 2px 8px; border-radius: 999px;
+  color: var(--marrs-dark); background: var(--marrs-tint);
+}
+
+/* Destaque institucional e de supervisor: a tinta de fundo + o brilho em volta
+   do card inteiro, para que a publicação salte na lista antes da leitura. */
+.comunidade-card.kind-allos, .comunidade-thread.kind-allos {
+  background: var(--com-fundo-allos);
+  border-color: var(--marrs);
+  box-shadow: 0 0 14px rgba(0, 143, 143, 0.16);
+}
+.comunidade-card.kind-supervisor, .comunidade-thread.kind-supervisor {
+  background: var(--com-fundo-supervisor);
+  border-color: var(--terra-soft);
+  box-shadow: 0 0 14px rgba(224, 122, 95, 0.14);
+}
+
+.comunidade-vazio { text-align: center; padding: 40px 24px; }
+.comunidade-vazio p { margin: 0 0 6px; color: var(--ink-soft); }
+.comunidade-vazio .dica { font-size: 13.5px; color: var(--muted); }
+
+/* --- Avisos de leitura --- */
+.comunidade-banner-visitante {
+  padding: 14px 18px; margin-bottom: 18px;
+  background: var(--marrs-tint); border: 1px solid var(--marrs);
+  border-radius: var(--radius); font-size: 14px; line-height: 1.55; color: var(--ink);
+}
+.comunidade-banner-visitante a { color: var(--marrs-dark); font-weight: 600; }
+.comunidade-aviso-leitura {
+  padding: 12px 16px; margin-bottom: 16px;
+  background: var(--sand-2); border: 1px dashed var(--line);
+  border-radius: var(--radius); font-size: 13.5px; color: var(--ink-soft);
+}
+.comunidade-aviso-leitura strong { color: var(--ink); font-weight: 600; }
+.comunidade-aviso-leitura a { color: var(--marrs-dark); }
+
+/* --- Thread aberta --- */
+.comunidade-voltar {
+  display: inline-block; margin-bottom: 14px;
+  font-size: 13px; color: var(--ink-soft); text-decoration: none;
+}
+.comunidade-voltar:hover { color: var(--marrs-dark); }
+
+.comunidade-thread {
+  padding: 22px 24px; margin-bottom: 20px;
+  background: var(--sand-2); border: 1px solid var(--sand); border-radius: var(--radius);
+}
+.comunidade-thread-topo {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+}
+.comunidade-thread-acoes { display: flex; gap: 6px; flex-wrap: wrap; }
+.comunidade-thread-acoes .perigo { color: var(--danger); }
+.comunidade-thread-titulo { margin: 0 0 12px; font-size: 24px; line-height: 1.25; }
+.comunidade-thread-texto {
+  font-size: 15px; line-height: 1.7; color: var(--ink);
+  white-space: pre-wrap; margin-bottom: 18px;
+}
+.comunidade-thread-rodape {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding-top: 14px; border-top: 1px solid var(--sand);
+}
+.comunidade-contagem { font-size: 13px; color: var(--muted); }
+
+/* --- Enquete --- */
+.comunidade-enquete { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.comunidade-enquete-opcao {
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; padding: 12px 16px; text-align: left;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--cream); color: var(--ink);
+  font-size: 14px; font-family: var(--body); cursor: pointer;
+  transition: border-color 0.15s;
+}
+.comunidade-enquete-opcao:hover:not(:disabled) { border-color: var(--marrs); }
+.comunidade-enquete-opcao:disabled { cursor: default; }
+.comunidade-enquete-opcao.escolhida { border-color: var(--marrs); font-weight: 600; }
+/* A barra É o fundo da opção — não ocupa largura própria, o que mantém o
+   texto legível no celular mesmo com percentual alto. */
+.comunidade-enquete-barra {
+  position: absolute; inset: 0 auto 0 0;
+  background: var(--marrs-tint);
+  transition: width 0.35s ease;
+}
+.comunidade-enquete-opcao.escolhida .comunidade-enquete-barra { background: var(--marrs-glow); }
+.comunidade-enquete-texto { position: relative; flex: 1; min-width: 0; }
+.comunidade-enquete-pct {
+  position: relative; font-variant-numeric: tabular-nums;
+  font-weight: 600; color: var(--marrs-dark); font-size: 13px;
+}
+.comunidade-enquete-rodape { font-size: 12.5px; color: var(--muted); }
+
+/* --- Caixa de comentário --- */
+.comunidade-caixa {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px; margin-bottom: 18px;
+  background: var(--sand-2); border: 1px solid var(--sand); border-radius: var(--radius);
+}
+.comunidade-caixa.resposta { margin: 10px 0 4px; background: var(--cream); }
+.comunidade-caixa textarea { width: 100%; resize: vertical; }
+.comunidade-caixa-acoes {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap;
+}
+.comunidade-caixa-acoes .comunidade-check { margin-right: auto; }
+
+/* --- Comentários --- */
+.comunidade-comentarios { display: flex; flex-direction: column; gap: 4px; }
+.comunidade-comentario { padding: 12px 0; border-top: 1px solid var(--sand); }
+.comunidade-comentario-linha { display: flex; gap: 12px; }
+.comunidade-comentario-corpo { flex: 1; min-width: 0; }
+.comunidade-comentario-texto {
+  font-size: 14px; line-height: 1.6; color: var(--ink);
+  white-space: pre-wrap; margin: 6px 0;
+}
+.comunidade-comentario-removido { font-size: 13.5px; color: var(--muted); font-style: italic; margin: 4px 0; }
+.comunidade-comentario-acoes { display: flex; gap: 14px; }
+.comunidade-comentario-acoes button {
+  background: none; border: none; padding: 0; cursor: pointer;
+  font-size: 12.5px; font-family: var(--body); color: var(--muted);
+}
+.comunidade-comentario-acoes button:hover { color: var(--marrs-dark); }
+.comunidade-comentario-acoes button.perigo:hover { color: var(--danger); }
+
+/* Resposta: um nível só. A borda à esquerda é o que marca a dobra — indentação
+   grande comeria a largura útil do celular. */
+.comunidade-comentario.aninhado {
+  margin-left: 20px; padding-left: 14px;
+  border-top: none; border-left: 2px solid var(--sand);
+}
+.comunidade-comentario.aninhado .voto-btn { width: 22px; height: 22px; }
+
+/* Fundo tingido também no comentário institucional/de supervisor. */
+.comunidade-comentario.kind-allos > .comunidade-comentario-linha,
+.comunidade-comentario.kind-supervisor > .comunidade-comentario-linha {
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.comunidade-comentario.kind-allos > .comunidade-comentario-linha { background: var(--com-fundo-allos); }
+.comunidade-comentario.kind-supervisor > .comunidade-comentario-linha { background: var(--com-fundo-supervisor); }
+
+/* --- Painel de administração --- */
+.comunidade-admin .comunidade-muted { color: var(--muted); font-size: 13px; }
+.comunidade-admin .card + .card { margin-top: 18px; }
+.comunidade-pill {
+  display: inline-block; font-size: 11px; font-weight: 600;
+  padding: 2px 10px; border-radius: 999px;
+}
+.comunidade-pill.perigo { color: var(--danger); background: rgba(184, 58, 58, 0.12); }
+
+.comunidade-admin-bloco { margin-bottom: 22px; }
+.comunidade-admin-bloco h4 { margin: 0 0 4px; font-size: 15px; }
+.comunidade-admin-bloco h5 { margin: 0 0 6px; font-size: 13px; color: var(--ink-soft); }
+.comunidade-admin-bloco > * + * { margin-top: 10px; }
+.comunidade-admin-ban { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+.comunidade-admin-ban label { display: flex; flex-direction: column; gap: 4px; }
+.comunidade-admin-ban label span {
+  font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft);
+}
+.comunidade-admin-ban input[type="number"] { width: 90px; }
+
+.comunidade-admin-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.comunidade-admin-lista li { font-size: 13.5px; }
+.comunidade-admin-lista a { color: var(--marrs-dark); }
+.comunidade-admin-lista.comentarios li {
+  padding-left: 10px; border-left: 2px solid var(--sand);
+}
+
+.comunidade-admin-avatar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.comunidade-admin-avatar-acoes { display: flex; gap: 8px; flex-wrap: wrap; }
+.comunidade-admin-pool { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.comunidade-admin-pool-item { position: relative; }
+.comunidade-admin-pool-remover {
+  position: absolute; top: -4px; right: -4px;
+  width: 20px; height: 20px; border-radius: 50%; padding: 0;
+  border: 1px solid var(--line); background: var(--cream); color: var(--danger);
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.comunidade-admin-pool-add {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 1px dashed var(--line); background: transparent;
+  color: var(--muted); font-size: 18px; line-height: 1; cursor: pointer;
+}
+.comunidade-admin-pool-add:hover { border-color: var(--marrs); color: var(--marrs-dark); }
+
+@media (max-width: 640px) {
+  .comunidade-card { padding: 14px; gap: 10px; }
+  .comunidade-card-titulo { font-size: 16.5px; }
+  .comunidade-thread { padding: 18px 16px; }
+  .comunidade-thread-titulo { font-size: 20px; }
+  /* No celular as setas ficam lado a lado sob o texto: uma coluna vertical de
+     votos rouba largura demais de um card estreito. */
+  .comunidade-card { flex-direction: column-reverse; }
+  .comunidade-card .voto.vertical { flex-direction: row; align-self: flex-start; }
+  .comunidade-comentario.aninhado { margin-left: 10px; padding-left: 10px; }
+  .comunidade-admin-ban { flex-direction: column; align-items: stretch; }
+  .comunidade-admin-ban input[type="number"] { width: 100%; }
+}
+
+/* ────────────────────────────────────────
+   EM DESENVOLVIMENTO
+   Itens de menu (e blocos de tela) de funcionalidades ainda fechadas.
+
+   A regra: o item APARECE PARA TODO MUNDO, em cinza, e o balão explica o que
+   está sendo construído — mostrar o que vem é o objetivo. Só o admin abre.
+   ──────────────────────────────────────── */
+
+/* O gatilho embrulha o item do menu; precisa ser bloco para não quebrar o
+   layout em flex do link que está dentro dele. */
+.dev-trigger { display: block; }
+
+/* Mesma caixa do `.sidebar-nav a`, em cinza e sem estado de hover — repetimos
+   as propriedades em vez de herdar porque o item bloqueado é um <span>, e o
+   seletor de link não o alcança. */
+.sidebar-nav .nav-dev {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 14px;
+  color: var(--muted);
+  border-radius: var(--radius);
+  font-size: 14px;
+  margin-bottom: 2px;
+  font-weight: 400;
+  border: 1px solid transparent;
+  text-decoration: none;
+  cursor: default;
+  opacity: 0.72;
+  transition: opacity 0.18s ease;
+}
+.sidebar-nav .nav-dev:hover { opacity: 1; }
+.sidebar-nav .nav-dev svg { flex-shrink: 0; }
+/* Liberado (admin): volta a ser um link de verdade, só mantém o marcador. */
+.sidebar-nav .nav-dev.liberado { color: var(--ink-soft); cursor: pointer; opacity: 1; }
+.sidebar-nav .nav-dev.liberado:hover { background: var(--cream); color: var(--marrs-deep); }
+.sidebar-nav .nav-dev.liberado.active {
+  background: var(--cream);
+  color: var(--marrs-deep);
+  font-weight: 500;
+  border-color: var(--sand);
+  box-shadow: inset 3px 0 0 var(--marrs);
+}
+
+/* Bolinha âmbar de "obra em andamento". Fica na ponta direita e some junto com
+   o rótulo quando a barra encolhe (senão viraria um ponto solto no ícone). */
+.nav-dev-marcador {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--warn);
+  margin-left: auto;
+  flex: none;
+}
+.sidebar-nav .nav-section.em-desenvolvimento { opacity: 0.65; cursor: default; }
+
+/* Balão. Vive no <body> (portal), então position:fixed e coordenadas vindas do
+   gatilho. `pointer-events:none` evita que ele próprio dispare o mouseleave do
+   item ao passar por baixo do cursor. */
+.dev-tooltip {
+  position: fixed;
+  z-index: 300;
+  width: 260px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--cream-2) 88%, transparent);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  pointer-events: none;
+  animation: dev-tooltip-in 0.14s ease-out;
+}
+/* Navegador sem color-mix cai neste fundo sólido (a regra acima é ignorada
+   inteira quando o valor não é reconhecido). */
+@supports not (background: color-mix(in srgb, red 50%, transparent)) {
+  .dev-tooltip { background: var(--cream-2); }
+}
+.dev-tooltip-tag {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--warn);
+  margin-bottom: 5px;
+}
+@keyframes dev-tooltip-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Bloco de tela (Perfil) em construção: mesmo vocabulário do menu. */
+.bloco-dev { opacity: 0.62; }
+.bloco-dev input, .bloco-dev textarea, .bloco-dev select { pointer-events: none; }
+.dev-etiqueta {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--warn);
+  background: rgba(201, 122, 42, 0.12);
+  padding: 2px 8px;
+  border-radius: 999px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+@media (min-width: 1025px) {
+  .sidebar.collapsed .sidebar-nav .nav-dev { justify-content: center; padding: 12px 0; }
+  .sidebar.collapsed .nav-dev-marcador { display: none; }
+}
+@media (max-width: 1024px) and (min-width: 769px) {
+  .sidebar-nav .nav-dev { justify-content: center; padding: 12px; }
+  .nav-dev-marcador { display: none; }
+}
+
+/* MMR no Perfil: o número grande à esquerda, a leitura à direita. */
+.perfil-mmr { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.perfil-mmr-valor {
+  font-family: var(--serif);
+  font-size: 42px;
+  line-height: 1;
+  color: var(--marrs-deep);
+  min-width: 84px;
+  text-align: center;
+  padding: 12px 16px;
+  background: var(--marrs-tint);
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+}
+.perfil-mmr-texto { flex: 1; min-width: 200px; font-size: 13.5px; line-height: 1.6; color: var(--ink-soft); }
+
+/* Respiro entre grupos de menu que não têm título de seção. */
+.sidebar-nav .nav-separador {
+  height: 1px;
+  margin: 14px 14px 10px;
+  background: var(--sand);
+}
+@media (min-width: 1025px) {
+  .sidebar.collapsed .sidebar-nav .nav-separador { margin: 10px 6px; }
+}
+@media (max-width: 1024px) and (min-width: 769px) {
+  .sidebar-nav .nav-separador { margin: 10px 6px; }
+}
+
+/* ────────────────────────────────────────
+   PÁGINA INICIAL — refinamento
+   A tela abria com um título que dizia o próprio nome ("Página Inicial") e três
+   parágrafos institucionais de mesmo peso, o que a fazia parecer uma seção
+   "sobre" e não a casa da pessoa. O que muda aqui: a saudação vira o título,
+   os indicadores da conta entram logo abaixo, o primeiro parágrafo assume como
+   texto de entrada e a lista de pacientes ganha um começo visível.
+   ──────────────────────────────────────── */
+
+/* Indicadores da conta. Chips baixos, número em serifada — a mesma família dos
+   títulos, que é o que amarra a faixa ao resto da identidade. */
+.inicio-resumo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 20px;
+  animation: fadeInUp 0.5s ease-out both;
+}
+.inicio-resumo-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--marrs-tint);
+  border: 1px solid var(--marrs-50);
+}
+.inicio-resumo-chip strong {
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1;
+  color: var(--marrs-deep);
+  font-variant-numeric: tabular-nums;
+}
+.inicio-resumo-chip span {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+/* O primeiro parágrafo é a entrada da tela; os outros dois são contexto. Dar
+   pesos diferentes é o que faz o bloco ser lido em vez de ignorado inteiro. */
+.inicio-hero-text .inicio-lead {
+  font-size: 15px;
+  line-height: 1.72;
+  color: var(--ink);
+}
+.inicio-hero-text .inicio-lead ~ p {
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+
+/* Começo da lista: título à esquerda, contagem à direita, régua embaixo. */
+.inicio-secao {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 34px 0 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--sand);
+}
+.inicio-secao .section-heading { margin: 0; }
+.inicio-secao-contagem {
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* O card de paciente é o que a pessoa vem clicar: ganha um convite físico ao
+   passar o mouse, em vez de só mudar de borda. */
+.character-card { transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+.character-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+@media (prefers-reduced-motion: reduce) {
+  .character-card:hover { transform: none; }
+}
+
+@media (max-width: 640px) {
+  .inicio-resumo-chip { padding: 6px 12px; }
+  .inicio-resumo-chip strong { font-size: 17px; }
+  .inicio-secao { margin-top: 26px; }
 }
