@@ -5,6 +5,8 @@ import ScoreBadge from '../components/ScoreBadge';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
+import SessionQuotaModal from '../components/SessionQuotaModal';
+import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 
 // Sessão de duelo: você atende o personagem do duelo na sua própria sessão.
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
@@ -33,6 +35,9 @@ export default function DuelSession({ user }) {
   const [highlightTarget, setHighlightTarget] = useState(null);
   const [highlightDraft, setHighlightDraft] = useState('');
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
+  // Cota diária do Aluno Externo (mensagem do servidor; vazio = sem aviso).
+  const [quotaMessage, setQuotaMessage] = useState('');
+  const abrindoRef = useRef(false); // abertura de sessão em voo (anti duplo clique)
 
   const [submitting, setSubmitting] = useState(false); // enviando/avaliando
   const [view, setView] = useState('loading'); // loading | session | waiting | result | evaluating
@@ -144,7 +149,19 @@ export default function DuelSession({ user }) {
   }
 
   async function handleStart() {
-    if (!character) return;
+    // O ref (e não só o state) segura o duplo clique: a checagem da cota é um
+    // await antes do setSessionStarted.
+    if (!character || sessionStarted || abrindoRef.current) return;
+    abrindoRef.current = true;
+
+    // Cota do Aluno Externo (3 sessões/24h): duelo conta como sessão também.
+    const bloqueio = await sessionQuotaBlockMessage({ type: 'freeplay', itemId: character.id });
+    if (bloqueio) {
+      abrindoRef.current = false;
+      setQuotaMessage(bloqueio);
+      return;
+    }
+
     setSessionStarted(true);
     const kickoff = { role: 'user', content: 'Iniciar', isSystem: true };
     setMessages([kickoff]);
@@ -153,8 +170,17 @@ export default function DuelSession({ user }) {
       const reply = await sendToAI('Iniciar', []);
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
     } catch (err) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+      // Cota estourada entre a checagem e o primeiro turno: desfaz a abertura.
+      const cota = sessionQuotaMessageFromError(err);
+      if (cota) {
+        setSessionStarted(false);
+        setMessages([]);
+        setQuotaMessage(cota);
+      } else {
+        setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+      }
     } finally {
+      abrindoRef.current = false;
       setIsTyping(false);
       textareaRef.current?.focus();
     }
@@ -517,6 +543,8 @@ export default function DuelSession({ user }) {
           </div>
         </div>
       )}
+
+      <SessionQuotaModal message={quotaMessage} onClose={() => setQuotaMessage('')} />
 
       {highlightTarget && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setHighlightTarget(null); }}>

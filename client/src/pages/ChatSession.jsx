@@ -10,6 +10,8 @@ import { makeLogItems, evalSection as evalSectionTxt, downloadText } from '../lo
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
+import SessionQuotaModal from '../components/SessionQuotaModal';
+import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 
 const PHASE_SIMULATION = 'simulation';
 const PHASE_EVALUATING = 'evaluating';
@@ -38,6 +40,9 @@ export default function ChatSession({ user }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [showSaveLoad, setShowSaveLoad] = useState(false);
   const [error, setError] = useState('');
+  // Cota diária do Aluno Externo (mensagem do servidor; vazio = sem aviso).
+  const [quotaMessage, setQuotaMessage] = useState('');
+  const abrindoRef = useRef(false); // abertura de sessão em voo (anti duplo clique)
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
   const [score, setScore] = useState(null);
@@ -198,8 +203,20 @@ export default function ChatSession({ user }) {
   }
 
   async function handleStartSession() {
-    if (!item || sessionStarted) return;
+    // O ref (e não só o state) segura o duplo clique: a checagem da cota é um
+    // await antes do setSessionStarted.
+    if (!item || sessionStarted || abrindoRef.current) return;
+    abrindoRef.current = true;
     setError('');
+
+    // Cota do Aluno Externo (3 sessões/24h): checa antes de montar o chat.
+    const bloqueio = await sessionQuotaBlockMessage({ type: 'exercise', itemId: id });
+    if (bloqueio) {
+      abrindoRef.current = false;
+      setQuotaMessage(bloqueio);
+      return;
+    }
+
     setSessionStarted(true);
 
     // O paciente fala primeiro: enviamos "Iniciar" oculto à IA pra disparar a abertura.
@@ -210,8 +227,20 @@ export default function ChatSession({ user }) {
       const reply = await sendToAI([kickoffMsg]);
       setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
     } catch (err) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+      // Cota estourada entre a checagem e o primeiro turno: desfaz a abertura.
+      const cota = sessionQuotaMessageFromError(err);
+      if (cota) {
+        setSessionStarted(false);
+        setMessages([]);
+        // O autosave pode ter gravado a sessão só com o "Iniciar"; sem isso ela
+        // voltaria como sessão em andamento na próxima visita.
+        clearActiveSession(user?.id, 'exercise', id);
+        setQuotaMessage(cota);
+      } else {
+        setMessages((prev) => [...prev, { role: 'assistant', content: `Erro: ${err.message}` }]);
+      }
     } finally {
+      abrindoRef.current = false;
       setIsTyping(false);
       textareaRef.current?.focus();
     }
@@ -993,6 +1022,8 @@ export default function ChatSession({ user }) {
           </div>
         );
       })()}
+
+      <SessionQuotaModal message={quotaMessage} onClose={() => setQuotaMessage('')} />
 
       {/* Modal de confirmação de reinício */}
       {confirmingReset && (

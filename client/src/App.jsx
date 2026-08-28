@@ -33,11 +33,17 @@ import Cadastro from './pages/Cadastro';
 import ConfirmarEmail from './pages/ConfirmarEmail';
 import EsqueciSenha from './pages/EsqueciSenha';
 import RedefinirSenha from './pages/RedefinirSenha';
+import PoliticaPrivacidade from './pages/PoliticaPrivacidade';
+import TermosDeUso from './pages/TermosDeUso';
 import Antessala from './pages/Antessala';
+import Comunidade from './pages/Comunidade';
+import ComunidadeDiscussao from './pages/ComunidadeDiscussao';
+import AdminComunidade from './pages/AdminComunidade';
 import Suporte from './pages/Suporte';
 import SelecaoDashboard from './pages/SelecaoDashboard';
 import SelecaoLogs from './pages/SelecaoLogs';
 import NotificationBell from './components/NotificationBell';
+import DevTooltip from './components/DevTooltip';
 import ThemeToggle from './components/ThemeToggle';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 import { ICONS } from './icons';
@@ -50,9 +56,60 @@ const LOGIN_PATH = '/login';
 // não disparam sessão de visitante: pedir um token de visitante pra alguém que
 // está criando conta gastaria cota do limite por IP sem nenhum ganho — e numa
 // faculdade, onde a sala toda sai pelo mesmo IP, isso importa.
-const ROTAS_PUBLICAS = ['/cadastro', '/confirmar-email', '/esqueci-senha', '/redefinir-senha'];
+// Termos de Uso e Política de Privacidade entram na mesma lista: precisam ser
+// lidos por quem ainda está decidindo se cria conta, então não podem exigir
+// login. Também respondem para quem já tem conta (link no rodapé/Perfil) —
+// aqui elas não fazem distinção, é o mesmo texto para todo mundo.
+const ROTAS_PUBLICAS = [
+  '/cadastro', '/confirmar-email', '/esqueci-senha', '/redefinir-senha',
+  '/termos-de-uso', '/politica-de-privacidade',
+];
 function ehRotaPublica(pathname) {
   return ROTAS_PUBLICAS.some((r) => pathname === r || pathname.startsWith(r + '/'));
+}
+
+// Link de uma discussão da Comunidade. É o que o botão "compartilhar" copia,
+// então precisa abrir para QUEM RECEBEU a mensagem — sem conta e sem gastar
+// token de visitante (numa faculdade a sala toda sai pelo mesmo IP, e um link
+// circulando no grupo esgotaria o limite por IP à toa). Quem já está logado
+// segue pelo shell normal, com a barra lateral e os botões de participação;
+// só o leitor anônimo cai na versão solta.
+const DISCUSSAO_PUBLICA = /^\/comunidade\/discussao\/[^/]+$/;
+function ehDiscussaoPublica(pathname) {
+  return DISCUSSAO_PUBLICA.test(pathname);
+}
+
+// Texto do balão de "Seu desenvolvimento". A seção inteira e os dois itens
+// dentro dela compartilham a mesma explicação — é uma frente só, ainda fechada.
+const DESC_DESENVOLVIMENTO =
+  'Ferramentas de monitoramento para seus supervisores do seu progresso individual.';
+
+// Item de menu de uma funcionalidade em construção.
+//
+// Regra combinada: o item APARECE PARA TODO MUNDO, em cinza, com um balão que
+// explica o que está sendo construído — mostrar o que vem é o ponto. Só o admin
+// consegue abrir; para os demais o item nem sequer é um link, é um botão que
+// abre a explicação (`aria-disabled` conta ao leitor de tela que não leva a
+// lugar nenhum). `to` ausente = a tela nem existe ainda, então ninguém abre.
+function NavEmDesenvolvimento({ to, icon, label, descricao, liberado, ativo }) {
+  const marcador = <span className="nav-dev-marcador" aria-hidden="true" />;
+
+  if (liberado && to) {
+    return (
+      <DevTooltip text={descricao}>
+        <Link to={to} className={`nav-dev liberado ${ativo ? 'active' : ''}`} title={label}>
+          {icon}<span>{label}</span>{marcador}
+        </Link>
+      </DevTooltip>
+    );
+  }
+  return (
+    <DevTooltip text={descricao} abrirNoToque>
+      <span className="nav-dev" role="link" aria-disabled="true" tabIndex={0} title={label}>
+        {icon}<span>{label}</span>{marcador}
+      </span>
+    </DevTooltip>
+  );
 }
 
 export default function App() {
@@ -121,6 +178,7 @@ export default function App() {
     if (location.pathname === LOGIN_PATH) return;
     if (location.pathname.startsWith('/processo-seletivo')) return;
     if (ehRotaPublica(location.pathname)) return;
+    if (ehDiscussaoPublica(location.pathname)) return;
 
     visitorPedidoRef.current = true;
     let cancelled = false;
@@ -203,6 +261,8 @@ export default function App() {
         <Route path="/confirmar-email" element={<ConfirmarEmail onLogin={(u) => handleLogin(u, { navegar: false })} />} />
         <Route path="/esqueci-senha" element={<EsqueciSenha />} />
         <Route path="/redefinir-senha" element={<RedefinirSenha />} />
+        <Route path="/termos-de-uso" element={<TermosDeUso />} />
+        <Route path="/politica-de-privacidade" element={<PoliticaPrivacidade />} />
       </Routes>
     );
   }
@@ -210,6 +270,16 @@ export default function App() {
   // sessão de visitante ativa — é assim que o visitante troca por uma conta real.
   if (location.pathname === LOGIN_PATH) {
     return <Login onLogin={handleLogin} visitorAtivo={!!user && user.role === 'visitor'} />;
+  }
+  // Discussão aberta por link, sem conta: renderiza a tela sozinha, fora do
+  // shell (a barra lateral pressupõe um usuário). Quem tem sessão passa direto
+  // e cai na rota normal lá embaixo, dentro do app.
+  if (!user && ehDiscussaoPublica(location.pathname)) {
+    return (
+      <Routes>
+        <Route path="/comunidade/discussao/:id" element={<ComunidadeDiscussao user={null} />} />
+      </Routes>
+    );
   }
   if (!user) {
     // Sessão de visitante sendo criada pelo efeito acima. Dura um round-trip.
@@ -301,75 +371,129 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {(isTherapist || isSupervisor || isAdmin || isVisitor) && (
+          {(isTherapist || isAdmin || isVisitor) && (
             <>
-              <div className="nav-section">Prática</div>
-              {(isTherapist || isAdmin || isVisitor) && (
-                <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''} title="Início">
-                  {ICONS.home}<span>Início</span>
+              <div className="nav-section">Página inicial</div>
+              <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''} title="Simulação">
+                {ICONS.home}<span>Simulação</span>
+              </Link>
+              {!isVisitor && (
+                <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''} title="Desafie um amigo">
+                  {ICONS.duel}<span>Desafie um amigo</span>
                 </Link>
               )}
-              {/* Treinamento voltou pro menu porque a tela de Início que o
-                  abria (as duas "portas") deixou de existir: o /inicio agora é
-                  a lista de pacientes. A Trilha é o hub dos outros modos —
-                  Progressão, Duelo e Antessala moram dentro dela. O visitante
-                  não entra na Trilha, então cai direto na Progressão, que é o
-                  que ele pode usar. */}
-              {(isTherapist || isAdmin || isVisitor) && (
-                <Link
-                  to={isVisitor ? '/progressao' : '/skills'}
-                  className={isActive('/skills') || isActive('/progressao') ? 'active' : ''}
-                  title="Treinamento"
-                >
-                  {ICONS.skill}<span>Treinamento</span>
-                </Link>
+              {/* Progressão e Antessala são ADMIN ONLY: não aparecem para aluno
+                  nem em cinza — some da barra inteira para quem não é admin.
+                  (A Antessala do supervisor é outra tela, a de ler os mapas
+                  entregues, e continua na seção Histórico dele.) */}
+              {isAdmin && (
+                <>
+                  <Link to="/progressao" className={isActive('/progressao') ? 'active' : ''} title="Progressão">
+                    {ICONS.progression}<span>Progressão</span>
+                  </Link>
+                  <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''} title="Antessala">
+                    {ICONS.antessala}<span>Antessala</span>
+                  </Link>
+                </>
               )}
+              <NavEmDesenvolvimento
+                to="/skills"
+                icon={ICONS.skill}
+                label="Trilha"
+                liberado={isAdmin}
+                ativo={isActive('/skills')}
+                descricao="A trilha é um conjunto de ferramentas e exercícios desenvolvidos com base em Prática Deliberada para trabalhar competências clínicas para além da estrutura de simulação de um caso."
+              />
+              <NavEmDesenvolvimento
+                to="/neuro"
+                icon={ICONS.neuro}
+                label="Avaliação Neuro"
+                liberado={isAdmin}
+                ativo={isActive('/neuro')}
+                descricao="Pacientes de simulação e estrutura de correção desenvolvidos especificamente para o contexto de avaliação neuropsicológica."
+              />
             </>
           )}
 
-          {/* Comunidade ACIMA de Histórico. Objetivos veio da Prática (mesma
-              audiência: aluno/admin — não visitante, não supervisor). O avaliador
-              não participa da comunidade (só vê o Processo Seletivo). */}
           {!isVisitor && !isEvaluator && (
             <>
               <div className="nav-section">Comunidade</div>
+              <Link to="/comunidade" className={isActive('/comunidade') ? 'active' : ''} title="Comunidade">
+                {ICONS.comunidade}<span>Comunidade</span>
+              </Link>
+              {/* O Ranking não aparece na nova estrutura, mas também não foi
+                  pedida a remoção dele — segue aqui, que é onde já estava. */}
               <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''} title="Ranking">
                 {ICONS.supervisor}<span>Ranking</span>
               </Link>
-              {(isTherapist || isAdmin) && (
-                <Link to="/missoes" className={isActive('/missoes') ? 'active' : ''} title="Objetivos">
-                  {ICONS.flame}<span>Objetivos</span>
-                </Link>
-              )}
             </>
           )}
 
-          {(isTherapist || isSupervisor || isVisitor || isAdmin) && (
+          {/* "Seu desenvolvimento" inteiro está em construção — o próprio título
+              da seção carrega a explicação, e os dois itens herdam o mesmo texto
+              (é o que o documento descreve). Aparece para todos, cinza, porque a
+              ideia é justamente mostrar o que está sendo construído. */}
+          {!isEvaluator && (
+            <>
+              <DevTooltip text={DESC_DESENVOLVIMENTO} abrirNoToque>
+                <div className="nav-section em-desenvolvimento">Seu desenvolvimento</div>
+              </DevTooltip>
+              <NavEmDesenvolvimento
+                to="/missoes"
+                icon={ICONS.flame}
+                label="Objetivos e metas"
+                liberado={isAdmin}
+                ativo={isActive('/missoes')}
+                descricao={DESC_DESENVOLVIMENTO}
+              />
+              {/* Sem rota: a tela do gráfico ainda não existe. O item está aqui
+                  só como sinalização, e por isso nunca é liberado. */}
+              <NavEmDesenvolvimento
+                icon={ICONS.progression}
+                label="Gráfico"
+                liberado={false}
+                descricao={DESC_DESENVOLVIMENTO}
+              />
+            </>
+          )}
+
+          {(isTherapist || isAdmin || isVisitor) && (
+            <>
+              {/* Perfil e Minhas sessões são entradas soltas na nova estrutura,
+                  sem título de seção acima — o separador só dá o respiro que o
+                  título dava. */}
+              <div className="nav-separador" aria-hidden="true" />
+              {!isVisitor && (
+                <Link to="/profile" className={isActive('/profile') ? 'active' : ''} title="Perfil">
+                  {ICONS.social}<span>Perfil</span>
+                </Link>
+              )}
+              <Link to="/logs" className={isActive('/logs') ? 'active' : ''} title="Minhas sessões">
+                {ICONS.log}<span>Minhas sessões</span>
+              </Link>
+            </>
+          )}
+
+          {/* Do supervisor para baixo é o menu de trabalho, que a nova estrutura
+              não menciona e por isso segue como estava. */}
+          {isSupervisor && (
             <>
               <div className="nav-section">Histórico</div>
-              {/* "Logs de Duelo" deixou de ser item próprio — agora é uma aba
-                  dentro de "Minhas Sessões". A rota /duelo/logs segue existindo. */}
-              {(isTherapist || isVisitor) && (
-                <Link to="/logs" className={isActive('/logs') ? 'active' : ''} title="Minhas Sessões">
-                  {ICONS.log}<span>Minhas Sessões</span>
-                </Link>
-              )}
-              {isSupervisor && (
-                <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''} title="Logs dos Alunos">
-                  {ICONS.supervisor}<span>Logs dos Alunos</span>
-                </Link>
-              )}
+              <Link to="/supervisor" className={isActive('/supervisor') ? 'active' : ''} title="Logs dos Alunos">
+                {ICONS.supervisor}<span>Logs dos Alunos</span>
+              </Link>
               {/* Antessala: o supervisor lê aqui os mapas entregues pelos alunos. */}
-              {isSupervisor && (
-                <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''} title="Antessala">
-                  {ICONS.antessala}<span>Antessala</span>
-                </Link>
-              )}
-              {(isSupervisor || isAdmin) && (
-                <Link to="/terapeutas" className={isActive('/terapeutas') ? 'active' : ''} title="Terapeutas">
-                  {ICONS.social}<span>Terapeutas</span>
-                </Link>
-              )}
+              <Link to="/antessala" className={isActive('/antessala') ? 'active' : ''} title="Antessala">
+                {ICONS.antessala}<span>Antessala</span>
+              </Link>
+            </>
+          )}
+          {(isSupervisor || isAdmin) && (
+            <>
+              {isAdmin && <div className="nav-section">Histórico</div>}
+              <Link to="/terapeutas" className={isActive('/terapeutas') ? 'active' : ''} title="Terapeutas">
+                {ICONS.social}<span>Terapeutas</span>
+              </Link>
             </>
           )}
 
@@ -456,6 +580,12 @@ export default function App() {
                   o detalhe (mensagem real, stack, quem, onde) fica aqui. */}
               <Link to="/admin/erros" className={isActive('/admin/erros') ? 'active' : ''} title="Logs de Erro">
                 {ICONS.alert}<span>Logs de Erro</span>
+              </Link>
+              {/* Moderação e identidade visual da Comunidade. Excluir uma
+                  discussão ou comentário avulso NÃO passa por aqui — o admin
+                  faz isso no próprio post. */}
+              <Link to="/admin/comunidade" className={isActive('/admin/comunidade') ? 'active' : ''} title="Comunidade">
+                {ICONS.comunidade}<span>Comunidade</span>
               </Link>
             </>
           )}
@@ -546,9 +676,11 @@ export default function App() {
           <Route path="/simulacao-independente" element={<SimulacaoIndependente user={user} />} />
           <Route path="/benchmark-simulacao" element={<BenchmarkSimulacao />} />
           <Route path="/suporte" element={<Suporte user={user} />} />
-          <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} />} />
+          <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} onLogout={handleLogout} />} />
           <Route path="/missoes" element={<Missoes user={user} />} />
           <Route path="/ranking" element={<Ranking user={user} />} />
+          <Route path="/comunidade" element={<Comunidade user={user} />} />
+          <Route path="/comunidade/discussao/:id" element={<ComunidadeDiscussao user={user} />} />
           <Route path="/selecao/dashboard" element={<SelecaoDashboard user={user} />} />
           <Route path="/selecao/logs" element={<SelecaoLogs user={user} />} />
           <Route path="/admin/users" element={<AdminUsers user={user} />} />
@@ -560,6 +692,7 @@ export default function App() {
           <Route path="/admin/modelos" element={<AdminModelos />} />
           <Route path="/admin/prompts" element={<AdminPrompts />} />
           <Route path="/admin/erros" element={<AdminErrorLogs />} />
+          <Route path="/admin/comunidade" element={<AdminComunidade />} />
           <Route path="*" element={<Navigate to={defaultRoute(user)} />} />
         </Routes>
       </main>

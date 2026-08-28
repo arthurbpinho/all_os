@@ -66,3 +66,8 @@ server/data/neuro-characters.json
 # Documentação interna e material de apoio — ficam só na máquina, fora do git.
 SEGURANCA.md
 .manuais/
+# Comunidade: as discussões são conteúdo escrito pelos usuários, e a config leva
+# os banimentos. O servidor cria os dois vazios no boot (ver index.js), então
+# nada precisa estar versionado aqui.
+server/data/comunidade.json
+server/data/comunidade-config.json

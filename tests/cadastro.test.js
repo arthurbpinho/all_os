@@ -128,6 +128,21 @@ describe('login endurecido', () => {
     expect(comNovo.status).toBe(200);
   });
 
+  // 400, não 401: o cliente trata TODO 401 como sessão expirada e desloga na
+  // hora (ver api.js) — digitar a senha atual errada não pode derrubar a
+  // sessão, só mostrar "senha incorreta" e deixar tentar de novo.
+  it('senha atual errada não invalida a sessão (400, não 401)', async () => {
+    const token = await loginAs('aluno');
+    const res = await request(app).post('/api/me/password').set(authHeader(token))
+      .send({ currentPassword: 'senhaerrada', newPassword: 'Nova@Senha1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/incorreta/i);
+
+    // A sessão continua válida — o token não foi revogado pelo erro.
+    const me = await request(app).get('/api/me').set(authHeader(token));
+    expect(me.status).toBe(200);
+  });
+
   it('reset pelo admin também derruba a sessão aberta do aluno', async () => {
     const doAluno = await loginAs('aluno');
     const admin = await loginAs('admin');
@@ -268,6 +283,19 @@ describe('cadastro de Aluno Externo', () => {
 });
 
 // ---------------------------------------------------------------------------
+describe('/api/config — URLs legais', () => {
+  beforeEach(limpar);
+
+  // Por padrão apontam pras páginas dentro do próprio app (rota relativa),
+  // não pro texto sublinhado-sem-link do "Legal" — ver server/index.js.
+  it('termosUrl e privacidadeUrl vêm preenchidas por padrão', async () => {
+    const res = await request(app).get('/api/config');
+    expect(res.status).toBe(200);
+    expect(res.body.termosUrl).toBe('/termos-de-uso');
+    expect(res.body.privacidadeUrl).toBe('/politica-de-privacidade');
+  });
+});
+
 describe('recuperação de senha', () => {
   beforeEach(limpar);
 
@@ -347,9 +375,11 @@ describe('troca de e-mail do próprio usuário', () => {
   it('exige a senha atual e confirma o endereço novo por link', async () => {
     const token = await loginAs('aluno');
 
+    // 400, não 401: o cliente trata TODO 401 como sessão expirada e desloga na
+    // hora (ver api.js) — aqui a sessão continua válida, só a senha está errada.
     const semSenha = await request(app).post('/api/me/email').set(authHeader(token))
       .send({ novoEmail: 'novo@exemplo.invalid', senhaAtual: 'errada' });
-    expect(semSenha.status).toBe(401);
+    expect(semSenha.status).toBe(400);
 
     const ok = await request(app).post('/api/me/email').set(authHeader(token))
       .send({ novoEmail: 'novo@exemplo.invalid', senhaAtual: TEST_PASSWORD });

@@ -130,10 +130,10 @@ export default function Terapeutas({ user }) {
 
       {error && <div className="alert error">{error}<button onClick={() => setError('')} className="close">×</button></div>}
 
-      {/* --- Banco de Sidequests --- */}
+      {/* --- Banco de Exercícios --- */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <h3 style={{ margin: 0 }}>Banco de Sidequests</h3>
+          <h3 style={{ margin: 0 }}>Banco de Exercícios</h3>
           <button className="btn btn-outline btn-sm" onClick={() => setShowBankForm((v) => !v)}>
             {showBankForm ? 'Cancelar' : '+ Nova sidequest'}
           </button>
@@ -226,7 +226,7 @@ export default function Terapeutas({ user }) {
                   </div>
                 </div>
 
-                <h4 className="section-heading" style={{ marginTop: 18 }}>Sidequest ativa</h4>
+                <h4 className="section-heading" style={{ marginTop: 18 }}>Exercício ativo</h4>
                 {studentSq === null ? (
                   <p style={{ color: 'var(--ink-soft)' }}><span className="spinner" /> Carregando…</p>
                 ) : studentSq.active ? (
@@ -262,7 +262,7 @@ export default function Terapeutas({ user }) {
                   </button>
                 </div>
 
-                <h4 className="section-heading" style={{ marginTop: 22 }}>Sidequests concluídas</h4>
+                <h4 className="section-heading" style={{ marginTop: 22 }}>Exercícios concluídos</h4>
                 {studentSq && studentSq.completed && studentSq.completed.length > 0 ? (
                   <div className="sidequest-completed-list">
                     {studentSq.completed.map((c, i) => (

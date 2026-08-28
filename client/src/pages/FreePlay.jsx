@@ -73,7 +73,7 @@ export default function FreePlay({ user }) {
 
       {sidequest && (
         <div className="sidequest-banner">
-          <div className="sidequest-banner-label">✦ Sidequest ativa · objetivo principal</div>
+          <div className="sidequest-banner-label">✦ Exercício ativo · objetivo principal</div>
           <div className="sidequest-banner-title">{sidequest.title}</div>
           <div className="sidequest-banner-desc">{sidequest.description}</div>
           <div className="sidequest-banner-hint">

@@ -4,8 +4,16 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import PhotoCropper from '../components/PhotoCropper';
 import RichText from '../components/RichText';
+import DevTooltip from '../components/DevTooltip';
 
-export default function Profile({ user, onUpdate }) {
+// Balões das partes do Perfil que ainda estão em construção. Mesmo vocabulário
+// do menu lateral (ver NavEmDesenvolvimento em App.jsx): cinza + explicação.
+const DESC_DESCRICAO_VISUAL =
+  'Funcionalidade para interação do paciente com sua descrição visual em tempo real na sessão.';
+const DESC_ABORDAGEM =
+  'Conduziremos pesquisas em psicologia comparada a partir dos dados gerados pelos usuários.';
+
+export default function Profile({ user, onUpdate, onLogout }) {
   const navigate = useNavigate();
   const [name, setName] = useState(user.name || '');
   // Troca de e-mail (fluxo próprio, ver mais abaixo). O campo do formulário
@@ -32,6 +40,12 @@ export default function Profile({ user, onUpdate }) {
   const [savedAt, setSavedAt] = useState(null);
   const [error, setError] = useState('');
   const [gamification, setGamification] = useState(null);
+  // Exercícios (as antigas sidequests): a pessoa escolhe se quer receber um
+  // objetivo junto do atendimento. Ausente = ligado (contas antigas).
+  const [sidequestsEnabled, setSidequestsEnabled] = useState(user.sidequestsEnabled !== false);
+  const [abordagem, setAbordagem] = useState(user.abordagem || '');
+  // MMR competitivo, mostrado aqui em vez de só no Ranking.
+  const [mmr, setMmr] = useState(null);
 
   // Troca de senha
   const [pwdCurrent, setPwdCurrent] = useState('');
@@ -40,6 +54,13 @@ export default function Profile({ user, onUpdate }) {
   const [pwdSaving, setPwdSaving] = useState(false);
   const [pwdError, setPwdError] = useState('');
   const [pwdSuccess, setPwdSuccess] = useState('');
+
+  // Exclusão da própria conta
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   // Título (subtítulo) desbloqueável exibido sob o nome / no ranking
   const [activeTitle, setActiveTitle] = useState(user.activeTitle || '');
@@ -85,10 +106,47 @@ export default function Profile({ user, onUpdate }) {
     }
   }
 
+  function openDeleteModal() {
+    setDeleteError('');
+    setDeleteConfirmText('');
+    setDeletePassword('');
+    setShowDeleteModal(true);
+  }
+
+  function closeDeleteModal() {
+    if (deleting) return;
+    setShowDeleteModal(false);
+  }
+
+  async function handleDeleteAccount() {
+    setDeleteError('');
+    if (deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR') {
+      setDeleteError('Digite EXCLUIR para confirmar.');
+      return;
+    }
+    if (!deletePassword) {
+      setDeleteError('Digite sua senha atual.');
+      return;
+    }
+    setDeleting(true);
+    try {
+      await api.deleteMyAccount(deletePassword);
+      // A conta já não existe mais no servidor — sai da sessão local e vai
+      // pro login, igual ao "Sair" comum.
+      onLogout();
+    } catch (err) {
+      setDeleteError(err.message || 'Não foi possível excluir a conta.');
+      setDeleting(false);
+    }
+  }
+
   useEffect(() => {
     api.getGamification(user.id)
       .then(setGamification)
       .catch(() => {});
+    api.getMyMmr()
+      .then(setMmr)
+      .catch(() => {}); // sem MMR ainda, o bloco simplesmente não aparece
   }, [user.id]);
 
   const earnedBadges = gamification?.achievements?.filter((a) => a.earned) || [];
@@ -124,6 +182,7 @@ export default function Profile({ user, onUpdate }) {
         visualDescription,
         updateAllOS,
         updateAllos,
+        sidequestsEnabled,
       });
       onUpdate(updated);
       setSavedAt(new Date());
@@ -291,6 +350,60 @@ export default function Profile({ user, onUpdate }) {
       )}
 
       <form onSubmit={handleSave} className="profile-form">
+        {/* MMR — a mesma medida do Ranking, aqui como leitura da própria conta.
+            Some durante a calibração? Não: mostrar quantas partidas faltam é
+            justamente o que explica por que ainda não há número. */}
+        {mmr && (
+          <section className="profile-section">
+            <h3 className="section-title">MMR</h3>
+            <div className="perfil-mmr">
+              <div className="perfil-mmr-valor">
+                {mmr.calibrating ? '—' : mmr.mmr}
+              </div>
+              <div className="perfil-mmr-texto">
+                {mmr.calibrating ? (
+                  <>
+                    <strong>Em calibração.</strong>{' '}
+                    {mmr.matchesRemaining === 1
+                      ? 'Falta 1 atendimento no modo Simulação para o seu MMR aparecer.'
+                      : `Faltam ${mmr.matchesRemaining} atendimentos no modo Simulação para o seu MMR aparecer.`}
+                  </>
+                ) : (
+                  <>
+                    Medida de habilidade do modo Simulação, calculada a partir da nota e da
+                    dificuldade de cada paciente. {mmr.n} {mmr.n === 1 ? 'partida contabilizada' : 'partidas contabilizadas'}.
+                  </>
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Exercícios (as antigas sidequests). O interruptor não cancela o que o
+            supervisor atribuiu — só para de servir o objetivo no atendimento. */}
+        <section className="profile-section">
+          <h3 className="section-title">Exercícios</h3>
+          <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 10 }}>
+            Exercícios são objetivos clínicos que entram junto do atendimento e viram o foco
+            da sessão — conduzir uma devolutiva, sustentar um silêncio, e assim por diante.
+          </p>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={sidequestsEnabled}
+              onChange={(e) => setSidequestsEnabled(e.target.checked)}
+            />
+            <span>
+              <strong>Atender com exercício</strong>
+              <br />
+              <span style={{ color: 'var(--ink-soft)', fontSize: 13 }}>
+                Desligado, você atende sem nenhum objetivo extra. Um exercício que o seu
+                supervisor tenha atribuído continua guardado e volta quando você religar.
+              </span>
+            </span>
+          </label>
+        </section>
+
         {/* Foto de perfil */}
         <section className="profile-section">
           <h3 className="section-title">Foto de perfil</h3>
@@ -332,8 +445,13 @@ export default function Profile({ user, onUpdate }) {
             </label>
           )}
 
-          <div className="visual-desc">
-            <label className="visual-desc-label">Descrição visual</label>
+          <div className="visual-desc bloco-dev">
+            <label className="visual-desc-label">
+              Descrição visual
+              <DevTooltip text={DESC_DESCRICAO_VISUAL} abrirNoToque>
+                <span className="dev-etiqueta" tabIndex={0}>Em desenvolvimento</span>
+              </DevTooltip>
+            </label>
             <div className={`visual-desc-box ${visualDescription && !generatingDesc ? '' : 'empty'}`} aria-readonly="true" tabIndex={-1}>
               {generatingDesc ? (
                 <span className="visual-desc-loading"><span className="spinner" /> Gerando descrição visual…</span>
@@ -354,6 +472,27 @@ export default function Profile({ user, onUpdate }) {
             <div style={{ flex: 1 }}>
               <label htmlFor="name">Nome de exibição</label>
               <input id="name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Como deseja ser chamado(a)" />
+            </div>
+          </div>
+
+          {/* Abordagem teórica. Em construção: o campo aparece para todos —
+              mostrar o que vem é o ponto — mas ainda não é editável nem salvo
+              (o servidor aceita o campo; a tela é que o mantém fechado). */}
+          <div className="profile-row bloco-dev" style={{ marginTop: 14 }}>
+            <div style={{ flex: 1 }}>
+              <label htmlFor="abordagem">
+                Abordagem
+                <DevTooltip text={DESC_ABORDAGEM} abrirNoToque>
+                  <span className="dev-etiqueta" tabIndex={0}>Em desenvolvimento</span>
+                </DevTooltip>
+              </label>
+              <input
+                id="abordagem"
+                type="text"
+                value={abordagem}
+                readOnly
+                placeholder="Psicanálise, TCC, Fenomenológica…"
+              />
             </div>
           </div>
         </section>
@@ -469,6 +608,20 @@ export default function Profile({ user, onUpdate }) {
         </form>
       </section>
 
+      <section className="profile-section profile-danger" style={{ marginTop: 24 }}>
+        <h3 className="section-title">Excluir conta</h3>
+        <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 12, lineHeight: 1.6 }}>
+          Isso encerra seu acesso e remove sua conta do all_OS — não é possível desfazer. Suas
+          sessões, avaliações e conversas registradas continuam guardadas (fazem parte do
+          histórico de supervisão e de pesquisa da Allos); para pedir a exclusão delas, envie um
+          e-mail para <strong>suporte@allos.org.br</strong>. Leia mais na{' '}
+          <a href="/politica-de-privacidade" target="_blank" rel="noopener noreferrer">política de privacidade</a>.
+        </p>
+        <button type="button" className="btn btn-danger" onClick={openDeleteModal}>
+          Excluir minha conta
+        </button>
+      </section>
+
       {showConsentModal && (
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) cancelConsent(); }}>
           <div className="modal" style={{ maxWidth: 460 }}>
@@ -480,6 +633,55 @@ export default function Profile({ user, onUpdate }) {
             <div className="modal-actions">
               <button type="button" className="btn btn-outline" onClick={cancelConsent}>Não</button>
               <button type="button" className="btn btn-primary" onClick={confirmConsent}>Sim</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showDeleteModal && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeDeleteModal(); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <h3>Excluir sua conta</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 14, lineHeight: 1.6, marginTop: -2, marginBottom: 16 }}>
+              <strong>Esta ação não pode ser desfeita.</strong> Você perde o acesso ao all_OS
+              imediatamente. Para confirmar, digite <strong>EXCLUIR</strong> e sua senha atual.
+            </p>
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div>
+                <label htmlFor="del-confirm">Digite EXCLUIR para confirmar</label>
+                <input
+                  id="del-confirm"
+                  type="text"
+                  value={deleteConfirmText}
+                  onChange={(e) => setDeleteConfirmText(e.target.value)}
+                  autoComplete="off"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label htmlFor="del-password">Sua senha atual</label>
+                <input
+                  id="del-password"
+                  type="password"
+                  value={deletePassword}
+                  onChange={(e) => setDeletePassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+              </div>
+            </div>
+            {deleteError && <div className="alert error" style={{ marginTop: 12 }}>{deleteError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-outline" onClick={closeDeleteModal} disabled={deleting}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={handleDeleteAccount}
+                disabled={deleting || deleteConfirmText.trim().toUpperCase() !== 'EXCLUIR' || !deletePassword}
+              >
+                {deleting ? 'Excluindo…' : 'Excluir definitivamente'}
+              </button>
             </div>
           </div>
         </div>
