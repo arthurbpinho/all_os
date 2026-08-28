@@ -463,7 +463,16 @@ console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 /
 console.log('[startup] VAPID_PUBLIC_KEY  =', envDiag('VAPID_PUBLIC_KEY'), '(Web Push)');
 console.log('[startup] GRAPH_TENANT_ID    =', envDiag('GRAPH_TENANT_ID'), '(e-mail via Microsoft 365 / Graph)');
 console.log('[startup] GRAPH_CLIENT_ID    =', envDiag('GRAPH_CLIENT_ID'));
-console.log('[startup] GRAPH_CLIENT_SECRET=', envDiag('GRAPH_CLIENT_SECRET'));
+console.log('[startup] GRAPH_CLIENT_SECRET=', envDiag('GRAPH_CLIENT_SECRET'), '(o tenant da Allos BLOQUEIA este caminho — use certificado)');
+// Sem estas três linhas o log do Railway mostrava todas as envs MENOS as que
+// decidem se o e-mail funciona, e a falha aparecia só como "e-mail DESLIGADO"
+// sem dizer qual peça faltava. GRAPH_CERT_KEY_FILE é caminho, não segredo — e
+// definida em produção é a armadilha conhecida: ela tem precedência e faz o
+// servidor ignorar o base64 (ver lerChavePrivada em server/email.js).
+console.log('[startup] GRAPH_CERT_PRIVATE_KEY=', envDiag('GRAPH_CERT_PRIVATE_KEY'), '(base64 do .pem, uma linha só)');
+console.log('[startup] GRAPH_CERT_THUMBPRINT =', envDiag('GRAPH_CERT_THUMBPRINT'));
+console.log('[startup] GRAPH_CERT_KEY_FILE   =', process.env.GRAPH_CERT_KEY_FILE || '(vazio — correto em produção)');
+console.log('[startup] credencial do Graph   =', mailer.modoCredencial());
 console.log('[startup] MAIL_FROM          =', envDiag('MAIL_FROM'), '→ e-mail', mailer.estaConfigurado() ? 'ATIVO' : 'DESLIGADO (links vão pro stdout)');
 console.log('[startup] APP_BASE_URL       =', envDiag('APP_BASE_URL'), '(base dos links de confirmação — sem ela o link sai relativo e não funciona)');
 console.log('[startup] TURNSTILE_SITE_KEY =', envDiag('TURNSTILE_SITE_KEY'), '→ captcha', turnstile.estaConfigurado() ? 'ATIVO' : 'DESLIGADO (cadastro aceita sem captcha)');
