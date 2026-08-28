@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import PhotoCropper from '../components/PhotoCropper';
@@ -704,13 +705,19 @@ function FotosPadrao() {
 
       {erro && <div className="alert error" style={{ marginTop: 12 }}>{erro}</div>}
 
-      {recortando && (
+      {/* Portal pro <body>: o modal é `position: fixed`, e qualquer ancestral com
+          transform (todo `.card` tem animação de entrada) passaria a ser a
+          referência de posicionamento — o overlay ficava do tamanho do card e os
+          botões do recortador caíam fora da tela. O portal tira essa
+          dependência de onde o componente foi montado. */}
+      {recortando && createPortal(
         <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setRecortando(false); }}>
           <div className="modal" style={{ maxWidth: 480 }}>
             <h3>Nova foto padrão</h3>
             <PhotoCropper onCrop={adicionar} onCancel={() => setRecortando(false)} />
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

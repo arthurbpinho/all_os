@@ -2303,9 +2303,17 @@ select option { background: var(--cream); color: var(--ink); }
 .card-grid > *:nth-child(6) { animation-delay: 0.34s; }
 .card-grid > *:nth-child(n+7) { animation-delay: 0.40s; }
 
+/* O último quadro é `transform: none`, NÃO `translateY(0)`. Com
+   `animation-fill-mode: both` o quadro final fica aplicado pra sempre, e um
+   transform identidade continua criando bloco de contenção — o que fazia todo
+   `.card` do app virar a referência de posicionamento de qualquer
+   `position: fixed` renderizado dentro dele. Sintoma: um `.modal-overlay`
+   dentro de um card ficava do tamanho do CARD em vez da janela, e os botões do
+   modal caíam fora da tela. `none` interpola igual (o navegador trata como
+   identidade durante a animação), então o efeito visual é idêntico. */
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(14px); }
-  to   { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; transform: none; }
 }
 
 /* ────────────────────────────────────────
