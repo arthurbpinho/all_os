@@ -685,11 +685,15 @@ if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
     if (typeof u.emailVerified !== 'boolean') { u.emailVerified = !!emailLower; dirty = true; }
 
     // Colisão pré-existente: duas contas cujos usernames só diferem no caixa.
-    // Não dá pra resolver sozinho (qual das duas renomear é decisão humana), mas
-    // silenciar seria pior — a partir daqui o login de uma delas fica ambíguo.
+    // O login de ambas fica ambíguo, então NENHUMA das duas entra (ver
+    // acharPorUsernameUnico) — mas o resto da plataforma continua de pé.
+    //
+    // Isto já foi `process.exit(1)`, e o raio estava errado: duas contas
+    // duplicadas derrubavam o app inteiro num loop de restart, e a única tela
+    // capaz de renomear uma delas (Administração → Contas) morria junto. Fechar
+    // as duas contas é a mesma proteção com o custo proporcional.
     if (vistos.has(lower)) {
-      console.error(`[FATAL] Dois usuários colidem ignorando maiúsculas: "${vistos.get(lower)}" e "${u.username}". Renomeie um deles em users.json antes de subir.`);
-      process.exit(1);
+      console.error(`[contas] CONFLITO: "${vistos.get(lower)}" e "${u.username}" só diferem em maiúsculas. As duas ficam SEM LOGIN até um admin renomear uma em Administração → Contas.`);
     }
     vistos.set(lower, u.username);
   }
@@ -705,6 +709,21 @@ function acharPorUsername(users, username) {
   const lower = contas.normalizeUsername(username);
   if (!lower) return null;
   return users.find((u) => (u.usernameLower || contas.normalizeUsername(u.username)) === lower) || null;
+}
+
+// Como acharPorUsername, mas avisa quando MAIS DE UMA conta responde pelo mesmo
+// nome ignorando maiúsculas. Nesse estado não dá pra saber de quem é a senha
+// que chegou, então o login das duas é recusado.
+//
+// A checagem é feita a cada tentativa, e não uma vez no boot: assim, no instante
+// em que o admin renomeia uma das contas, a outra volta a entrar — sem restart.
+function acharPorUsernameUnico(users, username) {
+  const lower = contas.normalizeUsername(username);
+  if (!lower) return { user: null, ambiguo: false };
+  const achados = users.filter(
+    (u) => (u.usernameLower || contas.normalizeUsername(u.username)) === lower,
+  );
+  return { user: achados[0] || null, ambiguo: achados.length > 1 };
 }
 
 function acharPorEmail(users, email) {
@@ -1073,7 +1092,16 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   if (atraso > 0) await new Promise((r) => setTimeout(r, atraso));
 
   const users = readJSON('users.json');
-  const user = acharPorUsername(users, username);
+  const { user, ambiguo } = acharPorUsernameUnico(users, username);
+  // Duas contas com o mesmo nome ignorando maiúsculas: não há como saber de quem
+  // é a senha, então nenhuma das duas entra até um admin renomear uma. O bcrypt
+  // roda mesmo assim, pra este caminho custar o mesmo que os outros.
+  if (ambiguo) {
+    await bcrypt.compare(String(password), HASH_ISCA);
+    return res.status(409).json({
+      error: 'Este nome de usuário está duplicado na base e o acesso está suspenso por segurança. Fale com a administração.',
+    });
+  }
   // Bcrypt SEMPRE, inclusive quando o usuário não existe — comparando contra um
   // hash-isca. A mensagem de erro já era genérica, mas o relógio entregava quem
   // existe: conta inexistente respondia na hora, conta real esperava o bcrypt
