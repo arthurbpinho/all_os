@@ -48,6 +48,10 @@ function lerChavePrivada() {
       return fs.readFileSync(alvo, 'utf-8');
     } catch (e) {
       console.error('[email] GRAPH_CERT_KEY_FILE não pôde ser lido:', e && e.message);
+      // Volta '' de propósito, sem cair no GRAPH_CERT_PRIVATE_KEY: apontar para
+      // um arquivo e silenciosamente usar OUTRA chave esconderia o erro. Em
+      // ambiente sem disco (Railway), deixe GRAPH_CERT_KEY_FILE vazio e use só
+      // o GRAPH_CERT_PRIVATE_KEY em base64.
       return '';
     }
   }
@@ -68,7 +72,15 @@ function lerChavePrivada() {
     const decodificado = Buffer.from(bruto, 'base64').toString('utf-8');
     if (decodificado.includes('-----BEGIN')) return decodificado;
   } catch {}
-  console.error('[email] GRAPH_CERT_PRIVATE_KEY nao parece um PEM nem um base64 de PEM.');
+  // Diagnóstico com FORMA, nunca conteúdo: sem isso a mensagem só diz que algo
+  // está errado, e as causas prováveis (valor truncado pelo painel, aspas
+  // coladas junto, base64 de outro arquivo) são indistinguíveis.
+  const inicio = bruto.slice(0, 6).replace(/[^\x20-\x7e]/g, '?');
+  console.error(
+    `[email] GRAPH_CERT_PRIVATE_KEY nao parece um PEM nem um base64 de PEM `
+    + `(${bruto.length} chars, comeca com "${inicio}...").`
+  );
+  console.error('[email] Gere o valor com: base64 -w0 caminho/da/chave.pem  e cole o resultado INTEIRO, sem aspas.');
   return '';
 }
 const GRAPH_CERT_PRIVATE_KEY = lerChavePrivada();
