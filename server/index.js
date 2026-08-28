@@ -800,8 +800,27 @@ if (!fs.existsSync(path.join(DATA_DIR, 'push-subscriptions.json'))) {
 //  - active: { <studentId>: <sidequest atribuída> } — no máx. 1 ativa por aluno.
 //  - completed: { <studentId>: [ <sidequest concluída + recompensa> ] }.
 // O Competitivo (MMR) ignora sidequests inteiramente.
+//
+// O ARQUIVO NÃO É VERSIONADO: `active` e `completed` guardam conteúdo de sessão
+// de aluno (a justificativa da conclusão descreve o atendimento), e isso não
+// pode viver no git. O banco inicial, que é conteúdo autoral do admin e não
+// dado de ninguém, mora aqui embaixo e semeia o arquivo no primeiro boot; daí
+// em diante o admin edita pela tela de Terapeutas.
+const SIDEQUEST_BANK_SEED = [
+  {
+    id: 'sq-1779721725367-bfdb0b',
+    title: 'Sustentar o Silêncio',
+    description: 'Em ao menos um momento, sustente o silêncio com excelência, de maneira que o paciente mude a atitude a partir do silêncio sustentado, e isso ajude a progredir com o caso.',
+    rewardTitleId: 'qt-sq-1779721725367-bfdb0b',
+    rewardTitleLabel: 'Terapeuta Silencioso',
+    rewardTitleTier: 'quest',
+    createdBy: null,
+    createdByName: 'Administrador',
+    createdAt: '2026-05-25T15:08:45.367Z',
+  },
+];
 if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
-  writeJSON('sidequests.json', { bank: [], active: {}, completed: {} });
+  writeJSON('sidequests.json', { bank: SIDEQUEST_BANK_SEED, active: {}, completed: {} });
 }
 
 // Recordes por paciente (👑): mapa { <characterId>: { score, userId, userName,
