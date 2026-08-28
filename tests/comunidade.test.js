@@ -194,6 +194,94 @@ describe('enquete', () => {
     const curta = await criarDiscussao(autor, { title: 'Enquete torta', poll: { options: ['única'] } });
     expect(curta.status).toBe(400);
   });
+
+  // --- Múltipla escolha ---
+
+  const MULTI = {
+    title: 'Quais temas você quer nos próximos encontros?',
+    poll: { options: ['Avaliação', 'Laudo', 'Reabilitação'], multi: true },
+  };
+
+  test('opção única é o padrão; múltipla escolha só quando o autor pede', async () => {
+    const autor = await loginAs('aluno');
+    await criarDiscussao(autor, ENQUETE);
+    const unica = await request(app).get('/api/comunidade/1').set(authHeader(autor));
+    expect(unica.body.discussion.poll.multi).toBe(false);
+
+    await criarDiscussao(autor, MULTI);
+    const varias = await request(app).get('/api/comunidade/2').set(authHeader(autor));
+    expect(varias.body.discussion.poll.multi).toBe(true);
+  });
+
+  test('na múltipla escolha os cliques acumulam e o clique repetido desmarca', async () => {
+    const autor = await loginAs('aluno');
+    await criarDiscussao(autor, MULTI);
+    const votar = (token, optionId) => request(app).post('/api/comunidade/1/poll')
+      .set(authHeader(token)).send({ optionId });
+
+    await votar(autor, 'o1');
+    const duas = await votar(autor, 'o3');
+    expect(duas.body.poll.myVotes).toEqual(['o1', 'o3']);
+    // Uma pessoa, dois votos: `total` conta PESSOAS, então as duas opções
+    // marcadas ficam com 100% cada e a soma passa de 100 de propósito.
+    expect(duas.body.poll.total).toBe(1);
+    expect(duas.body.poll.options.find((o) => o.id === 'o1').percent).toBe(100);
+    expect(duas.body.poll.options.find((o) => o.id === 'o3').percent).toBe(100);
+    // Na múltipla escolha não existe "o" voto — quem lê usa myVotes.
+    expect(duas.body.poll.myVote).toBeNull();
+
+    const desmarcou = await votar(autor, 'o1');
+    expect(desmarcou.body.poll.myVotes).toEqual(['o3']);
+    expect(desmarcou.body.poll.total).toBe(1);
+  });
+
+  test('desmarcar a última opção devolve a pessoa ao estado de quem não votou', async () => {
+    const autor = await loginAs('aluno');
+    await criarDiscussao(autor, MULTI);
+    const votar = (optionId) => request(app).post('/api/comunidade/1/poll')
+      .set(authHeader(autor)).send({ optionId });
+
+    await votar('o2');
+    const zerou = await votar('o2');
+    expect(zerou.body.poll.myVotes).toEqual([]);
+    expect(zerou.body.poll.total).toBe(0);
+    expect(zerou.body.poll.revealed).toBe(false);
+    expect(zerou.body.poll.options[0].count).toBeUndefined();
+  });
+
+  test('percentual da múltipla escolha é sobre pessoas, não sobre marcações', async () => {
+    const autor = await loginAs('aluno');
+    const outro = await loginAs('aluno2');
+    await criarDiscussao(autor, MULTI);
+    const votar = (token, optionId) => request(app).post('/api/comunidade/1/poll')
+      .set(authHeader(token)).send({ optionId });
+
+    await votar(autor, 'o1');
+    await votar(autor, 'o2');
+    const r = await votar(outro, 'o1');
+    expect(r.body.poll.total).toBe(2);
+    expect(r.body.poll.options.find((o) => o.id === 'o1').count).toBe(2);
+    expect(r.body.poll.options.find((o) => o.id === 'o1').percent).toBe(100);
+    expect(r.body.poll.options.find((o) => o.id === 'o2').percent).toBe(50);
+    expect(r.body.poll.options.find((o) => o.id === 'o3').percent).toBe(0);
+  });
+
+  // Enquetes criadas antes da múltipla escolha existir gravaram o voto como
+  // string ("o2"); o arquivo em produção tem esses registros e não é migrado.
+  test('voto gravado no formato antigo (string) continua sendo lido', async () => {
+    const autor = await loginAs('aluno');
+    await criarDiscussao(autor, ENQUETE);
+    const p = path.join(DATA_DIR, 'comunidade.json');
+    const store = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    store.discussions[0].poll.votes = { 'algum-id': 'o2' };
+    delete store.discussions[0].poll.multi;
+    fs.writeFileSync(p, JSON.stringify(store, null, 2));
+
+    const ver = await request(app).get('/api/comunidade/1');
+    expect(ver.body.discussion.poll.total).toBe(1);
+    expect(ver.body.discussion.poll.multi).toBe(false);
+    expect(ver.body.discussion.poll.options.find((o) => o.id === 'o2').count).toBe(1);
+  });
 });
 
 describe('comentários', () => {
@@ -305,6 +393,44 @@ describe('selo do autor', () => {
       expect(r.body.author.kind).toBe(kind);
       expect(r.body.author.subtitle).toBe(subtitle);
     }
+  });
+
+  // A etiqueta que aparece ao passar o mouse no avatar/nome usa `roleLabel`, não
+  // o `kind`: o kind é visual e agrupa (admin e aluno da Allos são os dois
+  // `member`), então só ele não distinguiria os dois na etiqueta.
+  test('roleLabel distingue papéis que o kind agrupa', async () => {
+    const casos = [
+      ['admin', 'member', 'Administrador'],
+      ['aluno', 'member', 'Aluno da Allos'],
+      ['prof', 'supervisor', 'Supervisor da Allos'],
+      ['recruta', 'recruiter', 'Recruiter da Allos'],
+      ['externo', 'external', 'Aluno Externo'],
+    ];
+    for (const [username, kind, roleLabel] of casos) {
+      const token = await loginAs(username);
+      const r = await criarDiscussao(token, { title: `Post de ${username}`, body: 'conteúdo' });
+      expect(r.status).toBe(200);
+      expect(r.body.author.kind).toBe(kind);
+      expect(r.body.author.roleLabel).toBe(roleLabel);
+    }
+  });
+
+  test('publicação institucional etiqueta a Associação, não o papel de quem digitou', async () => {
+    const admin = await loginAs('admin');
+    const inst = await criarDiscussao(admin, { title: 'Aviso', body: 'Comunicado.', asInstitution: true });
+    expect(inst.body.author.roleLabel).toBe('Associação Allos');
+  });
+
+  test('a etiqueta chega no comentário e no link público da discussão', async () => {
+    const aluno = await loginAs('aluno');
+    await criarDiscussao(aluno, { title: 'Uma dúvida', body: 'conteúdo' });
+    const prof = await loginAs('prof');
+    await request(app).post('/api/comunidade/1/comentarios').set(authHeader(prof))
+      .send({ body: 'respondendo' }).expect(200);
+
+    const anon = await request(app).get('/api/comunidade/1');
+    expect(anon.body.discussion.author.roleLabel).toBe('Aluno da Allos');
+    expect(anon.body.discussion.comments[0].author.roleLabel).toBe('Supervisor da Allos');
   });
 
   test('admin escolhe publicar como Associação Allos ou como pessoa', async () => {
@@ -476,21 +602,6 @@ describe('moderação', () => {
     expect(res.body.bans).toHaveLength(1);
   });
 
-  test('avatar de visitante: pool respeita o teto de 10 e o id é sanitizado', async () => {
-    const admin = await loginAs('admin');
-    const png = 'data:image/png;base64,' + Buffer.from('x'.repeat(40)).toString('base64');
-    for (let i = 0; i < comunidade.MAX_AVATARES_VISITANTE; i++) {
-      await request(app).post('/api/admin/comunidade/avatar-visitante').set(authHeader(admin))
-        .send({ image: png }).expect(200);
-    }
-    const cheio = await request(app).post('/api/admin/comunidade/avatar-visitante').set(authHeader(admin)).send({ image: png });
-    expect(cheio.status).toBe(400);
-
-    const travessia = await request(app).delete('/api/admin/comunidade/avatar-visitante/..%2F..%2Fusers')
-      .set(authHeader(admin));
-    expect(travessia.status).toBe(400);
-    expect(fs.existsSync(path.join(DATA_DIR, 'users.json'))).toBe(true);
-  });
 });
 
 describe('projeções puras (server/comunidade.js)', () => {

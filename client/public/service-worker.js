@@ -31,13 +31,17 @@ self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
   const title = data.title || 'all_OS · Allos';
+  // `renotify: true` SEM `tag` é TypeError pela especificação: o
+  // showNotification rejeita e nada aparece na tela. O servidor sempre manda
+  // tag, mas um payload torto não pode virar "nenhuma notificação, nenhum
+  // erro" — então renotify só entra quando há tag de verdade.
+  const tag = typeof data.tag === 'string' && data.tag ? data.tag : '';
   const options = {
     body: data.body || '',
-    tag: data.tag,
-    renotify: !!data.renotify,
     icon: '/icon-192.png',
     badge: '/icon-192.png',
     data: { url: data.url || '/' },
+    ...(tag ? { tag, renotify: !!data.renotify } : {}),
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });

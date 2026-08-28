@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
+import { fotoDoUsuario } from '../utils/avatar';
 
 // Aprovação na fase: nota (porcentagem 0–100) ≥ 75 libera a próxima.
 const PASS = 75;
@@ -255,7 +256,7 @@ export default function SkillMap({ user }) {
     <div className="trilha-topbar">
       <div className="trilha-id">
         <span className={`trilha-avatar ${constancia.isAlive ? 'with-streak' : ''}`}>
-          {user?.profilePhoto ? <img src={user.profilePhoto} alt={user.name} /> : <AvatarFallback />}
+          {fotoDoUsuario(user) ? <img src={fotoDoUsuario(user)} alt={user.name} /> : <AvatarFallback />}
         </span>
         <div className="trilha-id-text">
           <div className="trilha-hello">Olá, {firstName(user?.name)}</div>

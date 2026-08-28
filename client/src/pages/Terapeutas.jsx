@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import { fotoDoUsuario } from '../utils/avatar';
 
 function formatDate(ts) {
   if (!ts) return '—';
@@ -204,7 +205,7 @@ export default function Terapeutas({ user }) {
                 onClick={() => selectStudent(s)}
               >
                 <span className="terapeuta-avatar">
-                  {s.profilePhoto ? <img src={s.profilePhoto} alt={s.name} /> : (s.name || '?').slice(0, 1).toUpperCase()}
+                  {fotoDoUsuario(s) ? <img src={fotoDoUsuario(s)} alt={s.name} /> : (s.name || '?').slice(0, 1).toUpperCase()}
                 </span>
                 <span className="terapeuta-name">{s.name || s.username}</span>
               </button>

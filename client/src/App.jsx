@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { fotoDoUsuario } from './utils/avatar';
 import { Routes, Route, Navigate, Link, useLocation, useNavigate } from 'react-router-dom';
 import Login from './pages/Login';
 import SkillMap from './pages/SkillMap';
@@ -332,12 +333,15 @@ export default function App() {
         </div>
         {isVisitor ? (
           <span className="mobile-topbar-avatar" aria-label="Visitante">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+            {fotoDoUsuario(user)
+              ? <img src={fotoDoUsuario(user)} alt="" />
+              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+            }
           </span>
         ) : (
           <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
-            {user.profilePhoto
-              ? <img src={user.profilePhoto} alt={user.name} />
+            {fotoDoUsuario(user)
+              ? <img src={fotoDoUsuario(user)} alt={user.name} />
               : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
             }
           </Link>
@@ -595,7 +599,10 @@ export default function App() {
           {isVisitor ? (
             <div className="profile-mini" style={{ cursor: 'default' }}>
               <span className="profile-mini-avatar">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+                {fotoDoUsuario(user)
+                  ? <img src={fotoDoUsuario(user)} alt="" />
+                  : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+                }
               </span>
               <div className="profile-mini-info">
                 <div className="profile-mini-name">Modo visitante</div>
@@ -605,8 +612,8 @@ export default function App() {
           ) : (
             <Link to="/profile" className="profile-mini" title="Editar perfil">
               <span className={`profile-mini-avatar ${streak?.isAlive ? 'with-streak' : ''}`}>
-                {user.profilePhoto
-                  ? <img src={user.profilePhoto} alt={user.name} />
+                {fotoDoUsuario(user)
+                  ? <img src={fotoDoUsuario(user)} alt={user.name} />
                   : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
                 }
               </span>

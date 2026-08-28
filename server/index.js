@@ -16,6 +16,7 @@ const {
   wrapCustomEvaluatorPrompt,
 } = require('./prompts');
 const mmrEngine = require('./mmr');
+const avatarPool = require('./avatar-pool');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
 const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody, clearAssetsCache, estimarTokens } = require('./avaliacao-v25');
 const batchFila = require('./batch-fila');
@@ -235,6 +236,57 @@ app.use('/patient-photos', express.static(PATIENT_PHOTOS_DIR, { maxAge: '7d' }))
 const EXERCISE_PHOTOS_DIR = path.join(DATA_DIR, 'exercise-photos');
 if (!fs.existsSync(EXERCISE_PHOTOS_DIR)) fs.mkdirSync(EXERCISE_PHOTOS_DIR, { recursive: true });
 app.use('/exercise-photos', express.static(EXERCISE_PHOTOS_DIR, { maxAge: '7d' }));
+
+// Pool de fotos padrão (Administração → Contas): até 10 imagens que viram o
+// avatar de quem não tem foto própria — visitante e conta que nunca subiu a
+// sua. Bytes no volume, lista em avatar-pool.json; nada disso entra no repo.
+const AVATAR_POOL_DIR = path.join(DATA_DIR, 'avatar-pool');
+if (!fs.existsSync(AVATAR_POOL_DIR)) fs.mkdirSync(AVATAR_POOL_DIR, { recursive: true });
+app.use('/avatar-pool', express.static(AVATAR_POOL_DIR, { maxAge: '7d' }));
+
+const AVATAR_POOL_FILE = 'avatar-pool.json';
+
+// A pool é lida em laço (o ranking e a lista de contas resolvem a foto de cada
+// usuário), então fica em cache invalidado pelo mtime do arquivo: um upload ou
+// uma remoção aparece na requisição seguinte, sem reler o JSON N vezes por
+// resposta. Cache de UM processo, que é o caso no Railway.
+let avatarPoolCache = { mtime: -1, photos: [] };
+
+function readAvatarPool() {
+  const p = path.join(DATA_DIR, AVATAR_POOL_FILE);
+  let mtime = 0;
+  try { mtime = fs.existsSync(p) ? fs.statSync(p).mtimeMs : 0; } catch { mtime = 0; }
+  if (mtime !== avatarPoolCache.mtime) {
+    const d = readJSON(AVATAR_POOL_FILE, { photos: [] });
+    avatarPoolCache = { mtime, photos: avatarPool.normalizarPool(d && d.photos) };
+  }
+  return avatarPoolCache.photos;
+}
+function writeAvatarPool(photos) {
+  writeJSON(AVATAR_POOL_FILE, { photos });
+  avatarPoolCache = { mtime: -1, photos: [] }; // força releitura
+}
+
+// A foto da pool que cabe a `userId`, ou null quando a pool está vazia — aí
+// quem desenha cai no fallback (silhueta/iniciais) que já existia antes.
+function fotoPadrao(userId) {
+  try {
+    return avatarPool.escolherFoto(readAvatarPool(), userId);
+  } catch {
+    // Avatar não é motivo para derrubar uma resposta inteira.
+    return null;
+  }
+}
+
+// Foto a EXIBIR para um usuário: a própria, quando existe; senão uma da pool.
+// Serve só para payloads de LEITURA (ranking, duelo, comunidade, recordes) —
+// nunca para o que é gravado de volta, senão a imagem da pool viraria a foto
+// "própria" de alguém e pararia de rotacionar. Para o que o cliente grava de
+// volta existe o campo separado `defaultPhoto` (ver publicUser).
+function fotoExibida(userId, profilePhoto) {
+  if (!isDefaultProfilePhoto(profilePhoto)) return profilePhoto;
+  return fotoPadrao(userId) || profilePhoto || '';
+}
 
 // JWT secret — obrigatório em todos os ambientes. Fail-closed: se ausente ou
 // curto demais, encerramos o processo em vez de continuar com fallback inseguro
@@ -460,7 +512,12 @@ console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
 console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
 console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
 console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — Treinamento, Seletivo, Avaliação Independente e reflexão da Antessala)');
+// As DUAS chaves precisam existir: sendWebPushToUser() exige as duas e vira
+// no-op silencioso sem uma delas. Antes só a pública era logada — com a privada
+// faltando no Railway, o boot parecia saudável, o navegador assinava normalmente
+// e todo push era descartado sem uma linha de log em lugar nenhum.
 console.log('[startup] VAPID_PUBLIC_KEY  =', envDiag('VAPID_PUBLIC_KEY'), '(Web Push)');
+console.log('[startup] VAPID_PRIVATE_KEY =', envDiag('VAPID_PRIVATE_KEY'), '(Web Push — sem ela NENHUM push sai)');
 console.log('[startup] GRAPH_TENANT_ID    =', envDiag('GRAPH_TENANT_ID'), '(e-mail via Microsoft 365 / Graph)');
 console.log('[startup] GRAPH_CLIENT_ID    =', envDiag('GRAPH_CLIENT_ID'));
 console.log('[startup] GRAPH_CLIENT_SECRET=', envDiag('GRAPH_CLIENT_SECRET'), '(o tenant da Allos BLOQUEIA este caminho — use certificado)');
@@ -491,6 +548,12 @@ const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:ti@allos.org.br';
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log('[push] Web Push ATIVO (VAPID configurado).');
+} else {
+  console.warn('[push] Web Push DESLIGADO: falta '
+    + (!VAPID_PUBLIC_KEY && !VAPID_PRIVATE_KEY ? 'VAPID_PUBLIC_KEY e VAPID_PRIVATE_KEY'
+      : !VAPID_PUBLIC_KEY ? 'VAPID_PUBLIC_KEY' : 'VAPID_PRIVATE_KEY')
+    + '. O sino in-app continua funcionando; notificação do sistema não sai.');
 }
 
 function readJSON(file, fallback = []) {
@@ -812,7 +875,7 @@ if (!fs.existsSync(path.join(DATA_DIR, 'comunidade.json'))) {
   writeJSON('comunidade.json', { nextId: 1, discussions: [] });
 }
 if (!fs.existsSync(path.join(DATA_DIR, 'comunidade-config.json'))) {
-  writeJSON('comunidade-config.json', { institutionAvatar: null, visitorAvatars: [], bans: {} });
+  writeJSON('comunidade-config.json', { institutionAvatar: null, bans: {} });
 }
 
 // Assinaturas de Web Push por usuário — { <userId>: [ {endpoint, keys, ua,
@@ -1004,6 +1067,16 @@ function publicUser(u) {
       if (teacher && teacher.name) safe.teacherName = teacher.name;
     } catch {}
   }
+  // Quem não tem foto própria (nunca subiu uma, ou ainda está com a de fábrica)
+  // recebe uma da pool de fotos padrão. Vai num campo SEPARADO de propósito: o
+  // Perfil grava de volta o que estiver em profilePhoto, e substituir ali faria
+  // a pessoa "adotar" sem querer uma imagem da pool — que o admin pode apagar.
+  // Quem desenha usa `defaultPhoto || profilePhoto`; o campo só existe para
+  // quem está sem foto própria, então essa conta fecha sozinha.
+  if (isDefaultProfilePhoto(safe.profilePhoto)) {
+    const padrao = fotoPadrao(safe.id);
+    if (padrao) safe.defaultPhoto = padrao;
+  }
   return safe;
 }
 
@@ -1142,7 +1215,7 @@ app.post('/api/login/visitor', visitorLimiter, (req, res) => {
     isVisitor: true,
   };
   const token = signToken(visitorUser);
-  res.json({ token, user: visitorUser });
+  res.json({ token, user: publicUser(visitorUser) });
 });
 
 // Re-valida token e devolve user atualizado (usado no boot do client).
@@ -1950,6 +2023,57 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
 app.get('/api/admin/users', requireAuth, requireRole('admin'), (req, res) => {
   const users = readJSON('users.json');
   res.json(users.map(publicUser));
+});
+
+// --- Pool de fotos padrão (Administração → Contas) ---
+//
+// Até 10 imagens que o app usa como avatar de quem não tem foto própria:
+// visitante (que nunca vai ter) e conta que ainda está com a foto de fábrica.
+// A escolha é estável por pessoa (ver server/avatar-pool.js), então a pool
+// "rotaciona" espalhando as pessoas pelas imagens, sem trocar de rosto a cada
+// tela. Mesmo contrato das fotos de paciente: os bytes vão pro volume e a lista
+// pro JSON — nada de imagem entra no repo.
+
+app.get('/api/admin/avatar-pool', requireAuth, requireRole('admin'), (req, res) => {
+  res.json({ photos: readAvatarPool(), max: avatarPool.MAX_FOTOS });
+});
+
+app.post('/api/admin/avatar-pool', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
+  const photos = readAvatarPool();
+  if (photos.length >= avatarPool.MAX_FOTOS) {
+    return res.status(400).json({ error: `A pool aceita no máximo ${avatarPool.MAX_FOTOS} fotos.` });
+  }
+  const img = decodeImageDataUrl(req.body && req.body.image);
+  if (!img) return res.status(400).json({ error: 'Envie a imagem como data URL (JPEG, PNG ou WebP).' });
+  if (img.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Imagem muito grande.' });
+
+  const id = 'p' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+  try {
+    fs.writeFileSync(path.join(AVATAR_POOL_DIR, `${id}.jpg`), img);
+  } catch (err) {
+    return res.status(500).json(falhou(req, err, 'admin/avatar-pool-upload'));
+  }
+  photos.push({ id, url: `/avatar-pool/${id}.jpg` });
+  writeAvatarPool(photos);
+  res.json({ photos, max: avatarPool.MAX_FOTOS });
+});
+
+app.delete('/api/admin/avatar-pool/:id', requireAuth, requireRole('admin'), (req, res) => {
+  // O id compõe o nome do arquivo — sem esta checagem, um ".." na URL viraria
+  // unlink fora da pasta.
+  if (!/^[A-Za-z0-9]+$/.test(req.params.id)) return res.status(400).json({ error: 'Id inválido.' });
+  const photos = readAvatarPool();
+  const restantes = photos.filter((f) => f.id !== req.params.id);
+  if (restantes.length === photos.length) return res.status(404).json({ error: 'Foto não encontrada.' });
+  try {
+    const arq = path.join(AVATAR_POOL_DIR, `${req.params.id}.jpg`);
+    if (fs.existsSync(arq)) fs.unlinkSync(arq);
+  } catch { /* ignora: a lista é a fonte da verdade */ }
+  writeAvatarPool(restantes);
+  // Remover uma foto REDISTRIBUI quem estava nela (a escolha é o id módulo o
+  // tamanho da pool). É o preço de não guardar par pessoa→imagem; em troca,
+  // conta nova já entra com avatar sem ninguém precisar atribuir nada.
+  res.json({ photos: restantes, max: avatarPool.MAX_FOTOS });
 });
 
 app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
@@ -2955,7 +3079,9 @@ function publicRecord(r) {
   return {
     score: r.score,
     userName: r.userName || 'Aluno',
-    userPhoto: r.userPhoto || null,
+    // A foto foi congelada no momento em que o recorde caiu; se era a de
+    // fábrica (ou nenhuma), a pool responde por ela na leitura.
+    userPhoto: fotoExibida(r.userId, r.userPhoto) || null,
     at: r.at || null,
   };
 }
@@ -3915,7 +4041,7 @@ app.get('/api/ranking', requireAuth, (req, res) => {
       return {
         userId: u.id,
         name: u.name || u.username,
-        profilePhoto: u.profilePhoto || '',
+        profilePhoto: fotoExibida(u.id, u.profilePhoto),
         role: u.role,
         title: titleLabel,
         titleTier: titleTier,
@@ -8448,7 +8574,9 @@ function sanitizeDuelForUser(duel, user) {
   const sideView = (s, includeMessages) => ({
     userId: s.userId || null,
     name: s.name || null,
-    profilePhoto: s.profilePhoto || '',
+    // Resolvida na LEITURA, não no que ficou gravado no duels.json: a pool
+    // muda, e uma URL congelada apontaria pra imagem já removida.
+    profilePhoto: fotoExibida(s.userId, s.profilePhoto),
     isVisitor: !!s.isVisitor,
     kind: s.kind || undefined,
     state: s.state,
@@ -8678,7 +8806,7 @@ app.get('/api/duel/opponents', requireAuth, (req, res) => {
   const users = readJSON('users.json');
   const list = users
     .filter((u) => isAluno(u.role) && u.id !== req.user.id)
-    .map((u) => ({ userId: u.id, name: u.name || u.username, profilePhoto: u.profilePhoto || '' }))
+    .map((u) => ({ userId: u.id, name: u.name || u.username, profilePhoto: fotoExibida(u.id, u.profilePhoto) }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
   res.json(list);
 });
@@ -9124,7 +9252,7 @@ app.get('/api/duels/social', requireAuth, (req, res) => {
     const key = them.userId || (them.name ? `name:${them.name}` : `duel:${d.id}`);
     if (!groups[key]) {
       groups[key] = {
-        opponent: { userId: them.userId || null, name: them.name || 'Visitante', profilePhoto: them.profilePhoto || '', isVisitor: !!them.isVisitor },
+        opponent: { userId: them.userId || null, name: them.name || 'Visitante', profilePhoto: fotoExibida(them.userId, them.profilePhoto), isVisitor: !!them.isVisitor },
         count: 0, wins: 0, losses: 0, draws: 0, duels: [],
       };
     }
@@ -9586,6 +9714,54 @@ app.post('/api/push/subscribe', requireAuth, writeLimiter, (req, res) => {
   res.json({ ok: true });
 });
 
+// Push de TESTE pra si mesmo. Existe porque o push falha em silêncio por
+// natureza: sem VAPID, sem assinatura ou com chave trocada, o servidor
+// simplesmente não envia e ninguém fica sabendo. Este endpoint responde
+// exatamente ONDE parou, em vez de deixar o dono adivinhar.
+app.post('/api/push/test', requireAuth, writeLimiter, async (req, res) => {
+  if (req.user.role === 'visitor') return res.status(403).json({ error: 'Visitante não recebe notificação.' });
+  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+    return res.status(503).json({
+      error: 'O servidor está sem as chaves VAPID (VAPID_PUBLIC_KEY e VAPID_PRIVATE_KEY). Nenhum push sai enquanto isso.',
+    });
+  }
+  const subs = readPushSubs()[req.user.id];
+  if (!Array.isArray(subs) || !subs.length) {
+    return res.status(409).json({
+      error: 'Nenhum dispositivo assinado nesta conta. Abra o sino e ative as notificações neste aparelho.',
+    });
+  }
+
+  // Envio SÍNCRONO aqui (o fluxo normal é fire-and-forget): o ponto do teste é
+  // justamente devolver o erro do serviço de push, não engolir.
+  const payload = JSON.stringify({
+    title: 'Notificação de teste',
+    body: 'Se você está lendo isto, o push está funcionando neste aparelho.',
+    tag: 'push-teste',
+    renotify: true,
+    url: '/',
+  });
+  const resultados = await Promise.all(subs.map((s) =>
+    webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload)
+      .then(() => ({ ok: true }))
+      .catch((err) => ({ ok: false, status: err && err.statusCode, message: err && err.message }))
+  ));
+  const enviados = resultados.filter((r) => r.ok).length;
+  const falhas = resultados.filter((r) => !r.ok);
+  if (falhas.length) {
+    console.warn('[push] teste falhou em', falhas.length, 'dispositivo(s):',
+      falhas.map((f) => `${f.status || '?'} ${f.message || ''}`).join(' | '));
+  }
+  res.json({
+    devices: subs.length,
+    sent: enviados,
+    failed: falhas.length,
+    // Status HTTP do serviço de push (410 = assinatura morta, 403 = chave VAPID
+    // trocada). A mensagem crua não vai pro cliente — vai pro log do servidor.
+    failureStatuses: falhas.map((f) => f.status || 0),
+  });
+});
+
 app.post('/api/push/unsubscribe', requireAuth, writeLimiter, (req, res) => {
   const endpoint = req.body && req.body.endpoint;
   if (typeof endpoint === 'string' && endpoint) {
@@ -9941,7 +10117,7 @@ app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external
 //
 // Dois arquivos no DATA_DIR:
 //   comunidade.json        → { nextId, discussions: [...] }
-//   comunidade-config.json → { institutionAvatar, visitorAvatars[], bans{} }
+//   comunidade-config.json → { institutionAvatar, bans{} }
 // A separação é proposital: a config é escrita só pelo admin e lida em toda
 // requisição; misturá-la ao feed faria cada comentário reescrever a lista de
 // banimentos junto.
@@ -9967,11 +10143,43 @@ function readComunidadeConfig() {
   const c = readJSON(COMUNIDADE_CONFIG_FILE, {});
   return {
     institutionAvatar: c.institutionAvatar || null,
-    visitorAvatars: Array.isArray(c.visitorAvatars) ? c.visitorAvatars : [],
     bans: (c.bans && typeof c.bans === 'object') ? c.bans : {},
   };
 }
 function writeComunidadeConfig(c) { writeJSON(COMUNIDADE_CONFIG_FILE, c); }
+
+// Migração one-shot: a "pool de avatares de visitante" nasceu dentro da
+// Comunidade (comunidade-config.json + comunidade-avatars/) como groundwork e
+// nunca foi usada. Agora é a pool de fotos padrão do app inteiro, mora em
+// avatar-pool.json e é gerenciada em Administração → Contas. Isto adota o que o
+// admin já tinha subido: copia os bytes pra pasta nova e limpa a chave antiga.
+(function migrarPoolDeVisitante() {
+  try {
+    const c = readJSON(COMUNIDADE_CONFIG_FILE, {});
+    const antigos = Array.isArray(c.visitorAvatars) ? c.visitorAvatars : [];
+    if (antigos.length === 0) return;
+
+    const atuais = readAvatarPool();
+    const adotadas = [...atuais];
+    for (const a of antigos) {
+      if (adotadas.length >= avatarPool.MAX_FOTOS) break;
+      if (!a || typeof a.id !== 'string' || !/^[A-Za-z0-9]+$/.test(a.id)) continue;
+      const origem = path.join(COMUNIDADE_AVATARS_DIR, `${a.id}.jpg`);
+      if (!fs.existsSync(origem)) continue;
+      fs.copyFileSync(origem, path.join(AVATAR_POOL_DIR, `${a.id}.jpg`));
+      adotadas.push({ id: a.id, url: `/avatar-pool/${a.id}.jpg` });
+    }
+    if (adotadas.length > atuais.length) writeAvatarPool(adotadas);
+
+    delete c.visitorAvatars;
+    writeJSON(COMUNIDADE_CONFIG_FILE, c);
+    console.log(`[migration] pool de fotos padrão adotou ${adotadas.length - atuais.length} imagem(ns) da Comunidade.`);
+  } catch (err) {
+    // Falhar aqui não pode impedir o boot: sem a migração o admin só precisa
+    // subir as imagens de novo em Contas.
+    console.warn('[migration] pool de fotos padrão:', err.message);
+  }
+})();
 
 // Auth OPCIONAL: popula req.user quando há um token válido e segue em frente
 // quando não há. É o que permite a mesma rota servir o membro logado (com o
@@ -10035,7 +10243,7 @@ app.get('/api/comunidade', requireAuth, (req, res) => {
   const users = readJSON('users.json');
   const sort = req.query.sort === 'top' ? 'top' : 'recent';
   const podeVotar = podeEscrever(req.user, config);
-  const ctx = { users, config, viewerId: req.user.id };
+  const ctx = { users, config, viewerId: req.user.id, resolverFoto: fotoExibida };
   res.json({
     discussions: comunidade.ordenarFeed(store.discussions, sort)
       .map((d) => comunidade.discussaoResumo(d, ctx)),
@@ -10056,7 +10264,7 @@ app.get('/api/comunidade/:id', comunidadePublicaLimiter, optionalAuth, (req, res
   const permissao = podeEscrever(req.user, config);
   res.json({
     discussion: comunidade.discussaoCompleta(d, {
-      users, config, viewerId: req.user ? req.user.id : null, podeVotar: permissao.ok,
+      users, config, viewerId: req.user ? req.user.id : null, podeVotar: permissao.ok, resolverFoto: fotoExibida,
     }),
     canPost: permissao.ok,
     blockedReason: permissao.ok ? null : permissao.error,
@@ -10104,7 +10312,7 @@ app.post('/api/comunidade', requireAuth, writeLimiter, async (req, res) => {
   });
 
   const users = readJSON('users.json');
-  res.json(comunidade.discussaoResumo(criada, { users, config, viewerId: req.user.id }));
+  res.json(comunidade.discussaoResumo(criada, { users, config, viewerId: req.user.id, resolverFoto: fotoExibida }));
 });
 
 // Excluir discussão: o autor tira a própria, o admin tira qualquer uma
@@ -10145,9 +10353,10 @@ app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, async (req, res)
   res.json(resultado);
 });
 
-// Voto na enquete. Escolha única e trocável: gravamos o id da opção por usuário,
-// então revotar substitui em vez de somar (não existe "desvotar" — mandar o
-// mesmo id de novo mantém o voto, o que evita zerar por duplo clique).
+// Voto na enquete. O corpo é sempre { optionId } — um clique numa opção — e o
+// significado depende do tipo escolhido por quem criou: na opção única o voto é
+// trocável (revotar substitui), na múltipla escolha o clique alterna a opção.
+// Toda essa regra vive em comunidade.aplicarVotoEnquete.
 app.post('/api/comunidade/:id/poll', requireAuth, writeLimiter, async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
@@ -10159,11 +10368,9 @@ app.post('/api/comunidade/:id/poll', requireAuth, writeLimiter, async (req, res)
     const d = acharDiscussao(store, req.params.id);
     if (!d) return { status: 404, error: 'Discussão não encontrada.' };
     if (!d.poll) return { status: 400, error: 'Esta discussão não tem enquete.' };
-    if (!d.poll.options.some((o) => o.id === optionId)) {
+    if (!comunidade.aplicarVotoEnquete(d.poll, req.user.id, optionId)) {
       return { status: 400, error: 'Opção inválida.' };
     }
-    if (!d.poll.votes || typeof d.poll.votes !== 'object') d.poll.votes = {};
-    d.poll.votes[req.user.id] = optionId;
     writeComunidade(store);
     return { poll: comunidade.enquetePublica(d.poll, req.user.id, true) };
   });
@@ -10237,7 +10444,7 @@ app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (re
 
   const users = readJSON('users.json');
   res.json(comunidade.discussaoCompleta(d, {
-    users, config, viewerId: req.user.id, podeVotar: true,
+    users, config, viewerId: req.user.id, podeVotar: true, resolverFoto: fotoExibida,
   }));
 });
 
@@ -10324,8 +10531,6 @@ app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), (req, res) =
 
   res.json({
     institutionAvatar: config.institutionAvatar,
-    visitorAvatars: config.visitorAvatars,
-    maxVisitorAvatars: comunidade.MAX_AVATARES_VISITANTE,
     autores,
     bans: Object.entries(config.bans)
       .filter(([id]) => comunidade.banAtivo(config, id, agora))
@@ -10361,46 +10566,6 @@ app.put('/api/admin/comunidade/avatar-instituicao', requireAuth, requireRole('ad
   config.institutionAvatar = `/comunidade-avatars/instituicao.jpg?v=${Date.now()}`;
   writeComunidadeConfig(config);
   res.json({ institutionAvatar: config.institutionAvatar });
-});
-
-// Pool de avatares do visitante (até 10). Cada visitante recebe um deles de
-// forma estável dentro da sessão dele. Groundwork: hoje visitante só LÊ a
-// Comunidade, então a pool ainda não aparece em lugar nenhum — o admin já pode
-// montá-la para quando a participação sem conta for liberada.
-app.post('/api/admin/comunidade/avatar-visitante', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
-  const config = readComunidadeConfig();
-  if (config.visitorAvatars.length >= comunidade.MAX_AVATARES_VISITANTE) {
-    return res.status(400).json({ error: `A pool aceita no máximo ${comunidade.MAX_AVATARES_VISITANTE} imagens.` });
-  }
-  const img = decodeImageDataUrl(req.body && req.body.image);
-  if (!img) return res.status(400).json({ error: 'Envie a imagem como data URL (JPEG, PNG ou WebP).' });
-  if (img.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Imagem muito grande.' });
-
-  const id = 'v' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
-  try {
-    fs.writeFileSync(path.join(COMUNIDADE_AVATARS_DIR, `${id}.jpg`), img);
-  } catch (err) {
-    return res.status(500).json(falhou(req, err, 'admin/comunidade-avatar-visitante'));
-  }
-  config.visitorAvatars.push({ id, url: `/comunidade-avatars/${id}.jpg` });
-  writeComunidadeConfig(config);
-  res.json({ visitorAvatars: config.visitorAvatars });
-});
-
-app.delete('/api/admin/comunidade/avatar-visitante/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const config = readComunidadeConfig();
-  // O id compõe o nome do arquivo — sem esta checagem, um ".." na URL viraria
-  // unlink fora da pasta.
-  if (!/^[A-Za-z0-9]+$/.test(req.params.id)) return res.status(400).json({ error: 'Id inválido.' });
-  const antes = config.visitorAvatars.length;
-  config.visitorAvatars = config.visitorAvatars.filter((a) => a.id !== req.params.id);
-  if (config.visitorAvatars.length === antes) return res.status(404).json({ error: 'Imagem não encontrada.' });
-  try {
-    const p = path.join(COMUNIDADE_AVATARS_DIR, `${req.params.id}.jpg`);
-    if (fs.existsSync(p)) fs.unlinkSync(p);
-  } catch { /* ignora */ }
-  writeComunidadeConfig(config);
-  res.json({ visitorAvatars: config.visitorAvatars });
 });
 
 const BAN_MAX_DIAS = 3650; // 10 anos: na prática "permanente", mas com data

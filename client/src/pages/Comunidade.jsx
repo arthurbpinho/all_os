@@ -5,6 +5,7 @@ import Typewriter from '../components/Typewriter';
 import RichText from '../components/RichText';
 import CommunityAuthor from '../components/CommunityAuthor';
 import VoteButtons from '../components/VoteButtons';
+import { fotoDoUsuario } from '../utils/avatar';
 
 // Comunidade: o feed de discussões.
 //
@@ -75,8 +76,8 @@ export default function Comunidade({ user }) {
         ) : (
           <button type="button" className="comunidade-compositor-atalho" onClick={() => setCompondo(true)}>
             <span className="comunidade-compositor-avatar">
-              {user?.profilePhoto
-                ? <img src={user.profilePhoto} alt="" />
+              {fotoDoUsuario(user)
+                ? <img src={fotoDoUsuario(user)} alt="" />
                 : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>}
             </span>
             <span className="comunidade-compositor-texto">Comece uma discussão…</span>
@@ -160,6 +161,7 @@ function NovaDiscussao({ user, onCriada, onCancelar }) {
   const [body, setBody] = useState('');
   const [comEnquete, setComEnquete] = useState(false);
   const [opcoes, setOpcoes] = useState(['', '']);
+  const [multi, setMulti] = useState(false);
   const [comoAllos, setComoAllos] = useState(user?.role === 'admin');
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState('');
@@ -177,7 +179,7 @@ function NovaDiscussao({ user, onCriada, onCancelar }) {
         title,
         body,
         asInstitution: user?.role === 'admin' ? comoAllos : undefined,
-        poll: comEnquete ? { options: opcoes } : undefined,
+        poll: comEnquete ? { options: opcoes, multi } : undefined,
       });
       onCriada(nova);
     } catch (err) {
@@ -244,6 +246,27 @@ function NovaDiscussao({ user, onCriada, onCancelar }) {
 
       {comEnquete && (
         <div className="comunidade-editor-enquete">
+          {/* O tipo vale para todo mundo que responder e não muda depois de
+              publicado, então fica aqui em cima, antes das opções. */}
+          <div className="comunidade-enquete-tipo">
+            <button
+              type="button"
+              className={!multi ? 'ativo' : ''}
+              onClick={() => setMulti(false)}
+              aria-pressed={!multi}
+            >Opção única</button>
+            <button
+              type="button"
+              className={multi ? 'ativo' : ''}
+              onClick={() => setMulti(true)}
+              aria-pressed={multi}
+            >Múltipla escolha</button>
+          </div>
+          <p className="comunidade-enquete-tipo-dica">
+            {multi
+              ? 'Quem responder pode marcar mais de uma opção.'
+              : 'Quem responder escolhe uma opção só.'}
+          </p>
           {opcoes.map((o, i) => (
             <div key={i} className="comunidade-opcao-linha">
               <input
