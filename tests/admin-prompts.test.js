@@ -3,19 +3,19 @@
 // da versão anterior, com restauração. Mais o controle de acesso (admin-only) e
 // a invalidação do cache de prompts do pipeline.
 //
-// Caminhos: o PROMPTS_DIR do teste é semeado da pasta avaliacao/ do repo, onde a
-// versão v25 mora em avaliacao/v25/ (no volume de produção a mesma pasta se
-// chama "nova avaliacao" — ver `dirs` em PIPELINE_VERSIONS).
+// Caminhos: o PROMPTS_DIR do teste é semeado da pasta avaliacao/ do repo, onde
+// cada versão do pipeline mora na pasta do nome dela (ver `dir` em
+// PIPELINE_VERSIONS).
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const fs = require('fs');
 const path = require('path');
 const { PROMPTS_DIR } = require('../server/paths');
 const promptFiles = require('../server/prompt-files');
-const v25 = require('../server/avaliacao-v25');
+const pipeline = require('../server/avaliador-pipeline');
 
-const MONTADO = 'avaliacao/v25/prompt-no-v25-montado.md';
-const CRITERIOS = 'avaliacao/v25/criterios-no-v25.md';
-const MONTADO_V28 = 'avaliacao/v28/prompt-no-v28-montado.md';
+const MONTADO = 'avaliacao/v29/prompt-no-v29-montado.md';
+const CRITERIOS = 'avaliacao/v29/criterios-no-v29.md';
+const MISSAO = 'avaliacao/v29-progressao/missao-v29-progressao.md';
 const url = (p) => '/api/admin/prompts/' + p.split('/').map(encodeURIComponent).join('/');
 const absOf = (p) => path.join(PROMPTS_DIR, p);
 
@@ -32,7 +32,7 @@ describe('Administração — editor de prompts', () => {
 
     const arq = await request(app).get(url(MONTADO)).set(authHeader(admin));
     expect(arq.status).toBe(200);
-    expect(arq.body.content).toContain('@variante:so-nota');
+    expect(arq.body.content).toContain('## [METACOMANDO]');
 
     for (const quem of ['prof', 'aluno']) {
       const t = await loginAs(quem);
@@ -45,11 +45,12 @@ describe('Administração — editor de prompts', () => {
     const admin = await loginAs('admin');
     const antes = fs.readFileSync(absOf(MONTADO), 'utf8');
 
-    // Some com os blocos @variante (o caso que o Ctrl+V errado produz).
-    const quebrado = antes.replace(/<!--\s*@variante:[a-z-]+\s*-->/g, '');
+    // Some com um marcador de CACHE BREAKPOINT (o caso que o Ctrl+V errado
+    // produz): sem ele o parser não sabe onde termina o bloco do caso.
+    const quebrado = antes.replace('<!-- ===== CACHE BREAKPOINT B', '<!-- (removido)');
     const res = await request(app).put(url(MONTADO)).set(authHeader(admin)).send({ content: quebrado });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/@variante/);
+    expect(res.body.error).toMatch(/BREAKPOINT/);
     expect(fs.readFileSync(absOf(MONTADO), 'utf8')).toBe(antes); // intocado
 
     // Slot obrigatório removido também é recusado (global: o primeiro
@@ -86,32 +87,40 @@ describe('Administração — editor de prompts', () => {
   it('salvar invalida o cache de prompts do pipeline (sem restart)', async () => {
     const admin = await loginAs('admin');
     const original = fs.readFileSync(absOf(MONTADO), 'utf8');
-    v25.loadAssets('v25', 'so-nota'); // memoiza
+    pipeline.loadAssets('v29'); // memoiza
 
     const marca = 'MARCA-DE-CACHE-XYZ';
     const editado = original.replace('## [METACOMANDO]', '## [METACOMANDO]\n\n' + marca);
     await request(app).put(url(MONTADO)).set(authHeader(admin)).send({ content: editado });
 
-    expect(v25.loadAssets('v25', 'so-nota').blockA).toContain(marca);
+    expect(pipeline.loadAssets('v29').blockA).toContain(marca);
     fs.writeFileSync(absOf(MONTADO), original, 'utf8');
-    v25.clearAssetsCache();
+    pipeline.clearAssetsCache();
   });
 
-  // Os .md do v28 têm o mesmo contrato do v25, com 15 critérios em vez de 14 —
-  // e o validador tem de conferir cada versão pela SUA contagem, senão um arquivo
-  // trocado entre as pastas passaria batido.
-  it('valida os .md do v28 pelo contrato da versão (15 critérios)', async () => {
+  // O modo progressão tem contrato PRÓPRIO: cinco slots no bloco do caso, três
+  // slots extras no sintetizador e o .md do nó da missão. O validador tem de
+  // conferir cada versão pelo contrato dela, senão um arquivo trocado entre as
+  // pastas passaria batido.
+  it('valida os .md do modo progressão pelo contrato da versão', async () => {
     const admin = await loginAs('admin');
     const lista = await request(app).get('/api/admin/prompts').set(authHeader(admin));
-    expect(lista.body.files.find((f) => f.path === MONTADO_V28).validado).toBe(true);
+    expect(lista.body.files.find((f) => f.path === MISSAO).validado).toBe(true);
 
-    const criteriosV28 = fs.readFileSync(absOf('avaliacao/v28/criterios-no-v28.md'), 'utf8');
-    expect(promptFiles.validatePromptContent('avaliacao/v28/criterios-no-v28.md', criteriosV28).ok).toBe(true);
-    // Os 14 critérios do v25 no lugar dos 15 do v28: recusado pela contagem.
-    const criteriosV25 = fs.readFileSync(absOf(CRITERIOS), 'utf8');
-    const trocado = promptFiles.validatePromptContent('avaliacao/v28/criterios-no-v28.md', criteriosV25);
+    // O prompt do nó do modo padrão não serve no lugar do da progressão: faltam
+    // os slots dos materiais que só existem lá.
+    const montadoPadrao = fs.readFileSync(absOf(MONTADO), 'utf8');
+    const trocado = promptFiles.validatePromptContent(
+      'avaliacao/v29-progressao/prompt-no-v29-progressao-montado.md', montadoPadrao,
+    );
     expect(trocado.ok).toBe(false);
-    expect(trocado.error).toMatch(/15 critérios/);
+    expect(trocado.error).toMatch(/\{\{ATENDIMENTO_1\}\}/);
+
+    // E o do nó da missão precisa da missão e do log.
+    const missao = fs.readFileSync(absOf(MISSAO), 'utf8');
+    expect(promptFiles.validatePromptContent(MISSAO, missao).ok).toBe(true);
+    const semMissao = missao.replace(/\{\{MISSAO\}\}/g, 'sem slot');
+    expect(promptFiles.validatePromptContent(MISSAO, semMissao).ok).toBe(false);
   });
 
   // Sem isto não havia como levar um prompt NOVO para produção: os .md saíram do
@@ -122,7 +131,7 @@ describe('Administração — editor de prompts', () => {
   // para um caminho novo não apagar um prompt que está no ar).
   it('cria arquivo novo só com criar:true; edição e criação não se confundem', async () => {
     const admin = await loginAs('admin');
-    const novo = 'avaliacao/v28/rascunho-de-teste.md';
+    const novo = 'avaliacao/v29/rascunho-de-teste.md';
     expect(fs.existsSync(absOf(novo))).toBe(false);
 
     const semFlag = await request(app).put(url(novo)).set(authHeader(admin)).send({ content: 'texto' });
@@ -139,9 +148,9 @@ describe('Administração — editor de prompts', () => {
     expect(dedup.status).toBe(409);
     expect(fs.readFileSync(absOf(novo), 'utf8')).toBe('texto');
 
-    // O mesmo vale para um prompt de verdade: criar por cima do v28 é recusado
+    // O mesmo vale para um prompt de verdade: criar por cima do que está no ar é recusado
     // antes de qualquer escrita.
-    const porCima = await request(app).put(url(MONTADO_V28)).set(authHeader(admin)).send({ content: 'x', criar: true });
+    const porCima = await request(app).put(url(MONTADO)).set(authHeader(admin)).send({ content: 'x', criar: true });
     expect(porCima.status).toBe(409);
 
     // Editar (sem a flag) segue funcionando no arquivo que passou a existir.
@@ -184,19 +193,24 @@ describe('Administração — editor de prompts', () => {
     expect(semContrato.body.validado).toBe(false);
     fs.unlinkSync(absOf(caminho));
 
-    // Já um caminho com contrato (o trio do v25, em pasta nova) é conferido.
-    const comContrato = 'avaliacao/nova avaliacao/criterios-no-v25.md'; // não existe neste volume de teste
-    expect(fs.existsSync(absOf(comContrato))).toBe(false);
-    const quebrado = await request(app).put(url(comContrato)).set(authHeader(admin)).send({ content: 'nada de critérios aqui', criar: true });
-    expect(quebrado.status).toBe(400);
-    expect(quebrado.body.error).toMatch(/14 critérios/);
-    expect(fs.existsSync(absOf(comContrato))).toBe(false);
+    // Já um caminho COM contrato é conferido na criação. Todos os caminhos com
+    // contrato existem no volume semeado, então tiramos um de lado por um
+    // instante — é a única forma de exercitar a CRIAÇÃO de um arquivo que tem
+    // parser (criar por cima de arquivo existente é 409, testado acima).
+    const guardado = fs.readFileSync(absOf(MISSAO), 'utf8');
+    fs.unlinkSync(absOf(MISSAO));
+    try {
+      const quebrado = await request(app).put(url(MISSAO)).set(authHeader(admin)).send({ content: 'nada de missão aqui', criar: true });
+      expect(quebrado.status).toBe(400);
+      expect(quebrado.body.error).toMatch(/METACOMANDO|CACHE BREAKPOINT/);
+      expect(fs.existsSync(absOf(MISSAO))).toBe(false);
 
-    const bom = fs.readFileSync(absOf(CRITERIOS), 'utf8');
-    const ok = await request(app).put(url(comContrato)).set(authHeader(admin)).send({ content: bom, criar: true });
-    expect(ok.status).toBe(200);
-    expect(ok.body.validado).toBe(true);
-    fs.rmSync(path.dirname(absOf(comContrato)), { recursive: true, force: true });
+      const ok = await request(app).put(url(MISSAO)).set(authHeader(admin)).send({ content: guardado, criar: true });
+      expect(ok.status).toBe(200);
+      expect(ok.body.validado).toBe(true);
+    } finally {
+      fs.writeFileSync(absOf(MISSAO), guardado, 'utf8');
+    }
   });
 
   it('caminho fora do PROMPTS_DIR ou fora de .md é recusado', async () => {
@@ -211,7 +225,7 @@ describe('Administração — editor de prompts', () => {
     expect(promptFiles.validatePromptContent('entrevistador/qualquer.md', 'texto livre').ok).toBe(true);
     expect(promptFiles.validatePromptContent('entrevistador/qualquer.md', 'texto livre').validado).toBe(false);
     expect(promptFiles.validatePromptContent(MONTADO, '   ').ok).toBe(false);
-    // criterios-no-v25.md: o contrato é ter os 14 critérios parseáveis.
+    // criterios-no-v29.md: o contrato é ter os 15 critérios parseáveis.
     const criterios = fs.readFileSync(absOf(CRITERIOS), 'utf8');
     expect(promptFiles.validatePromptContent(CRITERIOS, criterios).ok).toBe(true);
     const truncado = criterios.slice(0, Math.floor(criterios.length / 3));

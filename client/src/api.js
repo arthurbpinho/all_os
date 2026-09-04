@@ -248,6 +248,10 @@ export const api = {
   // Logs
   getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
+  // Nota e feedback POR CRITÉRIO de um log — só supervisor/admin (o servidor
+  // recusa aluno com 403). O aluno tem a nota total e o feedback qualitativo;
+  // as quinze análises são escritas com o gabarito do caso à vista.
+  logCriterios: (logId) => request(`/logs/${encodeURIComponent(logId)}/criterios`),
   // Competitivo: avaliação assíncrona (nota em até 24h nos logs). Salva a sessão
   // pendente e retorna na hora ({ ok, pending, logId }) — sem nota/MMR.
   competitiveFinish: (data) => request('/competitive/finish', { method: 'POST', body: data }),
@@ -360,7 +364,13 @@ export const api = {
   // `onReasoning(delta, full)` é opcional: quando passado, o cliente pede o
   // resumo do raciocínio (showReasoning) e recebe eventos `data:{reasoning}`. O
   // servidor só envia esses eventos pra supervisor/admin — pro aluno fica vazio.
-  evaluate: async (messages, context, onToken, onReasoning) => {
+  // `onProgress(pct)` é opcional: o AVALIADOR OFICIAL (v29) são dezesseis
+  // chamadas e não streama token a token — o texto só existe no fim —, então
+  // ele manda uma fração de andamento durante a corrida. Vem só a fração, de
+  // propósito: quantos critérios existem e o que cada um mede não é do aluno.
+  // A resposta traz `evalId` (a chave do resultado, que fica no SERVIDOR e volta
+  // no saveLog), `score` (a nota calculada em código) e `evalVersion`.
+  evaluate: async (messages, context, onToken, onReasoning, onProgress) => {
     const token = getToken();
     const wantReasoning = typeof onReasoning === 'function';
     const body = context ? { messages, context } : { messages };
@@ -402,6 +412,9 @@ export const api = {
     let reasoning = '';
     let usage = null;
     let streamError = null;
+    let evalId = null;
+    let score = null;
+    let evalVersion = null;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -426,6 +439,14 @@ export const api = {
             // Custo dos Logs da Trilha: tokens normalizados pelo servidor —
             // o cliente só acumula/repassa ao salvar o log (ver ChatSession).
             usage = obj.usage;
+          } else if (obj.progress) {
+            if (onProgress) { try { onProgress(obj.progress.pct); } catch {} }
+          } else if (Object.prototype.hasOwnProperty.call(obj, 'evalId')) {
+            // Avaliador oficial: a chave do resultado (o detalhe por critério
+            // fica no servidor) + a nota já calculada.
+            evalId = obj.evalId;
+            if (Number.isFinite(obj.score)) score = obj.score;
+            if (obj.evalVersion) evalVersion = obj.evalVersion;
           } else if (obj.error) {
             streamError = obj.error;
           }
@@ -433,7 +454,7 @@ export const api = {
       }
     }
     if (streamError) throw new Error(streamError);
-    return { role: 'assistant', content: full, reasoning, usage };
+    return { role: 'assistant', content: full, reasoning, usage, evalId, score, evalVersion };
   },
 
   // Trilha — esquema visual (SVG) opcional ao final do exercício. Mesmo
@@ -625,7 +646,6 @@ export const api = {
 
   // --- Progressão (avaliação de evolução em sessões repetidas) ---
   getProgressionPatients: () => request('/progression/available-patients'),
-  evaluateProgression: (data) => request('/progression/evaluate', { method: 'POST', body: data }),
 
   // --- Sidequests (missões clínicas do Treinamento) ---
   // Aluno: sua sidequest ativa + concluídas.

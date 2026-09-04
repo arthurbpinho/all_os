@@ -32,7 +32,7 @@
 // duas abas medem a mesma coisa (o paciente), e duas tabelas de preço iriam
 // divergir no primeiro reajuste.
 const sim = require('./simulacao-independente');
-const { isRetryableAIError, retryDelayMs, modelEmiteResumo } = require('./avaliacao-v25');
+const { isRetryableAIError, retryDelayMs, modelEmiteResumo } = require('./avaliador-pipeline');
 
 // Teto de tokens da fala visível. O mesmo da Simulação Independente, pra o custo
 // por turno ser comparável entre as duas abas.

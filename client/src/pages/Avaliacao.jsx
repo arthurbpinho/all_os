@@ -5,44 +5,25 @@ import { useWakeLock } from '../useWakeLock';
 import { downloadText } from '../logFiles';
 import RichText from '../components/RichText';
 
-// Avaliação Independente — laboratório de PRICING (supervisor/admin). Alterna o
-// PROMPT (v16-2 / v18-25 / pipeline v28 ou v25, com feedback ou só nota), o
-// MODELO e o EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH (50% off) com
-// uma fila. Mostra a nota + o CUSTO EXATO (tokens × preço do modelo) e permite
-// baixar um relatório com tudo. Isolado do avaliador de produção e da simulação.
+// "Avaliar Sessão" (supervisor/admin): corrige um log colado com a MESMA régua
+// da produção — o pipeline v29, quinze nós, um por critério — e mostra a nota, o
+// custo exato da run (tokens × preço do modelo) e o resumo do raciocínio de cada
+// nó. Roda SÍNCRONO ou via BATCH (50% off) com uma fila. O que se alterna aqui é
+// MODELO e EFFORT: é onde se compara modelo contra modelo antes de trocar o que
+// a produção usa, em Administração → Modelos de IA.
+//
+// Havia também um alternador de PROMPT, com oito entradas (v16-2, v18.25, e os
+// pipelines v25/v28/v31/v32 em duas variantes cada). Saiu em 2026-09, quando o
+// app passou a rodar uma régua só. As runs antigas continuam no histórico, e a
+// tela ainda sabe desenhá-las: o que ficou guardado é resultado, não prompt.
 
-// Precisa espelhar o registry EVALUATORS do servidor (server/avaliacao-independente.js),
-// que é quem valida. O v29 é a versão em teste (travas respondidas uma a uma,
-// análise depois delas, sem confiança, e a pergunta da trava separada da pergunta
-// da régua); v32, v31, v28 e v25 ficam para rodar o mesmo log e comparar. A lista
-// está em ordem de CHEGADA (o v29 é o mais novo apesar do número, que é do
-// rascunho do prompt). Nas versões que têm duas entradas, é o mesmo código mudando
-// só a saída do nó: em 'vNN-nota' ele devolve só a nota, sem análise nem feedback
-// do aluno — mais barato, porque o texto por critério some do billing.
-const EVALUATORS = [
-  { id: 'v29', label: 'v29 · pipeline (15 nós)', nos: 15 },
-  { id: 'v32', label: 'v32 · pipeline (15 nós × 2 fases)', nos: 15, fases: 2 },
-  { id: 'v31', label: 'v31 · pipeline (15 nós)', nos: 15 },
-  { id: 'v28', label: 'v28 · pipeline (15 nós) · com feedback', nos: 15 },
-  { id: 'v28-nota', label: 'v28 · pipeline (15 nós) · só nota', nos: 15 },
-  { id: 'v25', label: 'v25 · pipeline (14 nós) · com feedback', nos: 14 },
-  { id: 'v25-nota', label: 'v25 · pipeline (14 nós) · só nota', nos: 14 },
-  { id: 'v18-25', label: 'v18.25 · 15 critérios' },
-];
-// Avaliadores que rodam o pipeline multi-nó (v28/v25, qualquer variante) — são
-// os que têm contagem de nós no registry.
-function isPipelineId(id) {
-  const e = EVALUATORS.find((x) => x.id === id);
-  return !!(e && e.nos);
-}
-// Quantos nós a versão roda (para os textos de tela). 0 se não for pipeline.
-function nosDe(id) {
-  const e = EVALUATORS.find((x) => x.id === id);
-  return (e && e.nos) || 0;
-}
-// Variante "só nota" (o nó devolve apenas a NOTA, sem análise nem sintetizador).
-function isSoNotaId(id) {
-  return /-nota$/.test(String(id || ''));
+// O avaliador da produção, e o único que a rota aceita (o servidor valida).
+const AVALIADOR = 'v29';
+const NOS = 15;
+// Rótulo de uma run: o do avaliador atual, ou o id cru quando a run é antiga —
+// aí o id (v28-nota, v18-25...) já é o rótulo mais honesto que existe.
+function evaluatorLabelDaRun(id) {
+  return id === AVALIADOR ? 'v29 · pipeline (15 nós)' : (id || '—');
 }
 // `efforts` só aparece no modelo que FOGE do padrão do provedor. A família 5.6
 // aceita dois degraus a mais (xhigh, max) — por isso a lista de effort virou
@@ -78,8 +59,7 @@ function effortsFor(modelKey) {
 }
 
 function evaluatorLabel(id) {
-  const e = EVALUATORS.find((x) => x.id === id);
-  return e ? e.label : (id || '—');
+  return evaluatorLabelDaRun(id);
 }
 // Dois estados de espera, e a diferença importa para quem olha: 'aguardando' é
 // a fila LOCAL (o job existe, mas o teto de tokens enfileirados do modelo na
@@ -90,8 +70,8 @@ function statusLabel(s) {
   if (s === 'aguardando') return 'Aguardando vaga';
   return 'Na fila';
 }
-// v28: linha das travas no card do critério. Mostra onde a subida parou, que é
-// o que diz se a trava está de fato segurando (um 7 exige F3 e F4 abertas).
+// Linha das travas no card do critério. Mostra onde a subida parou, que é o que
+// diz se a trava está de fato segurando (um 7 exige F3 e F4 abertas).
 function TravasLinha({ p }) {
   if (!p.travas) return null;
   return (
@@ -113,14 +93,12 @@ function TravasLinha({ p }) {
   );
 }
 
-// Linha sob a nota final do pipeline: quem ficou de fora da conta muda com a
-// VERSÃO. No v25 a confiança baixa exclui o critério; no v28 a confiança é só
-// recado ao supervisor; do v29/v31/v32 em diante não existe confiança, e só
-// fica de fora o nó cuja saída não deu para ler.
+// Linha sob a nota final: quem ficou de fora da conta. Na régua atual é só o nó
+// cuja saída não deu para ler; nas runs ANTIGAS do v25 a confiança baixa também
+// tirava o critério, e o histórico ainda as mostra.
 function subNotaPipeline(versao, incluidos, total) {
   const base = `Agregada de ${incluidos} de ${total} critérios `;
-  if (versao === 'v25') return base + '(os de confiança baixa ficaram fora).';
-  if (versao === 'v28') return base + '(a confiança não tira ninguém da nota; fica de fora só o nó sem nota legível).';
+  if (versao === 'v25') return base + '(run antiga: os de confiança baixa ficaram fora).';
   return base + '(fica de fora só o nó cuja saída não deu para ler).';
 }
 
@@ -159,6 +137,7 @@ function buildReport(result, log) {
   L.push(`Batch (50% off): ${inst.batch ? 'sim' : 'não'}`);
   if (inst.chamadas) L.push(`Chamadas ao modelo: ${inst.chamadas}${inst.retentativas ? ` (${inst.retentativas} refeitas por ordem trocada)` : ''}`);
   if (result.casoNome) L.push(`Caso: ${result.casoNome}`);
+  if (result.alunoNome) L.push(`Aluno: ${result.alunoNome}`);
   L.push('');
   L.push(`NOTA FINAL: ${result.notaFinal != null ? result.notaFinal + '/100' : '— (não avaliável)'}`);
   L.push('');
@@ -202,12 +181,13 @@ function buildReport(result, log) {
 
 export default function Avaliacao({ user }) {
   const [transcript, setTranscript] = useState('');
+  const [alunoNome, setAlunoNome] = useState('');
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
   // Abre na versão em teste (a primeira da lista) — é a que o supervisor roda
   // hoje; as outras ficam no alternador para comparar o mesmo log.
-  const [evaluator, setEvaluator] = useState(EVALUATORS[0].id);
+  const evaluator = AVALIADOR;
   const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
@@ -294,6 +274,7 @@ export default function Avaliacao({ user }) {
 
   async function handleStart() {
     if (!selectedCharacterId) { setError('Selecione o caso correspondente (necessário para o Bloco 1).'); return; }
+    if (!alunoNome.trim()) { setError('Informe o nome do aluno cuja sessão está sendo avaliada.'); return; }
     if (!transcript.trim()) { setError('Cole ou envie a transcrição da sessão.'); return; }
     setError('');
     setQueuedMsg('');
@@ -302,7 +283,7 @@ export default function Avaliacao({ user }) {
     if (isBatch) setSubmitting(true); else setLoading(true);
     try {
       const data = await api.avaliacaoIndependente({
-        log: transcript, casoId: selectedCharacterId, evaluator, model, effort, batch: isBatch,
+        log: transcript, casoId: selectedCharacterId, alunoNome: alunoNome.trim(), evaluator, model, effort, batch: isBatch,
       });
       if (data && data.queued && data.local) {
         await pollLocalJob(data.jobId);
@@ -389,7 +370,7 @@ export default function Avaliacao({ user }) {
                 <div key={j.id} className="aval-fila-job">
                   <div className="aval-fila-job-top">
                     <span className={`aval-job-status ${j.status}`}>{statusLabel(j.status)}</span>
-                    <span className="aval-fila-job-caso">{j.casoNome || '—'}</span>
+                    <span className="aval-fila-job-caso">{j.casoNome || '—'}{j.alunoNome ? ` · ${j.alunoNome}` : ''}</span>
                     <span className="aval-fila-job-time">{fmtDate(j.createdAt)}</span>
                   </div>
                   <div className="aval-fila-job-meta">
@@ -415,14 +396,13 @@ export default function Avaliacao({ user }) {
 
   // ── Tela de carregamento (sync) ──
   if (loading) {
-    const isPipe = isPipelineId(evaluator);
     return (
       <div>
         <div className="post-session">
           <div className="page-header">
             <div className="eyebrow">Avaliação Independente</div>
             <h2>Avaliando a <span className="accent">sessão</span></h2>
-            <p>{isPipe ? 'Cada critério é avaliado por um nó independente, em paralelo.' : 'Rodando o avaliador escolhido.'} Pode levar alguns segundos.</p>
+            <p>Cada critério é avaliado por um nó independente, em paralelo. Pode levar alguns minutos.</p>
             <div className="ornament" />
           </div>
           <div className="card evaluating-card">
@@ -431,8 +411,8 @@ export default function Avaliacao({ user }) {
             </div>
             <div className="evaluating-status">
               <div className="evaluating-line"><span className="dot active" /> Lendo o Bloco 1 do caso e o log</div>
-              <div className="evaluating-line"><span className="dot active" /> {isPipe ? `${nosDe(evaluator)} nós avaliando, um por critério` : 'Avaliando os critérios'}</div>
-              <div className="evaluating-line"><span className="dot pulse" /> {isSoNotaId(evaluator) ? 'Calculando a nota (esta variante não gera feedback)' : 'Calculando a nota e o feedback'}</div>
+              <div className="evaluating-line"><span className="dot active" /> {NOS} nós avaliando, um por critério</div>
+              <div className="evaluating-line"><span className="dot pulse" /> Calculando a nota e o feedback</div>
             </div>
           </div>
         </div>
@@ -446,9 +426,8 @@ export default function Avaliacao({ user }) {
     const inst = result.instrumentacao;
     const isPipe = Array.isArray(result.partes);
     const incluidos = isPipe ? result.partes.filter((p) => p.incluido).length : 0;
-    // Quem ficou fora da nota depende da VERSÃO do pipeline (ver
-    // subNotaPipeline). Runs antigas não gravaram `version` — sem ela, a regra é
-    // a do v25, que era a única que existia.
+    // Runs antigas não gravaram `version` — sem ela, a run é do v25, que era a
+    // única que existia quando o campo não existia (ver subNotaPipeline).
     const versaoPipe = result.version || 'v25';
     const numNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => typeof d.nota === 'number').length : 0;
     const naNotas = Array.isArray(result.notasDetalhe) ? result.notasDetalhe.filter((d) => d.nota === 'NA').length : 0;
@@ -458,7 +437,7 @@ export default function Avaliacao({ user }) {
           <div>
             <div className="eyebrow">Avaliação Independente · {evaluatorLabel(result.evaluator)}</div>
             <h2>Resultado da <span className="accent">avaliação</span></h2>
-            <p>{result.casoNome ? `Caso: ${result.casoNome}` : ''}</p>
+            <p>{[result.casoNome ? `Caso: ${result.casoNome}` : '', result.alunoNome ? `Aluno: ${result.alunoNome}` : ''].filter(Boolean).join(' · ')}</p>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="btn btn-outline" onClick={() => downloadReport(result, transcript)}>Baixar relatório (.txt)</button>
@@ -536,7 +515,7 @@ export default function Avaliacao({ user }) {
                     <TravasLinha p={p} />
                     <div className="v25-card-analise"><RichText text={p.analise} /></div>
                     <div className="v25-card-foot">
-                      {/* A confiança saiu no v31; no lugar dela, a etiqueta que o
+                      {/* A confiança saiu da régua; no lugar dela, a etiqueta que o
                           sintetizador recebe (derivada da faixa, escrita por código). */}
                       {p.etiqueta
                         ? <span className="v25-etiqueta">[{p.etiqueta}]</span>
@@ -564,10 +543,11 @@ export default function Avaliacao({ user }) {
               </div>
             )}
 
-            {/* Pipeline com captura (v28): o raciocínio vai para arquivo e sai
-                pelo botão do topo. Quando não houve, o aviso explica por quê —
-                senão o supervisor procura um botão que não existe. */}
-            {isPipe && versaoPipe === 'v28' && (
+            {/* O raciocínio dos nós vai para arquivo e sai pelo botão do topo.
+                Quando não houve, o aviso explica por quê — senão o supervisor
+                procura um botão que não existe. (Nas runs de v25, que não
+                capturavam, o arquivo nunca existiu.) */}
+            {isPipe && versaoPipe !== 'v25' && (
               <div className="card aval-reasoning">
                 <div className="aval-reasoning-head">Raciocínio dos nós</div>
                 {result.reasoningDisponivel
@@ -575,7 +555,7 @@ export default function Avaliacao({ user }) {
                     <div className="aval-reasoning-empty">
                       Guardado nesta avaliação: use <strong>Baixar raciocínio (.txt)</strong>, no topo. É o resumo que
                       o provedor entrega de cada nó (a cadeia bruta não é exposta por ninguém), com a nota e a
-                      confiança ao lado. Material do supervisor — não vai para o aluno.
+                      faixa ao lado. Material do supervisor — não vai para o aluno.
                     </div>
                   )
                   : (
@@ -588,8 +568,10 @@ export default function Avaliacao({ user }) {
               </div>
             )}
 
-            {/* Raciocínio "gasto" que o supervisor lê (o v18-25 raciocina no
-                canal oculto). GLM (z.ai) devolve o texto; GPT via chat.completions não. */}
+            {/* Runs ANTIGAS de avaliador de prompt único (v18-25, v16-2): o
+                raciocínio vinha na própria resposta quando o provedor o
+                devolvia (GLM sim; GPT via chat.completions não). Nenhuma run
+                nova cai aqui — o alternador de prompt não existe mais. */}
             {!isPipe && (
               <div className="card aval-reasoning">
                 <div className="aval-reasoning-head">Raciocínio — visível ao supervisor</div>
@@ -607,8 +589,8 @@ export default function Avaliacao({ user }) {
           <div className="card v25-feedback">
             {result.feedbackAluno
               ? <div className="v25-feedback-text"><RichText text={result.feedbackAluno} /></div>
-              : (result.variant === 'so-nota' || isSoNotaId(result.evaluator))
-                ? <div className="v25-feedback-empty">A variante <strong>só nota</strong> não gera feedback: os nós devolvem apenas a nota de cada critério, sem análise, e o sintetizador não roda. Para o feedback do aluno, rode a mesma versão em <strong>com feedback</strong>.</div>
+              : (result.variant === 'so-nota' || /-nota$/.test(String(result.evaluator || '')))
+                ? <div className="v25-feedback-empty">Esta run é de uma variante <strong>só nota</strong>, que não existe mais: os nós devolviam apenas a nota de cada critério e o sintetizador não rodava. Veja as notas por critério.</div>
                 : <div className="v25-feedback-empty">Sem feedback gerado. Veja as notas por critério.</div>}
           </div>
         )}
@@ -624,7 +606,7 @@ export default function Avaliacao({ user }) {
         <div className="eyebrow">Avaliação Independente</div>
         <h2><Typewriter text="Avaliar uma " /><span className="accent"><Typewriter text="Sessão" delayStart={520} /></span></h2>
         <p>
-          Laboratório de teste: escolha o <strong>avaliador</strong>, o <strong>modelo</strong> e o <strong>effort</strong>,
+          Corrige um log com a régua da produção (v29). Escolha o <strong>modelo</strong> e o <strong>effort</strong>,
           cole a transcrição e rode — na hora ou via <strong>batch</strong> (50% mais barato). Mostra a nota e o <strong>custo exato</strong> da run.
         </p>
         <div className="ornament" />
@@ -633,21 +615,13 @@ export default function Avaliacao({ user }) {
       <div className="avaliacao-intro">
         <div className="aval-controls">
           <div>
-            <label htmlFor="ev-select">Avaliador (prompt)</label>
-            <select id="ev-select" value={evaluator} onChange={(e) => setEvaluator(e.target.value)} style={{ width: '100%' }}>
-              {EVALUATORS.map((e) => <option key={e.id} value={e.id}>{e.label}</option>)}
-            </select>
-            {isPipelineId(evaluator) && (
-              <div className="aval-ev-hint">
-                {!isSoNotaId(evaluator)
-                  ? <>Os {nosDe(evaluator)} nós avaliam um critério cada, e o sintetizador escreve o feedback do aluno a partir das análises.</>
-                  : <>Os {nosDe(evaluator)} nós devolvem <strong>só a nota</strong>: mesma nota final, sem análise e sem feedback do aluno — mais barato (o texto por critério sai do billing; o reasoning continua).</>}
-                {evaluator.startsWith('v28') && <> No v28 a confiança é recado para o supervisor: ela aparece no critério, mas <strong>não tira ninguém da nota</strong>.</>}
-                {evaluator === 'v31' && <> O nó responde as quatro travas como perguntas independentes e a análise vem <strong>depois</strong> delas; faixa, realização e nota são derivadas por código.</>}
-                {evaluator === 'v29' && <> Como no v31 (travas uma a uma, análise depois, nota por código), mas com os <strong>dois juízos separados</strong>: a trava pergunta se aquilo aconteceu e funcionou, a régua pergunta se aquilo é o que <strong>caracteriza</strong> o trabalho — o v32 cobrava as duas coisas nas duas fases.</>}
-                {evaluator === 'v32' && <> Cada nó são <strong>duas chamadas</strong>: a primeira responde as quatro perguntas <strong>sem ver a régua</strong> (sem escada à vista, a impressão do atendimento não tem onde pousar), o código deriva a faixa, e a segunda decide completa ou incompleta com a régua inteira. São 30 chamadas por avaliação: pesa em tempo, pouco em dinheiro.</>}
-              </div>
-            )}
+            <label>Avaliador</label>
+            <div className="aval-ev-fixo">v29 · pipeline ({NOS} nós)</div>
+            <div className="aval-ev-hint">
+              A mesma régua que corrige as sessões dos alunos. Os {NOS} nós avaliam um critério cada,
+              respondendo as travas — a faixa e a nota saem por código, não do modelo —, e o
+              sintetizador escreve o feedback do aluno a partir das análises, sem ver o Bloco 1.
+            </div>
           </div>
           <div>
             <label htmlFor="md-select">Modelo</label>
@@ -687,6 +661,21 @@ export default function Avaliacao({ user }) {
               : <>Usar <strong>Batch</strong> (≈50% mais barato, assíncrono — o resultado cai na "Fila de avaliações")</>}
           </span>
         </label>
+
+        <div>
+          <label htmlFor="aluno-nome">Aluno <em style={{ color: 'var(--danger)', fontStyle: 'normal' }}>*</em></label>
+          <input
+            id="aluno-nome"
+            type="text"
+            value={alunoNome}
+            onChange={(e) => setAlunoNome(e.target.value)}
+            placeholder="Nome do aluno cuja sessão está sendo avaliada"
+            style={{ width: '100%' }}
+          />
+          <small style={{ display: 'block', marginTop: 6, color: 'var(--marrs-dark)', fontSize: 12 }}>
+            Obrigatório: identifica de quem é a sessão colada abaixo — sem isto, duas avaliações do mesmo caso ficam indistinguíveis no histórico.
+          </small>
+        </div>
 
         <div>
           <label htmlFor="character-select">Caso correspondente <em style={{ color: 'var(--danger)', fontStyle: 'normal' }}>*</em></label>

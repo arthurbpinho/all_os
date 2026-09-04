@@ -18,9 +18,15 @@ const {
 const mmrEngine = require('./mmr');
 const avatarPool = require('./avatar-pool');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody, clearAssetsCache, estimarTokens } = require('./avaliacao-v25');
+const {
+  runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody,
+  clearAssetsCache, estimarTokens, extractChatReasoning, PIPELINE_VERSIONS_IDS,
+} = require('./avaliador-pipeline');
 const batchFila = require('./batch-fila');
-const aiIndependente = require('./avaliacao-independente');
+// Avaliador OFICIAL da produção (pipeline v29). Quem decide quais modos usam o
+// pipeline, monta os materiais de cada modo e guarda o detalhe por critério
+// fora do alcance do aluno. Ver server/avaliacao-oficial.js.
+const oficial = require('./avaliacao-oficial');
 const promptFiles = require('./prompt-files');
 const simIndependente = require('./simulacao-independente');
 const benchmark = require('./benchmark-simulacao');
@@ -212,17 +218,128 @@ if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
 
 // PROMPTS_DIR guarda os .md do avaliador/entrevistador — dados sensíveis
 // (critérios de nota, gabaritos), por isso NÃO ficam versionados no git.
-// Semeia UMA VEZ a partir da cópia local em avaliacao/ e entrevistador/ (que
-// continuam existindo em disco, só não versionadas); depois disso o volume
-// persistente é a fonte e sobrevive a redeploys mesmo sem os arquivos no git.
-// Atualizações subsequentes vão pelas rotas /api/admin/prompts, não por git push.
-if (!fs.existsSync(PROMPTS_DIR)) {
+// Semeia a partir da cópia local em avaliacao/ e entrevistador/ (que continuam
+// existindo em disco, só não versionadas); depois disso o volume persistente é a
+// fonte e sobrevive a redeploys mesmo sem os arquivos no git. Atualizações de
+// conteúdo vão pelas rotas /api/admin/prompts, não por git push.
+//
+// A semeadura copia o que FALTA e nunca sobrescreve o que já está no volume.
+// Antes ela era só-uma-vez ("se o PROMPTS_DIR não existe"), e isso escondia uma
+// armadilha: um prompt NOVO (uma versão nova do pipeline, um modo novo de um
+// avaliador) nunca chegava a um ambiente que já tinha sido semeado — em
+// produção o arquivo simplesmente não existia, e a avaliação morria com ENOENT
+// na primeira sessão depois do deploy. Copiar o que falta resolve isso sem
+// tocar em nenhuma edição feita pelo painel: quem existe no volume manda.
+// Pastas da cópia local que NÃO são prompt do app e não têm o que fazer no
+// volume: a "benchmarking tool" é a bancada de análise do dono (scripts .py,
+// dumps de run, relatórios .html) — nenhum código lê nada de lá, e semeá-la
+// jogava ~150 arquivos no volume persistente e uma dúzia de .md na listagem de
+// Administração → Prompts.
+const SEED_PROMPTS_IGNORAR = new Set(['benchmarking tool']);
+
+function seedPromptsDir() {
   fs.mkdirSync(PROMPTS_DIR, { recursive: true });
+  let copiados = 0;
+  // Cria a pasta destino só quando há o que pôr dentro: uma pasta que sobrou na
+  // cópia local sem nenhum prompt (o caso de uma versão que foi apagada e
+  // deixou um arquivo de ferramenta atrás) não deve nascer no volume.
+  const copiarFaltantes = (src, dst) => {
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      // Nada que começa com ponto: são arquivos de ferramenta (.claude/, .DS_Store)
+      // que já apareceram dentro dessas pastas e não têm nada a fazer no volume.
+      if (entry.name.startsWith('.')) continue;
+      if (entry.isDirectory() && SEED_PROMPTS_IGNORAR.has(entry.name)) continue;
+      const de = path.join(src, entry.name);
+      const para = path.join(dst, entry.name);
+      if (entry.isDirectory()) {
+        copiarFaltantes(de, para);
+      } else if (entry.isFile() && !fs.existsSync(para)) {
+        fs.mkdirSync(path.dirname(para), { recursive: true });
+        fs.copyFileSync(de, para);
+        copiados++;
+        console.log(`[prompts] semeado: ${path.relative(PROMPTS_DIR, para)}`);
+      }
+    }
+  };
   for (const name of promptFiles.PROMPT_ROOTS) {
     const src = path.join(__dirname, '..', name);
-    if (fs.existsSync(src)) fs.cpSync(src, path.join(PROMPTS_DIR, name), { recursive: true });
+    if (!fs.existsSync(src)) continue;
+    copiarFaltantes(src, path.join(PROMPTS_DIR, name));
   }
+  return copiados;
 }
+seedPromptsDir();
+
+// Migração one-shot: APAGA do volume os prompts das réguas que saíram do app em
+// 2026-09 (v16-2, v18.25 individual/progressão/seletivo, e os pipelines v25,
+// v28, v31 e v32). Eles foram removidos do repositório, mas o volume é
+// persistente: sem isto continuariam lá para sempre, aparecendo na listagem de
+// Administração → Prompts como arquivos editáveis que nenhum código lê.
+//
+// Cada arquivo é COPIADO para o histórico de versões (prompt-backups/) antes de
+// sair, então nada se perde de verdade — o conteúdo continua recuperável no
+// volume, fora do caminho. Marker em migrations.json: roda uma vez.
+//
+// O que NÃO entra nesta lista, de propósito: `avaliador 18/avaliador-v18-25-duelo.md`
+// (Duelo comparativo), `avaliador 18/avaliador-v18-25-neuro.md` (Neuro), as
+// pastas v29/ e v29-progressao/, e a `benchmarking tool/` (que não é avaliador).
+(function limparPromptsDasReguasAntigas() {
+  const migrations = readJSON('migrations.json', {});
+  if (migrations.prompts_reguas_antigas_removidos) return;
+
+  // Arquivos soltos e pastas inteiras. "nova avaliacao" é o nome que a pasta do
+  // v25 tem no volume de PRODUÇÃO (no repo ela se chamava v25).
+  const arquivos = [
+    'avaliacao/avaliador-v16-2.md',
+    'avaliacao/avaliador-comparativo-v1.md',
+    'avaliacao/avaliador-comparativo-v2.md',
+    'avaliacao/avaliador-processo-seletivo-v1.md',
+    'avaliacao/avaliador-progressao-v2.md',
+    'avaliacao/avaliador 18/avaliador-v18-25.md',
+    'avaliacao/avaliador 18/avaliador-v18-25-processo-seletivo.md',
+    'avaliacao/avaliador 18/avaliador-v18-25-progressao.md',
+  ];
+  const pastas = ['avaliacao/v25', 'avaliacao/v28', 'avaliacao/v31', 'avaliacao/v32', 'avaliacao/nova avaliacao', 'avaliacao/neuro'];
+
+  const apagar = (rel) => {
+    const abs = promptFiles.resolvePromptPath(rel);
+    if (!abs || !fs.existsSync(abs)) return false;
+    try {
+      promptFiles.backupPrompt(rel); // guarda antes de sair
+      fs.unlinkSync(abs);
+      return true;
+    } catch (e) {
+      console.error(`[prompts] não deu para remover ${rel}:`, e.message);
+      return false;
+    }
+  };
+
+  let removidos = 0;
+  for (const rel of arquivos) if (apagar(rel)) removidos++;
+  for (const pasta of pastas) {
+    const dirAbs = path.join(PROMPTS_DIR, pasta);
+    if (!fs.existsSync(dirAbs)) continue;
+    for (const nome of fs.readdirSync(dirAbs)) {
+      // Só arquivo, e só o que a pasta de prompt deveria ter. Subpasta ou
+      // dotfile (um .claude/ que apareceu ali dentro) fica onde está — apagar
+      // recursivamente uma árvore no volume não é trabalho de migração.
+      const alvo = path.join(dirAbs, nome);
+      if (nome.startsWith('.') || !fs.statSync(alvo).isFile()) continue;
+      if (nome.toLowerCase().endsWith('.md')) {
+        if (apagar(`${pasta}/${nome}`)) removidos++;
+      } else {
+        try { fs.unlinkSync(alvo); removidos++; } catch {}
+      }
+    }
+    try { fs.rmdirSync(dirAbs); } catch {} // só sai se ficou vazia
+  }
+
+  migrations.prompts_reguas_antigas_removidos = new Date().toISOString();
+  writeJSON('migrations.json', migrations);
+  if (removidos > 0) {
+    console.log(`[prompts] ${removidos} arquivo(s) das réguas antigas removido(s) do volume (com backup em prompt-backups/).`);
+  }
+})();
 
 // Fotos de paciente enviadas pelo admin ficam no volume persistente (DATA_DIR),
 // não no repo — assim sobrevivem a redeploys do Railway. Servidas em
@@ -3401,12 +3518,15 @@ app.get('/api/logs', requireAuth, (req, res) => {
   const users = readJSON('users.json');
 
   // criteriaScores (notas por critério do avaliador) são só pra supervisor/admin.
-  // Aluno (interno ou externo) e visitante recebem o log SEM esse campo.
+  // Aluno (interno ou externo) e visitante recebem o log SEM esse campo — e sem
+  // o evalPartsId, que é a chave do arquivo com as quinze ANÁLISES por critério
+  // (a rota que o serve já exige supervisor/admin, mas o aluno não tem por que
+  // receber nem a chave).
   const isStudent = isAluno(req.user.role) || req.user.role === 'visitor';
   const serve = (arr) => {
     const decorated = decorateLogs(arr);
     if (!isStudent) return decorated;
-    return decorated.map(({ criteriaScores, ...rest }) => rest);
+    return decorated.map(({ criteriaScores, evalPartsId, ...rest }) => rest);
   };
 
   // Aluno e visitante: só os próprios.
@@ -3437,6 +3557,31 @@ app.get('/api/logs', requireAuth, (req, res) => {
 // Metadados da política de expiração — o cliente usa pra montar o aviso.
 app.get('/api/logs/policy', requireAuth, (req, res) => {
   res.json({ ttlDays: LOG_TTL_DAYS });
+});
+
+// NOTA E FEEDBACK POR CRITÉRIO de um log — SÓ supervisor e admin.
+//
+// É a única porta para as quinze análises do avaliador oficial. Elas são escritas
+// por nós que estavam lendo o Bloco 1 (o gabarito do caso), então nem o aluno
+// dono do log pode vê-las: ele tem a nota total e o feedback qualitativo, que é
+// o que o sintetizador escreveu sem nunca ver o gabarito.
+//
+// O gate é de ROLE, não de propriedade — de propósito. Um supervisor lê os
+// critérios de qualquer log; um aluno não lê nem os do log dele.
+app.get('/api/logs/:id/criterios', requireAuth, (req, res) => {
+  if (!oficial.podeVerCriterios(req.user.role)) {
+    return res.status(403).json({ error: 'Nota e feedback por critério são visíveis apenas a supervisor e administrador.' });
+  }
+  const log = readJSON('logs.json').find((l) => String(l.id) === String(req.params.id));
+  if (!log) return res.status(404).json({ error: 'Log não encontrado' });
+  if (!log.evalPartsId) {
+    // Log antigo (avaliador de prompt único) ou sem avaliação: as notas por
+    // critério que existirem estão no próprio log (criteriaScores), sem análise.
+    return res.json({ disponivel: false, motivo: 'Este log foi avaliado antes do avaliador oficial v29 — só há notas por critério, sem análise.' });
+  }
+  const detalhe = oficial.lerDetalhe(log.evalPartsId);
+  if (!detalhe) return res.json({ disponivel: false, motivo: 'O detalhe desta avaliação não está mais no volume.' });
+  res.json({ disponivel: true, ...oficial.detalheParaSupervisor(detalhe) });
 });
 
 // Cap de tamanho pra prevenir bloat em logs.json e ataques de fillup.
@@ -3650,9 +3795,31 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // Extrai primeiro o [sidequest-resultado] (remove só o próprio bloco, em
   // qualquer posição), depois o [notas-supervisor] (até o fim). Assim a extração
   // independe da ordem em que o avaliador emitiu os dois blocos.
-  const { clean: cleanAfterSq, result: sidequestResult } = extractSidequestResult(body.evaluation);
-  const { clean: cleanAfterDaily, result: dailyResult } = extractDailyMissionResult(cleanAfterSq);
+  const { clean: cleanAfterSq, result: sidequestResultTexto } = extractSidequestResult(body.evaluation);
+  const { clean: cleanAfterDaily, result: dailyResultTexto } = extractDailyMissionResult(cleanAfterSq);
   const { clean: cleanEvaluation, criteria: supervisorCriteria } = extractSupervisorNotes(cleanAfterDaily);
+
+  // AVALIADOR OFICIAL (v29): a avaliação já rodou em /api/evaluate e o resultado
+  // ficou no SERVIDOR — o cliente só devolve o `evalId`. Nota, notas por
+  // critério e texto do feedback vêm todos do detalhe gravado, nunca do body:
+  // além de o detalhe por critério não poder passar pelo navegador do aluno, é o
+  // que impede alterar a própria nota reenviando o log com outro texto.
+  //
+  // `anexar` recusa id de outro usuário e id já usado em outro log (ver
+  // avaliacao-oficial.js) — nos dois casos volta null e o log segue o caminho
+  // antigo, como se não houvesse avaliação oficial.
+  const logId = 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
+  const detalheOficial = body.evalId
+    ? oficial.anexar(clampStr(body.evalId, 60), { logId, dono: req.user.id })
+    : null;
+  // Missão: no v18.25 o veredito vinha num bloco no fim do texto do avaliador;
+  // no v29 é um nó próprio, e chega pelo detalhe. O formato que o resto do
+  // código consome ({ completed, justification }) é o mesmo dos dois.
+  const missaoOficial = detalheOficial && detalheOficial.missao
+    ? { completed: !!detalheOficial.missao.cumprida, justification: detalheOficial.missao.justificativa || '' }
+    : null;
+  const sidequestResult = missaoOficial || sidequestResultTexto;
+  const dailyResult = missaoOficial || dailyResultTexto;
 
   // Nota final: calculada em CÓDIGO a partir das notas por critério do bloco
   // [notas] (avaliadores v18.25) ou [notas-supervisor] (logs antigos). A IA não emite a nota
@@ -3667,6 +3834,10 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     const computed = finalScoreFromCriteria(supervisorCriteria);
     if (computed !== null) finalScore = computed;
   }
+  // O detalhe do avaliador oficial vence tudo: nota, notas por critério e texto.
+  const criteriosOficiais = detalheOficial ? oficial.notasPorCriterio(detalheOficial) : null;
+  const textoOficial = detalheOficial ? oficial.textoDoAluno(detalheOficial, detalheOficial.version) : '';
+  if (detalheOficial && Number.isFinite(detalheOficial.notaFinal)) finalScore = detalheOficial.notaFinal;
 
   // Neuroavaliação: registra a bateria de testes escolhida pelo aluno. Recomputa
   // a comparação server-side a partir do gabarito do personagem (à prova de
@@ -3693,7 +3864,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   }
 
   const log = {
-    id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
+    id: logId,
     timestamp: new Date().toISOString(),
     type: body.type,
     mode,
@@ -3703,8 +3874,14 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
     durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
     score: finalScore,
-    criteriaScores: explicitCriteria || supervisorCriteria || null,
-    evaluation: clampStr(cleanEvaluation, LOG_MAX_EVAL_LEN),
+    criteriaScores: criteriosOficiais || explicitCriteria || supervisorCriteria || null,
+    evaluation: clampStr(textoOficial || cleanEvaluation, LOG_MAX_EVAL_LEN),
+    // Avaliador oficial: versão do pipeline que corrigiu e o id do arquivo com
+    // as quinze análises. O `evalPartsId` é só uma chave — o conteúdo é servido
+    // por GET /api/logs/:id/criterios, que exige supervisor ou admin, e o GET
+    // dos logs esconde o campo do aluno.
+    evalVersion: detalheOficial ? detalheOficial.version : null,
+    evalPartsId: detalheOficial ? detalheOficial.id : null,
     // Esquema visual (opcional, Trilha): revalida o SVG aqui também (não confia
     // no que o cliente manda) — só persiste um bloco <svg> sanitizado ou null.
     imageSchema: clampStr(extractAndSanitizeSvg(body.imageSchema), LOG_MAX_IMAGE_SCHEMA_LEN) || null,
@@ -4076,16 +4253,26 @@ app.get('/api/me/mmr', requireAuth, (req, res) => {
 app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, res) => {
   const logs = readJSON('logs.json');
   let clearedScores = 0;
+  let clearedParts = 0;
   for (const l of logs) {
     if (l.score !== null && l.score !== undefined) clearedScores++;
     l.score = null;
     l.criteriaScores = null;
+    // O detalhe por critério do avaliador oficial também é NOTA (quinze delas
+    // por sessão), então cai no mesmo reset — se ficasse, o supervisor
+    // continuaria vendo notas do avaliador antigo numa tela que diz que as
+    // notas foram zeradas. O TEXTO da avaliação, que o aluno leu, é preservado
+    // como sempre: ele está no próprio log.
+    if (l.evalPartsId) {
+      if (oficial.apagarDetalhe(l.evalPartsId)) clearedParts++;
+      l.evalPartsId = null;
+    }
   }
   writeJSON('logs.json', logs);
   writeJSON('progress.json', {});
   // Os recordes 👑 dos pacientes são notas do avaliador antigo — caem junto.
   writeCharacterRecords({});
-  console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), progresso e recordes limpos.`);
+  console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), ${clearedParts} detalhe(s) por critério apagado(s), progresso e recordes limpos.`);
   res.json({ ok: true, clearedScores });
 });
 
@@ -4098,9 +4285,10 @@ app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, re
 //   aiModels — modelo do avaliador e do paciente POR CATEGORIA do app (ver
 //     server/ai-models.js e aiCategoryDefaults). Categoria sem escolha usa o
 //     padrão do sistema.
-//   visitorEvaluationModel — LEGADO da época em que só o visitante escolhia
-//     modelo (a escolha morava na aba Contas). Continua sendo lido como PADRÃO da
-//     categoria "visitante" pra não perder o que já estava configurado.
+// (Havia uma terceira, `visitorEvaluationModel`: a escolha de modelo do
+// visitante, da época em que ela morava na aba Contas. Saiu em 2026-09 — o
+// visitante entrou no avaliador oficial junto com todo mundo, e trocar o modelo
+// dele é escolher na categoria "Visitante" em Administração → Modelos de IA.)
 function readSettings() {
   return readJSON('settings.json', {});
 }
@@ -4110,13 +4298,12 @@ function visitorEvaluationEnabled() {
 
 // Configurações visíveis ao cliente — QUALQUER usuário autenticado (inclusive
 // visitante: o EchoSession precisa saber se deve rodar a avaliação do visitante).
-// visitorEvaluationModel é LEGADO: a escolha do modelo virou a categoria
-// "Visitante" em Administração → Modelos de IA. Continua sendo respondido (e
-// dizendo a verdade sobre o que roda) pra não quebrar cliente antigo em cache.
+// `avaliadorModelo` é informativo: diz qual modelo está avaliando o visitante
+// agora (o efetivo da categoria), no lugar da antiga chave de escolha.
 app.get('/api/settings', requireAuth, (req, res) => {
   res.json({
     visitorEvaluationEnabled: visitorEvaluationEnabled(),
-    visitorEvaluationModel: evaluatorSpecFor('visitante').preset || VISITOR_EVAL_MODEL_DEFAULT,
+    avaliadorModelo: evaluatorSpecFor('visitante').model,
   });
 });
 
@@ -4127,17 +4314,9 @@ app.put('/api/admin/settings', requireAuth, requireRole('admin'), (req, res) => 
   if (typeof body.visitorEvaluationEnabled === 'boolean') {
     cur.visitorEvaluationEnabled = body.visitorEvaluationEnabled;
   }
-  if (typeof body.visitorEvaluationModel === 'string') {
-    cur.visitorEvaluationModel = VISITOR_EVAL_MODELS[body.visitorEvaluationModel]
-      ? body.visitorEvaluationModel
-      : VISITOR_EVAL_MODEL_DEFAULT;
-  }
   writeJSON('settings.json', cur);
-  console.log(`[admin] settings atualizado por ${req.user.username}: visitorEvaluationEnabled=${cur.visitorEvaluationEnabled === true} visitorEvaluationModel=${cur.visitorEvaluationModel || VISITOR_EVAL_MODEL_DEFAULT}`);
-  res.json({
-    visitorEvaluationEnabled: cur.visitorEvaluationEnabled === true,
-    visitorEvaluationModel: VISITOR_EVAL_MODELS[cur.visitorEvaluationModel] ? cur.visitorEvaluationModel : VISITOR_EVAL_MODEL_DEFAULT,
-  });
+  console.log(`[admin] settings atualizado por ${req.user.username}: visitorEvaluationEnabled=${cur.visitorEvaluationEnabled === true}`);
+  res.json({ visitorEvaluationEnabled: cur.visitorEvaluationEnabled === true });
 });
 
 // --- Modelos de IA por categoria (admin-only) -------------------------------
@@ -4263,8 +4442,8 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 //    (Trilha/Treinamento/Neuro/Duelo). gpt-5.4-mini com effort 'minimal' — o
 //    personagem responde direto, rápido e natural, sem raciocínio denso. O
 //    prompt caching da OpenAI é automático no prefixo (system + histórico).
-//  - OpenAI GPT-5.x (reasoning): avaliador (v18.25), avaliador de duelo e
-//    entrevistador. São tarefas de raciocínio denso onde o modelo precisa
+//  - OpenAI GPT-5.x (reasoning): o avaliador oficial (pipeline v29), o
+//    avaliador do duelo e o entrevistador. São tarefas de raciocínio denso onde o modelo precisa
 //    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
 //    content), o que mantém o Bloco 1 opaco por construção.
@@ -4275,8 +4454,10 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
 // 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
 const PATIENT_MODEL = process.env.OPENAI_PATIENT_MODEL || 'gpt-5.4-mini-2026-03-17';
 const PATIENT_EFFORT = process.env.OPENAI_PATIENT_EFFORT || 'none';
-// Avaliador (v18.25 + duelo) roda no gpt-5.5. O entrevistador segue no full 5.4
-// (HEAVY) — geração de prompt de paciente é menos sensível a custo.
+// OPENAI_EVAL_MODEL: sobrou como default do effort/modelo de referência do
+// avaliador (ver OPENAI_EVAL_EFFORT abaixo); o avaliador oficial resolve o
+// modelo pela categoria. O entrevistador segue no full 5.4 (HEAVY) — geração de
+// prompt de paciente é menos sensível a custo.
 const OPENAI_EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
 const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
 // reasoning_effort por caminho. Avaliador em 'medium' — o default da família
@@ -4286,11 +4467,12 @@ const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05
 // minimal), senão reabre o vazamento do Bloco 1 — causa-raiz do bug do Opus (v15).
 const OPENAI_EVAL_EFFORT = process.env.OPENAI_EVAL_EFFORT || 'medium';
 const OPENAI_HEAVY_EFFORT = process.env.OPENAI_HEAVY_EFFORT || 'medium';
-// Avaliador da Simulação Livre (freeplay em treino). Por decisão do dono é um
-// modelo mais barato/antigo (5.4 default) e a avaliação é assumidamente MENOS
-// precisa que a do Competitivo — que reserva o EVAL (5.5). A simulação livre é
-// alto volume; o modelo bom fica pro que vale ranking. Selecionado em
-// /api/evaluate quando context.mode === 'training' e type === 'freeplay'.
+// ÚLTIMO RECURSO do avaliador em OpenAI. Era o avaliador da Simulação Livre, na
+// época em que o Treinamento rodava num modelo mais barato que o Competitivo;
+// hoje todos os modos rodam o avaliador oficial, e isto só é usado por
+// evaluatorOpenaiFallback quando a categoria que falhou tem PADRÃO fora da
+// OpenAI (o Duelo, hoje) — nenhum caminho vivo cai aqui, mas a rede de
+// segurança precisa de um modelo para apontar.
 const OPENAI_SIM_MODEL = process.env.OPENAI_SIM_MODEL || 'gpt-5.4-2026-03-05';
 const OPENAI_SIM_EFFORT = process.env.OPENAI_SIM_EFFORT || 'medium';
 // Avaliador da Trilha (exercícios). Por decisão do dono roda no mini da família
@@ -4321,15 +4503,26 @@ const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 //   - O Duelo continua SEM fallback pro GPT no caminho de FALHA (isso segue
 //     valendo), mas o admin pode escolher GPT como primário dele.
 //
-// TREINAMENTO (freeplay training): GLM 5.2/high; FALLBACK pra gpt-5.4/medium (o
-// SIM acima) se o primário falhar. SELETIVO e COMPETITIVO: gpt-5.5/high em BATCH
-// (ninguém espera a nota na tela). Provider é derivado do prefixo do modelo.
-const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || 'glm-5.2';
-const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || 'high';
-const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || 'gpt-5.5-2026-04-23';
-const SELECAO_EVAL_EFFORT = process.env.SELECAO_EVAL_EFFORT || 'high';
-const OPENAI_COMP_MODEL = process.env.OPENAI_COMP_MODEL || 'gpt-5.5-2026-04-23';
-const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || 'high';
+// AVALIADOR OFICIAL (2026-09): pipeline v29 em GPT 5.6 Luna, effort high, em
+// TODOS os modos de sessão individual — Treinamento (com e sem progressão),
+// Competitivo, Visitante, Processo Seletivo e a correção manual do supervisor.
+// Duelo (comparativo), Neuro e Trilha ficam fora; ver server/avaliacao-oficial.js.
+//
+// É o PADRÃO das categorias, não uma trava: Administração → Modelos de IA
+// continua podendo pôr outro modelo em qualquer uma delas, e o pipeline roda no
+// que a categoria resolver (inclusive GLM). Uma env var setada também vence este
+// padrão — é o que as linhas abaixo dizem, e o log de boot mostra o efetivo.
+const AVALIADOR_OFICIAL_MODEL = process.env.AVALIADOR_OFICIAL_MODEL || 'gpt-5.6-luna';
+const AVALIADOR_OFICIAL_EFFORT = process.env.AVALIADOR_OFICIAL_EFFORT || 'high';
+// TREINAMENTO, SELETIVO e COMPETITIVO: o oficial acima. Seletivo e Competitivo
+// vão de BATCH (50% off) porque ninguém espera a nota na tela; Treinamento é
+// síncrono, o aluno espera. Provider é derivado do prefixo do modelo.
+const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || AVALIADOR_OFICIAL_MODEL;
+const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || AVALIADOR_OFICIAL_EFFORT;
+const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || AVALIADOR_OFICIAL_MODEL;
+const SELECAO_EVAL_EFFORT = process.env.SELECAO_EVAL_EFFORT || AVALIADOR_OFICIAL_EFFORT;
+const OPENAI_COMP_MODEL = process.env.OPENAI_COMP_MODEL || AVALIADOR_OFICIAL_MODEL;
+const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || AVALIADOR_OFICIAL_EFFORT;
 // DUELO (avaliação comparativa): GLM 5.2/high por padrão. O resultado sai na hora
 // pros dois alunos, então esta categoria nunca vai de batch, qualquer que seja o
 // modelo — e não há fallback pro GPT quando o primário falha.
@@ -4338,18 +4531,6 @@ const DUEL_EVAL_EFFORT = process.env.DUEL_EVAL_EFFORT || 'high';
 function providerForModel(m) {
   return String(m || '').startsWith('glm') ? 'glm' : 'openai';
 }
-
-// LEGADO: as duas opções de avaliador de visitante da época em que essa escolha
-// morava na aba Contas (chave visitorEvaluationModel em settings.json). Hoje a
-// escolha é a categoria "visitante" em Administração → Modelos de IA, com as 3
-// opções de sempre; isto sobrevive só para (a) traduzir a escolha antiga no
-// PADRÃO daquela categoria (ver aiCategoryDefaults) e (b) manter o contrato do
-// PUT /api/admin/settings pra cliente antigo em cache. Não usar em código novo.
-const VISITOR_EVAL_MODEL_DEFAULT = 'glm-5.2';
-const VISITOR_EVAL_MODELS = {
-  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
-  'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'high' },
-};
 
 // Modelo do avaliador ESCOLHIDO POR EXERCÍCIO na Trilha (admin define ao salvar
 // o exercício, ver EXERCISE_FIELDS/evaluatorModel). Cinco opções fixas — não é
@@ -4396,22 +4577,24 @@ function patientDefaultSpec() {
   return { model: PATIENT_MODEL, provider: 'openai', effort: PATIENT_EFFORT };
 }
 
-// Padrão de cada categoria. Lido a cada chamada (não no boot) porque o padrão do
-// Visitante ainda considera a escolha ANTIGA de modelo (visitorEvaluationModel,
-// que vivia na aba Contas) — quem já tinha configurado ali não perde a escolha.
+// Padrão de cada categoria. Lido a cada chamada (não no boot) para que uma
+// troca de env ou de padrão global valha na próxima avaliação, sem restart.
 function aiCategoryDefaults() {
-  const legadoVisitante = VISITOR_EVAL_MODELS[readSettings().visitorEvaluationModel]
-    || VISITOR_EVAL_MODELS[VISITOR_EVAL_MODEL_DEFAULT];
   const paciente = patientDefaultSpec();
   const ev = (model, effort) => ({ model, provider: providerForModel(model), effort });
+  const oficial = ev(AVALIADOR_OFICIAL_MODEL, AVALIADOR_OFICIAL_EFFORT);
   return {
     treinamento: { evaluator: ev(TRAINING_EVAL_MODEL, TRAINING_EVAL_EFFORT), patient: paciente },
     competitivo: { evaluator: ev(OPENAI_COMP_MODEL, OPENAI_COMP_EFFORT), patient: paciente },
     seletivo: { evaluator: ev(SELECAO_EVAL_MODEL, SELECAO_EVAL_EFFORT), patient: paciente },
-    visitante: { evaluator: { ...legadoVisitante }, patient: paciente },
+    // VISITANTE: o mesmo avaliador oficial dos outros modos (decisão do dono),
+    // quando o interruptor de avaliação de visitante está ligado. Para trocar o
+    // modelo aqui, a porta é a categoria "Visitante" em Administração → Modelos
+    // de IA — a escolha antiga, que vivia na aba Contas, deixou de existir.
+    visitante: { evaluator: { ...oficial }, patient: paciente },
     duelo: { evaluator: ev(DUEL_EVAL_MODEL, DUEL_EVAL_EFFORT), patient: paciente },
     neuro: { evaluator: ev(OPENAI_NEURO_MODEL, OPENAI_NEURO_EFFORT), patient: paciente },
-    avaliacaoManual: { evaluator: ev(OPENAI_EVAL_MODEL, OPENAI_EVAL_EFFORT), patient: paciente },
+    avaliacaoManual: { evaluator: { ...oficial }, patient: paciente },
   };
 }
 
@@ -5016,14 +5199,21 @@ function sanitizeAssistantId(input) {
 }
 
 // --- Avaliação de Sessão (Chat com IA) ---
-// FAMÍLIA v18.25: todos os avaliadores de produção vivem em
-// `avaliacao/avaliador 18/`, derivados do mesmo base (avaliador-v18-25.md) com a
-// adaptação de cada modo. Saída única em todos: bloco `[notas]` (15 critérios,
-// 1–10 ou NA) no início, `[feedback]` + corpo depois. Os prompts v15/v16
-// continuam em `avaliacao/`
-// só como referência e para o laboratório da Avaliação Independente.
-const AVALIACAO_DIR = path.join(PROMPTS_DIR, 'avaliacao');
-const AVALIACAO_18_DIR = path.join(AVALIACAO_DIR, 'avaliador 18');
+// OS DOIS AVALIADORES DE PROMPT ÚNICO que sobraram, os dois em
+// `avaliacao/avaliador 18/`. Eles são o que restou da família v18.25 depois que
+// o pipeline v29 assumiu a avaliação individual de todos os modos (2026-09):
+//
+//   DUELO — a avaliação é COMPARATIVA (os dois logs numa chamada, notas
+//     A1..A15/B1..B15). O v29 é individual, e não há prompt comparativo na régua
+//     nova; por decisão do dono o Duelo fica aqui, no GLM.
+//   NEURO — grade própria de 4 critérios, e o único modo em que o gabarito
+//     diagnóstico pode ir ao aluno no feedback. Em stand-by.
+//
+// Saída dos dois: bloco `[notas]` no início, `[feedback]` + corpo depois — é o
+// formato que extractSupervisorNotes lê no save do log. Os outros quatro
+// (individual, progressão, processo seletivo, v16-2) foram apagados junto das
+// estruturas que os rodavam.
+const AVALIACAO_18_DIR = path.join(PROMPTS_DIR, 'avaliacao', 'avaliador 18');
 
 function loadEvaluatorFile(fileName) {
   const promptFile = path.join(AVALIACAO_18_DIR, fileName);
@@ -5031,21 +5221,6 @@ function loadEvaluatorFile(fileName) {
     throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
   }
   return fs.readFileSync(promptFile, 'utf-8');
-}
-
-// Avaliador individual (Treinamento sem progressão, Competitivo, avaliação
-// manual): 15 critérios em 6 grupos, nota final calculada no
-// scoring.js a partir do bloco [notas].
-function loadAvaliacaoPrompt() {
-  return loadEvaluatorFile('avaliador-v18-25.md');
-}
-
-// Avaliador dedicado do Processo Seletivo: "só-nota", saída curta e direcionada ao
-// AVALIADOR (síntese + pontos fortes/fracos + observações), sem o feedback longo
-// ao aluno. Mesma régua e mesmos 15 critérios do individual, mas system menor
-// (~13k vs ~25k) → corta input; saída curta → corta prosa.
-function loadSelecaoEvaluatorPrompt() {
-  return loadEvaluatorFile('avaliador-v18-25-processo-seletivo.md');
 }
 
 // Avaliador dedicado da Neuroavaliação: sessão única, 4 critérios próprios
@@ -5060,13 +5235,6 @@ function loadNeuroEvaluatorPrompt() {
 // análise comparativa + bloco [notas] com A1..A15 / B1..B15.
 function loadComparativoPrompt() {
   return loadEvaluatorFile('avaliador-v18-25-duelo.md');
-}
-
-// Avaliador de progressão: compara dois logs (Atendimento 1 e 2) do mesmo paciente.
-// Atendimento 2 é o objeto da avaliação; Atendimento 1 é referência contextual.
-// Também é o avaliador das missões (sidequest / missão diária).
-function loadProgressaoPrompt() {
-  return loadEvaluatorFile('avaliador-v18-25-progressao.md');
 }
 
 // Resolve o system prompt do avaliador server-side. Para exercícios da Trilha,
@@ -5087,8 +5255,11 @@ function resolveEvaluatorSystemPrompt({ context }) {
   if (context && typeof context === 'object' && context.type === 'neuro') {
     return { systemPrompt: loadNeuroEvaluatorPrompt() };
   }
-  // freeplay, avaliação manual (sem context) → avaliador global
-  return { systemPrompt: loadAvaliacaoPrompt() };
+  // Não há mais avaliador de prompt único genérico: freeplay e correção manual
+  // rodam o pipeline oficial, e quem chega aqui é porque `usaOficial` disse que
+  // não — o que só acontece se alguém criar um modo novo sem decidir quem o
+  // avalia. Erro explícito é melhor que rodar a régua errada em silêncio.
+  return { status: 400, error: 'Não há avaliador definido para este tipo de sessão.' };
 }
 
 // Resolve o Bloco 1 (gabarito/critério de correção) do personagem, server-side.
@@ -5191,27 +5362,35 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     });
   }
 
-  const resolved = resolveEvaluatorSystemPrompt({ context });
-  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
-
-  // Fora da Trilha, o modelo vem da CATEGORIA (Administração → Modelos de IA):
-  // treino/progressão, visitante, neuro ou avaliação manual. O cliente sinaliza
-  // o modo em context.mode; sem mode (aba Avaliar Sessão) cai em avaliacaoManual.
+  // QUEM AVALIA esta requisição. A decisão é por MODO e mora só aqui:
+  //   freeplay em treino, visitante e correção manual → pipeline OFICIAL v29
+  //     (v29-progressao quando o aluno reatende o caso ou tem missão ativa);
+  //   neuroavaliação → avaliador dedicado de neuro (família v18.25, em stand-by);
+  //   exercício da Trilha → avaliador que o admin configurou no exercício.
+  // O Competitivo e o Processo Seletivo também rodam o v29, mas não passam por
+  // aqui: são assíncronos e têm os sweeps deles.
   const isFreeSim = !!(context && context.type === 'freeplay' && context.mode === 'training');
   // Trilha (exercícios): modelo é ESCOLHIDO POR EXERCÍCIO (admin, ver
   // TRILHA_EXERCISE_MODELS/evaluatorModel) e NÃO passa pelas categorias — é
-  // controle próprio do editor de exercícios. Não entra no progressionMode (que
-  // é exclusivo do freeplay/treinamento).
+  // controle próprio do editor de exercícios.
   const isExercise = !!(context && context.type === 'exercise');
-  const exerciseModelSpec = isExercise
-    ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
-    : null;
   // Neuro tem categoria própria, fora da régua do treino.
   const isNeuroEval = !!(context && context.type === 'neuro');
   const evalCategory = isExercise ? null
     : req.user.role === 'visitor' ? 'visitante'
       : isNeuroEval ? 'neuro'
         : isFreeSim ? 'treinamento' : 'avaliacaoManual';
+  const usaOficial = !isExercise && !isNeuroEval && oficial.categoriaUsaPipeline(evalCategory);
+
+  // O prompt de uma chamada só (neuro e Trilha). O pipeline oficial não tem
+  // "um" system prompt — são dezesseis, montados pelo avaliacao-v25.js —, então
+  // nem resolvemos isto quando ele é quem vai rodar.
+  const resolved = usaOficial ? {} : resolveEvaluatorSystemPrompt({ context });
+  if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
+
+  const exerciseModelSpec = isExercise
+    ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
+    : null;
   // Spec efetivo da categoria (escolha do admin ou padrão do sistema).
   const categorySpec = evalCategory ? evaluatorSpecFor(evalCategory) : null;
   // Provedor que não é OpenAI (GLM hoje; Claude só via Trilha) roda BUFFERED:
@@ -5219,8 +5398,10 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // mostra a tela "avaliando", então não perde nada, e o heartbeat segura a
   // conexão. Vale pra Trilha (escolha por exercício) e pra qualquer categoria em
   // que o admin escolheu GLM. FALLBACK pro OpenAI se o provedor falhar.
+  // (No caminho oficial isto não se aplica: o pipeline fala com os dois
+  // provedores pelo mesmo código, e o "buffered" é o normal dele.)
   const isExerciseAltProvider = isExercise && exerciseModelSpec.provider !== 'openai';
-  const isCategoryAltProvider = !!(categorySpec && categorySpec.provider !== 'openai');
+  const isCategoryAltProvider = !usaOficial && !!(categorySpec && categorySpec.provider !== 'openai');
   // evalModel/evalEffort = o caminho OpenAI. Quando o primário já é OpenAI, é o
   // próprio primário; quando é GLM, é a rede de segurança do fallback.
   const categoryFallback = evalCategory ? evaluatorOpenaiFallback(evalCategory) : null;
@@ -5231,17 +5412,27 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   let evalEffort = isExercise
     ? (isExerciseAltProvider ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort)
     : (isCategoryAltProvider ? categoryFallback.effort : categorySpec.effort);
-  let inputTurns;
+  let inputTurns = [];
   let progressionMode = false;
   let sidequestActive = false;
+  // Materiais do pipeline oficial (um slot por material; ver avaliacao-oficial.js).
+  let materiaisOficial = null;
+  let versaoOficial = oficial.VERSAO;
+
+  // A transcrição que o cliente mandou, como texto corrido. É o {{LOG}} do
+  // pipeline e o turno de usuário do avaliador de uma chamada só.
+  const transcriptCliente = (messages || [])
+    .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+    .map((m) => (typeof m.content === 'string' ? m.content : String(m.content || '')))
+    .filter(Boolean)
+    .join('\n\n');
 
   // Treinamento conectado à progressão + sidequests. Quando o aluno reatende um
   // paciente (há log anterior) OU tem uma sidequest ativa, a avaliação passa a
-  // rodar no AVALIADOR DE PROGRESSÃO, com o contexto montado server-side: Bloco 1
-  // + Atendimento 1 + feedback anterior + sidequest ativa, seguido do atendimento
-  // que o cliente enviou (Atendimento 2). Continua sendo Treinamento, então roda
-  // no SIM/5.4 (herdado de isFreeSim acima) — o 5.5 fica só pro Competitivo, Neuro,
-  // Duelo e Trilha. O Competitivo (MMR) nunca entra aqui.
+  // rodar no MODO PROGRESSÃO do v29: mesma régua e mesmos critérios, com o
+  // atendimento anterior, a avaliação que ele leu e a missão entrando em slots
+  // próprios — e um nó a mais, que decide se a missão foi cumprida. O
+  // Competitivo (MMR) nunca entra aqui.
   if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
     const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
     // Uma missão OU outra (ver resolveTrainingMission): no máximo um dos dois vem
@@ -5250,50 +5441,61 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     if (prevLog || activeSq || activeDaily) {
       progressionMode = true;
       sidequestActive = !!activeSq;
-      systemPrompt = loadProgressaoPrompt();
 
       const studentName = req.user.name || 'Aluno';
       const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
       const characterName = (prevLog && prevLog.itemTitle) || (freeChar && freeChar.name) || 'Paciente';
       const bloco1p = resolveBloco1({ context });
 
-      // Atendimento 2 = a sessão que o cliente acabou de enviar para correção.
-      const atd2Content = (messages || [])
-        .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
-        .map((m) => (typeof m.content === 'string' ? m.content : String(m.content || '')))
-        .filter(Boolean)
-        .join('\n\n');
+      const missaoAtiva = activeSq || activeDaily || null;
+      materiaisOficial = oficial.materiaisProgressao({
+        bloco1: bloco1p,
+        log: transcriptCliente,
+        atendimento1: prevLog
+          ? `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcriptFromMessages(prevLog.messages, studentName, characterName) || '(sem mensagens)'}`
+          : '',
+        avaliacao1: prevLog ? buildPreviousEvalSection(getPreviousFeedback(req.user.id, context.itemId)) : '',
+        missao: missaoAtiva
+          ? `TÍTULO: ${missaoAtiva.title}\nDESCRIÇÃO: ${missaoAtiva.description}\nTIPO: ${activeSq ? 'sidequest atribuída pelo supervisor' : 'desafio do dia'}`
+          : '',
+      });
+      versaoOficial = oficial.VERSAO_PROGRESSAO;
 
-      let content = '';
-      if (bloco1p) content += `[BLOCO 1 DO CASO] (critério de correção/gabarito)\n${bloco1p}\n\n---\n\n`;
-      if (prevLog) {
-        const transcript1 = transcriptFromMessages(prevLog.messages, studentName, characterName);
-        content += `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n`;
-        const prevSection = buildPreviousEvalSection(getPreviousFeedback(req.user.id, context.itemId));
-        if (prevSection) content += `${prevSection}\n---\n\n`;
+      // Os prompts do modo progressão podem não estar no volume ainda (eles não
+      // vêm no git; sobem por Administração → Prompts). Nesse caso a avaliação
+      // NÃO falha: cai no modo padrão, que avalia a sessão que o aluno acabou de
+      // fazer. O que se perde é a comparação com o atendimento anterior e o
+      // fechamento automático da missão — não a nota nem o feedback.
+      if (!oficial.versaoDisponivel(versaoOficial)) {
+        console.error('[aval-oficial] modo progressão indisponível no volume — avaliando no modo padrão (a missão não fecha sozinha).');
+        materiaisOficial = null;
+        versaoOficial = oficial.VERSAO;
+        progressionMode = false;
+        sidequestActive = false;
       }
-      if (activeSq) {
-        content += `[SIDEQUEST ATIVA]\nTÍTULO: ${activeSq.title}\nDescrição: ${activeSq.description}\n\nEsta sidequest é o objetivo principal deste atendimento. Avalie primariamente se o aluno a cumpriu e emita o bloco [sidequest-resultado] conforme a especificação.\n\n---\n\n`;
-      }
-      if (activeDaily) {
-        content += `[MISSÃO DIÁRIA]\nTÍTULO: ${activeDaily.title}\nDescrição: ${activeDaily.description}\n\nEste é o desafio do dia e é o objetivo principal deste atendimento (o aluno não tem sidequest ativa — as duas nunca aparecem juntas). Avalie primariamente se o aluno o cumpriu, com a mesma régua da sidequest, e emita o bloco [missao-diaria-resultado] conforme a especificação.\n\n---\n\n`;
-      }
-      content += `[ATENDIMENTO 2 — ${studentName} com ${characterName}] (objeto da avaliação)\n${atd2Content || '(sem mensagens)'}`;
-
-      inputTurns = [{ role: 'user', content }];
     }
   }
 
-  if (!progressionMode) {
+  if (usaOficial) {
+    // Modo padrão do pipeline: o caso e o atendimento, cada um no seu slot. O
+    // Bloco 1 NÃO é prefixado no log (era o que o avaliador de uma chamada
+    // pedia) — aqui ele tem slot próprio, e o sintetizador nunca o vê.
+    if (!materiaisOficial) {
+      materiaisOficial = oficial.materiaisPadrao({ bloco1: resolveBloco1({ context }), log: transcriptCliente });
+    }
+    if (!transcriptCliente) {
+      return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+    }
+  } else {
     const bloco1 = resolveBloco1({ context });
     const finalMessages = withBloco1(messages, bloco1);
     inputTurns = (finalMessages || [])
       .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
       .map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : String(m.content || '') }))
       .filter((m) => m.content);
-  }
-  if (!inputTurns.length) {
-    return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+    if (!inputTurns.length) {
+      return res.status(400).json({ error: 'messages não contém turnos válidos (user/assistant)' });
+    }
   }
 
   // Exercício da Trilha com avaliador OpenAI (mini/5.4/5.5): SEMPRE em Batch —
@@ -5355,10 +5557,10 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   const streamReasoning = canSeeReasoning && showReasoning === true;
 
   try {
-    // Avaliador v18.25 no GPT-5.4 (reasoning) via Responses API. O modelo cruza
-    // Bloco 1 × log e pontua os 15 critérios no canal de reasoning OCULTO — não
-    // sai no output_text, então o gabarito não vaza pro aluno (era o que o Opus
-    // sem thinking fazia errado, externalizando a análise). Quando o pedido vem
+    // Avaliador de UMA chamada (hoje: neuro e Trilha) via Responses API. O
+    // modelo cruza Bloco 1 × log e pontua os critérios no canal de reasoning
+    // OCULTO — não sai no output_text, então o gabarito não vaza pro aluno (era
+    // o que o Opus sem thinking fazia errado, externalizando a análise). Quando o pedido vem
     // da aba Avaliar Sessão (supervisor/admin), o RESUMO do raciocínio
     // (reasoning.summary) é encaminhado à parte em eventos `data:{reasoning}` —
     // a OpenAI não expõe a cadeia bruta, só o resumo. O prompt caching é
@@ -5386,7 +5588,101 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     let usageProvider = 'openai'; // provedor do usage capturado — pra normalizar certo
     let usageModel = evalModel; // modelo que efetivamente rodou (pode virar o fallback)
     try {
-      if (isCategoryAltProvider) {
+      if (usaOficial) {
+        // ---- PIPELINE OFICIAL (v29) --------------------------------------
+        // Dezesseis chamadas: quinze nós (um por critério, em paralelo, no
+        // limite de TPM) e o sintetizador, que escreve o feedback do aluno sem
+        // nunca ter visto o Bloco 1. No modo progressão entra uma décima sétima,
+        // a da missão. Nada disso streama token a token: o texto do aluno só
+        // existe no fim, então ele sai de uma vez, como no caminho do GLM.
+        //
+        // Enquanto roda, mandamos PROGRESSO — e de propósito só uma fração
+        // (`pct`), nunca "critério 7 de 15": o aluno tem acesso à nota total e
+        // ao feedback qualitativo, e a mecânica da avaliação não é dele.
+        let ultimoPct = -1;
+        const onProgress = ({ feitos, total }) => {
+          const pct = Math.min(99, Math.round((feitos / total) * 100));
+          if (pct === ultimoPct) return;
+          ultimoPct = pct;
+          try { res.write(`data: ${JSON.stringify({ progress: { pct } })}\n\n`); } catch {}
+        };
+
+        const spec = categorySpec;
+        let usouModel = spec.model;
+        let usouEffort = spec.effort;
+        let usouProvider = spec.provider;
+        let result;
+        try {
+          const client = getClientForProvider(spec.provider);
+          if (!client) throw new Error(`${spec.provider} indisponível`);
+          result = await oficial.avaliar({
+            client, provider: spec.provider, model: spec.model, effort: spec.effort,
+            materiais: materiaisOficial, version: versaoOficial, onProgress,
+          });
+        } catch (err) {
+          // REDE DE SEGURANÇA (a mesma que o avaliador de uma chamada tinha):
+          // quando o admin escolheu um provedor que não é OpenAI e ele falha —
+          // sem chave, rate limit que sobreviveu às retentativas, instabilidade
+          // —, refazemos no OpenAI para o aluno nunca ficar sem nota. Custa uma
+          // avaliação inteira a mais, e é por isso que só vale nesse caso: com o
+          // primário já na OpenAI, repetir daria o mesmo erro.
+          if (spec.provider === 'openai') throw err;
+          console.error(`[aval-oficial] ${spec.model} falhou → refazendo em ${categoryFallback.model}/${categoryFallback.effort}:`, err.message);
+          const openaiClient = getClientForProvider('openai');
+          if (!openaiClient) throw err;
+          usouModel = categoryFallback.model;
+          usouEffort = categoryFallback.effort;
+          usouProvider = 'openai';
+          ultimoPct = -1;
+          result = await oficial.avaliar({
+            client: openaiClient, provider: 'openai', model: usouModel, effort: usouEffort,
+            materiais: materiaisOficial, version: versaoOficial, onProgress,
+          });
+        }
+        usageProvider = usouProvider;
+        usageModel = usouModel;
+
+        const texto = oficial.textoDoAluno(result, versaoOficial);
+        if (result.notaFinal == null || !texto) {
+          // Nenhum critério avaliável (todos os nós fora de formato). Sem nota e
+          // sem feedback não há o que entregar — vira erro visível em vez de um
+          // log salvo com avaliação vazia.
+          throw new Error('o avaliador não devolveu nota nem feedback (nenhum critério avaliável)');
+        }
+
+        // O detalhe por critério fica no SERVIDOR. O cliente recebe só o id
+        // (`evalId`), que ele devolve ao salvar o log — é assim que a nota e as
+        // análises entram no log sem nunca passar pelo navegador do aluno.
+        let evalId = null;
+        try {
+          evalId = oficial.salvarDetalhe({
+            dono: req.user.id, version: versaoOficial, categoria: evalCategory,
+            model: usouModel, effort: usouEffort, provider: usouProvider, result,
+            itemId: (context && context.itemId) || null,
+            itemTitle: (context && context.itemTitle) || '',
+          });
+        } catch (e) {
+          // Perder o detalhe não pode custar a avaliação ao aluno: ele recebe
+          // nota e feedback de qualquer jeito, e o supervisor fica sem a tabela.
+          console.error('[aval-oficial] falha ao gravar o detalhe por critério:', e.message);
+        }
+
+        res.write(`data: ${JSON.stringify({ delta: texto })}\n\n`);
+        res.write(`data: ${JSON.stringify({ evalId, score: result.notaFinal, evalVersion: versaoOficial })}\n\n`);
+        // Instrumentação do pipeline: os tokens já vêm somados das 16 chamadas.
+        // `usage` fica null de propósito: o normalizeUsage lá embaixo espera o
+        // usage cru de UMA chamada, e aqui são dezesseis já somadas. O custo do
+        // pipeline sai neste log.
+        const t = (result.instrumentacao && result.instrumentacao.totais) || null;
+        if (t) {
+          const custo = result.instrumentacao.custo;
+          console.log(
+            `Evaluate (${usouModel} · ${evalCategory}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : ''} · ${versaoOficial}): `
+            + `nota=${result.notaFinal} chamadas=${result.instrumentacao.chamadas} cached=${t.cached} in=${t.input} out=${t.output}`
+            + `${custo ? ` custo=US$ ${custo.usd.toFixed(4)}` : ''}`,
+          );
+        }
+      } else if (isCategoryAltProvider) {
         // Categoria com avaliador de OUTRO provedor (GLM 5.2 — o único fora da
         // OpenAI nas opções de avaliador). Roda BUFFERED: uma chamada
         // chat.completions e a resposta inteira de uma vez no SSE. A UI já mostra
@@ -5659,12 +5955,12 @@ function selecaoExportSlug(nome) {
 
 const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
 const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
-// Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 junto com a
-// migração pro avaliador v18.25: o seletivo roda no GPT-5.5 (batch), que pontua
-// mais alto que o GLM em que o corte de 40 foi calibrado, então o mesmo 40
-// deixaria passar candidato mediano. Muda só a etiqueta ativo/rejeitado e a
-// contagem da dashboard — a nota em si não se move, e logs já avaliados
-// conservam o status que receberam na época.
+// Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
+// para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
+// corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
+// v29 — a régua nova é outra, e é isso que fica para o retrabalho do Seletivo.
+// Muda só a etiqueta ativo/rejeitado e a contagem da dashboard; a nota em si não
+// se move, e logs já avaliados conservam o status que receberam na época.
 const SELECTION_ACTIVE_THRESHOLD = 55;
 const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
 // Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
@@ -5780,26 +6076,49 @@ function buildSelectionExportText(log) {
 
   const evalBody = [
     `Nota final: ${log.score == null ? '—' : `${log.score}/100`}`,
-    `Status: ${SELECAO_STATUS_LABEL[log.status] || log.status}`, '',
+    `Status: ${SELECAO_STATUS_LABEL[log.status] || log.status}`,
+    log.evalVersion ? `Avaliador: ${log.evalVersion}` : null,
+    '',
     (log.evaluation || '').trim() || '(sem texto de avaliação)',
-  ].join('\n');
+    // Análise por critério do avaliador oficial. Quem baixa este .txt é o
+    // recrutador (role 'evaluator') ou o admin — o candidato nunca recebe nada.
+    criteriosDoSeletivoTxt(log),
+  ].filter((l) => l !== null).join('\n');
   return `${logStr}\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalBody}`;
 }
 
-// Partes do input da avaliação do seletivo: o prompt enxuto + o turno do usuário
-// (Bloco 1 + transcrição). Usado tanto pelo GLM (chat.completions) quanto pelo
-// fallback OpenAI (responses).
-function selectionEvalParts(log) {
+// Materiais da avaliação do seletivo (Bloco 1 + transcrição, cada um no seu
+// slot). O candidato NUNCA vê nada disto — nem nota, nem feedback —, então aqui
+// o texto do sintetizador existe só para o recrutador ler.
+//
+// O avaliador ENXUTO próprio do seletivo (avaliador-v18-25-processo-seletivo.md)
+// saiu do caminho: a régua agora é a mesma do resto do app, que era o pedido. O
+// .md continua no volume, e o Seletivo será retrabalhado depois — por ora ele
+// muda de avaliador e nada mais (candidato segue sem devolutiva).
+function selectionMateriais(log) {
   const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.characterId))
     || { id: log.characterId, name: log.characterName || 'Paciente' };
   const transcript = buildSelectionTranscript(log.messages, char.name || 'Paciente');
-  const evalUser = {
-    role: 'user',
-    content: `[LOG DO ATENDIMENTO — pode conter várias sessões com o mesmo paciente]\nPersonagem: ${char.name || 'Paciente'}\nLegenda: "═══ SESSÃO N ═══" separa as sessões (acompanhamento ao longo do tempo — avalie também a evolução entre elas); "★" marca uma intervenção que o próprio candidato destacou e a linha "{...}" logo abaixo é a justificativa dele.\n\n${transcript}`,
-  };
-  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: char.id } });
-  const inputTurns = withBloco1([evalUser], bloco1);
-  return { prompt: loadSelecaoEvaluatorPrompt(), inputTurns };
+  return oficial.materiaisPadrao({
+    bloco1: resolveBloco1({ context: { type: 'freeplay', itemId: char.id } }),
+    log: `[LOG DO ATENDIMENTO — pode conter várias sessões com o mesmo paciente]\nPersonagem: ${char.name || 'Paciente'}\nLegenda: "═══ SESSÃO N ═══" separa as sessões (acompanhamento ao longo do tempo — avalie também a evolução entre elas); "★" marca uma intervenção que o próprio candidato destacou e a linha "{...}" logo abaixo é a justificativa dele.\n\n${transcript}`,
+  });
+}
+
+// Bloco de análise por critério para o .txt do recrutador. Vazio quando o
+// candidato foi avaliado antes do avaliador oficial (ou quando o detalhe já
+// saiu do volume pela expiração).
+function criteriosDoSeletivoTxt(log) {
+  if (!log || !log.evalPartsId) return '';
+  const detalhe = oficial.lerDetalhe(log.evalPartsId);
+  if (!detalhe || !Array.isArray(detalhe.partes) || !detalhe.partes.length) return '';
+  const L = ['', '--- ANÁLISE POR CRITÉRIO ---', ''];
+  for (const p of detalhe.partes) {
+    L.push(`${p.num}. ${p.nome} — ${p.nota != null ? `${p.nota}/10` : 'sem nota'}${p.faixa ? ` (faixa ${p.faixa}${p.realizacao ? `, ${p.realizacao}` : ''})` : ''}`);
+    if (p.analise) L.push(p.analise);
+    L.push('');
+  }
+  return L.join('\n');
 }
 
 // Extrai nota + avaliação limpa do texto do avaliador (mesma régua do resto):
@@ -5879,19 +6198,32 @@ async function criarBatchRegistrado({ openai, requests, model, modo }) {
 }
 
 // Submete os pendentes de um modo em LOTES que caibam na fila da OpenAI, na
-// ordem de chegada. `itens` é [{ id, body }]; devolve um Map id → batchId com
-// os que entraram AGORA. O que não coube não é perdido nem marcado: fica
-// pendente e volta no próximo ciclo do sweep (a cada 3 minutos) — é a fila
-// esperando vaga, que é o comportamento que 20 pessoas submetendo ao mesmo
-// tempo precisam ter.
+// ordem de chegada. Devolve um Map id → batchId com os que entraram AGORA. O que
+// não coube não é perdido nem marcado: fica pendente e volta no próximo ciclo do
+// sweep (a cada 3 minutos) — é a fila esperando vaga, que é o comportamento que
+// 20 pessoas submetendo ao mesmo tempo precisam ter.
+//
+// `itens` aceita as duas formas:
+//   [{ id, body }]                    → uma requisição por item (Trilha, legado)
+//   [{ id, bodies: [{num, body}] }]   → várias por item (pipeline v29: 15 nós)
+// No segundo caso o item é INDIVISÍVEL: as quinze requisições de uma sessão vão
+// no mesmo lote, senão metade dos nós ficaria num batch de hoje e metade num de
+// amanhã, e o coletor não teria o que agregar. O `custom_id` fica `<id>::<num>`,
+// que é o que o coletor usa para reagrupar por sessão.
 async function submeterPendentesEmLotes({ openai, itens, model, modo, rotulo }) {
   const destino = new Map();
   if (!itens.length) return destino;
-  const comTokens = itens.map((it) => ({ ...it, tokens: batchFila.tokensDaRequisicao(it.body, estimarTokens) }));
+  const requisicoesDe = (it) => (Array.isArray(it.bodies)
+    ? it.bodies.map((n) => ({ custom_id: `${it.id}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body }))
+    : [{ custom_id: String(it.id), method: 'POST', url: '/v1/chat/completions', body: it.body }]);
+  const comTokens = itens.map((it) => ({
+    ...it,
+    tokens: tokensDoLote(requisicoesDe(it).map((r) => r.body)),
+  }));
   const lotes = batchFila.dividirEmLotes({ itens: comTokens, model, tokensEmVoo: tokensEmVoo(model) });
 
   for (const lote of lotes) {
-    const requests = lote.map((it) => ({ custom_id: String(it.id), method: 'POST', url: '/v1/chat/completions', body: it.body }));
+    const requests = lote.flatMap(requisicoesDe);
     let batch;
     try {
       batch = await criarBatchRegistrado({ openai, requests, model, modo });
@@ -5937,41 +6269,91 @@ function toBatchFile(jsonl) {
 // batch e ganhar os 50% de desconto. Só vale para modelo OpenAI: quando o admin
 // escolhe GLM na categoria, `spec.batch` vem false e a avaliação vai pelo
 // caminho síncrono em background (ver runPendingEvalsWithoutBatch).
-function buildSelectionEvalBody(log, spec) {
-  const { prompt, inputTurns } = selectionEvalParts(log);
-  return {
-    model: spec.model,
-    reasoning_effort: spec.effort,
-    max_completion_tokens: 64000,
-    messages: buildOpenAIMessages(prompt, inputTurns),
-  };
+function buildSelectionEvalBodies(log, spec) {
+  return oficial.requisicoesDosNos({
+    materiais: selectionMateriais(log), model: spec.model, effort: spec.effort, provider: spec.provider,
+  });
 }
 
-// Avaliação SÍNCRONA de um item pendente, para quando o modelo escolhido não tem
-// Batch API (GLM). Roda em background no mesmo sweep: nada na UX muda — quem
-// finalizou já saiu sem nota e ela entra no log quando chegar; por este caminho
-// só chega mais rápido, sem o desconto do batch.
-async function runEvalWithoutBatch({ spec, systemPrompt, inputTurns }) {
-  // Só chat.completions aqui (OpenAI e GLM). A Anthropic usa a Messages API, com
-  // outra forma — se algum dia Claude entrar em EVALUATOR_PRESETS, este caminho
-  // precisa do buildAnthropicArgs (como runPatientTurn faz). Falha explícita em
-  // vez de um TypeError obscuro em `client.chat`.
+// --- Pipeline oficial nos modos ASSÍNCRONOS (Competitivo e Seletivo) -------
+
+// Saídas de um batch, indexadas pelo id da SESSÃO. Aceita os dois formatos de
+// `custom_id` que podem aparecer no mesmo dia de deploy:
+//   "<id>::<num>" → uma requisição por critério (pipeline v29) ⇒ { nodes: [...] }
+//   "<id>"        → uma requisição por sessão (avaliador antigo) ⇒ { text }
+function lerSaidasDoBatch(jsonl) {
+  const porSessao = new Map();
+  for (const line of String(jsonl || '').split('\n')) {
+    if (!line.trim()) continue;
+    let obj;
+    try { obj = JSON.parse(line); } catch { continue; }
+    const body = obj.response && obj.response.body;
+    const texto = (body && body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) || '';
+    const cid = String(obj.custom_id || '');
+    const sep = cid.indexOf('::');
+    if (sep === -1) {
+      porSessao.set(cid, { text: texto });
+      continue;
+    }
+    const id = cid.slice(0, sep);
+    const num = Number(cid.slice(sep + 2));
+    if (!Number.isFinite(num)) continue;
+    const atual = porSessao.get(id) || { nodes: [] };
+    if (!atual.nodes) continue; // já classificada como legado
+    atual.nodes.push({ num, text: texto, usage: (body && body.usage) || null });
+    porSessao.set(id, atual);
+  }
+  return porSessao;
+}
+
+// O sintetizador não vai no lote (precisa das quinze análises juntas), então ele
+// roda aqui, síncrono, uma chamada por sessão. Quando o admin trocou o modelo
+// para um provedor sem Batch API DEPOIS da submissão, o lote continua sendo da
+// OpenAI: o sintetizador acompanha o lote, não a escolha nova.
+function especDoSintetizador(spec) {
+  if (spec && spec.provider === 'openai') return { model: spec.model, effort: spec.effort };
+  return { model: AVALIADOR_OFICIAL_MODEL, effort: AVALIADOR_OFICIAL_EFFORT };
+}
+
+// Fecha uma sessão a partir da saída do lote. Devolve o que o finalizador de
+// cada modo consome: { result, batch } no pipeline, { text } no legado.
+async function fecharPipelineDoLote({ saida, spec, materiais, version = oficial.VERSAO, rotulo }) {
+  if (saida.text != null && !saida.nodes) return { text: saida.text };
+  const openai = getOpenAI();
+  if (!openai) throw new Error('OPENAI_API_KEY ausente para fechar o pipeline do lote');
+  const sint = especDoSintetizador(spec);
+  const result = await oficial.finalizarDoLote({
+    client: openai, provider: 'openai', model: sint.model, effort: sint.effort,
+    version, materiais, nodeOutputs: saida.nodes,
+  });
+  const t = (result.instrumentacao && result.instrumentacao.totais) || null;
+  if (t) {
+    const custo = result.instrumentacao.custo;
+    console.log(`[${rotulo}] ${sint.model} · ${version}: nota=${result.notaFinal} cached=${t.cached} in=${t.input} out=${t.output}${custo ? ` custo=US$ ${custo.usd.toFixed(4)}` : ''}`);
+  }
+  return { result, batch: true, version };
+}
+
+// Pipeline oficial SÍNCRONO em background, para quando o modelo escolhido não
+// tem Batch API (GLM). Mesma UX: quem finalizou já saiu sem nota, e ela entra no
+// registro quando chegar — por aqui só chega mais rápido, sem o desconto.
+async function runPipelineSemBatch({ spec, materiais, version = oficial.VERSAO, rotulo }) {
   if (spec.provider === 'anthropic') {
+    // Mesma recusa explícita do runEvalWithoutBatch: a Anthropic usa a Messages
+    // API, com outra forma de corpo. Nenhum preset de avaliador é Claude hoje.
     throw new Error('avaliação sem batch não suporta Anthropic (usaria a Messages API)');
   }
   const client = getClientForProvider(spec.provider);
   if (!client) throw new Error(`${spec.provider} indisponível`);
-  const resp = await client.chat.completions.create(buildChatBody({
-    provider: spec.provider, model: spec.model, effort: spec.effort,
-    maxTokens: 64000, messages: buildOpenAIMessages(systemPrompt, inputTurns),
-  }));
-  const text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-  if (!String(text).trim()) throw new Error('resposta vazia');
-  // normalizeUsage (e não logOpenAIUsage): este caminho roda GLM, cujo usage tem
-  // outros nomes de campo e sub-reporta o thinking em completion_tokens.
-  const uso = normalizeUsage(spec.provider, resp.usage || null);
-  console.log(`Avaliação sem batch (${spec.model}): cached=${uso.cacheRead} in=${uso.input} out=${uso.output}`);
-  return text;
+  const result = await oficial.avaliar({
+    client, provider: spec.provider, model: spec.model, effort: spec.effort, materiais, version,
+  });
+  const t = (result.instrumentacao && result.instrumentacao.totais) || null;
+  if (t) {
+    const custo = result.instrumentacao.custo;
+    console.log(`[${rotulo}] ${spec.model} · ${version} (sem batch): nota=${result.notaFinal} cached=${t.cached} in=${t.input} out=${t.output}${custo ? ` custo=US$ ${custo.usd.toFixed(4)}` : ''}`);
+  }
+  return result;
 }
 
 // Quantas vezes tentamos o caminho síncrono antes de desistir e marcar erro.
@@ -5991,7 +6373,7 @@ async function submitSelectionBatches(openai) {
   if (!pending.length) return;
   const itens = [];
   for (const log of pending) {
-    try { itens.push({ id: log.id, body: buildSelectionEvalBody(log, spec) }); }
+    try { itens.push({ id: log.id, bodies: buildSelectionEvalBodies(log, spec) }); }
     catch (e) { console.error('[selecao-batch] corpo:', e.message); }
   }
   const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'selecao-batch', rotulo: 'candidato(s)' });
@@ -6016,19 +6398,29 @@ async function submitSelectionBatches(openai) {
 // vazio — chat.completions não devolve o texto do reasoning (só a contagem).
 async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
   const alvo = new Set(ids.map(String));
+  const spec = evaluatorSpecFor('seletivo');
   const appendedList = [];
   const triList = [];
   await withFileLock('selection-logs.json', async () => {
     const arr = readJSON('selection-logs.json');
     for (const l of arr) {
       if (!alvo.has(String(l.id)) || l.status !== 'pending') continue;
-      if (results.has(l.id) && results.get(l.id)) {
-        const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
+      const campos = camposDaAvaliacaoAssincrona(results.get(l.id), {
+        logId: l.id, dono: l.id, spec, categoria: 'seletivo',
+        itemId: l.characterId, itemTitle: l.characterName || '',
+        // Quem lê é o recrutador: sem a saudação que enquadra o texto como
+        // pré-correção para conversar com o supervisor.
+        textoParaAluno: false,
+      });
+      if (campos && (campos.score != null || campos.evaluation)) {
+        const { evaluation, criteriaScores, score } = campos;
         const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
         l.status = st;
         l.score = score;
         l.criteriaScores = criteriaScores;
         l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
+        l.evalVersion = campos.evalVersion || null;
+        l.evalPartsId = campos.evalPartsId || null;
         l.reasoning = '';
         if (score != null) {
           appendedList.push({ timestamp: l.timestamp, score, status: st });
@@ -6063,10 +6455,9 @@ async function runSelectionEvalsWithoutBatch() {
   const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
   for (const log of pending) {
     try {
-      const { prompt, inputTurns } = selectionEvalParts(log);
-      const text = await runEvalWithoutBatch({ spec, systemPrompt: prompt, inputTurns });
-      await finalizeSelectionEvals([log.id], new Map([[log.id, text]]), 'sem resultado');
-      console.log(`[selecao-sync] candidato ${log.id} avaliado em ${spec.model} (sem batch)`);
+      const result = await runPipelineSemBatch({ spec, materiais: selectionMateriais(log), rotulo: 'selecao-sync' });
+      await finalizeSelectionEvals([log.id], new Map([[log.id, { result }]]), 'sem resultado');
+      console.log(`[selecao-sync] candidato ${log.id} avaliado em ${spec.model} (sem batch): nota=${result.notaFinal}`);
     } catch (e) {
       const tentativas = (Number(log.evalAttempts) || 0) + 1;
       const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
@@ -6093,20 +6484,23 @@ async function collectSelectionBatches(openai) {
     try { batch = await openai.batches.retrieve(bid); } catch (e) { console.error('[selecao-batch] retrieve:', e.message); continue; }
 
     if (batch.status === 'completed') {
+      const saidas = batch.output_file_id
+        ? lerSaidasDoBatch(await (await openai.files.content(batch.output_file_id)).text())
+        : new Map();
+      const logsDoBatch = withBatch.filter((l) => l.evalBatchId === bid);
+      const idsDoBatch = logsDoBatch.map((l) => l.id);
+      await liberarBatchDaFila(bid);
+      const spec = evaluatorSpecFor('seletivo');
       const results = new Map();
-      if (batch.output_file_id) {
-        const text = await (await openai.files.content(batch.output_file_id)).text();
-        for (const line of text.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            const out = obj.response && obj.response.body && obj.response.body.choices;
-            results.set(obj.custom_id, (out && out[0] && out[0].message && out[0].message.content) || '');
-          } catch {}
+      for (const l of logsDoBatch) {
+        const saida = saidas.get(String(l.id));
+        if (!saida) continue;
+        try {
+          results.set(l.id, await fecharPipelineDoLote({ saida, spec, materiais: selectionMateriais(l), rotulo: 'selecao-batch' }));
+        } catch (e) {
+          console.error(`[selecao-batch] candidato ${l.id}: agregação falhou:`, e.message);
         }
       }
-      const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
-      await liberarBatchDaFila(bid);
       await finalizeSelectionEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[selecao-batch] batch ${bid} completo: ${results.size} candidato(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
@@ -6159,25 +6553,25 @@ async function sweepSelectionBatches() {
 // log dele em até 24h. O log aparece JÁ como 'pendente' em Minhas Sessões (fica em
 // logs.json com evaluationPending:true) e é o próprio "job" do batch.
 // ============================================================================
-// Partes do input da avaliação do competitivo (prompt + Bloco 1 + transcrição) —
-// compartilhado pelo batch e pelo caminho síncrono.
-function competitiveEvalParts(log) {
+// Materiais da avaliação do competitivo (Bloco 1 + transcrição, cada um no seu
+// slot) — compartilhados pelo batch e pelo caminho síncrono. Remontados a partir
+// do log guardado, então uma resubmissão produz exatamente as mesmas
+// requisições.
+function competitiveMateriais(log) {
   const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.itemId));
   const patientName = log.itemTitle || (char && char.name) || 'Paciente';
   const transcript = transcriptFromMessages(log.messages || [], log.userName || 'Aluno', patientName);
-  const evalUser = { role: 'user', content: `[LOG DO ATENDIMENTO]\nSessão: Competitivo\nPersonagem: ${patientName}\n\n${transcript}` };
-  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: log.itemId } });
-  return { prompt: loadAvaliacaoPrompt(), inputTurns: withBloco1([evalUser], bloco1) };
+  return oficial.materiaisPadrao({
+    bloco1: resolveBloco1({ context: { type: 'freeplay', itemId: log.itemId } }),
+    log: `[LOG DO ATENDIMENTO]\nSessão: Competitivo\nPersonagem: ${patientName}\n\n${transcript}`,
+  });
 }
 
-function buildCompetitiveEvalBody(log, spec) {
-  const { prompt, inputTurns } = competitiveEvalParts(log);
-  return {
-    model: spec.model,
-    reasoning_effort: spec.effort,
-    max_completion_tokens: 64000,
-    messages: buildOpenAIMessages(prompt, inputTurns),
-  };
+// As 15 requisições dos nós de uma sessão competitiva (uma por critério).
+function buildCompetitiveEvalBodies(log, spec) {
+  return oficial.requisicoesDosNos({
+    materiais: competitiveMateriais(log), model: spec.model, effort: spec.effort, provider: spec.provider,
+  });
 }
 
 let competitiveSweepRunning = false;
@@ -6192,7 +6586,7 @@ async function submitCompetitiveBatches(openai) {
   if (!pending.length) return;
   const itens = [];
   for (const log of pending) {
-    try { itens.push({ id: log.id, body: buildCompetitiveEvalBody(log, spec) }); }
+    try { itens.push({ id: log.id, bodies: buildCompetitiveEvalBodies(log, spec) }); }
     catch (e) { console.error('[comp-batch] corpo:', e.message); }
   }
   const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'comp-batch', rotulo: 'competitivo(s)' });
@@ -6207,22 +6601,54 @@ async function submitCompetitiveBatches(openai) {
   });
 }
 
-// Fecha os logs competitivos com o texto do avaliador: nota/feedback no log,
-// zera o pending e aplica o MMR. MESMO caminho para batch e para o síncrono, pra
-// o gate do MMR existir num só lugar.
+// Traduz o desfecho de UMA avaliação assíncrona nos campos que o registro
+// recebe. Duas formas de entrada, de propósito:
+//   { result } → resultado do pipeline oficial (v29), o caminho normal;
+//   { text }   → texto de avaliador de prompt único (v18.25). Só acontece na
+//                TRANSIÇÃO: batches submetidos no formato antigo que ainda
+//                estavam em voo quando o v29 entrou. Sem este ramo, essas
+//                sessões (com "sua nota sai em até 24h" já prometido ao aluno)
+//                virariam erro no primeiro deploy.
+// `categoria`/`textoParaAluno` são repassados ao módulo oficial.
+function camposDaAvaliacaoAssincrona(entrada, { logId, dono, spec, categoria, itemId, itemTitle, textoParaAluno = true }) {
+  if (!entrada) return null;
+  if (entrada.result) {
+    return oficial.camposDoLog({
+      result: entrada.result, logId, dono, version: entrada.version || oficial.VERSAO,
+      model: spec && spec.model, effort: spec && spec.effort, provider: spec && spec.provider,
+      categoria, itemId, itemTitle, batch: !!entrada.batch, textoParaAluno,
+    });
+  }
+  if (entrada.text) {
+    const { evaluation, criteriaScores, score } = parseSelectionEval(entrada.text);
+    return { evaluation, criteriaScores, score, evalVersion: null, evalPartsId: null };
+  }
+  return null;
+}
+
+// Fecha os logs competitivos com a avaliação: nota/feedback no log, zera o
+// pending e aplica o MMR. MESMO caminho para batch e para o síncrono, pra o gate
+// do MMR existir num só lugar. `results` é um Map id → { result } | { text }
+// (ver camposDaAvaliacaoAssincrona).
 async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
   const alvo = new Set(ids.map(String));
+  const spec = evaluatorSpecFor('competitivo');
   const ready = []; // { userId, refId, itemTitle } — notificados DEPOIS do lock (ver fim da função)
   await withFileLock('logs.json', async () => {
     const arr = readJSON('logs.json');
     let mmr = null; let mmrChanged = false;
     for (const l of arr) {
       if (!alvo.has(String(l.id)) || !l.evaluationPending) continue;
-      if (results.has(l.id) && results.get(l.id)) {
-        const { evaluation, criteriaScores, score } = parseSelectionEval(results.get(l.id));
+      const campos = camposDaAvaliacaoAssincrona(results.get(l.id), {
+        logId: l.id, dono: l.userId, spec, categoria: 'competitivo', itemId: l.itemId, itemTitle: l.itemTitle,
+      });
+      if (campos && (campos.score != null || campos.evaluation)) {
+        const { evaluation, criteriaScores, score } = campos;
         l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
         l.criteriaScores = criteriaScores;
         l.score = score;
+        l.evalVersion = campos.evalVersion || null;
+        l.evalPartsId = campos.evalPartsId || null;
         l.evaluationPending = false;
         if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
         // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
@@ -6264,10 +6690,9 @@ async function runCompetitiveEvalsWithoutBatch() {
   const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
   for (const log of pending) {
     try {
-      const { prompt, inputTurns } = competitiveEvalParts(log);
-      const text = await runEvalWithoutBatch({ spec, systemPrompt: prompt, inputTurns });
-      await finalizeCompetitiveEvals([log.id], new Map([[log.id, text]]), 'sem resultado');
-      console.log(`[comp-sync] log ${log.id} avaliado em ${spec.model} (sem batch)`);
+      const result = await runPipelineSemBatch({ spec, materiais: competitiveMateriais(log), rotulo: 'comp-sync' });
+      await finalizeCompetitiveEvals([log.id], new Map([[log.id, { result }]]), 'sem resultado');
+      console.log(`[comp-sync] log ${log.id} avaliado em ${spec.model} (sem batch): nota=${result.notaFinal}`);
     } catch (e) {
       const tentativas = (Number(log.evalAttempts) || 0) + 1;
       const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
@@ -6294,20 +6719,26 @@ async function collectCompetitiveBatches(openai) {
     try { batch = await openai.batches.retrieve(bid); } catch (e) { console.error('[comp-batch] retrieve:', e.message); continue; }
 
     if (batch.status === 'completed') {
+      const saidas = batch.output_file_id
+        ? lerSaidasDoBatch(await (await openai.files.content(batch.output_file_id)).text())
+        : new Map();
+      const logsDoBatch = withBatch.filter((l) => l.evalBatchId === bid);
+      const idsDoBatch = logsDoBatch.map((l) => l.id);
+      await liberarBatchDaFila(bid);
+      // Agrega cada sessão (nós → agregador → sintetizador) ANTES de gravar.
+      // O sintetizador é uma chamada síncrona por sessão, então este passo fala
+      // com a API — por isso ele acontece fora do lock do logs.json.
+      const spec = evaluatorSpecFor('competitivo');
       const results = new Map();
-      if (batch.output_file_id) {
-        const text = await (await openai.files.content(batch.output_file_id)).text();
-        for (const line of text.split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            const out = obj.response && obj.response.body && obj.response.body.choices;
-            results.set(obj.custom_id, (out && out[0] && out[0].message && out[0].message.content) || '');
-          } catch {}
+      for (const l of logsDoBatch) {
+        const saida = saidas.get(String(l.id));
+        if (!saida) continue;
+        try {
+          results.set(l.id, await fecharPipelineDoLote({ saida, spec, materiais: competitiveMateriais(l), rotulo: 'comp-batch' }));
+        } catch (e) {
+          console.error(`[comp-batch] log ${l.id}: agregação falhou:`, e.message);
         }
       }
-      const idsDoBatch = withBatch.filter((l) => l.evalBatchId === bid).map((l) => l.id);
-      await liberarBatchDaFila(bid);
       await finalizeCompetitiveEvals(idsDoBatch, results, 'sem resultado no batch');
       console.log(`[comp-batch] batch ${bid} completo: ${results.size} avaliado(s)`);
     } else if (['failed', 'expired', 'cancelled', 'cancelling'].includes(batch.status)) {
@@ -6869,13 +7300,23 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 });
 
 // ============================================================================
-// AVALIAÇÃO INDEPENDENTE — laboratório de pricing (supervisor/admin)
+// AVALIAÇÃO INDEPENDENTE — a aba "Avaliar Sessão" do supervisor
 // ----------------------------------------------------------------------------
-// Alterna PROMPT (v16-2 / v18-25 / pipeline v28 ou v25), MODELO (5.5 / 5.4 / 5.4-mini) e
-// EFFORT (low/medium/high); roda SÍNCRONO ou via BATCH API (50% off) com fila.
-// Isolado: só LÊ os prompts; não toca simulação, processo seletivo nem os
-// avaliadores de produção. Resultado unificado + instrumentação de custo.
+// Corrige um log que já existe, com a MESMA régua da produção (v29), e mede o
+// custo da run. Alterna MODELO (5.6 Sol/Luna, 5.5, 5.4, mini, GLM) e EFFORT, e
+// roda SÍNCRONO ou via BATCH API (50% off) com fila — é onde se compara modelo
+// contra modelo antes de mexer em Administração → Modelos de IA.
+//
+// Alternava também o PROMPT: v16-2, v18-25 e os pipelines v25/v28/v31/v32, cada
+// um com o seu formato de saída. Saíram todos em 2026-09, quando o app passou a
+// rodar uma régua só. As runs antigas continuam no histórico (avaliacao-v25.json)
+// e a tela ainda as renderiza — o que ficou guardado é resultado, não prompt.
 // ============================================================================
+// Versões do pipeline que a rota aceita. Uma só, hoje: a oficial. O modo
+// progressão fica FORA de propósito — ele precisa de cinco materiais (dois
+// atendimentos, a avaliação anterior, a missão), e esta tela recebe um log
+// colado.
+const AVAL_VERSOES = PIPELINE_VERSIONS_IDS.filter((v) => v === oficial.VERSAO);
 // Modelos selecionáveis: id pinado + PROVEDOR (openai | glm/z.ai) + efforts
 // válidos daquele modelo + se suporta Batch API. GLM (z.ai) só na Independente,
 // síncrono (z.ai não expõe Batch API); o caching por prefixo funciona igual.
@@ -6918,61 +7359,16 @@ function getClientForProvider(provider) {
   return getOpenAI();
 }
 
-// Roda o avaliador escolhido SÍNCRONO e devolve o resultado unificado.
+// Roda o avaliador da Avaliação Independente (o laboratório do supervisor).
+//
+// Aqui era um `if` de três caminhos: pipeline, avaliador de prompt único no GLM
+// e o mesmo no OpenAI (cada um com o seu parser e a sua instrumentação). Com os
+// avaliadores de prompt único fora, sobrou o pipeline — que já fala com os dois
+// provedores pelo mesmo código.
 async function runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log }) {
-  if (aiIndependente.isPipeline(evaluator)) {
-    // v28/v28-nota e v25/v25-nota são o MESMO código de pipeline; o que muda é a
-    // VERSÃO (trio de .md + regra de agregação) e a VARIANTE do prompt do nó,
-    // ambas resolvidas pelo registry.
-    return runAvaliacaoIndependente({
-      openai: client, provider, bloco1, log, model, effort,
-      version: aiIndependente.versionFor(evaluator),
-      variant: aiIndependente.variantFor(evaluator),
-      evaluatorId: evaluator,
-    });
-  }
-  // GLM (z.ai): chat.completions — devolve o raciocínio em message.reasoning_content.
-  if (provider === 'glm') {
-    const body = aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider });
-    const resp = await client.chat.completions.create(body);
-    const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
-    console.log(`[aval-usage] GLM ${model} effort=${effort} usage=`, JSON.stringify(resp.usage || null));
-    return aiIndependente.finalizeSingle({
-      evaluatorId: evaluator,
-      text: msg.content || '',
-      reasoning: aiIndependente.extractReasoning(msg),
-      usage: resp.usage || null,
-      model, effort, batch: false,
-    });
-  }
-  // GPT (OpenAI): Responses API em STREAMING pra capturar o RESUMO do raciocínio —
-  // mesmo caminho da aba de produção. A OpenAI entrega o resumo nos eventos
-  // reasoning_summary_text.delta (no não-streaming ele frequentemente vem vazio).
-  // Consumimos o stream no SERVIDOR e devolvemos o resultado montado (sem SSE ao
-  // cliente). max_output_tokens é teto (reasoning + saída visível saem dele).
-  const args = aiIndependente.buildSingleEvalResponsesArgs({ evaluatorId: evaluator, bloco1, log, model, effort });
-  const stream = await client.responses.create({ ...args, stream: true });
-  let text = '';
-  let reasoning = '';
-  let usage = null;
-  for await (const ev of stream) {
-    if (ev.type === 'response.output_text.delta') {
-      if (ev.delta) text += ev.delta;
-    } else if (ev.type === 'response.reasoning_summary_text.delta') {
-      if (ev.delta) reasoning += ev.delta;
-    } else if (ev.type === 'response.reasoning_summary_part.added') {
-      if (reasoning) reasoning += '\n\n'; // separa partes do resumo
-    } else if (ev.type === 'response.completed') {
-      usage = (ev.response && ev.response.usage) || null;
-    }
-  }
-  console.log(`[aval-usage] GPT ${model} effort=${effort} usage=`, JSON.stringify(usage || null));
-  return aiIndependente.finalizeSingle({
-    evaluatorId: evaluator,
-    text,
-    reasoning: reasoning.trim(),
-    usage,
-    model, effort, batch: false,
+  return runAvaliacaoIndependente({
+    openai: client, provider, bloco1, log, model, effort,
+    version: evaluator, evaluatorId: evaluator,
   });
 }
 
@@ -6983,8 +7379,9 @@ function buildAvalResponse(entry, result) {
   return {
     id: entry ? entry.id : null,
     casoNome: entry ? entry.casoNome : '',
+    alunoNome: entry ? entry.alunoNome || '' : '',
     evaluator: (entry && entry.evaluator) || result.evaluator,
-    version: result.version || null, // pipeline: 'v28' | 'v25'
+    version: result.version || null, // 'v29' (ou a versão da run antiga)
     variant: result.variant || null, // pipeline: 'com-feedback' | 'so-nota'
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
@@ -7018,14 +7415,14 @@ function reasoningPathFor(entryId) {
 }
 
 // Persiste o resultado em avaliacao-v25.json (store de todos os avaliadores).
-async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model, effort, batch, result }) {
+async function persistAvaliacaoResult({ user, casoId, casoNome, alunoNome, evaluator, model, effort, batch, result }) {
   const entry = {
     id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     createdAt: new Date().toISOString(),
     userId: user.id,
     userName: user.name || '',
-    casoId, casoNome, evaluator, model, effort, batch: !!batch,
-    version: result.version || null, // versão do pipeline ('v28' | 'v25'); null nos single
+    casoId, casoNome, alunoNome: alunoNome || '', evaluator, model, effort, batch: !!batch,
+    version: result.version || null, // 'v29'; null nas runs antigas de prompt único
     variant: result.variant || null,
     notaFinal: result.notaFinal,
     considerados: result.considerados != null ? result.considerados : null,
@@ -7067,16 +7464,8 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model
 // JSONL nem o arquivo da OpenAI.
 function buildAvaliacaoRequests(job) {
   const { id: jobId, evaluator, model, effort, provider, bloco1, log } = job;
-  if (aiIndependente.isPipeline(evaluator)) {
-    return buildPipelineNodeRequests({
-      bloco1, log, model, effort, provider,
-      version: aiIndependente.versionFor(evaluator), variant: aiIndependente.variantFor(evaluator),
-    }).map((n) => ({ custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body }));
-  }
-  return [{
-    custom_id: `${jobId}::0`, method: 'POST', url: '/v1/chat/completions',
-    body: aiIndependente.buildSingleEvalBody({ evaluatorId: evaluator, bloco1, log, model, effort, provider }),
-  }];
+  return buildPipelineNodeRequests({ bloco1, log, model, effort, provider, version: evaluator })
+    .map((n) => ({ custom_id: `${jobId}::${n.num}`, method: 'POST', url: '/v1/chat/completions', body: n.body }));
 }
 
 // Tenta mandar um job da fila local para a Batch API. Devolve 'entrou',
@@ -7128,12 +7517,12 @@ async function submeterJobAvaliacao(job, client) {
 // Antes daqui o job era submetido direto na rota: com a fila cheia, o batch
 // nascia e morria minutos depois com `token_limit_exceeded`, e a avaliação
 // virava erro. Agora esperar é um estado, não uma falha.
-async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome }) {
+async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome, alunoNome }) {
   const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
   const job = {
     id: jobId, createdAt: new Date().toISOString(),
     userId: user.id, userName: user.name || '',
-    casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: true,
+    casoId, casoNome, alunoNome: alunoNome || '', evaluator, model, modelKey, effort, provider, batch: true,
     status: 'aguardando', batchId: null, requestCount: 0,
     // log e bloco1 ficam no job porque as requisições são remontadas a cada
     // tentativa (e o sintetizador do pipeline precisa do log na coleta). Saem
@@ -7174,12 +7563,12 @@ async function markAvalJob(jobId, patch) {
 // responde. Bug corrigido: antes disso, batch:false fazia `await
 // runIndependenteSync` direto na resposta HTTP e o Cloudflare cortava com 524
 // antes da origem terminar.
-async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome }) {
+async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome, alunoNome }) {
   const jobId = 'avjob-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
   const job = {
     id: jobId, createdAt: new Date().toISOString(),
     userId: user.id, userName: user.name || '',
-    casoId, casoNome, evaluator, model, modelKey, effort, provider, batch: false, local: true,
+    casoId, casoNome, alunoNome: alunoNome || '', evaluator, model, modelKey, effort, provider, batch: false, local: true,
     status: 'processing', result: null, error: null,
   };
   await withFileLock('avaliacao-fila.json', async () => {
@@ -7189,7 +7578,7 @@ async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model,
   });
   runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log })
     .then(async (result) => {
-      const entry = await persistAvaliacaoResult({ user, casoId, casoNome, evaluator, model, effort, batch: false, result });
+      const entry = await persistAvaliacaoResult({ user, casoId, casoNome, alunoNome, evaluator, model, effort, batch: false, result });
       await markAvalJob(jobId, { status: 'completed', completedAt: new Date().toISOString(), result: buildAvalResponse(entry, result) });
       console.log(`[aval-local] job ${jobId} (${evaluator}) completo: nota=${result.notaFinal}`);
     })
@@ -7231,27 +7620,20 @@ async function sweepAvaliacaoBatches() {
               const suffix = String(o.custom_id).split('::')[1];
               const body = o.response && o.response.body;
               const msg = (body && body.choices && body.choices[0] && body.choices[0].message) || {};
-              outputs.set(suffix, { text: msg.content || '', reasoning: aiIndependente.extractReasoning(msg), usage: (body && body.usage) || null });
+              outputs.set(suffix, { text: msg.content || '', usage: (body && body.usage) || null });
             } catch {}
           }
         }
         try {
-          let result;
-          if (aiIndependente.isPipeline(job.evaluator)) {
-            const nodeOutputs = [];
-            for (const [suffix, out] of outputs) nodeOutputs.push({ num: Number(suffix), text: out.text, usage: out.usage });
-            result = await finalizePipeline({
-              openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort,
-              version: aiIndependente.versionFor(job.evaluator), variant: aiIndependente.variantFor(job.evaluator),
-              evaluatorId: job.evaluator, nodeOutputs, batch: true,
-            });
-          } else {
-            const out = outputs.get('0') || { text: '', usage: null };
-            result = aiIndependente.finalizeSingle({ evaluatorId: job.evaluator, text: out.text, reasoning: out.reasoning, usage: out.usage, model: job.model, effort: job.effort, batch: true });
-          }
+          const nodeOutputs = [];
+          for (const [suffix, out] of outputs) nodeOutputs.push({ num: Number(suffix), text: out.text, usage: out.usage });
+          const result = await finalizePipeline({
+            openai: client, provider: job.provider || 'openai', log: job.log, model: job.model, effort: job.effort,
+            version: job.evaluator, evaluatorId: job.evaluator, nodeOutputs, batch: true,
+          });
           const entry = await persistAvaliacaoResult({
             user: { id: job.userId, name: job.userName },
-            casoId: job.casoId, casoNome: job.casoNome, evaluator: job.evaluator, model: job.model, effort: job.effort, batch: true, result,
+            casoId: job.casoId, casoNome: job.casoNome, alunoNome: job.alunoNome, evaluator: job.evaluator, model: job.model, effort: job.effort, batch: true, result,
           });
           await markAvalJob(job.id, { status: 'completed', completedAt: new Date().toISOString(), result: buildAvalResponse(entry, result) });
           console.log(`[aval-batch] job ${job.id} (${job.evaluator}) completo: nota=${result.notaFinal}`);
@@ -7302,6 +7684,7 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
     const b = req.body || {};
     const log = clampStr(b.log, 200000).trim();
     const casoId = b.casoId;
+    const alunoNome = clampStr(b.alunoNome, 200).trim();
     const evaluator = b.evaluator || 'v28';
     const modelKey = b.model || 'gpt-5.5';
     const effort = b.effort || 'medium';
@@ -7309,7 +7692,12 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
 
     if (!log) return res.status(400).json({ error: 'Cole ou envie a transcrição da sessão.' });
     if (!casoId) return res.status(400).json({ error: 'Selecione um caso (necessário para o Bloco 1).' });
-    if (!aiIndependente.isValidEvaluator(evaluator)) return res.status(400).json({ error: 'Avaliador inválido.' });
+    // Sem isto, duas avaliações do mesmo caso (ex.: duas sessões diferentes com
+    // "Enzo") ficam indistinguíveis no histórico — nem dá pra saber se é o
+    // mesmo log rodado 2x (teste de congruência do avaliador) ou dois alunos
+    // diferentes.
+    if (!alunoNome) return res.status(400).json({ error: 'Informe o nome do aluno cuja sessão está sendo avaliada.' });
+    if (!AVAL_VERSOES.includes(evaluator)) return res.status(400).json({ error: `Avaliador inválido (disponível: ${AVAL_VERSOES.join(', ')}).` });
     const modelInfo = AVAL_MODELOS[modelKey];
     // Lista montada do próprio registro — a mensagem não envelhece quando entra
     // ou sai um modelo do laboratório.
@@ -7336,13 +7724,13 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
     const casoNome = freeChar ? freeChar.name : '';
 
     if (batch) {
-      const job = await enqueueAvaliacaoBatch({ openai: client, user: req.user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome });
+      const job = await enqueueAvaliacaoBatch({ openai: client, user: req.user, evaluator, model, modelKey, effort, provider, bloco1, log, casoId, casoNome, alunoNome });
       return res.json({ queued: true, jobId: job.id, status: job.status });
     }
 
     // Não-batch: roda como job LOCAL em background (ver enqueueAvaliacaoLocal) —
     // nunca bloqueia a resposta HTTP, então nunca esbarra no timeout do Cloudflare.
-    const job = await enqueueAvaliacaoLocal({ client, provider, user: req.user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome });
+    const job = await enqueueAvaliacaoLocal({ client, provider, user: req.user, evaluator, model, modelKey, effort, bloco1, log, casoId, casoNome, alunoNome });
     return res.json({ queued: true, jobId: job.id, status: job.status, local: true });
   } catch (err) {
     if (!res.headersSent) {
@@ -7375,7 +7763,7 @@ app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor
     .slice(0, 50)
     .map((j) => ({
       id: j.id, createdAt: j.createdAt, completedAt: j.completedAt || null,
-      casoNome: j.casoNome, evaluator: j.evaluator, model: j.model, modelKey: j.modelKey,
+      casoNome: j.casoNome, alunoNome: j.alunoNome || '', evaluator: j.evaluator, model: j.model, modelKey: j.modelKey,
       effort: j.effort, status: j.status, error: j.error || null,
       // 'aguardando' = na fila LOCAL, ainda não entrou na Batch API (sem vaga no
       // teto de tokens enfileirados do modelo). `espera` diz por quê.
@@ -7601,7 +7989,7 @@ async function runBenchTurn({ client, modelKey, model, provider, effort, systemP
     const resp = await client.chat.completions.create(body);
     const msg = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
     texto = simIndependente.extractSimText(provider, resp);
-    reasoning = captura ? aiIndependente.extractReasoning(msg) : '';
+    reasoning = captura ? extractChatReasoning(msg) : '';
     usage = resp.usage || null;
   });
 
@@ -8692,65 +9080,11 @@ function buildPreviousEvalSection({ criteria, feedback, pointsToReview }) {
   return `[AVALIAÇÃO DO ATENDIMENTO 1]\n${parts.join('\n\n')}\n`;
 }
 
-// Executa avaliação de progressão: compara Atendimento 1 (anterior) vs Atendimento 2 (novo).
-// userMessages: array de mensagens da nova sessão (Log 2).
-// Retorna { evaluationClean, criteria } onde criteria tem apenas as 15 notas do Atendimento 2.
-async function runProgressionEvaluation(userId, characterId, userMessages) {
-  const openai = getOpenAI();
-
-  if (!openai) {
-    const criteria = {};
-    for (let i = 1; i <= 15; i++) criteria[i] = 0;
-    return {
-      evaluationClean: '[Modo demonstração — OPENAI_API_KEY não configurada] Avaliação de progressão indisponível.',
-      criteria,
-    };
-  }
-
-  // Busca Atendimento 1 (Log anterior)
-  const log1 = getLastLogForCharacter(userId, characterId);
-  if (!log1) {
-    return {
-      evaluationClean: 'Erro: Nenhum atendimento anterior encontrado para este paciente.',
-      criteria: null,
-    };
-  }
-
-  // Busca Bloco 1 do paciente
-  const bloco1 = resolveBloco1({ context: { type: 'freeplay', itemId: characterId } });
-
-  // Monta as transcrições dos dois atendimentos
-  const characterName = log1.itemTitle || 'Paciente';
-  const studentName = log1.userName || 'Aluno';
-
-  const transcript1 = transcriptFromMessages(log1.messages, studentName, characterName);
-  const transcript2 = transcriptFromMessages(userMessages, studentName, characterName);
-
-  // Avaliação do Atendimento 1 (notas por critério + feedback que o aluno leu)
-  const previousFeedbackSection = buildPreviousEvalSection(getPreviousFeedback(userId, characterId));
-
-  // Monta o conteúdo para o avaliador de progressão (Bloco 1 + atendimento 1 +
-  // avaliação do 1 + atendimento 2, na ordem que o prompt v18.25 descreve).
-  const userContent =
-    (bloco1 ? `[BLOCO 1 DO CASO]\n${bloco1}\n\n---\n\n` : '') +
-    `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcript1 || '(sem mensagens)'}\n\n---\n\n` +
-    (previousFeedbackSection ? `${previousFeedbackSection}\n\n---\n\n` : '') +
-    `[ATENDIMENTO 2 — ${studentName} com ${characterName}]\n${transcript2 || '(sem mensagens)'}`;
-
-  const { text, usage } = await openaiComplete({
-    openai,
-    model: OPENAI_EVAL_MODEL,
-    effort: OPENAI_EVAL_EFFORT,
-    systemPrompt: loadProgressaoPrompt(),
-    messages: [{ role: 'user', content: userContent }],
-    maxCompletionTokens: 64000,
-  });
-
-  logOpenAIUsage('Progression evaluate', OPENAI_EVAL_MODEL, usage);
-  const { clean, criteria } = extractSupervisorNotes(text);
-
-  return { evaluationClean: clean, criteria };
-}
+// (Aqui morava `runProgressionEvaluation`, do avaliador de progressão v18.25:
+// ele comparava dois atendimentos numa chamada só e servia a rota
+// /api/progression/evaluate, que nenhuma tela chamava mais. A progressão do
+// Treinamento roda no modo progressão do v29 desde 2026-09 — ver
+// server/avaliacao-oficial.js e o `materiaisProgressao` em /api/evaluate.)
 
 async function runComparativeEvaluation(duel) {
   const challengerName = duel.challenger.name || 'Aluno A';
@@ -9312,35 +9646,6 @@ app.get('/api/progression/available-patients', requireAuth, (req, res) => {
     .sort((a, b) => new Date(b.lastInteraction) - new Date(a.lastInteraction));
 
   res.json(list);
-});
-
-// Executa avaliação de progressão: compara última sessão anterior com nova sessão.
-app.post('/api/progression/evaluate', requireAuth, aiLimiter, async (req, res) => {
-  const { characterId, messages } = req.body || {};
-
-  if (!characterId || typeof characterId !== 'string') {
-    return res.status(400).json({ error: 'characterId obrigatório' });
-  }
-
-  if (!Array.isArray(messages)) {
-    return res.status(400).json({ error: 'messages deve ser um array' });
-  }
-
-  try {
-    const { evaluationClean, criteria } = await runProgressionEvaluation(req.user.id, characterId, messages);
-
-    if (!criteria) {
-      return res.status(400).json({ error: evaluationClean });
-    }
-
-    res.json({
-      evaluation: evaluationClean,
-      criteria,
-    });
-  } catch (err) {
-    console.error('Erro em /api/progression/evaluate:', err);
-    res.status(500).json({ error: 'Erro ao executar avaliação de progressão' });
-  }
 });
 
 // --- Sidequests (missões clínicas do Treinamento) ---
@@ -11032,8 +11337,30 @@ if (require.main === module) {
     if (ns > 0) console.log(`[selecao] ${ns} log(s) de seleção expirado(s) removido(s).`);
   }, 6 * 60 * 60 * 1000).unref();
 
-  // Processo Seletivo (Batch API GPT 5.5): submete os candidatos pendentes e
-  // coleta os prontos — mesmo padrão do Competitivo.
+  // AVALIADOR OFICIAL: qual modelo cada modo está de fato usando agora. Vale a
+  // pena no boot porque a resolução tem três camadas (escolha da categoria em
+  // Administração → Modelos de IA > padrão global > padrão do sistema) e uma env
+  // var setada vence o padrão novo — sem esta linha, descobrir por que o
+  // Treinamento não está no Luna exige ler três arquivos.
+  for (const cat of aiModels.AI_CATEGORIES) {
+    const ev = evaluatorSpecFor(cat.key);
+    const pipeline = oficial.categoriaUsaPipeline(cat.key);
+    console.log(
+      `[avaliador] ${cat.label}: ${pipeline ? oficial.VERSAO : 'prompt único (v18.25)'}`
+      + ` em ${ev.model}/${ev.effort}${ev.batch ? ' · batch' : ''} (${ev.fonte})`,
+    );
+  }
+  // Detalhes por critério de avaliações cujo log nunca foi salvo (aluno fechou a
+  // aba entre a avaliação e o salvamento). Poda no boot e a cada 6h.
+  const orfaos = oficial.podarOrfaos();
+  if (orfaos > 0) console.log(`[avaliador] ${orfaos} detalhe(s) de avaliação órfão(s) removido(s) no boot.`);
+  setInterval(() => {
+    const n = oficial.podarOrfaos();
+    if (n > 0) console.log(`[avaliador] ${n} detalhe(s) de avaliação órfão(s) removido(s).`);
+  }, 6 * 60 * 60 * 1000).unref();
+
+  // Processo Seletivo (Batch API, avaliador oficial em batch): submete os
+  // candidatos pendentes e coleta os prontos — mesmo padrão do Competitivo.
   sweepSelectionBatches().catch(() => {});
   setInterval(() => { sweepSelectionBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 

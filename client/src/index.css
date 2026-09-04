@@ -1451,6 +1451,51 @@ select option { background: var(--cream); color: var(--ink); }
   50%      { opacity: 0.4; transform: scale(0.7); }
 }
 
+/* Barra de andamento da avaliação. O avaliador oficial são várias chamadas em
+   sequência e o texto só existe no fim, então em vez de tokens aparecendo a tela
+   mostra o quanto já andou. Só a fração: quantas etapas existem e o que cada uma
+   faz é mecânica da avaliação, e ela não é do aluno. */
+.evaluating-progress { width: 100%; max-width: 420px; margin-top: 4px; }
+.evaluating-progress-bar {
+  height: 7px; border-radius: 999px; background: var(--sand); overflow: hidden;
+}
+.evaluating-progress-bar span {
+  display: block; height: 100%; border-radius: 999px; background: var(--marrs);
+  box-shadow: 0 0 8px var(--marrs-glow);
+  transition: width 0.6s ease;
+}
+.evaluating-progress-txt {
+  margin-top: 8px; font-size: 12.5px; color: var(--muted); font-family: var(--body);
+}
+
+/* ──── Análise por critério (supervisor/admin) ────
+   O avaliador oficial devolve uma análise curta por critério, além da nota. É
+   material de supervisão: a prosa é escrita por quem estava lendo o gabarito do
+   caso, então nunca aparece para o aluno (o servidor nem manda a chave). */
+.criteria-analyses { margin-bottom: 16px; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--sand-soft, var(--sand)); }
+.criteria-analyses-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px;
+}
+.criteria-analyses-head em { text-transform: none; letter-spacing: 0; font-style: normal; }
+.criteria-analyses-meta { font-size: 12px; color: var(--muted); margin-bottom: 10px; font-family: var(--body); }
+.criteria-analyses-msg { font-size: 13px; color: var(--muted); font-style: italic; }
+.criteria-analyses-msg.erro { color: var(--danger); font-style: normal; }
+.criteria-missao {
+  border-left: 3px solid var(--marrs); padding: 8px 10px; margin-bottom: 12px;
+  border-radius: 6px; background: var(--bg); font-size: 13px; line-height: 1.5;
+}
+.criteria-missao.nao { border-left-color: var(--danger); }
+.criteria-parte { padding: 9px 0; border-top: 1px solid var(--line); }
+.criteria-parte.fora { opacity: 0.65; }
+.criteria-parte-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13.5px; }
+.criteria-parte-top strong { color: var(--marrs-deep); }
+.criteria-parte-nota { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.criteria-parte-linha { font-size: 11.5px; color: var(--muted); margin: 2px 0 5px; }
+.criteria-parte-analise { font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); }
+.criteria-parte-analise.vazio { font-style: italic; color: var(--muted); }
+.criteria-parte-aviso { margin-top: 5px; font-size: 11.5px; color: var(--danger); }
+
 /* ──── Resultado da avaliação ──── */
 .post-evaluation {
   margin-top: 22px;
@@ -4703,6 +4748,13 @@ select option { background: var(--cream); color: var(--ink); }
 .aval-batch-toggle.disabled { opacity: 0.72; cursor: default; }
 .aval-batch-toggle.disabled input { cursor: not-allowed; }
 /* Linha de explicação do avaliador escolhido (ex.: v25 com feedback × só nota) */
+/* Avaliador da tela "Avaliar Sessão": era um <select> com oito prompts; hoje é
+   um rótulo, porque a régua é uma só. */
+.aval-ev-fixo {
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--sand); color: var(--marrs-deep); font-family: var(--serif);
+  font-size: 14px;
+}
 .aval-ev-hint { font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; margin-top: 6px; }
 
 /* Notas por critério (avaliadores single) */

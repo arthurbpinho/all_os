@@ -1,6 +1,9 @@
-// Configuração da "Avaliação para visitantes" (Gestão de Contas) — liga/
-// desliga + escolha do MODELO (GLM 5.2 high ou GPT-5.5 high) que roda essa
-// avaliação (ver VISITOR_EVAL_MODELS em server/index.js).
+// Configuração da "Avaliação para visitantes": liga/desliga a avaliação de quem
+// entra como visitante (palestras, eventos). É a única chave que sobrou aqui —
+// a escolha de MODELO do visitante saiu em 2026-09, quando ele entrou no
+// avaliador oficial junto com os outros modos; trocá-lo é escolher na categoria
+// "Visitante" em Administração → Modelos de IA. O GET informa, por conveniência,
+// qual modelo está avaliando o visitante agora.
 
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 
@@ -12,12 +15,14 @@ describe('Configurações — avaliação para visitantes (/api/settings, /api/a
     expect(res.status).toBe(401);
   });
 
-  it('defaults: desligada, modelo glm-5.2', async () => {
+  it('defaults: desligada, e o modelo relatado é o avaliador oficial da categoria', async () => {
     const token = await loginAs('aluno');
     const res = await request(app).get('/api/settings').set(authHeader(token));
     expect(res.status).toBe(200);
     expect(res.body.visitorEvaluationEnabled).toBe(false);
-    expect(res.body.visitorEvaluationModel).toBe('glm-5.2');
+    // Visitante também é avaliado pelo oficial (v29 em Luna high) quando o
+    // interruptor está ligado.
+    expect(res.body.avaliadorModelo).toBe('gpt-5.6-luna');
   });
 
   it('PUT /api/admin/settings é admin-only', async () => {
@@ -26,36 +31,26 @@ describe('Configurações — avaliação para visitantes (/api/settings, /api/a
     expect(res.status).toBe(403);
   });
 
-  it('admin liga a avaliação e troca o modelo pra gpt-5.5; reflete em GET /api/settings', async () => {
+  it('admin liga a avaliação e o GET reflete o toggle', async () => {
     const admin = await loginAs('admin');
-    const put = await request(app).put('/api/admin/settings').set(authHeader(admin)).send({
-      visitorEvaluationEnabled: true, visitorEvaluationModel: 'gpt-5.5',
-    });
+    const put = await request(app).put('/api/admin/settings').set(authHeader(admin)).send({ visitorEvaluationEnabled: true });
     expect(put.status).toBe(200);
     expect(put.body.visitorEvaluationEnabled).toBe(true);
-    expect(put.body.visitorEvaluationModel).toBe('gpt-5.5');
 
     const token = await loginAs('aluno');
     const res = await request(app).get('/api/settings').set(authHeader(token));
     expect(res.body.visitorEvaluationEnabled).toBe(true);
-    expect(res.body.visitorEvaluationModel).toBe('gpt-5.5');
+    expect(res.body.avaliadorModelo).toBe('gpt-5.6-luna');
   });
 
-  it('modelo inválido cai no default (glm-5.2), sem quebrar', async () => {
-    const admin = await loginAs('admin');
-    const res = await request(app).put('/api/admin/settings').set(authHeader(admin)).send({
-      visitorEvaluationModel: 'dall-e-mega',
-    });
-    expect(res.status).toBe(200);
-    expect(res.body.visitorEvaluationModel).toBe('glm-5.2');
-  });
-
-  it('atualizar só o modelo não derruba o toggle já ligado', async () => {
+  // Cliente antigo em cache pode continuar mandando a chave de modelo que saiu.
+  // Ela é ignorada — e, o que importa, não derruba o toggle nem estoura a rota.
+  it('chave de modelo que saiu do contrato é ignorada, sem quebrar o toggle', async () => {
     const admin = await loginAs('admin');
     await request(app).put('/api/admin/settings').set(authHeader(admin)).send({ visitorEvaluationEnabled: true });
-
     const put = await request(app).put('/api/admin/settings').set(authHeader(admin)).send({ visitorEvaluationModel: 'gpt-5.5' });
+    expect(put.status).toBe(200);
     expect(put.body.visitorEvaluationEnabled).toBe(true);
-    expect(put.body.visitorEvaluationModel).toBe('gpt-5.5');
+    expect(put.body.visitorEvaluationModel).toBeUndefined();
   });
 });

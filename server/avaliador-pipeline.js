@@ -1,31 +1,37 @@
-// Avaliação Independente — pipeline multi-nó (AvaliAllos), em TESTE e isolado
-// dos avaliadores de produção. Hospeda DUAS VERSÕES do mesmo desenho, v25 e v28
-// (ver PIPELINE_VERSIONS); o nome "v25" no arquivo, nas envs e no store JSON é
-// histórico — quem escolhe a versão é o registry de avaliadores.
+// Pipeline multi-nó do avaliador (AvaliAllos) — o MOTOR, compartilhado por dois
+// chamadores:
 //
-// Roda em GPT-5.x (OpenAI, mesma OPENAI_API_KEY do resto; modelo por env
-// AVALIACAO_V25_MODEL, hoje gpt-5.4-mini-2026-03-17). Os demais avaliadores
-// (Treino/Competitivo/Duelo/Neuro/Trilha) NÃO são tocados por este arquivo.
+//   · PRODUÇÃO (desde 2026-09): o v29 e o modo progressão dele avaliam
+//     Treinamento, Competitivo, Visitante, Processo Seletivo e a correção
+//     manual do supervisor. Quem os aciona é server/avaliacao-oficial.js.
+//   · A ABA "AVALIAR SESSÃO" (supervisor): a mesma régua, num log colado, com
+//     seletor de modelo/effort e a conta de custo da run.
 //
-// Pipeline completo (ver avaliacao/nova avaliacao/brief-pipeline-v25-completo.md):
-//   1) Um nó GPT por critério, em paralelo (14 no v25, 15 no v28). Cada nó vê só
-//      o seu critério + o Bloco 1 + o log, e devolve ANÁLISE / NOTA / CONFIANÇA.
-//   2) Agregador determinístico (código): aplica pesos (iguais por enquanto) e
-//      normaliza a média(1–10) para 0–100. No v25 os critérios de confiança
-//      `baixa` ficam de fora da conta; no v28 a confiança não mexe no cálculo.
+// Duas versões, que são o mesmo desenho com entradas diferentes: `v29` e
+// `v29-progressao` (ver PIPELINE_VERSIONS). O nome "v25" que sobrou nas envs
+// (AVALIACAO_V25_*) e no store JSON é histórico — trocá-los apagaria a
+// configuração de quem já tem essas envs setadas no painel do Railway.
+//
+// Roda em GPT-5.x (OpenAI) ou GLM (z.ai). Na produção o modelo vem da categoria
+// em Administração → Modelos de IA; na aba do supervisor, do seletor da tela. Os
+// avaliadores que ficaram FORA do pipeline (Duelo comparativo, Neuro e Trilha)
+// não passam aqui.
+//
+// Pipeline completo:
+//   1) Um nó por critério, em paralelo (15). Cada nó vê só o seu critério + o
+//      Bloco 1 + o log, responde as quatro travas da régua e a realização da
+//      faixa que abriu, e escreve a ANÁLISE — nunca a nota.
+//   2) Agregador determinístico (código): deriva faixa e nota de cada critério
+//      das travas, aplica pesos (iguais por enquanto) e normaliza a média(1–10)
+//      para 0–100. Fica de fora só o nó cuja saída não deu para ler.
 //   3) Sintetizador (1 chamada): recebe só o log + as análises em prosa (sem
 //      números, sem Bloco 1) e devolve o corpo do feedback do aluno.
-//   4) Montagem final (código): cola "Nota: X/100" + saudação fixa + corpo.
+//   4) Montagem final (código): cola a nota (no laboratório) e a saudação fixa.
 //
-// Duas VARIANTES do nó (ver PIPELINE_VARIANTS), escolhidas no alternador da tela:
-//   com-feedback → o nó devolve ANÁLISE + NOTA + CONFIANÇA (pipeline completo,
-//                  com sintetizador e feedback do aluno);
-//   so-nota      → o nó devolve só a NOTA (sem análise, o passo 3 é pulado e não
-//                  há feedback do aluno; nota final e partes saem iguais). Roda
-//                  mais barato — some o texto por critério do billing.
-// As duas moram no MESMO .md do prompt do nó, em blocos `@variante`.
+// No modo progressão entra um nó a mais, o da MISSÃO, que decide se a
+// sidequest/desafio do dia foi cumprida — e não pontua critério nenhum.
 //
-// RACIOCÍNIO (só v28, `capturaReasoning`): a OpenAI não entrega a cadeia bruta
+// RACIOCÍNIO (`capturaReasoning`): a OpenAI não entrega a cadeia bruta
 // de raciocínio em lugar nenhum — só um RESUMO, e só pela Responses API. Por
 // isso, quando a versão pede captura, os nós GPT saem do chat.completions e vão
 // para a Responses (mesmas mensagens: o prefixo cacheável vira `instructions`,
@@ -55,175 +61,79 @@ const path = require('path');
 const { PROMPTS_DIR } = require('./paths');
 
 // Saudação colada por código no topo do feedback do aluno (o modelo não a gera
-// nem a varia — ver brief, "Montagem final"). É POR VERSÃO: cada uma tem a sua
-// em PIPELINE_VERSIONS.saudacao, porque o texto faz parte do que a versão
-// entrega ao aluno, não do encanamento.
+// nem a varia). Era uma por versão, quando as versões traziam saudações
+// diferentes; hoje é uma só.
 //
-// v25: os dois parágrafos do brief original, intocados (as runs dele são linha
-// de base — mudar o texto mudaria o que já foi medido).
-const SAUDACAO_V25 = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.
+// É só o enquadramento do feedback: a nota aparece como selo na tela (produção)
+// ou no cabeçalho do relatório (laboratório), e o segundo parágrafo que as
+// versões antigas traziam — o pedido para descrever o raciocínio na caixa de
+// estrela — saiu do texto quando a régua mudou.
+const SAUDACAO = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.`;
 
-Eu só tenho acesso ao que você escreveu, não ao que você pensou. Quando o raciocínio por trás de uma fala importar, descreva-o no botão de estrela. Isso me ajuda a separar uma decisão clínica consciente de um erro por falta de percepção.`;
-
-// v28: só o enquadramento do feedback. O segundo parágrafo do v25 (o pedido para
-// descrever o raciocínio na caixa de estrela) sai daqui.
-const SAUDACAO_V28 = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.`;
-
-// VERSÕES do pipeline. Cada uma é um trio de .md no PROMPTS_DIR (prompt do nó,
-// critérios, sintetizador) mais o que muda no CÓDIGO entre elas:
+// As DUAS versões que existem, e são o MESMO desenho: quinze nós (uma chamada
+// por critério), travas respondidas uma a uma, faixa e nota derivadas por
+// código, e um sintetizador que escreve o feedback do aluno sem nunca ver o
+// Bloco 1. A diferença está na ENTRADA:
 //
-//   v25 → 14 critérios. CONFIANÇA `baixa` significa "o log não deu material":
-//         o critério sai da nota final e sai do sintetizador.
-//   v28 → 15 critérios (coerência interna e narrativa voltam separadas, desfeita
-//         a fusão em "Confiança transmitida"). A CONFIANÇA virou recado para o
-//         supervisor e NÃO entra mais no cálculo — o próprio prompt manda dar
-//         nota de todo jeito ([SAÍDA]: "Ela não entra no cálculo... A nota você
-//         dá de todo jeito"), então todo critério com nota entra na média e nas
-//         análises do sintetizador.
+//   v29            → um atendimento (Bloco 1 + log). É o avaliador oficial de
+//                    Treinamento, Competitivo, Visitante, Seletivo e da
+//                    correção manual do supervisor.
+//   v29-progressao → o aluno reatende um caso: chegam os dois atendimentos, a
+//                    avaliação que ele leu do primeiro e, às vezes, a missão
+//                    ativa. Tem um nó a mais, o da missão, que decide se a
+//                    sidequest/desafio do dia foi cumprida.
 //
-// `dirs` é lista porque a pasta do v25 tem nomes diferentes nos dois lugares: no
-// volume de produção ela se chama "nova avaliacao" e a cópia local do repo (a
-// que semeia o volume e os testes) se chama "v25". Vale a primeira que existir,
-// então os dois ambientes rodam sem renomear pasta em produção.
+// Aqui moravam também v25, v28, v31 e v32, cada uma com o que o código precisava
+// para rodá-la: variantes do nó (com-feedback / só-nota), nó partido em duas
+// fases, três formatos de saída e a regra de confiança do v25. Saíram todas em
+// 2026-09, junto dos avaliadores de prompt único (v16-2, v18.25) — o app roda
+// uma régua só. As runs antigas continuam legíveis no histórico da Avaliação
+// Independente porque o que ficou guardado é RESULTADO, não prompt.
 const PIPELINE_VERSIONS = {
-  v25: {
-    id: 'v25',
-    dirs: ['nova avaliacao', 'v25'],
-    montado: 'prompt-no-v25-montado.md',
-    criterios: 'criterios-no-v25.md',
-    sintetizador: 'sintetizador-v25.md',
-    nCriterios: 14,
-    confiancaBaixaExclui: true,
-    capturaReasoning: false,
-    saudacao: SAUDACAO_V25,
-    variantes: true,
-    formatoSaida: 'nota-direta',
-  },
-  v28: {
-    id: 'v28',
-    dirs: ['v28'],
-    montado: 'prompt-no-v28-montado.md',
-    criterios: 'criterios-no-v28.md',
-    sintetizador: 'sintetizador-v28.md',
-    nCriterios: 15,
-    confiancaBaixaExclui: false,
-    // Guarda o RESUMO do raciocínio de cada nó (ver captureReasoning abaixo).
-    // Só no v28: ligar isto no v25 trocaria o transporte das chamadas dele e
-    // sujaria a linha de base de custo/latência que já foi medida.
-    capturaReasoning: true,
-    saudacao: SAUDACAO_V28,
-    // TRAVAS ESTRUTURAIS: o nó não escolhe nota. Ele responde `passa`/`não passa`
-    // às quatro travas (F2→F5) e diz se a realização é completa ou incompleta; a
-    // faixa (última trava que passou) e a nota saem daqui, do código.
-    //
-    // Por que: a subida pelas travas era uma instrução de processo INTERNO, e é
-    // exatamente o que não dá para verificar — nem pelo resumo do raciocínio, que
-    // é paráfrase de outro modelo. Pedindo a nota, o modelo podia escolhê-la de
-    // impressão e só depois narrar a régua. Aqui ele não tem número para mirar
-    // (os numerais saíram do prompt) e a hierarquia é aplicada por código.
-    travasEstruturais: true,
-    variantes: true,
-    formatoSaida: 'travas-v28',
-  },
-  // v31 — consolidação da revisão de escrita. Mudanças que o CÓDIGO enxerga:
-  //   · sem variantes (o arquivo não tem blocos @variante; só uma entrada no
-  //     alternador);
-  //   · sem CONFIANÇA (o campo deixou de existir);
-  //   · saída nova: por faixa, `Fn abre: sim|não` + `Fn realizada:
-  //     completa|incompleta` (só das que abriram, mais a da F1 quando a trava
-  //     da F2 não abre), e a ANÁLISE por ÚLTIMO — a prosa não ancora mais as
-  //     respostas, porque vem depois delas;
-  //   · a etiqueta que o sintetizador lê ([erro], [clichê], [potente],
-  //     [preciso], [excepcional]) é escrita por código, derivada só da faixa.
-  // A derivação da faixa é a MESMA do v28 (sobe de baixo para cima, para na
-  // primeira fechada, descarta trava aberta acima de fechada). O nó responde as
-  // quatro travas como perguntas independentes justamente para não saber onde
-  // vai parar — se soubesse, poderia mirar a nota.
-  v31: {
-    id: 'v31',
-    dirs: ['v31'],
-    montado: 'prompt-no-v31-montado.md',
-    criterios: 'criterios-no-v31.md',
-    sintetizador: 'sintetizador-v31.md',
-    nCriterios: 15,
-    confiancaBaixaExclui: false, // não há confiança nesta versão
-    capturaReasoning: true,
-    saudacao: SAUDACAO_V28,
-    travasEstruturais: true,
-    variantes: false,
-    formatoSaida: 'travas-v31',
-    etiquetaNaAnalise: true,
-  },
-  // v32 — o nó vira DUAS chamadas, e é a régua que muda de lugar.
-  //
-  // O problema que isto resolve: enquanto as cinco faixas estão à vista na hora
-  // de responder as travas, o modelo consegue se colocar numa delas por leitura
-  // holística e preencher as quatro respostas de trás para frente até chegar lá.
-  // Tirar a escada da frente não impede a impressão de se formar — nada impede —,
-  // mas tira o lugar onde ela pousaria: ele pode achar o atendimento bom ou ruim
-  // e ainda assim não saber que combinação de sim e não produz o quê.
-  //
-  //   fase 1: entrada + princípios + critério + as quatro perguntas, SEM régua
-  //           nenhuma e sem os rótulos F2..F5 (que já denunciariam a escada e a
-  //           posição de cada pergunta nela). Devolve só quatro sim/não.
-  //   → o CÓDIGO deriva a faixa (mesma regra de sempre).
-  //   fase 2: régua inteira + a faixa já derivada. Devolve realização e análise.
-  //
-  // A paridade continua julgada com a régua toda à vista, que é o que ela pede:
-  // incompleta se define por dividir espaço com as faixas de baixo.
-  //
-  // Custo: 30 chamadas por avaliação em vez de 15. Em dinheiro pesa pouco (a
-  // fase 2 é curta e o bloco do caso já está em cache); o que pesa é LATÊNCIA e
-  // TPM — ver V32_FASE1_MAX_TOKENS/V32_FASE2_MAX_TOKENS, que dimensionam a
-  // reserva de cada fase separadamente em vez de reservar 16k duas vezes.
-  v32: {
-    id: 'v32',
-    dirs: ['v32'],
-    montado: 'prompt-no-v32-fase1-montado.md',
-    montadoFase2: 'prompt-no-v32-fase2-montado.md',
-    criterios: 'criterios-no-v32.md',
-    sintetizador: 'sintetizador-v32.md',
-    nCriterios: 15,
-    confiancaBaixaExclui: false,
-    capturaReasoning: true,
-    saudacao: SAUDACAO_V28,
-    travasEstruturais: true,
-    variantes: false,
-    formatoSaida: 'duas-fases',
-    etiquetaNaAnalise: true,
-    duasFases: true,
-  },
-  // v29 — a mais NOVA das quatro, apesar do número (a numeração é do rascunho
-  // do prompt, não da ordem em que cada um entrou aqui). Vem depois do v32 e
-  // volta a UMA chamada por nó: é o v31 com as travas da F3 e da F4 na redação
-  // do v32, e com os dois eixos de decisão separados de forma explícita — a
-  // trava pergunta se aquilo aconteceu e funcionou, a régua pergunta se aquilo
-  // é o que caracteriza o trabalho. O v32 fazia o teste do "caracterizar" nas
-  // duas fases e cobrava a mesma exigência duas vezes.
-  //
-  // Para o CÓDIGO, v29 é igual ao v31: uma chamada por nó, sem variantes, sem
-  // confiança, mesma saída (`Fn abre` / `Fn realizada` + ANÁLISE por último) e
-  // mesma derivação de faixa. Por isso divide com ele o formatoSaida
-  // 'travas-v31' — o parser é o mesmo, e duplicá-lo só criaria dois nomes para
-  // um contrato só.
   v29: {
     id: 'v29',
-    dirs: ['v29'],
+    dir: 'v29',
     montado: 'prompt-no-v29-montado.md',
     criterios: 'criterios-no-v29.md',
     sintetizador: 'sintetizador-v29.md',
     nCriterios: 15,
-    confiancaBaixaExclui: false, // não há confiança nesta versão
     capturaReasoning: true,
-    saudacao: SAUDACAO_V28,
-    travasEstruturais: true,
-    variantes: false,
-    formatoSaida: 'travas-v31',
-    etiquetaNaAnalise: true,
+  },
+  // Mesma grade do v29: os critérios são LIDOS DA PASTA DELE (`criteriosDe`) —
+  // é o mesmo arquivo, e duplicá-lo faria as duas cópias divergirem na primeira
+  // edição pelo painel. O que esta versão tem de próprio são os cinco slots do
+  // caso, três slots extras no sintetizador e o prompt do nó da missão.
+  'v29-progressao': {
+    id: 'v29-progressao',
+    dir: 'v29-progressao',
+    montado: 'prompt-no-v29-progressao-montado.md',
+    criterios: 'criterios-no-v29.md',
+    criteriosDe: 'v29',
+    sintetizador: 'sintetizador-v29-progressao.md',
+    slotsSintetizador: ['{{ATENDIMENTO_1}}', '{{MISSAO}}', '{{MISSAO_VEREDITO}}'],
+    missao: 'missao-v29-progressao.md',
+    slotsCaso: ['{{BLOCO_1}}', '{{ATENDIMENTO_1}}', '{{AVALIACAO_1}}', '{{MISSAO}}', '{{LOG}}'],
+    nCriterios: 15,
+    capturaReasoning: true,
   },
 };
+
+// Slots do bloco do caso (bloco B do prompt do nó) de uma versão. O padrão são
+// os dois de sempre; o modo progressão declara os seus em `slotsCaso`.
+const SLOTS_CASO_PADRAO = ['{{BLOCO_1}}', '{{LOG}}'];
+function slotsCasoDe(cfg) {
+  return (cfg && Array.isArray(cfg.slotsCaso) && cfg.slotsCaso.length) ? cfg.slotsCaso : SLOTS_CASO_PADRAO;
+}
+
+// Slots ADICIONAIS que o sintetizador de uma versão pode usar, além do
+// {{LOG}} e do {{ANALISES}} que todos têm. O modo progressão precisa do
+// atendimento anterior e da missão (com o veredito já decidido) para escrever a
+// comparação e falar da missão sem contradizer o nó que a julgou.
+function slotsSintetizadorDe(cfg) {
+  return (cfg && Array.isArray(cfg.slotsSintetizador)) ? cfg.slotsSintetizador : [];
+}
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
-const DEFAULT_VERSION = 'v25';
+const DEFAULT_VERSION = 'v29';
 
 function versionConfig(version) {
   const cfg = PIPELINE_VERSIONS[version];
@@ -231,13 +141,11 @@ function versionConfig(version) {
   return cfg;
 }
 
-// Pasta da versão dentro do PROMPTS_DIR: a primeira de `dirs` que já tenha o
-// prompt do nó. Nenhuma existindo, devolve a primeira — assim o erro que sobe é
-// o ENOENT do caminho canônico, que diz onde o arquivo deveria estar.
+// Pasta da versão dentro do PROMPTS_DIR. Era uma LISTA de nomes possíveis
+// enquanto o v25 se chamava "nova avaliacao" no volume de produção e "v25" na
+// cópia do repo; com aquela versão fora, cada versão tem um nome só.
 function versionDir(cfg) {
-  const base = path.join(PROMPTS_DIR, 'avaliacao');
-  const achada = cfg.dirs.find((d) => fs.existsSync(path.join(base, d, cfg.montado)));
-  return path.join(base, achada || cfg.dirs[0]);
+  return path.join(PROMPTS_DIR, 'avaliacao', cfg.dir);
 }
 
 // Modelo dos nós e do sintetizador (GPT-5.x). Var própria do v25 — independente
@@ -249,13 +157,10 @@ const V25_EFFORT = process.env.AVALIACAO_V25_EFFORT || 'medium';
 // gerado. Folga generosa: se curto, o GPT gasta tudo pensando e devolve vazio.
 const V25_MAX_TOKENS = Number(process.env.AVALIACAO_V25_MAX_TOKENS || 16000);
 const V25_SYNTH_MAX_TOKENS = Number(process.env.AVALIACAO_V25_SYNTH_MAX_TOKENS || 16000);
-// Tetos por fase do v32. O contador de TPM da OpenAI RESERVA o teto de saída de
-// cada chamada, então partir o nó em duas dobraria a reserva se as duas
-// pedissem os 16k de sempre. A fase 1 devolve quatro linhas e a fase 2 devolve
-// cinco, mas o raciocínio (que sai do mesmo teto) é onde mora o trabalho: a
-// fase 1 faz o julgamento clínico das quatro perguntas e fica com a folga maior.
-const V32_FASE1_MAX_TOKENS = Number(process.env.AVALIACAO_V32_FASE1_MAX_TOKENS || 12000);
-const V32_FASE2_MAX_TOKENS = Number(process.env.AVALIACAO_V32_FASE2_MAX_TOKENS || 6000);
+// Teto do nó da MISSÃO (modo progressão). A saída são duas linhas; o teto existe
+// pelo raciocínio, que sai do mesmo bolso. Menor que o de um nó de critério: a
+// pergunta é uma só, e ela vem escrita.
+const V25_MISSAO_MAX_TOKENS = Number(process.env.AVALIACAO_V25_MISSAO_MAX_TOKENS || 8000);
 
 // Preços em USD por 1 milhão de tokens, para o custo EXATO da run (ver
 // buildInstrumentacao). Chaves = prefixo do modelo, batidas do prefixo mais
@@ -340,47 +245,16 @@ function resolvePrices(model) {
   return null;
 }
 
-// Variantes de saída do NÓ, marcadas no próprio prompt do nó montado com
-// blocos `<!-- @variante:X -->…<!-- /@variante -->` (iguais nas duas versões):
-//   com-feedback → ANÁLISE + NOTA + CONFIANÇA (o pipeline inteiro: agregador +
-//                  sintetizador + feedback do aluno);
-//   so-nota      → só a NOTA (sem análise ⇒ sem sintetizador ⇒ sem feedback do
-//                  aluno; nota final e partes seguem iguais). Mais barato: o
-//                  texto por critério some do billing, o reasoning fica.
-// O resto do prompt é compartilhado — editar fora dos blocos muda as duas.
-const PIPELINE_VARIANTS = ['com-feedback', 'so-nota'];
-const DEFAULT_VARIANT = 'com-feedback';
-
-function isValidVariant(v) {
-  return PIPELINE_VARIANTS.includes(v);
-}
-
-// Mantém os blocos da variante escolhida e apaga os das outras. Se o arquivo não
-// tiver marcador nenhum (versão antiga do .md, ainda no volume de produção),
-// falha em vez de rodar silenciosamente a variante errada. `arquivo` só aparece
-// na mensagem de erro (é o .md da versão em uso).
-function selectVariant(text, variant, arquivo = 'O prompt do nó montado') {
-  const re = /[ \t]*<!--\s*@variante:([a-z0-9-]+)\s*-->\r?\n?([\s\S]*?)[ \t]*<!--\s*\/@variante\s*-->\r?\n?/g;
-  let found = false;
-  const out = String(text).replace(re, (_m, v, inner) => {
-    found = true;
-    return v === variant ? inner : '';
-  });
-  if (!found) {
-    throw new Error(`${arquivo} sem os blocos <!-- @variante:… --> (variante "${variant}"). Atualize o .md pelo painel de prompts (Administração → Prompts).`);
-  }
-  return out;
-}
-
 // Fatia o prompt do nó nos três blocos (A estático, B do caso, C do nó), pelos
-// comentários de CACHE BREAKPOINT, já com a variante escolhida aplicada. PURO
-// (recebe o texto, não lê disco) para o editor de prompts poder validar um
-// rascunho com exatamente o mesmo parser que a produção usa.
-// `comVariantes: false` para as versões cujo .md não tem blocos `@variante` (o
-// v31 em diante): o arquivo inteiro é o prompt, e não há o que selecionar.
-function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó montado', comVariantes = true) {
-  if (comVariantes && !isValidVariant(variant)) throw new Error('Variante inválida: ' + variant);
-  const montado = comVariantes ? selectVariant(raw, variant, arquivo) : String(raw);
+// comentários de CACHE BREAKPOINT. PURO (recebe o texto, não lê disco) para o
+// editor de prompts poder validar um rascunho com exatamente o mesmo parser que
+// a produção usa.
+//
+// Havia aqui um passo a mais: as versões até o v28 traziam DUAS variantes do nó
+// no mesmo .md (com-feedback e só-nota), em blocos `<!-- @variante:X -->`, e
+// este parser escolhia uma. Do v29 em diante o arquivo inteiro é o prompt.
+function parseMontado(raw, arquivo = 'O prompt do nó montado', slotsCaso = SLOTS_CASO_PADRAO) {
+  const montado = String(raw);
 
   const start = montado.indexOf('## [METACOMANDO]');
   const bpA = montado.indexOf('<!-- ===== CACHE BREAKPOINT A');
@@ -395,7 +269,11 @@ function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó
   const blockB = montado.slice(bpAEnd, bpB).trim();          // {{BLOCO_1}} + {{LOG}}
   const blockC = montado.slice(bpBEnd).trim();               // {{CRITÉRIO}}
 
-  for (const [name, blk, slot] of [['B', blockB, '{{BLOCO_1}}'], ['B', blockB, '{{LOG}}'], ['C', blockC, '{{CRITÉRIO}}']]) {
+  const exigidos = [
+    ...(slotsCaso || SLOTS_CASO_PADRAO).map((slot) => ['B', blockB, slot]),
+    ['C', blockC, '{{CRITÉRIO}}'],
+  ];
+  for (const [name, blk, slot] of exigidos) {
     if (!blk.includes(slot)) throw new Error(`Bloco ${name} do ${arquivo} não contém o slot ${slot}.`);
   }
   return { blockA, blockB, blockC };
@@ -404,7 +282,7 @@ function parseMontado(raw, variant = DEFAULT_VARIANT, arquivo = 'O prompt do nó
 // Sintetizador: bloco estático (do METACOMANDO até o breakpoint) vira o
 // `developer` cacheável; o resto ({{LOG}} + {{ANALISES}} + tarefa) vira `user`.
 // Puro, pelo mesmo motivo do parseMontado.
-function parseSintetizador(sint, arquivo = 'O sintetizador') {
+function parseSintetizador(sint, arquivo = 'O sintetizador', slotsExtra = []) {
   const sStart = sint.indexOf('## [METACOMANDO]');
   const sBp = sint.indexOf('<!-- CACHE BREAKPOINT');
   if (sStart === -1 || sBp === -1) {
@@ -416,7 +294,40 @@ function parseSintetizador(sint, arquivo = 'O sintetizador') {
   for (const slot of ['{{LOG}}', '{{ANALISES}}']) {
     if (!synthVariable.includes(slot)) throw new Error(`${arquivo} não contém o slot ${slot}.`);
   }
+  // Slot que o .md usa mas a versão não conhece seria enviado ao modelo como
+  // texto cru `{{ASSIM}}`. Barra aqui, na gravação do prompt, e não em produção.
+  const conhecidos = ['{{LOG}}', '{{ANALISES}}', ...(slotsExtra || [])];
+  for (const usado of synthVariable.match(/\{\{[A-Z\u00c0-\u00da_0-9]+\}\}/g) || []) {
+    if (!conhecidos.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
+  }
   return { synthStatic, synthVariable };
+}
+
+// Nó da MISSÃO (modo progressão): mesma anatomia do sintetizador — bloco
+// estático até o breakpoint (o `developer`, cacheável entre avaliações) e o
+// resto variável, com os materiais do caso. Exige o slot da missão e o do
+// atendimento avaliado; os outros slots do caso são opcionais aqui (o veredito
+// da missão não depende da avaliação anterior, por exemplo). Puro, pelo mesmo
+// motivo dos outros parsers: o editor de prompts valida um rascunho com ele.
+function parseMissao(raw, arquivo = 'O prompt da missão', slotsCaso = SLOTS_CASO_PADRAO) {
+  const texto = String(raw || '');
+  const start = texto.indexOf('## [METACOMANDO]');
+  const bp = texto.indexOf('<!-- CACHE BREAKPOINT');
+  if (start === -1 || bp === -1) {
+    throw new Error(`${arquivo} sem os marcadores esperados (METACOMANDO / CACHE BREAKPOINT).`);
+  }
+  const bpEnd = texto.indexOf('-->', bp) + 3;
+  const missaoStatic = texto.slice(start, bp).trim();
+  const missaoVariable = texto.slice(bpEnd).trim();
+  for (const slot of ['{{MISSAO}}', '{{LOG}}']) {
+    if (!missaoVariable.includes(slot)) throw new Error(`${arquivo} não contém o slot ${slot}.`);
+  }
+  // Slot que o prompt usa mas a versão não declara = erro de digitação num
+  // nome de slot, que passaria batido e chegaria ao modelo como texto cru.
+  for (const usado of missaoVariable.match(/\{\{[A-ZÇÃÉÍÓÚ_0-9]+\}\}/g) || []) {
+    if (!slotsCaso.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
+  }
+  return { missaoStatic, missaoVariable };
 }
 
 const _assetsCache = new Map();
@@ -429,41 +340,38 @@ function clearAssetsCache() {
 }
 
 // Lê os .md do volume e devolve os blocos + os critérios da versão. Memoizado
-// por (versão, variante) e invalidado por clearAssetsCache.
-function loadAssets(version = DEFAULT_VERSION, variant = DEFAULT_VARIANT) {
+// por versão e invalidado por clearAssetsCache.
+function loadAssets(version = DEFAULT_VERSION) {
   const cfg = versionConfig(version);
-  const comVariantes = cfg.variantes !== false;
-  // Versão sem variantes ignora o parâmetro (e aceita null, que é o que o
-  // registry devolve para uma entrada de alternador sem variante).
-  const v = comVariantes ? (variant || DEFAULT_VARIANT) : null;
-  if (comVariantes && !isValidVariant(v)) throw new Error('Variante inválida: ' + variant);
-  const chave = `${version}|${v || '-'}`;
-  if (_assetsCache.has(chave)) return _assetsCache.get(chave);
+  if (_assetsCache.has(version)) return _assetsCache.get(version);
 
   const dir = versionDir(cfg);
-  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), v, cfg.montado, comVariantes);
+  const slotsCaso = slotsCasoDe(cfg);
+  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), cfg.montado, slotsCaso);
 
-  const criteria = parseCriteria(fs.readFileSync(path.join(dir, cfg.criterios), 'utf8'));
+  // Critérios: da pasta da própria versão, ou da versão apontada por
+  // `criteriosDe` (o modo progressão usa a MESMA grade do v29 — duplicar o .md
+  // faria as duas cópias divergirem na primeira edição do painel).
+  const dirCriterios = cfg.criteriosDe ? versionDir(versionConfig(cfg.criteriosDe)) : dir;
+  const criteria = parseCriteria(fs.readFileSync(path.join(dirCriterios, cfg.criterios), 'utf8'));
   if (criteria.length !== cfg.nCriterios) {
     throw new Error(`Esperava ${cfg.nCriterios} critérios em ${cfg.criterios}, encontrei ${criteria.length}.`);
   }
 
-  const { synthStatic, synthVariable } = parseSintetizador(fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador);
+  const { synthStatic, synthVariable } = parseSintetizador(
+    fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador, slotsSintetizadorDe(cfg),
+  );
 
-  // Versões de duas fases trazem um segundo prompt montado, com a MESMA
-  // estrutura (estático / caso / cauda) — a diferença é o que cada um mostra: a
-  // fase 1 não vê a régua, a fase 2 vê e recebe a faixa já derivada.
-  let fase2 = null;
-  if (cfg.duasFases) {
-    const f2 = parseMontado(fs.readFileSync(path.join(dir, cfg.montadoFase2), 'utf8'), null, cfg.montadoFase2, false);
-    if (!f2.blockC.includes('{{FAIXA}}')) {
-      throw new Error(`${cfg.montadoFase2} não contém o slot {{FAIXA}} (a fase 2 recebe a faixa já derivada pelo código).`);
-    }
-    fase2 = f2;
+  // Nó da MISSÃO (só o modo progressão tem): uma chamada à parte que responde se
+  // a sidequest/missão diária foi cumprida. Mesma anatomia do sintetizador
+  // (estático cacheável + parte variável).
+  let missao = null;
+  if (cfg.missao) {
+    missao = parseMissao(fs.readFileSync(path.join(dir, cfg.missao), 'utf8'), cfg.missao, slotsCaso);
   }
 
-  const assets = { version, variant: v, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable, fase2 };
-  _assetsCache.set(chave, assets);
+  const assets = { version, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable, missao, slotsCaso };
+  _assetsCache.set(version, assets);
   return assets;
 }
 
@@ -623,6 +531,25 @@ function concorrenciaPorTPM(reservaPorChamada, tetoConfigurado) {
 function retriesDeOrdem() {
   const n = Number(process.env.AVALIACAO_V25_RETRY_ORDEM);
   return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Refazer o nó quando ele volta SEM ANÁLISE. LIGADO por padrão (uma vez), e o
+// motivo é outro do que o da ordem acima: aqui não há nada a interpretar — o
+// formato pede a análise, ela é o último campo da saída, e voltar sem ela é
+// defeito objetivo. Foi visto em produção: numa run do modo progressão, doze dos
+// quinze nós devolveram as travas (logo, nota) e pararam antes da análise. A nota
+// não se move com isso, mas o SINTETIZADOR passa a escrever o feedback do aluno
+// com um quinto da evidência — e é o feedback que o aluno lê.
+//
+// Uma tentativa só: se o modelo repetir a omissão, o critério segue contando na
+// nota e fica de fora do feedback (o comportamento de sempre), agora com aviso
+// no log. Desligue com AVALIACAO_V25_RETRY_ANALISE=0 se quiser medir a
+// frequência crua da omissão.
+function retriesDeAnalise() {
+  const raw = process.env.AVALIACAO_V25_RETRY_ANALISE;
+  if (raw === '0') return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 1;
 }
 
 // Retentativas por chamada, acima das do SDK. O SDK da OpenAI retenta 429/5xx só
@@ -826,61 +753,19 @@ function capturaLigada(cfg) {
 // não pode escolher o tom da própria análise. Ver sintetizador-v31.md.
 const ETIQUETA_POR_FAIXA = { 1: 'erro', 2: 'clichê', 3: 'potente', 4: 'preciso', 5: 'excepcional' };
 
-// Nome da faixa como ela aparece na régua — é o que vai no slot {{FAIXA}} da
-// fase 2 do v32, para o modelo achar as duas descrições dela no texto.
-const NOME_DA_FAIXA = {
-  1: 'Faixa 1 · Erro',
-  2: 'Faixa 2 · Clichê',
-  3: 'Faixa 3 · Potente',
-  4: 'Faixa 4 · Precisa',
-  5: 'Faixa 5 · Excepcional',
-};
-
-// Fase 1 do v32: quatro linhas `N: sim|não`. As perguntas são numeradas de 1 a 4
-// no prompt, e não pelas faixas — o rótulo `F3` diria ao modelo que existe uma
-// escada de cinco degraus e onde aquela pergunta cai nela. A correspondência
-// (1→F2, 2→F3, 3→F4, 4→F5) mora aqui, no código.
-const PERGUNTA_PARA_TRAVA = { 1: 2, 2: 3, 3: 4, 4: 5 };
-
-function parseFase1V32(text) {
-  const t = String(text || '');
-  const travas = {};
-  for (const [pergunta, trava] of Object.entries(PERGUNTA_PARA_TRAVA)) {
-    // Tolerante à decoração que o modelo às vezes acrescenta: negrito, "Pergunta
-    // 3:", ponto/parêntese/hífen como separador. Uma linha que não casa vira
-    // `null`, e null FECHA a trava — então um parser estrito não inflaria nota
-    // nenhuma, mas tiraria o critério inteiro da conta sem ninguém ver.
-    const m = t.match(new RegExp(
-      `^[^\\S\\n]*[*_#>\\s-]*(?:pergunta\\s*)?${pergunta}[*_\\s]*[:.)\\-–—][\\s*_]*(sim|n[ãa]o)`,
-      'im',
-    ));
-    travas[trava] = m ? /^sim$/i.test(m[1]) : null;
-  }
-  const { faixa, inconsistente } = derivarFaixa(travas);
-  return { travas, faixa, inconsistente };
-}
-
-// Fase 2 do v32: realização + análise. A faixa não vem daqui — já veio do código.
-function parseFase2V32(text) {
-  const t = String(text || '');
-  const realM = t.match(/REALIZA[ÇC][ÃA]O\s*:\s*(completa|incompleta)/i);
-  const anaM = t.match(/AN[ÁA]LISE\s*:\s*([\s\S]*)$/i);
-  return {
-    realizacao: realM ? realM[1].toLowerCase() : null,
-    analise: anaM ? anaM[1].trim() : '',
-  };
-}
-
-// Saída do nó na versão v31: uma linha `Fn abre` por trava e uma `Fn realizada`
-// por faixa aberta (mais a da F1 quando a trava da F2 não abre), com a ANÁLISE
-// no FIM.
+// Saída do nó: uma linha `Fn abre` por trava e uma `Fn realizada` por faixa
+// aberta (mais a da F1 quando a trava da F2 não abre), com a ANÁLISE no FIM.
+//
+// Conviviam aqui outros dois parsers, um por formato de saída: o do v25 (o nó
+// escrevia a NOTA direto) e o do v28 (`F3: passa`, com CONFIANÇA). Saíram com
+// as versões; sobrou este, que é o do v29.
 //
 // O nó responde as quatro travas como perguntas independentes e não sabe onde
 // vai parar — por isso responde a realização de todas as faixas que abriu. Só a
 // realização da faixa DERIVADA conta; as outras são descartadas aqui mesmo e não
 // chegam a ser persistidas. Se o nó soubesse qual delas contaria, saberia a nota
 // e poderia preencher as travas de trás para frente.
-function parseNodeOutputV31(text) {
+function parseSaidaDoNo(text) {
   const t = String(text || '');
 
   const travas = {};
@@ -911,7 +796,6 @@ function parseNodeOutputV31(text) {
 
   return {
     nota,
-    confianca: null, // o v31 não tem confiança
     analise,
     travas,
     faixa,
@@ -922,130 +806,12 @@ function parseNodeOutputV31(text) {
   };
 }
 
-// Saída do nó na versão de TRAVAS ESTRUTURAIS (v28). Lê as quatro linhas de
-// trava + a realização; a nota é derivada, nunca lida do texto.
-function parseNodeOutputTravas(text) {
-  const t = String(text || '');
-
-  const travas = {};
-  for (const n of TRAVAS) {
-    // "F3: passa — …" / "F3: não passa (…)" — aceita com e sem acento/hífen.
-    const m = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s*:\\s*(n[ãa]o\\s+passa|passa)`, 'im'));
-    travas[n] = m ? !/n[ãa]o/i.test(m[1]) : null;
-  }
-
-  const realM = t.match(/REALIZA[ÇC][ÃA]O:\s*(completa|incompleta)/i);
-  // Sem o campo, assume `completa`: no v28 a ímpar tem de ser afirmada, não
-  // acontecer por omissão (era o que inflava o 7).
-  const realizacao = realM ? realM[1].toLowerCase() : null;
-
-  const confM = t.match(/CONFIAN[ÇC]A:\s*(alta|m[ée]dia|baixa)/i);
-  let confianca = confM ? confM[1].toLowerCase() : null;
-  if (confianca === 'media') confianca = 'média';
-
-  // A análise vai até a primeira linha de trava (ou o fim, se não houver).
-  const anaM = t.match(/AN[ÁA]LISE:\s*([\s\S]*?)(?=\n[^\S\n]*F[2-5]\s*:|\n[^\S\n]*REALIZA[ÇC][ÃA]O:|$)/i);
-  const analise = anaM ? anaM[1].trim() : '';
-
-  const { faixa, inconsistente } = derivarFaixa(travas);
-  const nota = faixa == null ? null : NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0];
-
-  return { nota, confianca, analise, travas, faixa, realizacao, inconsistente };
-}
-
-// Parser da saída do nó, conforme a versão: v28 responde travas (a nota é
-// derivada aqui), v25 escreve a NOTA direto.
-function parseSaidaDoNo(text, cfg) {
-  const formato = (cfg && cfg.formatoSaida) || 'nota-direta';
-  if (formato === 'travas-v31') return parseNodeOutputV31(text);
-  if (formato === 'travas-v28') return parseNodeOutputTravas(text);
-  return parseNodeOutput(text);
-}
-
-// Estrutura a saída do nó por regex simples (conforme [SAÍDA] do prompt).
-function parseNodeOutput(text) {
-  const t = String(text || '');
-  const notaM = t.match(/NOTA:\s*\[?\s*([0-9]{1,2})/i);
-  const confM = t.match(/CONFIAN[ÇC]A:\s*(alta|m[ée]dia|baixa)/i);
-  const anaM = t.match(/AN[ÁA]LISE:\s*([\s\S]*?)(?=\n[^\S\n]*NOTA:|$)/i);
-
-  let nota = notaM ? Number(notaM[1]) : null;
-  if (nota !== null && Number.isFinite(nota)) nota = Math.max(1, Math.min(10, Math.round(nota)));
-  else nota = null;
-
-  let confianca = confM ? confM[1].toLowerCase() : null;
-  if (confianca === 'media') confianca = 'média';
-
-  // Sem rótulo ANÁLISE (ex.: modo teste "só nota", ou nó fora de formato) → análise
-  // vazia, para não injetar texto cru no sintetizador (que então é pulado).
-  const analise = anaM ? anaM[1].trim() : '';
-  return { nota, confianca, analise };
-}
-
-// `developer` (bloco estático + caso) vem pronto do caller: é idêntico em todos
-// os nós — é justamente o prefixo que a OpenAI cacheia — e montá-lo uma vez só
-// evita refazer a concatenação grande a cada nó. Ver buildDeveloper.
-// Nó de DUAS FASES (v32). A fase 1 responde as quatro perguntas sem ver a régua;
-// o código deriva a faixa; a fase 2 recebe a faixa pronta, com a régua inteira à
-// vista, e devolve realização e análise.
-//
-// Degradação: fase 1 ilegível → sem faixa, o nó fica fora da nota e a fase 2 nem
-// roda (não haveria faixa a julgar). Fase 2 ilegível → a faixa vale, a realização
-// cai no padrão `completa` e a análise fica vazia (o critério conta na nota, mas
-// não manda prosa ao sintetizador).
-async function runNodeDuasFases(openai, assets, developer1, developer2, criterio, model, effort, provider) {
-  const captura = capturaLigada(assets.cfg);
-  const usages = [];
-
-  const user1 = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const r1 = await gptComplete(openai, developer1, user1, V32_FASE1_MAX_TOKENS, model, effort, provider, `nó ${criterio.num} f1`, captura);
-  usages.push(r1.usage);
-  const { travas, faixa, inconsistente } = parseFase1V32(r1.text);
-
-  const base = {
-    num: criterio.num,
-    nome: criterio.nome,
-    linhaCurta: criterio.linhaCurta,
-    travas,
-    faixa,
-    inconsistente,
-    confianca: null,
-    analiseForaDeOrdem: false,
-    etiqueta: faixa == null ? null : ETIQUETA_POR_FAIXA[faixa],
-    reasoning: r1.reasoning || '',
-    usage: r1.usage,
-    usages,
-    retentativas: 0,
-  };
-
-  if (faixa == null) {
-    return { ...base, nota: null, realizacao: null, analise: '' };
-  }
-
-  const user2 = fill(
-    fill(assets.fase2.blockC, '{{CRITÉRIO}}', criterio.descricao),
-    '{{FAIXA}}', NOME_DA_FAIXA[faixa],
-  );
-  const r2 = await gptComplete(openai, developer2, user2, V32_FASE2_MAX_TOKENS, model, effort, provider, `nó ${criterio.num} f2`, captura);
-  usages.push(r2.usage);
-  const { realizacao, analise } = parseFase2V32(r2.text);
-
-  return {
-    ...base,
-    // Realização ausente vale completa, como nas outras versões: a ímpar tem de
-    // ser afirmada, nunca acontecer por omissão.
-    nota: NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0],
-    realizacao,
-    analise,
-    // O raciocínio das duas fases, na ordem, para o .txt do supervisor.
-    reasoning: [r1.reasoning, r2.reasoning].filter(Boolean).join('\n\n---\n\n'),
-    usages,
-  };
-}
-
-async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai') {
+// Um nó: uma chamada, um critério. `developer` (bloco estático + caso) vem
+// pronto do caller — é idêntico em todos os nós, é justamente o prefixo que a
+// OpenAI cacheia, e montá-lo uma vez só evita refazer a concatenação grande a
+// cada nó. Ver buildDeveloper.
+async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = capturaLigada(assets.cfg)) {
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
-  const captura = capturaLigada(assets.cfg);
 
   // A tentativa descartada FOI COBRADA: o usage de todas entra na conta, não só
   // o da última. Sem isto o laboratório subestimaria o custo justamente nas runs
@@ -1058,7 +824,20 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   for (let tentativa = 0; ; tentativa++) {
     out = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
     usages.push(out.usage);
-    parsed = parseSaidaDoNo(out.text, assets.cfg);
+    parsed = parseSaidaDoNo(out.text);
+
+    // Sem ANÁLISE, mas com faixa: o nó pontuou e parou antes do último campo.
+    const semAnalise = !parsed.analise && parsed.faixa != null;
+    if (semAnalise && tentativa < retriesDeAnalise()) {
+      retentativas++;
+      console.warn(`[v29-nó] nó ${criterio.num} (${criterio.nome}) voltou sem ANÁLISE — refazendo (${tentativa + 1}/${retriesDeAnalise()})`);
+      continue;
+    }
+    if (semAnalise) {
+      console.warn(`[v29-nó] nó ${criterio.num} (${criterio.nome}) segue sem ANÁLISE: conta na nota, fica fora do feedback do aluno.`);
+      break;
+    }
+
     const teto = retriesDeOrdem();
     if (!parsed.analiseForaDeOrdem || tentativa >= teto) break;
     retentativas++;
@@ -1078,21 +857,21 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   };
 }
 
-// Um critério entra na nota quando tem nota. Na v25 a CONFIANÇA `baixa` também
-// o tira (o prompt de lá manda usar `baixa` para "o log não deu material");
-// na v28 a confiança é só recado ao supervisor e não mexe no cálculo.
-function entraNaNota(r, confiancaBaixaExclui) {
-  if (!Number.isFinite(r.nota)) return false;
-  return !confiancaBaixaExclui || r.confianca !== 'baixa';
+// Um critério entra na nota quando tem nota — e só isso. (No v25 a CONFIANÇA
+// `baixa` também o tirava da conta; o campo deixou de existir na régua nova, e
+// com ele a exceção.) Nó fora de formato não devolve número e fica de fora,
+// marcado na tela do supervisor.
+function entraNaNota(r) {
+  return Number.isFinite(r.nota);
 }
 
 // Agregador determinístico. Pesos iguais por enquanto (parametrizáveis).
 // Normaliza a média (1–10) para 0–100.
-function aggregate(results, weights, confiancaBaixaExclui = true) {
+function aggregate(results, weights) {
   let ws = 0;
   let wt = 0;
   results.forEach((r, i) => {
-    if (entraNaNota(r, confiancaBaixaExclui)) {
+    if (entraNaNota(r)) {
       const w = weights[i] != null ? weights[i] : 1;
       ws += r.nota * w;
       wt += w;
@@ -1105,20 +884,17 @@ function aggregate(results, weights, confiancaBaixaExclui = true) {
 
 // Monta o bloco {{ANALISES}} do sintetizador: para cada critério que entra na
 // nota, na ordem dos critérios, cabeçalho (nº + nome) + linha curta + a prosa do
-// nó. Sem NOTA nem CONFIANÇA (a valência já vem na 1ª palavra da prosa). Vazio
-// se nenhum. Critério sem prosa (variante só-nota, ou nó fora de formato) não
-// entra. O corte por confiança segue o da versão: na v25 `baixa` também sai do
-// feedback; na v28 todas as análises vão para o sintetizador, que espera uma
-// por critério.
-function buildAnalises(results, confiancaBaixaExclui = true, comEtiqueta = false) {
+// nó. Sem NOTA (a valência já vem na etiqueta e na 1ª palavra da prosa). Vazio
+// se nenhum. Critério sem prosa (nó fora de formato) não entra.
+function buildAnalises(results) {
   const blocks = results
-    .filter((r) => (!confiancaBaixaExclui || r.confianca !== 'baixa') && r.analise)
+    .filter((r) => r.analise)
     .sort((a, b) => a.num - b.num)
     .map((r) => {
-      // v31: a etiqueta ([preciso], [clichê]...) é colada por CÓDIGO a partir da
+      // A etiqueta ([preciso], [clichê]...) é colada por CÓDIGO a partir da
       // faixa. O nó não a escreve nem a vê, então não escolhe o tom com que a
       // própria análise chega ao sintetizador.
-      const etiqueta = comEtiqueta && r.etiqueta ? `[${r.etiqueta}] ` : '';
+      const etiqueta = r.etiqueta ? `[${r.etiqueta}] ` : '';
       return `## ${r.num} · ${r.nome}\n${r.linhaCurta}\n${etiqueta}${r.analise}`;
     });
   return blocks.join('\n\n');
@@ -1126,15 +902,56 @@ function buildAnalises(results, confiancaBaixaExclui = true, comEtiqueta = false
 
 // Sintetizador: 1 chamada. developer = bloco estático (cacheável entre
 // avaliações); user = log + análises. Devolve só o corpo (sem nota, sem saudação).
-async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = false) {
-  const user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
+async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = false, extras = {}) {
+  let user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
+  // Slots próprios da versão (modo progressão). O que a versão declara e o
+  // caller não mandou entra com a frase de ausência, nunca cru.
+  for (const slot of slotsSintetizadorDe(assets.cfg)) {
+    const valor = extras && extras[slot] != null ? String(extras[slot]).trim() : '';
+    user = fill(user, slot, valor || AUSENTE_POR_SLOT[slot] || '(não informado)');
+  }
   const { text, reasoning, usage } = await gptComplete(openai, assets.synthStatic, user, V25_SYNTH_MAX_TOKENS, model, effort, provider, 'sintetizador', captura);
   return { corpo: (text || '').trim(), reasoning: reasoning || '', usage };
 }
 
 // Montagem final (código): nota + saudação da versão + corpo do sintetizador.
-function montarFeedback(notaFinal, corpo, saudacao = SAUDACAO_V25) {
+function montarFeedback(notaFinal, corpo, saudacao = SAUDACAO) {
   return `Nota: ${notaFinal}/100\n\n${saudacao}\n\n${corpo}`;
+}
+
+// (A saudação é uma só — ver SAUDACAO no topo. A produção monta o texto do
+// aluno como SAUDACAO + corpo, sem a linha "Nota: X/100" do montarFeedback: lá
+// a nota aparece como selo na tela.)
+
+// --- Nó da MISSÃO (modo progressão) ---------------------------------------
+//
+// Uma chamada só, fora dos 15 critérios: responde se a sidequest/missão diária
+// foi cumprida. Fica separada de propósito. No v18.25 o veredito vinha pendurado
+// no fim do texto do avaliador ([sidequest-resultado] + JSON), e quem escrevia o
+// feedback decidia a recompensa na mesma passada — dois trabalhos numa cabeça.
+// Aqui o veredito é de quem só olha a missão, e o sintetizador nem o vê.
+//
+// Formato (ver missao-v29-progressao.md):
+//   CUMPRIDA: <sim|não>
+//   JUSTIFICATIVA: <uma a duas frases>
+function parseSaidaMissao(text) {
+  const t = String(text || '');
+  const m = t.match(/^[^\S\n]*CUMPRIDA\s*:\s*(sim|n[ãa]o)/im);
+  const j = t.match(/^[^\S\n]*JUSTIFICATIVA\s*:\s*([\s\S]*)$/im);
+  return {
+    // Sem resposta legível a missão NÃO é cumprida: a conclusão desbloqueia
+    // recompensa, então o silêncio nunca pode virar um "sim" por omissão.
+    cumprida: m ? /^sim$/i.test(m[1]) : false,
+    legivel: !!m,
+    justificativa: j ? j[1].trim().replace(/\s+/g, ' ') : '',
+  };
+}
+
+async function runMissaoNode(openai, assets, materiais, model, effort, provider, captura) {
+  let user = assets.missao.missaoVariable;
+  for (const [slot, valor] of Object.entries(materiais)) user = fill(user, slot, valor);
+  const out = await gptComplete(openai, assets.missao.missaoStatic, user, V25_MISSAO_MAX_TOKENS, model, effort, provider, 'nó da missão', captura);
+  return { ...parseSaidaMissao(out.text), reasoning: out.reasoning || '', usage: out.usage };
 }
 
 // Resumo de uso + CUSTO EXATO da run. Soma os tokens que cada uma das 15
@@ -1232,14 +1049,14 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
 //
 // Devolve '' quando não há resumo nenhum: aí não existe arquivo a guardar nem
 // botão a mostrar (batch, modelo "mini", GLM com thinking desligado).
-function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, batch, casoNome, notaFinal, partes, reasoningSintetizador, criadoEm }) {
+function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, casoNome, notaFinal, partes, reasoningSintetizador, criadoEm }) {
   const blocos = (partes || []).filter((p) => p.reasoning && p.reasoning.trim());
   if (!blocos.length && !(reasoningSintetizador || '').trim()) return '';
 
   const L = [];
   L.push('AVALIAÇÃO INDEPENDENTE — RACIOCÍNIO DA AVALIAÇÃO');
   L.push('='.repeat(52));
-  L.push(`Avaliador: ${evaluatorLabel || version || '—'}${variant ? ` (${variant})` : ''}`);
+  L.push(`Avaliador: ${evaluatorLabel || version || '—'}`);
   L.push(`Modelo: ${model || '—'} · effort: ${effort || '—'}${batch ? ' · batch' : ''}`);
   if (casoNome) L.push(`Caso: ${casoNome}`);
   if (notaFinal != null) L.push(`Nota final: ${notaFinal}/100`);
@@ -1254,16 +1071,13 @@ function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, ba
   for (const p of blocos) {
     L.push('─'.repeat(52));
     L.push(`${p.num} · ${p.nome}`);
-    // A confiança só entra nas versões que a têm (saiu no v31); a etiqueta, nas
-    // que a geram por código.
     const meta = [
       Number.isFinite(p.nota) ? `nota ${p.nota}/10` : 'sem nota',
       p.etiqueta ? `etiqueta ${p.etiqueta}` : null,
-      p.confianca ? `confiança ${p.confianca}` : null,
       p.incluido ? 'na nota final' : 'fora da nota final',
     ].filter(Boolean);
     L.push(`[${meta.join(' · ')}]`);
-    // v28: como a nota foi derivada — quais travas abriram e onde parou.
+    // Como a nota foi derivada — quais travas abriram e onde parou.
     if (p.travas) {
       const linha = [2, 3, 4, 5].map((n) => `F${n} ${p.travas[n] === true ? '✓' : p.travas[n] === false ? '✗' : '?'}`).join('  ');
       L.push(`[${linha}  →  faixa F${p.faixa} · realização ${p.realizacao || 'não declarada (assumida completa)'}]`);
@@ -1292,9 +1106,43 @@ function buildReasoningTxt({ evaluatorLabel, version, variant, model, effort, ba
   return L.join('\n');
 }
 
-// Prefixo cacheável de um caso: bloco estático (A) + Bloco 1 e log (B).
-function buildDeveloper(assets, bloco1, log) {
-  return assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
+// Materiais do caso, por SLOT do bloco B. As versões padrão têm dois
+// ({{BLOCO_1}} e {{LOG}}); o modo progressão tem cinco. Aceita as duas formas de
+// chamada — `{ bloco1, log }` (todo o código antigo) e `{ materiais }` (o mapa
+// slot → texto) — e completa o que faltar com o aviso de ausência, para nenhum
+// slot chegar ao modelo como texto cru `{{ASSIM}}`.
+function normalizeMateriais(assets, { bloco1, log, materiais } = {}) {
+  const slots = assets.slotsCaso || SLOTS_CASO_PADRAO;
+  const out = {};
+  for (const slot of slots) {
+    const dado = materiais && materiais[slot] != null ? materiais[slot]
+      : slot === '{{BLOCO_1}}' ? bloco1
+        : slot === '{{LOG}}' ? log
+          : null;
+    const txt = dado == null ? '' : String(dado).trim();
+    out[slot] = txt || AUSENTE_POR_SLOT[slot] || '(não informado)';
+  }
+  return out;
+}
+
+// O que vai no slot quando o material não existe naquela avaliação. Texto, e não
+// vazio, porque o prompt tem seção sobre cada material: uma seção em branco o
+// modelo interpreta como falha nossa, e uma frase explícita ele sabe ler (o
+// prompt da progressão tem a cláusula "quando não há atendimento 1").
+const AUSENTE_POR_SLOT = {
+  '{{BLOCO_1}}': '(este caso não tem Bloco 1 configurado)',
+  '{{ATENDIMENTO_1}}': '(não houve atendimento anterior — este é o primeiro atendimento do aluno neste caso)',
+  '{{AVALIACAO_1}}': '(não há avaliação anterior)',
+  '{{MISSAO}}': '(não há missão ativa neste atendimento)',
+  '{{MISSAO_VEREDITO}}': '(não há missão ativa neste atendimento)',
+  '{{LOG}}': '(sem mensagens)',
+};
+
+// Prefixo cacheável de um caso: bloco estático (A) + os materiais do caso (B).
+function buildDeveloper(assets, materiaisNormalizados) {
+  let blockB = assets.blockB;
+  for (const [slot, valor] of Object.entries(materiaisNormalizados)) blockB = fill(blockB, slot, valor);
+  return assets.blockA + '\n\n' + blockB;
 }
 
 // Executa o pipeline completo: nós → agregador → sintetizador → montagem.
@@ -1302,22 +1150,41 @@ function buildDeveloper(assets, bloco1, log) {
 // os demais em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) — assim
 // o prefixo A+B (com o log) é cobrado cheio uma vez e lido barato pelos outros.
 // O sintetizador roda por último.
-async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT, evaluatorId }) {
-  const assets = loadAssets(version, variant);
+async function runAvaliacaoIndependente({
+  openai, bloco1, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai',
+  version = DEFAULT_VERSION, evaluatorId,
+  // Produção: acompanha o andamento sem revelar quantos nós existem (ver
+  // /api/evaluate — o aluno vê uma barra, não "critério 7 de 15").
+  onProgress,
+  // `false` desliga a captura do resumo de raciocínio mesmo nas versões que a
+  // pedem. A produção desliga: são 15 resumos por sessão avaliada, que ninguém
+  // leria, e ligar troca o transporte das chamadas (Responses em vez de
+  // chat.completions) sem mudar nada do que o aluno ou o supervisor recebem.
+  capturarReasoning,
+} = {}) {
+  const assets = loadAssets(version);
   const { criteria } = assets;
   const weights = criteria.map(() => 1);
+  const captura = capturarReasoning === undefined ? capturaLigada(assets.cfg) : !!capturarReasoning;
+  const materiaisCaso = normalizeMateriais(assets, { bloco1, log, materiais });
+  const logDoCaso = materiaisCaso['{{LOG}}'];
 
-  const developer = buildDeveloper(assets, bloco1, log);
-  // Duas fases: cada uma tem o seu prefixo cacheável (estático próprio + o mesmo
-  // bloco do caso). São duas famílias de cache, uma por fase, cada uma
-  // compartilhada pelos 15 nós.
-  const duasFases = !!assets.cfg.duasFases;
-  const developer2 = duasFases
-    ? assets.fase2.blockA + '\n\n' + fill(fill(assets.fase2.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log)
-    : null;
-  const rodarNo = (c) => (duasFases
-    ? runNodeDuasFases(openai, assets, developer, developer2, c, model, effort, provider)
-    : runNode(openai, assets, developer, c, model, effort, provider));
+  // Progresso: os nós dos critérios + o da missão (quando há) + o sintetizador.
+  const totalPassos = criteria.length + (assets.missao ? 1 : 0) + 1;
+  let feitos = 0;
+  const avancar = () => {
+    feitos++;
+    if (typeof onProgress === 'function') {
+      try { onProgress({ feitos, total: totalPassos }); } catch {}
+    }
+  };
+
+  const developer = buildDeveloper(assets, materiaisCaso);
+  const rodarNo = async (c) => {
+    const r = await runNode(openai, assets, developer, c, model, effort, provider, captura);
+    avancar();
+    return r;
+  };
 
   const first = await rodarNo(criteria[0]);
   // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
@@ -1329,30 +1196,35 @@ async function runAvaliacaoIndependente({ openai, bloco1, log, model = V25_MODEL
     conc = GLM_V25_CONCURRENCY;
   } else {
     const maiorCriterio = criteria.reduce((a, c) => Math.max(a, (c.descricao || '').length), 0);
-    // No v32 quem dita o lote é a fase mais pesada: as duas rodam em sequência
-    // dentro do mesmo nó, então nunca estão as duas no ar pelo mesmo nó.
-    const reserva = duasFases
-      ? estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + Math.max(V32_FASE1_MAX_TOKENS, V32_FASE2_MAX_TOKENS)
-      : estimarTokens(developer) + estimarTokens(assets.blockC) + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
+    const reserva = estimarTokens(developer) + estimarTokens(assets.blockC)
+      + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
     conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
     console.log(`[v25-fanout] ${criteria.length} nós · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
   }
-  const rest = await mapLimit(criteria.slice(1), conc, (c) => rodarNo(c));
+  // O nó da MISSÃO entra no mesmo fan-out dos critérios: ele não depende de
+  // nenhum deles, e serializá-lo só somaria latência à espera do aluno.
+  const [rest, missao] = await Promise.all([
+    mapLimit(criteria.slice(1), conc, (c) => rodarNo(c)),
+    assets.missao
+      ? runMissaoNode(openai, assets, materiaisCaso, model, effort, provider, captura).then((r) => { avancar(); return r; })
+      : Promise.resolve(null),
+  ]);
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
-  return finishPipeline({
-    openai, assets, log, results, weights, model, effort, provider, batch: false, evaluatorId,
-    capturaSint: capturaLigada(assets.cfg),
+  const out = await finishPipeline({
+    openai, assets, log: logDoCaso, results, weights, model, effort, provider, batch: false, evaluatorId,
+    capturaSint: captura, missao, materiais: materiaisCaso,
   });
+  avancar(); // sintetizador
+  return out;
 }
 
 // Passo comum do fim do pipeline (síncrono e batch): agregador → partes →
 // sintetizador → montagem → instrumentação.
-async function finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint = false }) {
-  const { cfg, version, variant } = assets;
-  const excluiBaixa = cfg.confiancaBaixaExclui;
+async function finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint = false, missao = null, materiais = null }) {
+  const { cfg, version } = assets;
 
-  const { notaFinal, considerados } = aggregate(results, weights, excluiBaixa);
+  const { notaFinal, considerados } = aggregate(results, weights);
 
   const partes = results.map((r) => ({
     num: r.num,
@@ -1360,49 +1232,64 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
     linhaCurta: r.linhaCurta,
     analise: r.analise,
     nota: r.nota,
-    confianca: r.confianca,
-    // Só no v28 (travas estruturais): como a nota foi derivada. Deixa o
-    // supervisor ver ONDE o caso parou, que é a estatística que interessa —
-    // se a F3 está segurando ou se todo mundo chega à F4.
+    // Como a nota foi derivada. Deixa o supervisor ver ONDE o caso parou, que é
+    // a estatística que interessa — se a F3 está segurando ou se todo mundo
+    // chega à F4.
     travas: r.travas || null,
     faixa: r.faixa != null ? r.faixa : null,
     realizacao: r.realizacao || null,
-    // v31: etiqueta derivada da faixa (a que o sintetizador lê) e o aviso de que
-    // a prosa veio antes das travas mesmo depois da retentativa.
+    // Etiqueta derivada da faixa (a que o sintetizador lê) e o aviso de que a
+    // prosa veio antes das travas mesmo depois da retentativa.
     etiqueta: r.etiqueta || null,
     analiseForaDeOrdem: !!r.analiseForaDeOrdem,
     // Trava aberta acima de uma fechada foi DESCARTADA pelo código. Sem a
     // confiança, este é o sinal mais próximo que sobrou de "o nó titubeou aqui".
     travasInconsistentes: !!r.inconsistente,
-    // Fora da conta final (v25: `baixa`; qualquer versão: nó que não devolveu
-    // número). Aparece na tela do supervisor de qualquer jeito, marcado.
-    incluido: entraNaNota(r, excluiBaixa),
+    // Fora da conta final (nó que não devolveu número). Aparece na tela do
+    // supervisor de qualquer jeito, marcado.
+    incluido: entraNaNota(r),
   }));
 
   // Sintetizador + feedback do aluno só fazem sentido com pelo menos um critério
-  // avaliável. Caso degenerado (nenhuma nota, ou tudo `baixa` no v25): só o
+  // avaliável. Caso degenerado (nenhum nó devolveu nota legível): só o
   // supervisor vê as partes; não há feedback de aluno a montar.
-  const analises = buildAnalises(results, excluiBaixa, !!cfg.etiquetaNaAnalise);
+  const analises = buildAnalises(results);
   let corpoSintetizador = null;
   let feedbackAluno = null;
   let synthUsage = null;
   let synthReasoning = '';
   if (notaFinal != null && analises) {
-    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider, capturaSint);
+    // Extras do sintetizador (modo progressão): o atendimento anterior, a
+    // missão e o VEREDITO dela, que já foi decidido pelo nó da missão. O
+    // sintetizador recebe o veredito como fato para não escrever uma prosa que
+    // contradiga o que o sistema vai registrar.
+    const extras = {};
+    if (materiais) {
+      extras['{{ATENDIMENTO_1}}'] = materiais['{{ATENDIMENTO_1}}'];
+      extras['{{MISSAO}}'] = materiais['{{MISSAO}}'];
+    }
+    if (missao) {
+      extras['{{MISSAO_VEREDITO}}'] = `${missao.cumprida ? 'CUMPRIDA' : 'NÃO CUMPRIDA'}${missao.justificativa ? ` — ${missao.justificativa}` : ''}`;
+    }
+    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider, capturaSint, extras);
     corpoSintetizador = synth.corpo;
     synthUsage = synth.usage;
     synthReasoning = synth.reasoning || '';
     feedbackAluno = montarFeedback(notaFinal, corpoSintetizador, cfg.saudacao);
   }
 
-  const instrumentacao = buildInstrumentacao(model, results, synthUsage, effort, batch);
+  // O nó da missão é uma chamada como as outras: entra na conta de custo junto
+  // dos nós de critério (senão o custo do modo progressão apareceria menor do
+  // que é). Só não entra na nota — missão cumprida não infla critério nenhum.
+  const paraCusto = missao ? [...results, { usage: missao.usage, usages: [missao.usage] }] : results;
+  const instrumentacao = buildInstrumentacao(model, paraCusto, synthUsage, effort, batch);
 
   // Raciocínio: o .txt já montado (ou '' quando não houve resumo nenhum). Sai
   // separado do resto porque é grande — o caller grava em arquivo próprio em vez
   // de engordar o store que é lido inteiro a cada avaliação.
   const reasoningTxt = buildReasoningTxt({
     evaluatorLabel: evaluatorId || version,
-    version, variant, model, effort, batch, casoNome: null, notaFinal,
+    version, model, effort, batch, casoNome: null, notaFinal,
     partes: partes.map((p, i) => ({ ...p, reasoning: results[i] ? results[i].reasoning : '' })),
     reasoningSintetizador: synthReasoning,
     criadoEm: new Date().toISOString(),
@@ -1410,16 +1297,22 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
 
   // `evaluator` é o id do avaliador no alternador (v28, v28-nota, ...) quando o
   // caller o informa; sem ele, a própria versão do pipeline.
-  return { evaluator: evaluatorId || version, version, variant, notaFinal, considerados, partes, corpoSintetizador, feedbackAluno, instrumentacao, reasoningTxt };
+  return {
+    evaluator: evaluatorId || version, version, notaFinal, considerados, partes,
+    corpoSintetizador, feedbackAluno, instrumentacao, reasoningTxt,
+    // Veredito da missão (só o modo progressão). `null` quando a versão não tem
+    // nó de missão — quem lê distingue "não há missão" de "não foi cumprida".
+    missao: missao ? { cumprida: !!missao.cumprida, legivel: !!missao.legivel, justificativa: missao.justificativa || '' } : null,
+  };
 }
 
 // --- Suporte a BATCH API (os nós num lote; sintetizador roda síncrono no coletor) ---
 
 // Corpos /v1/chat/completions dos nós (mesmo developer cacheável + user do
 // critério). O caller monta o custom_id (ex.: `${jobId}::${num}`) e o JSONL.
-function buildPipelineNodeRequests({ bloco1, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT }) {
-  const assets = loadAssets(version, variant);
-  const developer = assets.blockA + '\n\n' + fill(fill(assets.blockB, '{{BLOCO_1}}', bloco1), '{{LOG}}', log);
+function buildPipelineNodeRequests({ bloco1, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION }) {
+  const assets = loadAssets(version);
+  const developer = buildDeveloper(assets, normalizeMateriais(assets, { bloco1, log, materiais }));
   return assets.criteria.map((criterio) => ({
     num: criterio.num,
     body: buildChatBody({
@@ -1437,14 +1330,14 @@ function buildPipelineNodeRequests({ bloco1, log, model = V25_MODEL, effort = V2
 
 // Finaliza a partir das saídas dos nós do batch. `nodeOutputs` = [{ num, text, usage }].
 // Roda o agregador, o sintetizador (síncrono, 1 chamada) e a instrumentação.
-async function finalizePipeline({ openai, log, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, variant = DEFAULT_VARIANT, nodeOutputs, batch = false, evaluatorId }) {
-  const assets = loadAssets(version, variant);
+async function finalizePipeline({ openai, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, nodeOutputs, batch = false, evaluatorId, missao = null }) {
+  const assets = loadAssets(version);
   const weights = assets.criteria.map(() => 1);
   const byNum = new Map((nodeOutputs || []).map((o) => [o.num, o]));
   const results = assets.criteria
     .map((c) => {
       const o = byNum.get(c.num) || { text: '', usage: null };
-      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseSaidaDoNo(o.text, assets.cfg), usage: o.usage };
+      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseSaidaDoNo(o.text), usage: o.usage };
     })
     .sort((a, b) => a.num - b.num);
 
@@ -1452,44 +1345,49 @@ async function finalizePipeline({ openai, log, model = V25_MODEL, effort = V25_E
   // /v1/chat/completions e não devolve resumo de raciocínio. Capturar só o do
   // sintetizador daria um arquivo manco (14 ou 15 nós em branco) e ainda trocaria
   // o transporte de uma run cujo motivo de existir é medir custo.
-  return finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint: false });
+  return finishPipeline({
+    openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId,
+    capturaSint: false, missao, materiais: materiais ? normalizeMateriais(assets, { materiais }) : null,
+  });
 }
 
 module.exports = {
+  // Execução do pipeline
   runAvaliacaoIndependente,
   buildChatBody,
+  // Versões (v29 e o modo progressão dele)
   PIPELINE_VERSIONS,
+  PIPELINE_VERSIONS_IDS,
   DEFAULT_VERSION,
-  PIPELINE_VARIANTS,
-  DEFAULT_VARIANT,
-  isValidVariant,
-  selectVariant,
-  // Batch API (Avaliação Independente):
+  SAUDACAO,
+  slotsCasoDe,
+  slotsSintetizadorDe,
+  normalizeMateriais,
+  // Batch API (nós no lote; sintetizador roda síncrono no coletor)
   buildPipelineNodeRequests,
   finalizePipeline,
+  // Raciocínio (laboratório) e utilidades de fila/custo
   buildReasoningTxt,
   modelEmiteResumo,
-  parseFase1V32,
-  parseFase2V32,
-  PERGUNTA_PARA_TRAVA,
-  NOME_DA_FAIXA,
-  parseNodeOutputV31,
-  ETIQUETA_POR_FAIXA,
-  parseNodeOutputTravas,
-  derivarFaixa,
-  NOTAS_POR_FAIXA,
+  extractChatReasoning,
   estimarTokens,
   concorrenciaPorTPM,
   reservarTPM,
   _resetTPM,
-  // usados pelo editor de prompts (validação com o parser da produção):
+  // Usados pelo editor de prompts — a validação de um rascunho roda o MESMO
+  // parser da produção.
   parseMontado,
   parseSintetizador,
+  parseMissao,
   clearAssetsCache,
-  // exportados para teste:
+  // Exportados para teste
   loadAssets,
   parseCriteria,
-  parseNodeOutput,
+  parseSaidaDoNo,
+  parseSaidaMissao,
+  derivarFaixa,
+  NOTAS_POR_FAIXA,
+  ETIQUETA_POR_FAIXA,
   aggregate,
   buildAnalises,
   montarFeedback,

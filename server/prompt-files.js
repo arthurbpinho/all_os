@@ -23,7 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const { DATA_DIR, PROMPTS_DIR } = require('./paths');
-const { parseMontado, parseSintetizador, parseCriteria, PIPELINE_VERSIONS, PIPELINE_VARIANTS } = require('./avaliacao-v25');
+const { parseMontado, parseSintetizador, parseCriteria, parseMissao, slotsCasoDe, slotsSintetizadorDe, PIPELINE_VERSIONS } = require('./avaliador-pipeline');
 
 // Pastas de primeiro nível do PROMPTS_DIR. São as duas famílias de prompt que o
 // app lê (e as que o boot semeia). Um arquivo NOVO só pode nascer dentro delas:
@@ -31,7 +31,7 @@ const { parseMontado, parseSintetizador, parseCriteria, PIPELINE_VERSIONS, PIPEL
 // vira erro na hora, em vez de um .md órfão que ninguém lê.
 const PROMPT_ROOTS = ['avaliacao', 'entrevistador'];
 // Profundidade máxima de um caminho novo: raiz + subpasta + arquivo
-// (ex.: avaliacao/v28/criterios-no-v28.md). Nada mais fundo que isso existe hoje.
+// (ex.: avaliacao/v29/criterios-no-v29.md). Nada mais fundo que isso existe hoje.
 const MAX_NEW_PATH_SEGMENTS = 3;
 
 const BACKUPS_DIR = path.join(DATA_DIR, 'prompt-backups');
@@ -80,34 +80,34 @@ function listPromptFiles() {
 // valor roda o parser de produção e estoura com a mensagem dele. Arquivo fora
 // desta tabela passa só pelas checagens genéricas (não-vazio, tamanho) — não
 // invento contrato para prompt cujo formato o código não lê.
-// Os três .md de cada VERSÃO do pipeline (v28, v25) têm contrato conhecido —
-// são montados pelo mesmo parser da produção. As pastas vêm de PIPELINE_VERSIONS
-// (`dirs`), então uma versão nova entra aqui sozinha, sem editar esta tabela.
+//
+// Os .md de cada VERSÃO do pipeline (v29 e o modo progressão) têm contrato
+// conhecido — são montados pelo mesmo parser da produção. A pasta vem de
+// PIPELINE_VERSIONS (`dir`), então uma versão nova entra aqui sozinha, sem
+// editar esta tabela.
 const VALIDATORS = {};
 for (const cfg of Object.values(PIPELINE_VERSIONS)) {
-  for (const dir of cfg.dirs) {
-    const base = `avaliacao/${dir}/`;
-    VALIDATORS[base + cfg.montado] = (content) => {
-      // Nas versões com variantes, as duas precisam continuar montáveis (se um
-      // marcador `@variante` sumir, cai aqui). Nas sem variante (v31 em diante),
-      // o arquivo inteiro é o prompt e a checagem é dos blocos e dos slots.
-      if (cfg.variantes === false) {
-        parseMontado(content, null, cfg.montado, false);
-        return;
-      }
-      for (const variant of PIPELINE_VARIANTS) parseMontado(content, variant, cfg.montado, true);
+  const slotsCaso = slotsCasoDe(cfg);
+  const base = `avaliacao/${cfg.dir}/`;
+  VALIDATORS[base + cfg.montado] = (content) => {
+    parseMontado(content, cfg.montado, slotsCaso);
+  };
+  VALIDATORS[base + cfg.sintetizador] = (content) => {
+    // Os slots EXTRAS da versão entram na validação (o sintetizador do modo
+    // progressão usa {{ATENDIMENTO_1}}, {{MISSAO}} e {{MISSAO_VEREDITO}}) —
+    // sem isto o parser recusaria o próprio arquivo da produção.
+    parseSintetizador(content, cfg.sintetizador, slotsSintetizadorDe(cfg));
+  };
+  // Nó da missão (só o modo progressão tem).
+  if (cfg.missao) {
+    VALIDATORS[base + cfg.missao] = (content) => {
+      parseMissao(content, cfg.missao, slotsCaso);
     };
-    if (cfg.montadoFase2) {
-      VALIDATORS[base + cfg.montadoFase2] = (content) => {
-        const { blockC } = parseMontado(content, null, cfg.montadoFase2, false);
-        if (!blockC.includes('{{FAIXA}}')) {
-          throw new Error('A fase 2 precisa do slot {{FAIXA}} — é por ele que a faixa derivada pelo código chega ao modelo.');
-        }
-      };
-    }
-    VALIDATORS[base + cfg.sintetizador] = (content) => {
-      parseSintetizador(content, cfg.sintetizador);
-    };
+  }
+  // Versão que LÊ os critérios de outra (o modo progressão usa a grade do v29)
+  // não tem .md de critérios na pasta dela — o validador pertence à versão dona
+  // do arquivo, e registrá-lo aqui criaria um caminho que não existe no volume.
+  if (!cfg.criteriosDe) {
     VALIDATORS[base + cfg.criterios] = (content) => {
       const criteria = parseCriteria(content);
       if (criteria.length !== cfg.nCriterios) {
@@ -155,7 +155,7 @@ function validateNewPromptPath(relPath) {
     if (!seg || seg.startsWith('.')) return { ok: false, error: 'Cada parte do caminho precisa ter nome e não pode começar com ponto.' };
     if (seg.length > 80) return { ok: false, error: 'Cada parte do caminho tem de caber em 80 caracteres.' };
     // Letras (com acento), números, espaço e - _ . ( ) — o suficiente para os
-    // nomes que já existem ("nova avaliacao", "avaliador 18") e nada além.
+    // nomes que já existem ("avaliador 18", "v29-progressao") e nada além.
     if (!/^[\p{L}\p{N} ._()-]+$/u.test(seg)) {
       return { ok: false, error: `"${seg}" tem caractere que não vale em nome de pasta ou arquivo aqui (use letras, números, espaço, ponto, hífen, sublinhado ou parênteses).` };
     }

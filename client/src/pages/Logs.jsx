@@ -4,6 +4,7 @@ import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
+import CriteriaAnalyses from '../components/CriteriaAnalyses';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
 import RichText from '../components/RichText';
@@ -263,6 +264,7 @@ function LogCard({ log, showDownload }) {
             evaluation || log.criteriaScores ? (
               <div>
                 <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
+                <CriteriaAnalyses log={log} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                     <RichText text={evaluation} />
@@ -641,6 +643,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
           {evaluation || log.criteriaScores ? (
             <div>
               <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
+              <CriteriaAnalyses log={log} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                   <RichText text={evaluation} />

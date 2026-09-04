@@ -49,15 +49,17 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       expect(c.avaliador.effort).toBeTruthy();
       if (c.temPaciente) expect(c.paciente.fonte).toBe('padrao');
     }
-    // Os padrões de hoje, modelo E effort (o que as envs já faziam).
-    expect(cat(res.body, 'treinamento').avaliador.model).toBe('glm-5.2');
-    expect(cat(res.body, 'competitivo').avaliador.model).toBe('gpt-5.5-2026-04-23');
-    expect(cat(res.body, 'competitivo').avaliador.effort).toBe('high');
-    expect(cat(res.body, 'seletivo').avaliador.model).toBe('gpt-5.5-2026-04-23');
-    // Neuro e avaliação manual têm effort próprio, que NÃO virou 'high' à força.
+    // Os padrões de hoje. As cinco categorias do AVALIADOR OFICIAL (v29) rodam
+    // no mesmo modelo e no mesmo effort — é o que "uma régua só" significa aqui.
+    for (const categoria of ['treinamento', 'competitivo', 'seletivo', 'visitante', 'avaliacaoManual']) {
+      expect(cat(res.body, categoria).avaliador.model).toBe('gpt-5.6-luna');
+      expect(cat(res.body, categoria).avaliador.effort).toBe('high');
+    }
+    // Duelo (comparativo) e Neuro ficaram fora do v29 e mantêm os padrões deles.
     expect(cat(res.body, 'neuro').avaliador.model).toBe('gpt-5.4-2026-03-05');
     expect(cat(res.body, 'neuro').avaliador.effort).toBe('low');
-    expect(cat(res.body, 'avaliacaoManual').avaliador.effort).toBe('medium');
+    expect(cat(res.body, 'duelo').avaliador.model).toBe('glm-5.2');
+    expect(cat(res.body, 'duelo').avaliador.effort).toBe('high');
     // Paciente: o mini de sempre, sem raciocínio.
     expect(cat(res.body, 'treinamento').paciente.model).toBe('gpt-5.4-mini-2026-03-17');
     expect(cat(res.body, 'treinamento').paciente.effort).toBe('none');
@@ -281,16 +283,17 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
     });
   });
 
-  describe('compatibilidade com a escolha antiga do visitante', () => {
-    it('visitorEvaluationModel legado vale como PADRÃO da categoria visitante', async () => {
+  describe('visitante: a escolha de modelo vive na categoria, não mais na aba Contas', () => {
+    it('a chave de modelo que saiu do contrato não desvia o padrão do visitante', async () => {
       const admin = await loginAs('admin');
       await request(app).put('/api/admin/settings').set(authHeader(admin))
-        .send({ visitorEvaluationModel: 'gpt-5.5' });
+        .send({ visitorEvaluationModel: 'gpt-5.5' }); // ignorada
 
       const res = await request(app).get('/api/admin/ai-models').set(authHeader(admin));
       const visitante = cat(res.body, 'visitante');
-      expect(visitante.avaliador.model).toBe('gpt-5.5-2026-04-23');
-      expect(visitante.avaliador.fonte).toBe('padrao'); // é padrão, não escolha nova
+      // Visitante entrou no avaliador oficial junto com todo mundo.
+      expect(visitante.avaliador.model).toBe('gpt-5.6-luna');
+      expect(visitante.avaliador.fonte).toBe('padrao');
     });
 
     it('a escolha nova vence o legado', async () => {
@@ -303,14 +306,14 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       expect(cat(res.body, 'visitante').avaliador.fonte).toBe('admin');
     });
 
-    it('GET /api/settings continua respondendo o que roda de fato pro visitante', async () => {
+    it('GET /api/settings informa o modelo que roda de fato pro visitante', async () => {
       const admin = await loginAs('admin');
       await request(app).put('/api/admin/ai-models').set(authHeader(admin))
         .send({ categoria: 'visitante', evaluator: 'gpt-5.5' });
 
       const aluno = await loginAs('aluno');
       const res = await request(app).get('/api/settings').set(authHeader(aluno));
-      expect(res.body.visitorEvaluationModel).toBe('gpt-5.5');
+      expect(res.body.avaliadorModelo).toBe('gpt-5.5-2026-04-23');
     });
   });
 });

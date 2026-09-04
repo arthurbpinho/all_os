@@ -113,6 +113,10 @@ export default function EchoSession({ user, sessionType }) {
   const [savingLog, setSavingLog] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [evaluating, setEvaluating] = useState(false);
+  // Andamento da avaliação (0–100). O avaliador oficial não streama o texto: ele
+  // roda em várias chamadas e o feedback só existe no fim, então o que a tela
+  // mostra enquanto isso é o quanto já andou.
+  const [evalProgress, setEvalProgress] = useState(0);
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
   const [evalScore, setEvalScore] = useState(null);
@@ -695,6 +699,7 @@ export default function EchoSession({ user, sessionType }) {
     //    modelo usar: 'training' (Simulação Livre) → 5.4 barato; 'competitive' → 5.5.
     let evalContent = '';
     let totalScore = null;
+    let evalId = null;
     if (!skipEvaluator) {
       // Monta a transcrição que vai pro avaliador (mesma forma do downloadLog,
       // pra que o avaliador veja exatamente o que o aluno destacou).
@@ -719,18 +724,33 @@ export default function EchoSession({ user, sessionType }) {
         };
         // context permite o servidor injetar o Bloco 1 (gabarito) do personagem
         // antes do log, server-side — sem expor o gabarito ao cliente.
-        const reply = await api.evaluate([evalMsg], { type: sessionType, itemId: id, mode: logMode });
+        const reply = await api.evaluate(
+          [evalMsg], { type: sessionType, itemId: id, mode: logMode },
+          null, null, (pct) => setEvalProgress(pct),
+        );
         evalContent = typeof reply === 'string' ? reply : reply.content || '';
+        // Avaliador oficial: a nota vem calculada em código e o detalhe por
+        // critério fica no servidor — aqui só guardamos a chave (evalId) para
+        // devolvê-la no saveLog, que é quem liga a avaliação ao log.
+        if (reply && typeof reply === 'object') {
+          if (reply.evalId) evalId = reply.evalId;
+          if (Number.isFinite(reply.score)) totalScore = reply.score;
+        }
         // A nota final NÃO vem mais do texto da IA — o backend a calcula em código
         // a partir do bloco [notas-supervisor] (server/scoring.js) e devolve no
         // save (saved.score). Mantemos um parse de fallback só para avaliadores
         // antigos que ainda escreviam **Nota: X/100** ou [NOTA:X].
-        const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
-        if (v9) {
-          totalScore = Number(v9[1]);
-        } else {
-          const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
-          if (m) totalScore = Number(m[1].replace(',', '.'));
+        // Fallback de nota só para avaliador ANTIGO, que a escrevia no texto
+        // (**Nota: X/100** ou [NOTA:X]). Com o avaliador oficial a nota já veio
+        // do servidor, e o texto do aluno não traz número nenhum.
+        if (totalScore === null) {
+          const v9 = evalContent.match(/\*\*\s*Nota:\s*(\d{1,3})\s*\/\s*100\s*\*\*/i);
+          if (v9) {
+            totalScore = Number(v9[1]);
+          } else {
+            const m = evalContent.match(/\[NOTA:\s*([-+]?\d+(?:[.,]\d+)?)\s*\]/i);
+            if (m) totalScore = Number(m[1].replace(',', '.'));
+          }
         }
         if (totalScore !== null && Number.isFinite(totalScore)) {
           totalScore = Math.round(totalScore);
@@ -765,6 +785,9 @@ export default function EchoSession({ user, sessionType }) {
         durationSeconds: elapsed,
         score: totalScore,
         evaluation: evalContent,
+        // Chave da avaliação oficial: o servidor lê dela a nota, as notas por
+        // critério e o texto do feedback (nada disso é aceito do cliente).
+        evalId,
         // Neuro: ids indicados + justificativas — o servidor recomputa a
         // comparação a partir do gabarito e grava em log.neuroTests (à prova de
         // adulteração), anexando as justificativas.
@@ -865,7 +888,7 @@ export default function EchoSession({ user, sessionType }) {
         <div className="page-header">
           <div className="eyebrow">Sessão concluída</div>
           <h2>Avaliando sua <span className="accent">sessão</span></h2>
-          <p>A IA está analisando o atendimento com {item?.name}. Pode levar alguns segundos.</p>
+          <p>A IA está analisando o atendimento com {item?.name}. Pode levar alguns minutos — não feche esta tela.</p>
           <div className="ornament" />
         </div>
 
@@ -877,10 +900,12 @@ export default function EchoSession({ user, sessionType }) {
             <div className="orb-core" />
           </div>
           <div className="evaluating-status">
-            <div className="evaluating-line"><span className="dot active" /> Construindo transcrição da sessão</div>
-            <div className="evaluating-line"><span className="dot active" /> Aplicando os 6 critérios da Allos</div>
-            <div className="evaluating-line"><span className="dot pulse" /> Citando trechos e formulando análise</div>
-            <div className="evaluating-line"><span className="dot" /> Calculando a nota final</div>
+            <div className="evaluating-progress">
+              <div className="evaluating-progress-bar"><span style={{ width: `${Math.max(4, evalProgress)}%` }} /></div>
+              <div className="evaluating-progress-txt">
+                {evalProgress < 70 ? 'Analisando o atendimento…' : 'Escrevendo o seu feedback…'}
+              </div>
+            </div>
           </div>
         </div>
       </div>
