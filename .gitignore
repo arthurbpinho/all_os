@@ -42,7 +42,15 @@ server/data/patient-photos/
 server/data/avaliacao-v25.json
 # Resumos de raciocínio das avaliações do v28 (um .txt por run, no volume)
 server/data/avaliacao-reasoning/
+# Detalhe por critério das avaliações de PRODUÇÃO (avaliador oficial v29): um
+# .json por avaliação, com as quinze análises. É material de supervisor e
+# contém leitura feita com o gabarito do caso à vista — nunca vai pro git.
+server/data/avaliacoes-criterios/
 server/data/benchmark-fila.json
+# Contabilidade da fila da Batch API (quais batches estão em voo e quantos
+# tokens cada um reserva). Estado de runtime, compartilhado por Competitivo,
+# Seletivo, Trilha e Avaliação Independente.
+server/data/batch-ledger.json
 server/data/benchmark-lotes.json
 # Runs do Benchmarking de Simulação (uma por arquivo: transcrição + custo por
 # interação + resumo do raciocínio). Ficam no volume, fora do git.
