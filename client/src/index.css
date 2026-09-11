@@ -4720,6 +4720,14 @@ select option { background: var(--cream); color: var(--ink); }
   font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 999px;
   background: color-mix(in srgb, var(--success, #1f8a4c) 16%, transparent); color: var(--success, #1f8a4c);
 }
+/* "em uso" = algum código lê este .md (não dá para excluir). "órfão" = sobrou de
+   um modo ou régua que saiu do app e só ocupa lugar na listagem. O órfão é
+   neutro de propósito: não é erro que ele exista, é só informação de que dá
+   para limpar. */
+.prompts-badge.em-uso { background: var(--sand-2); color: var(--ink-soft); }
+.prompts-badge.orfao { background: transparent; color: var(--muted); border: 1px dashed var(--line); }
+.btn.prompts-excluir { color: var(--danger, #b3261e); }
+.btn.prompts-excluir:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #b3261e) 10%, transparent); }
 .prompts-editor { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .prompts-editor-head { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .prompts-textarea {

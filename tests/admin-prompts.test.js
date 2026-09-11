@@ -1,7 +1,9 @@
 // Administração → Prompts: as duas travas que substituem o que o git dava para
 // esses .md (que saíram do versionamento): VALIDAÇÃO antes de gravar e BACKUP
-// da versão anterior, com restauração. Mais o controle de acesso (admin-only) e
-// a invalidação do cache de prompts do pipeline.
+// da versão anterior, com restauração. Mais o controle de acesso (admin-only),
+// a invalidação do cache de prompts do pipeline e a EXCLUSÃO — que existe para
+// limpar o que ficou preso no volume quando um modo saiu do app, e cuja trava
+// é não deixar sair um .md que a produção lê.
 //
 // Caminhos: o PROMPTS_DIR do teste é semeado da pasta avaliacao/ do repo, onde
 // cada versão do pipeline mora na pasta do nome dela (ver `dir` em
@@ -262,6 +264,91 @@ describe('Administração — editor de prompts', () => {
     const sintV34 = fs.readFileSync(absOf('avaliacao/v34/sintetizador-v34.md'), 'utf8');
     expect(promptFiles.validatePromptContent('avaliacao/v34-duelo/sintetizador-v34-duelo.md', sintV34).error)
       .toMatch(/\{\{ALUNO_A\}\}|\{\{LOG_A\}\}/);
+  });
+
+  // --- EXCLUSÃO ------------------------------------------------------------
+  //
+  // O volume é persistente e o deploy não leva prompts: quando um modo sai do
+  // app, os .md dele ficam lá para sempre. A exclusão é a saída para isso, e o
+  // risco dela é o oposto — apagar um .md que a produção lê quebra a avaliação
+  // de todo mundo, e ele não vem no git para repor.
+  it('a lista marca quem está EM USO e quem é órfão', async () => {
+    const admin = await loginAs('admin');
+    const lista = await request(app).get('/api/admin/prompts').set(authHeader(admin));
+    // Os .md das três entradas do pipeline, o de Neuro e o do entrevistador.
+    for (const emUso of promptFiles.promptsEmUso()) {
+      const item = lista.body.files.find((f) => f.path === emUso);
+      expect(item, `${emUso} deveria estar no volume`).toBeTruthy();
+      expect(item.emUso, `${emUso} deveria estar marcado em uso`).toBe(true);
+    }
+    // E um arquivo qualquer que ninguém lê é órfão. O nome muda por teste de
+    // propósito: prompt-backups/ é um DIRETÓRIO e sobrevive ao resetData (que só
+    // apaga arquivos no topo do DATA_DIR), então reusar o caminho faria um teste
+    // ler o backup deixado pelo outro.
+    const orfao = 'avaliacao/v34/orfao-da-listagem.md';
+    await request(app).put(url(orfao)).set(authHeader(admin)).send({ content: 'sobrou de alguma coisa', criar: true });
+    const lista2 = await request(app).get('/api/admin/prompts').set(authHeader(admin));
+    expect(lista2.body.files.find((f) => f.path === orfao).emUso).toBe(false);
+    await request(app).delete(url(orfao)).set(authHeader(admin));
+  });
+
+  it('exclui órfão (com backup), e RECUSA o que está em uso', async () => {
+    const admin = await loginAs('admin');
+    const orfao = 'avaliacao/v34/orfao-da-exclusao.md';
+    await request(app).put(url(orfao)).set(authHeader(admin)).send({ content: 'conteúdo que vai sumir', criar: true });
+    expect(fs.existsSync(absOf(orfao))).toBe(true);
+
+    const del = await request(app).delete(url(orfao)).set(authHeader(admin));
+    expect(del.status).toBe(200);
+    expect(fs.existsSync(absOf(orfao))).toBe(false);
+    // Saiu do volume, mas o conteúdo continua recuperável pelo histórico — é o
+    // que torna a exclusão reversível sem o git.
+    const versoes = await request(app).get('/api/admin/prompt-versions?path=' + encodeURIComponent(orfao)).set(authHeader(admin));
+    expect(versoes.body.versoes.length).toBeGreaterThan(0);
+    const conteudo = promptFiles.readBackup(orfao, versoes.body.versoes[0].id);
+    expect(conteudo).toBe('conteúdo que vai sumir');
+
+    // O que a produção lê não sai — nem o prompt do nó, nem os critérios, nem o
+    // sintetizador, nem o de Neuro, nem o do entrevistador.
+    for (const vivo of promptFiles.promptsEmUso()) {
+      const r = await request(app).delete(url(vivo)).set(authHeader(admin));
+      expect(r.status, `${vivo} não podia ser excluído`).toBe(409);
+      expect(r.body.error).toMatch(/EM USO/i);
+      expect(fs.existsSync(absOf(vivo)), `${vivo} continua no volume`).toBe(true);
+    }
+  });
+
+  it('excluir é admin-only, e arquivo inexistente dá 400', async () => {
+    const admin = await loginAs('admin');
+    const orfao = 'avaliacao/v34/orfao-do-acesso.md';
+    await request(app).put(url(orfao)).set(authHeader(admin)).send({ content: 'x', criar: true });
+
+    for (const quem of ['prof', 'aluno']) {
+      const t = await loginAs(quem);
+      const r = await request(app).delete(url(orfao)).set(authHeader(t));
+      expect(r.status).toBe(403);
+    }
+    expect(fs.existsSync(absOf(orfao))).toBe(true);
+
+    expect((await request(app).delete(url('avaliacao/v34/nao-existe.md')).set(authHeader(admin))).status).toBe(400);
+    // Traversal continua barrado aqui como no resto das rotas de prompt.
+    const fora = await request(app).delete('/api/admin/prompts/' + encodeURIComponent('../fora.md')).set(authHeader(admin));
+    expect(fora.status).toBe(400);
+  });
+
+  // A lista de "em uso" é DERIVADA do código (PIPELINE_VERSIONS + Neuro +
+  // entrevistador), e o que a torna confiável é ela apontar para arquivos que
+  // existem: um caminho errado ali não daria erro nenhum — só deixaria o .md
+  // de verdade excluível e protegeria um fantasma.
+  it('todo prompt marcado como EM USO existe mesmo no volume', () => {
+    const emUso = promptFiles.promptsEmUso();
+    expect(emUso.length).toBeGreaterThanOrEqual(10);
+    for (const rel of emUso) {
+      expect(fs.existsSync(absOf(rel)), `${rel} está na lista de em-uso mas não existe`).toBe(true);
+    }
+    // E os três intocáveis por pedido do dono continuam protegidos.
+    expect(promptFiles.isPromptEmUso('entrevistador/promptentrevistador.md')).toBe(true);
+    expect(promptFiles.isPromptEmUso('avaliacao/avaliador 18/avaliador-v18-25-neuro.md')).toBe(true);
   });
 
   it('validador: arquivo sem contrato passa; conteúdo vazio nunca', () => {

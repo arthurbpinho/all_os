@@ -175,6 +175,73 @@ function hasValidator(relPath) {
   return Object.prototype.hasOwnProperty.call(VALIDATORS, String(relPath || '').replace(/\\/g, '/'));
 }
 
+// --- Prompts EM USO (não podem ser excluídos) ------------------------------
+//
+// O painel ganhou exclusão para o admin limpar o que ficou preso no volume:
+// prompts de réguas e modos que saíram do app, que ninguém lê e que só poluem a
+// listagem. O risco óbvio disso é apagar por engano um .md que a produção lê —
+// aí a avaliação quebra para todo mundo, e o arquivo não vem no git para
+// repor.
+//
+// Por isso a exclusão tem uma allowlist invertida: tudo pode sair, MENOS o que
+// o código aponta. A lista é DERIVADA, não escrita à mão — sai de
+// PIPELINE_VERSIONS (as três entradas do avaliador oficial) mais os dois
+// avaliadores que vivem fora do pipeline. Uma versão nova entra aqui sozinha,
+// pelo mesmo caminho dos validadores; um modo que sair do app some daqui e os
+// .md dele passam a ser excluíveis, que é exatamente o que se quer.
+//
+// (O `criteriosDe` é o motivo de `criterios` entrar pela pasta DONA do arquivo:
+// progressão e duelo leem o do v34, e o caminho que existe no volume é um só.)
+const EM_USO = new Set();
+for (const cfg of Object.values(PIPELINE_VERSIONS)) {
+  const base = `avaliacao/${cfg.dir}/`;
+  EM_USO.add(base + cfg.montado);
+  EM_USO.add(base + cfg.sintetizador);
+  if (cfg.missao) EM_USO.add(base + cfg.missao);
+  if (!cfg.criteriosDe) EM_USO.add(base + cfg.criterios);
+}
+// Fora do pipeline, e é por isso que estão escritos aqui: o avaliador de Neuro
+// (grade própria de 4 critérios) e o do entrevistador. Os dois são lidos por
+// caminho fixo no index.js — se um deles for renomeado lá, tem de mudar aqui
+// junto, e o teste que confere "todo .md em uso existe no volume" acusa.
+EM_USO.add('avaliacao/avaliador 18/avaliador-v18-25-neuro.md');
+EM_USO.add('entrevistador/promptentrevistador.md');
+
+// O caminho é lido por algum código vivo? A UI usa isto para não oferecer o
+// botão, e a rota para recusar — as duas pontas, porque a primeira é
+// conveniência e a segunda é a trava.
+function isPromptEmUso(relPath) {
+  return EM_USO.has(String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, ''));
+}
+
+// Os caminhos em uso, para o teste conferir que todos existem de fato.
+function promptsEmUso() {
+  return [...EM_USO];
+}
+
+// Apaga um .md do volume, guardando a versão atual no histórico antes — excluir
+// por engano tem volta pelo mesmo lugar que uma gravação ruim tem (o conteúdo
+// continua em prompt-backups/, fora do PROMPTS_DIR).
+//
+// Devolve { ok } ou { ok:false, error } — nunca lança, porque a rota traduz isto
+// direto para o admin.
+function deletePrompt(relPath) {
+  const rel = String(relPath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  const abs = resolvePromptPath(rel);
+  if (!abs) return { ok: false, error: 'Caminho inválido.' };
+  if (!fs.existsSync(abs)) return { ok: false, error: 'Arquivo não encontrado no volume.' };
+  if (isPromptEmUso(rel)) {
+    return { ok: false, error: 'Este prompt está EM USO pelo app — apagá-lo quebraria a avaliação, e ele não vem no git para repor. Para trocar o conteúdo, edite o arquivo.' };
+  }
+  const versaoAnterior = backupPrompt(rel);
+  fs.unlinkSync(abs);
+  // Pasta que ficou vazia sai junto: uma versão inteira removida não deve
+  // deixar um diretório fantasma na listagem. `rmdir` só remove se vazia, então
+  // uma pasta com outros .md dentro fica onde está.
+  try { fs.rmdirSync(path.dirname(abs)); } catch {}
+  return { ok: true, versaoAnterior };
+}
+
 // --- Backups ---------------------------------------------------------------
 
 // Uma pasta por arquivo, nomeada com o caminho relativo encodado — vira um
@@ -231,6 +298,9 @@ function readBackup(relPath, id) {
 
 module.exports = {
   BACKUPS_DIR,
+  isPromptEmUso,
+  promptsEmUso,
+  deletePrompt,
   MAX_BACKUPS,
   PROMPT_ROOTS,
   resolvePromptPath,

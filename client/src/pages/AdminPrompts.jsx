@@ -15,6 +15,13 @@ import Typewriter from '../components/Typewriter';
 //     VERSÃO nova de avaliador, cujos arquivos o deploy não leva);
 //   · "Carregar .md" lê um arquivo do computador e joga no editor — vale tanto
 //     no arquivo novo quanto na edição de um que já está no ar.
+//
+// E uma de tirar: EXCLUIR. O volume é persistente e o deploy não leva prompts,
+// então quando um modo ou uma régua sai do app os .md dele ficam presos lá,
+// aparecendo na listagem como arquivos que ninguém lê. O selo "órfão" marca
+// esses; "em uso" marca os que o código aponta, e neles o botão nem aparece
+// (a rota recusa de qualquer jeito). Excluir guarda o conteúdo no histórico
+// antes, então tem volta pelo mesmo lugar que uma gravação ruim tem.
 // Em ambos o conteúdo passa pelo editor antes de gravar: o admin vê o que vai
 // subir, e a gravação continua sendo a mesma (validação + backup).
 //
@@ -99,6 +106,32 @@ export default function AdminPrompts() {
     } catch (e) {
       // Erro de validação vem com a mensagem do parser (ex.: qual marcador sumiu).
       setErro(e.message || 'Erro ao salvar.');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  // Exclui o arquivo aberto. Só aparece para prompt que NENHUM código lê (o
+  // servidor marca `emUso` na listagem e recusa a rota de qualquer jeito), e
+  // pede confirmação escrita porque o .md não vem no git — o que repõe é o
+  // histórico, e isso é bom saber ANTES de clicar, não depois.
+  async function excluir() {
+    if (!sel || salvando) return;
+    const f = files.find((x) => x.path === sel);
+    if (f && f.emUso) return;
+    if (!window.confirm(
+      `Excluir ${sel} do volume?\n\n`
+      + 'O conteúdo vai para o histórico de versões antes de sair, então dá para recuperar. '
+      + 'Mas o arquivo NÃO vem no git: se ele ainda fizer falta, é do histórico que ele volta.',
+    )) return;
+    setSalvando(true); setErro(''); setAviso('');
+    try {
+      await api.adminDeletePrompt(sel);
+      setFiles((fs) => fs.filter((x) => x.path !== sel));
+      setSel(''); setMeta(null); setOriginal(''); setDraft(''); setVendoVersao(null);
+      setAviso(`${sel} foi excluído. O conteúdo ficou no histórico, caso precise voltar.`);
+    } catch (e) {
+      setErro(e.message || 'Erro ao excluir.');
     } finally {
       setSalvando(false);
     }
@@ -269,6 +302,9 @@ export default function AdminPrompts() {
                   <span className="prompts-file-meta">
                     {fmtSize(f.size)} · {fmtDate(f.updatedAt)}
                     {f.validado && <span className="prompts-badge" title="O servidor confere este arquivo no parser da produção antes de gravar">verificado</span>}
+                    {f.emUso
+                      ? <span className="prompts-badge em-uso" title="Algum código vivo lê este arquivo — ele pode ser editado, mas não excluído">em uso</span>
+                      : <span className="prompts-badge orfao" title="Nenhum código do app lê este arquivo. Sobrou de um modo ou de uma régua que saiu — dá para excluir.">órfão</span>}
                   </span>
                 </button>
               );
@@ -338,10 +374,19 @@ export default function AdminPrompts() {
                   <div className="prompts-editor-head">
                     <div style={{ display: 'flex', gap: 10, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
                       <code style={{ fontSize: 12.5 }}>{sel}</code>
-                      <label className="btn btn-ghost btn-sm" style={{ margin: 0, cursor: 'pointer' }} title="Substitui o texto do editor pelo conteúdo de um .md do computador (não grava — você ainda revisa e salva)">
-                        Carregar .md do computador
-                        <input type="file" accept=".md,text/markdown,text/plain" onChange={carregarDoDisco} style={{ display: 'none' }} />
-                      </label>
+                      <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <label className="btn btn-ghost btn-sm" style={{ margin: 0, cursor: 'pointer' }} title="Substitui o texto do editor pelo conteúdo de um .md do computador (não grava — você ainda revisa e salva)">
+                          Carregar .md do computador
+                          <input type="file" accept=".md,text/markdown,text/plain" onChange={carregarDoDisco} style={{ display: 'none' }} />
+                        </label>
+                        {/* Só em arquivo órfão. Prompt que a produção lê não tem
+                            botão — e a rota recusa mesmo que alguém a chame. */}
+                        {!(files.find((x) => x.path === sel) || {}).emUso && (
+                          <button className="btn btn-ghost btn-sm prompts-excluir" onClick={excluir} disabled={salvando} title="Remove o .md do volume. O conteúdo fica no histórico.">
+                            Excluir
+                          </button>
+                        )}
+                      </span>
                     </div>
                     <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>
                       {meta && meta.validado

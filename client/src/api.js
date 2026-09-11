@@ -566,6 +566,10 @@ export const api = {
   // se o caminho já existir); sem a flag é edição do que já está lá.
   adminSavePrompt: (p, content, { criar = false } = {}) =>
     request('/admin/prompts/' + encodePromptPath(p), { method: 'PUT', body: criar ? { content, criar: true } : { content } }),
+  // Exclui um .md do volume. O servidor recusa (409) quando o prompt está EM
+  // USO por algum código vivo; o conteúdo vai para o histórico antes de sair,
+  // então isto tem volta.
+  adminDeletePrompt: (p) => request('/admin/prompts/' + encodePromptPath(p), { method: 'DELETE' }),
   adminGetPromptVersion: (p, id) => request(`/admin/prompt-versions/${encodeURIComponent(id)}?path=${encodeURIComponent(p)}`),
   adminRestorePromptVersion: (p, id) =>
     request(`/admin/prompt-versions/${encodeURIComponent(id)}/restaurar`, { method: 'POST', body: { path: p } }),

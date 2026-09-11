@@ -281,6 +281,13 @@ seedPromptsDir();
 //   · a seguir — v29, v29-progressao, v43 e o comparativo v18.25 do Duelo,
 //     quando o v34 fechou como a régua LTS de todos os modos.
 //
+// Esta lista cobre só o que ESTE código deixou para trás, e é por isso que ela
+// não cresce sozinha: prompt de modo que saiu antes (o Modo Desafio, removido em
+// 2026-08-17, é o caso conhecido) continua no volume até alguém apagar. Para
+// esses existe o botão Excluir em Administração → Prompts, que mostra a lista
+// REAL do volume e marca o que ninguém lê como "órfão" — melhor do que uma
+// migração adivinhando nome de arquivo que talvez nem exista.
+//
 // Cada arquivo é COPIADO para o histórico de versões (prompt-backups/) antes de
 // sair, então nada se perde de verdade — o conteúdo continua recuperável no
 // volume, fora do caminho. Marker em migrations.json: roda uma vez.
@@ -2824,7 +2831,14 @@ app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, re
 // mesmo parser que a produção usa) e BACKUP (a versão anterior é copiada, e dá
 // pra restaurar). Caminho validado contra traversal e restrito a .md.
 app.get('/api/admin/prompts', requireAuth, requireRole('admin'), (req, res) => {
-  const files = promptFiles.listPromptFiles().map((f) => ({ ...f, validado: promptFiles.hasValidator(f.path) }));
+  // `emUso` = algum código vivo lê este .md. A tela usa para não oferecer o
+  // botão de excluir nele (a rota recusa de qualquer jeito — isto é a
+  // conveniência, não a trava).
+  const files = promptFiles.listPromptFiles().map((f) => ({
+    ...f,
+    validado: promptFiles.hasValidator(f.path),
+    emUso: promptFiles.isPromptEmUso(f.path),
+  }));
   res.json({
     // `files` como lista de objetos; `paths` mantém o formato antigo (só os
     // caminhos) para quem já consumia esta rota.
@@ -2885,6 +2899,28 @@ app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) =>
   clearAssetsCache(); // o pipeline memoiza os .md — sem isto o servidor serviria a versão velha
   console.log(`[prompts] ${rel} ${existe ? 'atualizado' : 'CRIADO'} por ${req.user.username} (backup: ${versaoAnterior || 'nenhum'})`);
   res.json({ ok: true, criado: !existe, validado: !!v.validado, versaoAnterior, versoes: promptFiles.listBackups(rel) });
+});
+
+// Exclui um .md do volume. Existe porque o volume é PERSISTENTE e o deploy não
+// leva prompts: quando um modo ou uma régua sai do app, os .md dele ficam lá
+// para sempre, aparecendo na listagem como arquivos editáveis que nenhum código
+// lê. Antes disso só uma migração one-shot os alcançava — e uma migração é
+// escrita por quem está mexendo no código, não por quem está olhando a tela.
+//
+// Duas travas, e a segunda é a que importa:
+//   · BACKUP antes de apagar, no mesmo prompt-backups/ das gravações, então
+//     excluir por engano tem volta;
+//   · prompt EM USO não sai. A lista é derivada do código (PIPELINE_VERSIONS +
+//     Neuro + entrevistador), não escrita à mão — ver isPromptEmUso. Apagar um
+//     .md que a produção lê quebraria a avaliação para todo mundo, e ele não vem
+//     no git para repor.
+app.delete('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+  const rel = req.params[0];
+  const r = promptFiles.deletePrompt(rel);
+  if (!r.ok) return res.status(promptFiles.isPromptEmUso(rel) ? 409 : 400).json({ error: r.error });
+  clearAssetsCache();
+  console.log(`[prompts] ${rel} EXCLUÍDO por ${req.user.username} (backup: ${r.versaoAnterior || 'nenhum'})`);
+  res.json({ ok: true, versaoAnterior: r.versaoAnterior });
 });
 
 // Histórico de versões de um arquivo (as MAX_BACKUPS últimas gravações).
