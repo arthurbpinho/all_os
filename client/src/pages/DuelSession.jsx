@@ -5,6 +5,7 @@ import ScoreBadge from '../components/ScoreBadge';
 import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from '../sessionLimit';
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
+import CriteriaAnalyses from '../components/CriteriaAnalyses';
 import SessionQuotaModal from '../components/SessionQuotaModal';
 import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 
@@ -391,6 +392,10 @@ export default function DuelSession({ user }) {
           <div className="card">
             <div className="post-evaluation">
               <h4>Análise comparativa da IA</h4>
+              {/* Só supervisor/admin recebem `evalPartsId` do servidor, então o
+                  botão nem aparece para quem duelou: as análises por critério
+                  foram escritas com o Bloco 1 à vista. */}
+              <CriteriaAnalyses log={r} duelId={duel.id} />
               <div className="post-evaluation-body"><RichText text={r.evaluation} /></div>
             </div>
           </div>

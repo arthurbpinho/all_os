@@ -20,7 +20,7 @@ describe('Configurações — avaliação para visitantes (/api/settings, /api/a
     const res = await request(app).get('/api/settings').set(authHeader(token));
     expect(res.status).toBe(200);
     expect(res.body.visitorEvaluationEnabled).toBe(false);
-    // Visitante também é avaliado pelo oficial (v29 em Luna high) quando o
+    // Visitante também é avaliado pelo oficial (v34 em Luna high) quando o
     // interruptor está ligado.
     expect(res.body.avaliadorModelo).toBe('gpt-5.6-luna');
   });

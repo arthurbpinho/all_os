@@ -13,9 +13,9 @@ const { PROMPTS_DIR } = require('../server/paths');
 const promptFiles = require('../server/prompt-files');
 const pipeline = require('../server/avaliador-pipeline');
 
-const MONTADO = 'avaliacao/v29/prompt-no-v29-montado.md';
-const CRITERIOS = 'avaliacao/v29/criterios-no-v29.md';
-const MISSAO = 'avaliacao/v29-progressao/missao-v29-progressao.md';
+const MONTADO = 'avaliacao/v34/prompt-no-v34-montado.md';
+const CRITERIOS = 'avaliacao/v34/criterios-no-v34.md';
+const MISSAO = 'avaliacao/v34-progressao/missao-v34-progressao.md';
 const url = (p) => '/api/admin/prompts/' + p.split('/').map(encodeURIComponent).join('/');
 const absOf = (p) => path.join(PROMPTS_DIR, p);
 
@@ -87,13 +87,13 @@ describe('Administração — editor de prompts', () => {
   it('salvar invalida o cache de prompts do pipeline (sem restart)', async () => {
     const admin = await loginAs('admin');
     const original = fs.readFileSync(absOf(MONTADO), 'utf8');
-    pipeline.loadAssets('v29'); // memoiza
+    pipeline.loadAssets('v34'); // memoiza
 
     const marca = 'MARCA-DE-CACHE-XYZ';
     const editado = original.replace('## [METACOMANDO]', '## [METACOMANDO]\n\n' + marca);
     await request(app).put(url(MONTADO)).set(authHeader(admin)).send({ content: editado });
 
-    expect(pipeline.loadAssets('v29').blockA).toContain(marca);
+    expect(pipeline.loadAssets('v34').blockA).toContain(marca);
     fs.writeFileSync(absOf(MONTADO), original, 'utf8');
     pipeline.clearAssetsCache();
   });
@@ -111,7 +111,7 @@ describe('Administração — editor de prompts', () => {
     // os slots dos materiais que só existem lá.
     const montadoPadrao = fs.readFileSync(absOf(MONTADO), 'utf8');
     const trocado = promptFiles.validatePromptContent(
-      'avaliacao/v29-progressao/prompt-no-v29-progressao-montado.md', montadoPadrao,
+      'avaliacao/v34-progressao/prompt-no-v34-progressao-montado.md', montadoPadrao,
     );
     expect(trocado.ok).toBe(false);
     expect(trocado.error).toMatch(/\{\{ATENDIMENTO_1\}\}/);
@@ -131,7 +131,7 @@ describe('Administração — editor de prompts', () => {
   // para um caminho novo não apagar um prompt que está no ar).
   it('cria arquivo novo só com criar:true; edição e criação não se confundem', async () => {
     const admin = await loginAs('admin');
-    const novo = 'avaliacao/v29/rascunho-de-teste.md';
+    const novo = 'avaliacao/v34/rascunho-de-teste.md';
     expect(fs.existsSync(absOf(novo))).toBe(false);
 
     const semFlag = await request(app).put(url(novo)).set(authHeader(admin)).send({ content: 'texto' });
@@ -180,14 +180,14 @@ describe('Administração — editor de prompts', () => {
     }
     // Traversal continua barrado antes de tudo (resolvePromptPath).
     expect(promptFiles.validateNewPromptPath('avaliacao/../../fora.md').ok).toBe(false);
-    expect(promptFiles.validateNewPromptPath('avaliacao/v29/criterios-no-v29.md').ok).toBe(true);
+    expect(promptFiles.validateNewPromptPath('avaliacao/v34/criterios-no-v34.md').ok).toBe(true);
   });
 
   // Criar não é um atalho para gravar qualquer coisa: se o caminho tem contrato
   // conhecido, o conteúdo passa pelo mesmo parser da produção.
   it('criação valida o conteúdo quando o caminho tem contrato', async () => {
     const admin = await loginAs('admin');
-    const caminho = 'avaliacao/v290/criterios-no-v290.md'; // sem validador (número alto de propósito: nenhuma versão real vai ocupá-lo)
+    const caminho = 'avaliacao/v340/criterios-no-v340.md'; // sem validador (número alto de propósito: nenhuma versão real vai ocupá-lo)
     const semContrato = await request(app).put(url(caminho)).set(authHeader(admin)).send({ content: 'texto livre', criar: true });
     expect(semContrato.status).toBe(200);
     expect(semContrato.body.validado).toBe(false);
@@ -221,11 +221,54 @@ describe('Administração — editor de prompts', () => {
     expect(fora.status).toBe(400);
   });
 
+  // Os validadores saem de PIPELINE_VERSIONS: uma versão nova do pipeline entra
+  // na tabela sozinha, sem ninguém editar o prompt-files.js. O que este teste
+  // protege é justamente isso — se a derivação quebrar, os .md da versão nova
+  // passariam a ser gravados sem conferência nenhuma pelo painel.
+  it('os .md de toda ENTRADA do pipeline nascem com contrato', () => {
+    const daVersao = [
+      ...['prompt-no-v34-montado.md', 'criterios-no-v34.md', 'sintetizador-v34.md'].map((f) => `avaliacao/v34/${f}`),
+      // A progressão tem um quarto: o nó da missão, que é uma chamada à parte.
+      ...['prompt-no-v34-progressao-montado.md', 'sintetizador-v34-progressao.md', 'missao-v34-progressao.md']
+        .map((f) => `avaliacao/v34-progressao/${f}`),
+      ...['prompt-no-v34-duelo-montado.md', 'sintetizador-v34-duelo.md'].map((f) => `avaliacao/v34-duelo/${f}`),
+    ];
+    for (const caminho of daVersao) {
+      expect(promptFiles.hasValidator(caminho)).toBe(true);
+      const atual = fs.readFileSync(absOf(caminho), 'utf8');
+      const ok = promptFiles.validatePromptContent(caminho, atual);
+      expect(ok.ok).toBe(true);
+      expect(ok.validado).toBe(true);
+      // E um Ctrl+V que quebre o contrato é recusado na hora, não na primeira
+      // avaliação que rodar depois.
+      expect(promptFiles.validatePromptContent(caminho, 'colei outra coisa aqui').ok).toBe(false);
+    }
+
+    // Progressão e duelo LEEM os critérios do v34 (`criteriosDe`), então não têm
+    // .md de critérios próprio — e registrar um validador para um caminho que não
+    // existe no volume seria oferecer ao admin um arquivo fantasma.
+    expect(promptFiles.hasValidator('avaliacao/v34-progressao/criterios-no-v34.md')).toBe(false);
+    expect(promptFiles.hasValidator('avaliacao/v34-duelo/criterios-no-v34.md')).toBe(false);
+
+    // E os contratos são POR ENTRADA: cada prompt do nó exige os slots do caso da
+    // versão dele, e cada sintetizador os slots de log dela. Trocar um pelo outro
+    // é recusado — o do v34 não tem {{ATENDIMENTO_1}}, e o do duelo não tem
+    // {{LOG}} sozinho.
+    const montadoV34 = fs.readFileSync(absOf('avaliacao/v34/prompt-no-v34-montado.md'), 'utf8');
+    expect(promptFiles.validatePromptContent('avaliacao/v34-progressao/prompt-no-v34-progressao-montado.md', montadoV34).error)
+      .toMatch(/\{\{ATENDIMENTO_1\}\}/);
+    expect(promptFiles.validatePromptContent('avaliacao/v34-duelo/prompt-no-v34-duelo-montado.md', montadoV34).error)
+      .toMatch(/\{\{ALUNO_A\}\}|\{\{LOG_A\}\}/);
+    const sintV34 = fs.readFileSync(absOf('avaliacao/v34/sintetizador-v34.md'), 'utf8');
+    expect(promptFiles.validatePromptContent('avaliacao/v34-duelo/sintetizador-v34-duelo.md', sintV34).error)
+      .toMatch(/\{\{ALUNO_A\}\}|\{\{LOG_A\}\}/);
+  });
+
   it('validador: arquivo sem contrato passa; conteúdo vazio nunca', () => {
     expect(promptFiles.validatePromptContent('entrevistador/qualquer.md', 'texto livre').ok).toBe(true);
     expect(promptFiles.validatePromptContent('entrevistador/qualquer.md', 'texto livre').validado).toBe(false);
     expect(promptFiles.validatePromptContent(MONTADO, '   ').ok).toBe(false);
-    // criterios-no-v29.md: o contrato é ter os 15 critérios parseáveis.
+    // criterios-no-v34.md: o contrato é ter os 8 critérios parseáveis.
     const criterios = fs.readFileSync(absOf(CRITERIOS), 'utf8');
     expect(promptFiles.validatePromptContent(CRITERIOS, criterios).ok).toBe(true);
     const truncado = criterios.slice(0, Math.floor(criterios.length / 3));

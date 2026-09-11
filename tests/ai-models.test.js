@@ -49,17 +49,19 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       expect(c.avaliador.effort).toBeTruthy();
       if (c.temPaciente) expect(c.paciente.fonte).toBe('padrao');
     }
-    // Os padrões de hoje. As cinco categorias do AVALIADOR OFICIAL (v29) rodam
-    // no mesmo modelo e no mesmo effort — é o que "uma régua só" significa aqui.
-    for (const categoria of ['treinamento', 'competitivo', 'seletivo', 'visitante', 'avaliacaoManual']) {
+    // Os padrões de hoje. As SEIS categorias do AVALIADOR OFICIAL (v34) rodam no
+    // mesmo modelo e no mesmo effort — e isso não é economia de configuração:
+    // nota de modos diferentes é comparada no ranking e no MMR, e duas réguas
+    // iguais em modelos diferentes não produzem números comparáveis. O Duelo foi
+    // o último a entrar, quando saiu do avaliador comparativo próprio (GLM).
+    for (const categoria of ['treinamento', 'competitivo', 'seletivo', 'visitante', 'avaliacaoManual', 'duelo']) {
       expect(cat(res.body, categoria).avaliador.model).toBe('gpt-5.6-luna');
       expect(cat(res.body, categoria).avaliador.effort).toBe('high');
     }
-    // Duelo (comparativo) e Neuro ficaram fora do v29 e mantêm os padrões deles.
+    // O Neuro é o único fora do pipeline, com grade própria — e o único cujo
+    // avaliador tem outro padrão.
     expect(cat(res.body, 'neuro').avaliador.model).toBe('gpt-5.4-2026-03-05');
     expect(cat(res.body, 'neuro').avaliador.effort).toBe('low');
-    expect(cat(res.body, 'duelo').avaliador.model).toBe('glm-5.2');
-    expect(cat(res.body, 'duelo').avaliador.effort).toBe('high');
     // Paciente: o mini de sempre, sem raciocínio.
     expect(cat(res.body, 'treinamento').paciente.model).toBe('gpt-5.4-mini-2026-03-17');
     expect(cat(res.body, 'treinamento').paciente.effort).toBe('none');

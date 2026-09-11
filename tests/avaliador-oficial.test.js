@@ -1,11 +1,11 @@
-// AVALIADOR OFICIAL (pipeline v29) em produção.
+// AVALIADOR OFICIAL (pipeline v34, a régua LTS) em produção.
 //
 // O que este arquivo cobre — e por que cada coisa:
 //
-//   1. Os .md das duas versões (v29 e o modo progressão) montam: os slots que o
-//      código preenche são exatamente os que o prompt usa. Um slot com nome
-//      trocado não daria erro nenhum — chegaria ao modelo como `{{ASSIM}}`, e a
-//      avaliação sairia sem o material.
+//   1. Os .md das três entradas (padrão, progressão e duelo) montam: os slots
+//      que o código preenche são exatamente os que o prompt usa. Um slot com
+//      nome trocado não daria erro nenhum — chegaria ao modelo como `{{ASSIM}}`,
+//      e a avaliação sairia sem o material.
 //   2. O SIGILO: nota e feedback por CRITÉRIO são de supervisor e admin. Aluno
 //      (interno, externo) e visitante têm nota total + feedback qualitativo. As
 //      análises são escritas com o gabarito do caso à vista, então isto é
@@ -16,8 +16,8 @@
 //   4. A MISSÃO (sidequest/desafio do dia) fechando pelo nó da missão, que é o
 //      que substituiu o bloco [sidequest-resultado] do avaliador antigo.
 //
-// A execução do pipeline em si (as 16 chamadas) não entra aqui: a suite roda com
-// as chaves de API vazias, de propósito. O que dá para testar sem rede é tudo o
+// A execução do pipeline em si (as nove chamadas) não entra aqui: a suite roda
+// com as chaves de API vazias, de propósito. O que dá para testar sem rede é tudo o
 // que decide o que o modelo recebe e quem vê o que volta.
 
 const fs = require('fs');
@@ -28,7 +28,7 @@ const oficial = require('../server/avaliacao-oficial');
 
 // Resultado de pipeline no formato que o finishPipeline devolve — o suficiente
 // para os pedaços que este arquivo testa (nota, partes, corpo, missão).
-function resultadoFake({ notaFinal = 72, comAnalise = true, missao = null, nCriterios = 15 } = {}) {
+function resultadoFake({ notaFinal = 72, comAnalise = true, missao = null, nCriterios = 8 } = {}) {
   const partes = [];
   for (let i = 1; i <= nCriterios; i++) {
     partes.push({
@@ -37,33 +37,33 @@ function resultadoFake({ notaFinal = 72, comAnalise = true, missao = null, nCrit
       linhaCurta: `o que o critério ${i} mede`,
       analise: comAnalise ? `Análise do critério ${i}, que cita o gabarito: GABARITO_SECRETO_${i}.` : '',
       nota: 7,
-      confianca: null,
-      travas: { 2: true, 3: true, 4: false, 5: false },
-      faixa: 3,
-      realizacao: 'completa',
-      etiqueta: 'potente',
+      notas: null,
+      qualidades: {
+        integridade: 'plena', autoria: 'parcial', potencia: 'parcial',
+        calibracao: 'plena', excepcionalidade: 'ausente',
+      },
+      qualidadesFaltantes: null,
       analiseForaDeOrdem: false,
-      travasInconsistentes: false,
       incluido: true,
     });
   }
   return {
-    evaluator: 'v29', version: 'v29', variant: null,
-    notaFinal, considerados: nCriterios, partes,
+    evaluator: 'v34', version: 'v34',
+    notaFinal, considerados: nCriterios, partes, comparativo: null,
     corpoSintetizador: 'Você abriu bem e sustentou o silêncio quando importava.',
     feedbackAluno: `Nota: ${notaFinal}/100\n\nsaudação\n\ncorpo`,
-    instrumentacao: { model: 'gpt-5.6-luna', effort: 'high', totais: {}, custo: null, chamadas: 16 },
+    instrumentacao: { model: 'gpt-5.6-luna', effort: 'high', totais: {}, custo: null, chamadas: 9 },
     missao,
   };
 }
 
-describe('avaliador oficial v29 — prompts e slots', () => {
+describe('avaliador oficial v34 — prompts e slots', () => {
   it('o modo padrão preenche os dois slots do caso, sem deixar slot cru', () => {
     const reqs = aval.buildPipelineNodeRequests({
       materiais: oficial.materiaisPadrao({ bloco1: 'BLOCO1_AQUI', log: 'LOG_AQUI' }),
-      model: 'gpt-5.6-luna', effort: 'high', provider: 'openai', version: 'v29', variant: null,
+      model: 'gpt-5.6-luna', effort: 'high', provider: 'openai', version: 'v34',
     });
-    expect(reqs.length).toBe(15);
+    expect(reqs.length).toBe(8);
     const developer = reqs[0].body.messages[0].content;
     expect(developer).toContain('BLOCO1_AQUI');
     expect(developer).toContain('LOG_AQUI');
@@ -71,11 +71,11 @@ describe('avaliador oficial v29 — prompts e slots', () => {
     expect(developer).not.toMatch(/\{\{[A-Z_0-9ÇÃÉÍÓÚ]+\}\}/);
     // O critério é o que varia por nó, e é a mensagem `user`.
     const users = reqs.map((r) => r.body.messages[1].content);
-    expect(new Set(users).size).toBe(15);
+    expect(new Set(users).size).toBe(8);
     for (const u of users) expect(u).not.toMatch(/\{\{[A-Z_0-9ÇÃÉÍÓÚ]+\}\}/);
   });
 
-  it('o modo progressão preenche os cinco slots e compartilha os critérios do v29', () => {
+  it('o modo progressão preenche os cinco slots e compartilha os critérios do v34', () => {
     const materiais = oficial.materiaisProgressao({
       bloco1: 'BLOCO1_AQUI',
       log: 'ATENDIMENTO_2_AQUI',
@@ -85,25 +85,25 @@ describe('avaliador oficial v29 — prompts e slots', () => {
     });
     const reqs = aval.buildPipelineNodeRequests({
       materiais, model: 'gpt-5.6-luna', effort: 'high', provider: 'openai',
-      version: 'v29-progressao', variant: null,
+      version: 'v34-progressao', variant: null,
     });
-    expect(reqs.length).toBe(15);
+    expect(reqs.length).toBe(8);
     const developer = reqs[0].body.messages[0].content;
     for (const t of ['BLOCO1_AQUI', 'ATENDIMENTO_1_AQUI', 'AVALIACAO_1_AQUI', 'MISSAO_AQUI', 'ATENDIMENTO_2_AQUI']) {
       expect(developer).toContain(t);
     }
     expect(developer).not.toMatch(/\{\{[A-Z_0-9ÇÃÉÍÓÚ]+\}\}/);
 
-    // Mesma grade do v29 (o .md dos critérios é o mesmo arquivo, lido da pasta
-    // do v29 — se alguém duplicar o arquivo, este teste continua passando, mas
+    // Mesma grade do v34 (o .md dos critérios é o mesmo arquivo, lido da pasta
+    // do v34 — se alguém duplicar o arquivo, este teste continua passando, mas
     // a contagem e os nomes precisam bater).
-    const padrao = aval.loadAssets('v29');
-    const prog = aval.loadAssets('v29-progressao');
+    const padrao = aval.loadAssets('v34');
+    const prog = aval.loadAssets('v34-progressao');
     expect(prog.criteria.map((c) => c.nome)).toEqual(padrao.criteria.map((c) => c.nome));
   });
 
   it('material ausente entra com a frase de ausência, nunca com o slot cru', () => {
-    const assets = aval.loadAssets('v29-progressao');
+    const assets = aval.loadAssets('v34-progressao');
     const m = aval.normalizeMateriais(assets, {
       materiais: oficial.materiaisProgressao({ bloco1: 'B', log: 'L' }),
     });
@@ -113,12 +113,46 @@ describe('avaliador oficial v29 — prompts e slots', () => {
   });
 
   it('a régua e o formato de saída do modo progressão são os do prompt-raiz', () => {
-    const raiz = aval.loadAssets('v29');
-    const prog = aval.loadAssets('v29-progressao');
+    const raiz = aval.loadAssets('v34');
+    const prog = aval.loadAssets('v34-progressao');
     // O bloco estático carrega régua + saída. As duas versões divergem só na
     // entrada e no sétimo princípio: as travas e as faixas têm de ser iguais.
+    // O bloco estático carrega régua + saída. As duas entradas divergem só na
+    // entrada e no sétimo princípio: o sistema de pontuação e o formato de saída
+    // têm de ser iguais palavra por palavra.
     const soRegua = (t) => t.slice(t.indexOf('## [SISTEMA DE PONTUAÇÃO]'));
     expect(soRegua(prog.blockA)).toBe(soRegua(raiz.blockA));
+  });
+
+  // DUELO: os cinco slots do caso são os dois logs (mais os dois nomes), e o
+  // sintetizador comparativo recebe os dois no lugar do {{LOG}} único.
+  it('o modo duelo preenche os dois logs e compartilha os critérios do v34', () => {
+    const reqs = oficial.requisicoesDosNos({
+      materiais: oficial.materiaisDuelo({
+        bloco1: 'BLOCO1', alunoA: 'Ana', logA: 'LOG-DA-ANA', alunoB: 'Bruno', logB: 'LOG-DO-BRUNO',
+      }),
+      model: 'gpt-5.6-luna', effort: 'high', provider: 'openai', version: oficial.VERSAO_DUELO,
+    });
+    expect(reqs.length).toBe(8);
+    const dev = reqs[0].body.messages[0].content;
+    for (const material of ['BLOCO1', 'Ana', 'LOG-DA-ANA', 'Bruno', 'LOG-DO-BRUNO']) {
+      expect(dev).toContain(material);
+    }
+    // Nenhum slot chega cru ao modelo.
+    for (const r of reqs) {
+      expect(`${r.body.messages[0].content}${r.body.messages[1].content}`).not.toMatch(/\{\{[A-Z]/);
+    }
+    // Mesma grade do v34: o .md dos critérios é o mesmo arquivo.
+    expect(aval.loadAssets(oficial.VERSAO_DUELO).criteria).toEqual(aval.loadAssets('v34').criteria);
+  });
+
+  // O nome de cada aluno é opcional; sem ele o rótulo neutro entra no lugar,
+  // porque o prompt fala de "Aluno A" e "Aluno B" de qualquer jeito.
+  it('duelo sem nome de aluno cai no rótulo neutro, nunca no slot cru', () => {
+    const assets = aval.loadAssets(oficial.VERSAO_DUELO);
+    const m = aval.normalizeMateriais(assets, { materiais: oficial.materiaisDuelo({ bloco1: 'B', logA: 'a', logB: 'b' }) });
+    expect(m['{{ALUNO_A}}']).toBe('Aluno A');
+    expect(m['{{ALUNO_B}}']).toBe('Aluno B');
   });
 
   it('nó da missão: sem resposta legível a missão NÃO é dada por cumprida', () => {
@@ -164,23 +198,35 @@ describe('avaliador oficial v29 — prompts e slots', () => {
   it('versaoDisponivel diz se os .md da versão estão no volume', () => {
     expect(oficial.versaoDisponivel(oficial.VERSAO)).toBe(true);
     expect(oficial.versaoDisponivel(oficial.VERSAO_PROGRESSAO)).toBe(true);
+    expect(oficial.versaoDisponivel(oficial.VERSAO_DUELO)).toBe(true);
     expect(oficial.versaoDisponivel('v99-que-nao-existe')).toBe(false);
   });
 
+  // O Duelo é COMPARATIVO e o texto vai para os dois alunos, na terceira pessoa:
+  // a saudação em segunda pessoa do singular não cabe, e a versão declara isso
+  // como '' — que é uma escolha, não um campo faltando.
+  it('o texto do duelo não leva saudação; o dos modos individuais leva', () => {
+    const r = resultadoFake();
+    expect(oficial.textoDoAluno(r, oficial.VERSAO)).toContain(aval.SAUDACAO);
+    const duelo = oficial.textoDoAluno(r, oficial.VERSAO_DUELO);
+    expect(duelo).not.toContain(aval.SAUDACAO);
+    expect(duelo).toBe(r.corpoSintetizador);
+  });
+
   it('o prompt da missão recebe missão e log, e é validado pelo painel de prompts', () => {
-    const assets = aval.loadAssets('v29-progressao');
+    const assets = aval.loadAssets('v34-progressao');
     expect(assets.missao.missaoVariable).toContain('{{MISSAO}}');
     expect(assets.missao.missaoVariable).toContain('{{LOG}}');
     // Contrato conhecido = gravação pelo painel passa pelo parser da produção.
     const promptFiles = require('../server/prompt-files');
-    expect(promptFiles.hasValidator('avaliacao/v29-progressao/missao-v29-progressao.md')).toBe(true);
-    expect(promptFiles.hasValidator('avaliacao/v29-progressao/prompt-no-v29-progressao-montado.md')).toBe(true);
+    expect(promptFiles.hasValidator('avaliacao/v34-progressao/missao-v34-progressao.md')).toBe(true);
+    expect(promptFiles.hasValidator('avaliacao/v34-progressao/prompt-no-v34-progressao-montado.md')).toBe(true);
   });
 });
 
-describe('avaliador oficial v29 — o que o aluno recebe', () => {
+describe('avaliador oficial v34 — o que o aluno recebe', () => {
   it('texto do aluno = saudação + corpo, sem a linha de nota (a nota é selo na tela)', () => {
-    const texto = oficial.textoDoAluno(resultadoFake(), 'v29');
+    const texto = oficial.textoDoAluno(resultadoFake(), 'v34');
     expect(texto).toContain('pré-correção');
     expect(texto).toContain('Você abriu bem');
     expect(texto).not.toMatch(/Nota:\s*\d+\/100/);
@@ -190,19 +236,19 @@ describe('avaliador oficial v29 — o que o aluno recebe', () => {
     const r = resultadoFake();
     r.partes[3].nota = null;
     const notas = oficial.notasPorCriterio(r);
-    expect(Object.keys(notas).length).toBe(14);
+    expect(Object.keys(notas).length).toBe(7);
     expect(notas['4']).toBeUndefined();
     expect(notas['5']).toBe(7);
   });
 });
 
-describe('avaliador oficial v29 — detalhe por critério (arquivo no volume)', () => {
+describe('avaliador oficial v34 — detalhe por critério (arquivo no volume)', () => {
   beforeEach(() => resetData());
 
   it('grava, lê e vincula ao log; recusa dono errado e reuso', () => {
-    const id = oficial.salvarDetalhe({ dono: '3', version: 'v29', result: resultadoFake(), model: 'gpt-5.6-luna', effort: 'high' });
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake(), model: 'gpt-5.6-luna', effort: 'high' });
     expect(id).toMatch(/^av-\d+-[0-9a-f]{8}$/);
-    expect(oficial.lerDetalhe(id).partes.length).toBe(15);
+    expect(oficial.lerDetalhe(id).partes.length).toBe(8);
 
     // Chave de outro aluno não vale — seria herdar a nota de alguém.
     expect(oficial.anexar(id, { logId: 'log-x', dono: '5' })).toBeNull();
@@ -234,7 +280,7 @@ describe('avaliador oficial v29 — detalhe por critério (arquivo no volume)', 
   });
 });
 
-describe('avaliador oficial v29 — POST /api/logs com evalId', () => {
+describe('avaliador oficial v34 — POST /api/logs com evalId', () => {
   beforeEach(() => resetData());
 
   async function salvarComEvalId({ token, evalId, over = {} }) {
@@ -249,20 +295,20 @@ describe('avaliador oficial v29 — POST /api/logs com evalId', () => {
 
   it('nota, notas por critério e texto vêm do SERVIDOR, não do body', async () => {
     const aluno = await loginAs('aluno');
-    const id = oficial.salvarDetalhe({ dono: '3', version: 'v29', result: resultadoFake({ notaFinal: 72 }), model: 'gpt-5.6-luna', effort: 'high' });
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake({ notaFinal: 72 }), model: 'gpt-5.6-luna', effort: 'high' });
     // O body tenta plantar nota 100 e um texto próprio: os dois são ignorados.
     const saved = await salvarComEvalId({ token: aluno, evalId: id, over: { score: 100, evaluation: 'nota 100, confia' } });
     expect(saved.status).toBe(200);
     expect(saved.body.score).toBe(72);
     expect(saved.body.evaluation).toContain('Você abriu bem');
     expect(saved.body.evaluation).not.toContain('confia');
-    expect(saved.body.evalVersion).toBe('v29');
+    expect(saved.body.evalVersion).toBe('v34');
     expect(saved.body.criteriaScores['1']).toBe(7);
   });
 
   it('evalId de outro aluno é ignorado (a nota não é herdada)', async () => {
     const aluno = await loginAs('aluno'); // id 3
-    const id = oficial.salvarDetalhe({ dono: '5', version: 'v29', result: resultadoFake({ notaFinal: 95 }) });
+    const id = oficial.salvarDetalhe({ dono: '5', version: 'v34', result: resultadoFake({ notaFinal: 95 }) });
     const saved = await salvarComEvalId({ token: aluno, evalId: id, over: { score: null, evaluation: '' } });
     expect(saved.status).toBe(200);
     expect(saved.body.score).toBeNull();
@@ -271,7 +317,7 @@ describe('avaliador oficial v29 — POST /api/logs com evalId', () => {
 
   it('o MESMO evalId não serve para duas sessões', async () => {
     const aluno = await loginAs('aluno');
-    const id = oficial.salvarDetalhe({ dono: '3', version: 'v29', result: resultadoFake({ notaFinal: 88 }) });
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake({ notaFinal: 88 }) });
     const um = await salvarComEvalId({ token: aluno, evalId: id });
     const dois = await salvarComEvalId({ token: aluno, evalId: id });
     expect(um.body.score).toBe(88);
@@ -280,12 +326,12 @@ describe('avaliador oficial v29 — POST /api/logs com evalId', () => {
   });
 });
 
-describe('avaliador oficial v29 — sigilo do detalhe por critério', () => {
+describe('avaliador oficial v34 — sigilo do detalhe por critério', () => {
   beforeEach(() => resetData());
 
   async function logComDetalhe() {
     const aluno = await loginAs('aluno');
-    const id = oficial.salvarDetalhe({ dono: '3', version: 'v29', result: resultadoFake(), model: 'gpt-5.6-luna', effort: 'high' });
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake(), model: 'gpt-5.6-luna', effort: 'high' });
     const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
       type: 'freeplay', mode: 'training', itemId: 'fp-test-1', itemTitle: 'Sofia Test',
       durationSeconds: 60, messages: [{ role: 'user', content: 'oi' }], evalId: id,
@@ -318,7 +364,7 @@ describe('avaliador oficial v29 — sigilo do detalhe por critério', () => {
     const comoProf = await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(prof));
     expect(comoProf.status).toBe(200);
     expect(comoProf.body.disponivel).toBe(true);
-    expect(comoProf.body.partes.length).toBe(15);
+    expect(comoProf.body.partes.length).toBe(8);
     expect(comoProf.body.partes[0].analise).toContain('GABARITO_SECRETO_1');
     expect(comoProf.body.notaFinal).toBe(72);
 
@@ -337,7 +383,7 @@ describe('avaliador oficial v29 — sigilo do detalhe por critério', () => {
     const res = await request(app).get(`/api/logs/${saved.body.id}/criterios`).set(authHeader(prof));
     expect(res.status).toBe(200);
     expect(res.body.disponivel).toBe(false);
-    expect(res.body.motivo).toMatch(/v29/);
+    expect(res.body.motivo).toMatch(/avaliador oficial/i);
   });
 
   it('log inexistente → 404 (para quem pode ver)', async () => {
@@ -346,7 +392,7 @@ describe('avaliador oficial v29 — sigilo do detalhe por critério', () => {
   });
 });
 
-describe('avaliador oficial v29 — missão pelo nó da missão', () => {
+describe('avaliador oficial v34 — missão pelo nó da missão', () => {
   beforeEach(() => resetData());
 
   async function atribuirSidequest() {
@@ -364,7 +410,7 @@ describe('avaliador oficial v29 — missão pelo nó da missão', () => {
     const sq = await atribuirSidequest();
     const aluno = await loginAs('aluno');
     const id = oficial.salvarDetalhe({
-      dono: '3', version: 'v29-progressao',
+      dono: '3', version: 'v34-progressao',
       result: resultadoFake({ missao: { cumprida: true, legivel: true, justificativa: 'Sustentou por duas trocas.' } }),
     });
     const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
@@ -384,7 +430,7 @@ describe('avaliador oficial v29 — missão pelo nó da missão', () => {
     await atribuirSidequest();
     const aluno = await loginAs('aluno');
     const id = oficial.salvarDetalhe({
-      dono: '3', version: 'v29-progressao',
+      dono: '3', version: 'v34-progressao',
       result: resultadoFake({ missao: { cumprida: false, legivel: true, justificativa: 'Preencheu o silêncio.' } }),
     });
     const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
@@ -401,7 +447,7 @@ describe('avaliador oficial v29 — missão pelo nó da missão', () => {
   it('avaliação sem missão (modo padrão) não fecha sidequest nenhuma', async () => {
     await atribuirSidequest();
     const aluno = await loginAs('aluno');
-    const id = oficial.salvarDetalhe({ dono: '3', version: 'v29', result: resultadoFake({ missao: null }) });
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake({ missao: null }) });
     const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
       type: 'freeplay', mode: 'training', itemId: 'fp-test-1', durationSeconds: 120,
       messages: [{ role: 'user', content: 'oi' }], evalId: id,

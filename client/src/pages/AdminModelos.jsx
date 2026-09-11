@@ -166,9 +166,9 @@ export default function AdminModelos() {
         </p>
         <p style={{ fontSize: 13, color: 'var(--muted)' }}>
           O que muda aqui é o MODELO, não a régua: Treinamento, Competitivo, Processo Seletivo,
-          Visitante e Avaliar Sessão rodam o avaliador oficial (pipeline v29, um nó por critério),
-          qualquer que seja o modelo escolhido. Duelo (avaliação comparativa) e Neuroavaliação
-          seguem no avaliador de prompt único, por terem grade própria.
+          Visitante, Duelo e Avaliar Sessão rodam o avaliador oficial (pipeline v34, um nó por
+          critério), qualquer que seja o modelo escolhido. Só a Neuroavaliação segue no avaliador
+          de prompt único, por ter grade própria.
         </p>
       </div>
 

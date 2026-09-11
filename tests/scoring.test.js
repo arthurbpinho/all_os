@@ -1,4 +1,4 @@
-const { finalScoreFromCriteria, comparativeScores } = require('../server/scoring');
+const { finalScoreFromCriteria } = require('../server/scoring');
 
 // Fórmula (decisão do dono): soma das notas dos critérios convertida de base
 // (nº de critérios × 10) para base 100.
@@ -28,36 +28,5 @@ describe('finalScoreFromCriteria', () => {
     expect(finalScoreFromCriteria({})).toBeNull();
     expect(finalScoreFromCriteria(null)).toBeNull();
     expect(finalScoreFromCriteria({ a: 'x' })).toBeNull();
-  });
-});
-
-describe('comparativeScores', () => {
-  it('separa A1..A6 / B1..B6, calcula notas e aponta o vencedor', () => {
-    const criteria = {
-      A1: 6, A2: 6, A3: 6, A4: 6, A5: 6, A6: 6,
-      B1: 8, B2: 8, B3: 8, B4: 8, B5: 8, B6: 8,
-    };
-    const r = comparativeScores(criteria);
-    expect(r.scoreA).toBe(60);
-    expect(r.scoreB).toBe(80);
-    expect(r.winner).toBe('B');
-    expect(r.criteriaA).toEqual({ 1: 6, 2: 6, 3: 6, 4: 6, 5: 6, 6: 6 });
-  });
-
-  it('empate quando as notas finais coincidem', () => {
-    const r = comparativeScores({ A1: 5, A2: 5, A3: 5, A4: 5, A5: 5, A6: 5, B1: 5, B2: 5, B3: 5, B4: 5, B5: 5, B6: 5 });
-    expect(r.winner).toBe('draw');
-    expect(r.scoreA).toBe(50);
-    expect(r.scoreB).toBe(50);
-  });
-
-  it('A vence quando soma mais', () => {
-    const r = comparativeScores({ A1: 9, A2: 9, A3: 9, A4: 9, A5: 9, A6: 9, B1: 4, B2: 4, B3: 4, B4: 4, B5: 4, B6: 4 });
-    expect(r.winner).toBe('A');
-  });
-
-  it('retorna null se faltar um dos lados', () => {
-    expect(comparativeScores({ A1: 5, A2: 5 })).toBeNull(); // sem B
-    expect(comparativeScores({})).toBeNull();
   });
 });

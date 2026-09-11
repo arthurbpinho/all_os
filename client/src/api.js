@@ -250,8 +250,11 @@ export const api = {
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
   // Nota e feedback POR CRITÉRIO de um log — só supervisor/admin (o servidor
   // recusa aluno com 403). O aluno tem a nota total e o feedback qualitativo;
-  // as quinze análises são escritas com o gabarito do caso à vista.
+  // as análises por critério são escritas com o gabarito do caso à vista.
   logCriterios: (logId) => request(`/logs/${encodeURIComponent(logId)}/criterios`),
+  // Mesmo detalhe, do lado do Duelo: as oito análises com as cinco qualidades
+  // de cada aluno. Também só supervisor/admin (o servidor checa o papel).
+  duelCriterios: (duelId) => request(`/duel/${encodeURIComponent(duelId)}/criterios`),
   // Competitivo: avaliação assíncrona (nota em até 24h nos logs). Salva a sessão
   // pendente e retorna na hora ({ ok, pending, logId }) — sem nota/MMR.
   competitiveFinish: (data) => request('/competitive/finish', { method: 'POST', body: data }),
@@ -364,7 +367,7 @@ export const api = {
   // `onReasoning(delta, full)` é opcional: quando passado, o cliente pede o
   // resumo do raciocínio (showReasoning) e recebe eventos `data:{reasoning}`. O
   // servidor só envia esses eventos pra supervisor/admin — pro aluno fica vazio.
-  // `onProgress(pct)` é opcional: o AVALIADOR OFICIAL (v29) são dezesseis
+  // `onProgress(pct)` é opcional: o AVALIADOR OFICIAL (v34) são nove
   // chamadas e não streama token a token — o texto só existe no fim —, então
   // ele manda uma fração de andamento durante a corrida. Vem só a fração, de
   // propósito: quantos critérios existem e o que cada um mede não é do aluno.

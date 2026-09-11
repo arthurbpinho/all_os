@@ -1,10 +1,21 @@
 // Cálculo da nota final (0–100) a partir das notas por critério.
 //
-// Por que isto vive em código (e não na IA): os avaliadores emitem APENAS as
-// notas por critério (v18.25: bloco [notas], 15 critérios de 1 a 10 ou NA; logs
-// antigos: [notas-supervisor] com 6 critérios). O que a IA NÃO faz (porque
-// errava com frequência) é a conta da nota final: somar os critérios e
-// converter de base para 0–100. Esse passo é determinístico e fica aqui.
+// Por que isto vive em código (e não na IA): os avaliadores de prompt único
+// emitem APENAS as notas por critério (v18.25, hoje só o de Neuro: bloco
+// [notas], notas de 1 a 10 ou NA; logs antigos: [notas-supervisor] com 6
+// critérios). O que a IA NÃO faz (porque errava com frequência) é a conta da
+// nota final: somar os critérios e converter de base para 0–100. Esse passo é
+// determinístico e fica aqui.
+//
+// O AVALIADOR OFICIAL (pipeline v34) não passa por aqui: lá a nota de cada
+// critério é a soma de cinco qualidades e a final é a média × 10, feita pelo
+// agregador do pipeline. Aqui ficam os caminhos que ainda leem um bloco
+// [notas] de texto — Neuro e os logs antigos.
+//
+// Daqui saiu também o `comparativeScores`, que separava as chaves A1..A15 /
+// B1..B15 do avaliador comparativo do Duelo. O Duelo passou a rodar no v34
+// (entrada `v34-duelo`), onde as duas notas saem do agregador do pipeline, uma
+// por lado, e não há bloco de texto a fatiar.
 //
 // Fórmula (decisão do dono): soma das notas dos critérios (base = nº de
 // critérios × 10, ex.: 15 critérios → base 150) convertida para base 100:
@@ -26,31 +37,4 @@ function finalScoreFromCriteria(criteria) {
   return Math.round((sum / base) * 100);
 }
 
-// Separa as notas comparativas (chaves A1..A15 / B1..B15) nas notas de cada aluno
-// e calcula a nota final 0–100 de cada um. Retorna também o vencedor. Como cada
-// nota final é uma média normalizada, os dois lados seguem comparáveis mesmo se
-// um deles tiver um critério NA a mais (o 13 depende do que cada aluno explicitou).
-// Retorna null se não der pra montar as duas notas.
-function comparativeScores(criteria) {
-  if (!criteria || typeof criteria !== 'object') return null;
-  const a = {};
-  const b = {};
-  for (const [k, v] of Object.entries(criteria)) {
-    const m = /^([AB])\s*0*(\d+)$/i.exec(String(k).trim());
-    if (!m) continue;
-    const n = Number(String(v).replace(',', '.'));
-    if (!Number.isFinite(n)) continue;
-    if (m[1].toUpperCase() === 'A') a[m[2]] = n;
-    else b[m[2]] = n;
-  }
-  const scoreA = finalScoreFromCriteria(a);
-  const scoreB = finalScoreFromCriteria(b);
-  if (scoreA === null || scoreB === null) return null;
-  let winner;
-  if (scoreA > scoreB) winner = 'A';
-  else if (scoreB > scoreA) winner = 'B';
-  else winner = 'draw';
-  return { criteriaA: a, criteriaB: b, scoreA, scoreB, winner };
-}
-
-module.exports = { finalScoreFromCriteria, comparativeScores };
+module.exports = { finalScoreFromCriteria };

@@ -1,6 +1,6 @@
 // IMPORTANTE: helpers seta as envs antes de importar o app — manter como 1º require.
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
-const { finalScoreFromCriteria, comparativeScores } = require('../server/scoring');
+const { finalScoreFromCriteria } = require('../server/scoring');
 
 // Saída dos avaliadores v18.25: bloco `[notas]` (15 critérios, 1–10 ou NA) NO
 // INÍCIO, `[feedback]` e o corpo depois. No save o servidor extrai as notas (vão
@@ -142,15 +142,9 @@ describe('scoring com a grade de 15 critérios', () => {
     expect(finalScoreFromCriteria(c)).toBe(80); // 14 × 8 / 140
   });
 
-  it('comparativo separa A1..A15 / B1..B15 e aponta o vencedor', () => {
-    const c = {};
-    for (let i = 1; i <= 15; i++) { c['A' + i] = 7; c['B' + i] = 5; }
-    c.B13 = 'NA';
-    const r = comparativeScores(c);
-    expect(r.scoreA).toBe(70);
-    expect(r.scoreB).toBe(50); // 14 critérios, base 140
-    expect(r.winner).toBe('A');
-    expect(Object.keys(r.criteriaA)).toHaveLength(15);
-    expect(Object.keys(r.criteriaB)).toHaveLength(14);
-  });
+  // O comparativo A1..A15 / B1..B15 saiu daqui junto do avaliador de prompt
+  // único do Duelo: o Duelo roda no pipeline (entrada `v34-duelo`), onde as duas
+  // notas saem do agregador, uma por lado, e não há bloco de texto a fatiar. O
+  // parser de `[notas]` acima continua lendo as chaves com letra, porque os logs
+  // de duelo antigos foram gravados assim e o histórico ainda é servido.
 });

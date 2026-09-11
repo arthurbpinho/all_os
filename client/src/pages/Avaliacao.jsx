@@ -5,25 +5,48 @@ import { useWakeLock } from '../useWakeLock';
 import { downloadText } from '../logFiles';
 import RichText from '../components/RichText';
 
-// "Avaliar Sessão" (supervisor/admin): corrige um log colado com a MESMA régua
-// da produção — o pipeline v29, quinze nós, um por critério — e mostra a nota, o
-// custo exato da run (tokens × preço do modelo) e o resumo do raciocínio de cada
-// nó. Roda SÍNCRONO ou via BATCH (50% off) com uma fila. O que se alterna aqui é
-// MODELO e EFFORT: é onde se compara modelo contra modelo antes de trocar o que
-// a produção usa, em Administração → Modelos de IA.
+// "Avaliar Sessão" (supervisor/admin): corrige um log colado com a régua do
+// pipeline e mostra a nota, o custo exato da run (tokens × preço do modelo) e o
+// resumo do raciocínio de cada nó. Roda SÍNCRONO ou via BATCH (50% off) com uma
+// fila. O que se alterna aqui é AVALIADOR, MODELO e EFFORT: é onde se compara
+// antes de trocar o que a produção usa, em Administração → Modelos de IA.
 //
-// Havia também um alternador de PROMPT, com oito entradas (v16-2, v18.25, e os
-// pipelines v25/v28/v31/v32 em duas variantes cada). Saiu em 2026-09, quando o
-// app passou a rodar uma régua só. As runs antigas continuam no histórico, e a
-// tela ainda sabe desenhá-las: o que ficou guardado é resultado, não prompt.
+// Um avaliador só: o v34, que fechou como a régua LTS e corrige todos os modos
+// do app. O card de cada critério mostra as cinco qualidades que somaram a nota
+// dele.
+//
+// Já houve aqui um alternador com oito entradas (v16-2, v18.25, e os pipelines
+// v25/v28/v31/v32 em duas variantes cada) e, depois, um de três (v29, v34, v43).
+// As runs antigas continuam no histórico, e a tela ainda sabe desenhá-las: o que
+// ficou guardado é resultado, não prompt. Quando a próxima régua entrar em
+// teste, ela volta a ser uma entrada aqui.
 
-// O avaliador da produção, e o único que a rota aceita (o servidor valida).
-const AVALIADOR = 'v29';
-const NOS = 15;
-// Rótulo de uma run: o do avaliador atual, ou o id cru quando a run é antiga —
-// aí o id (v28-nota, v18-25...) já é o rótulo mais honesto que existe.
+// Os avaliadores selecionáveis. Espelha PIPELINE_VERSIONS no servidor, que é
+// quem valida — aqui a lista só evita oferecer o que daria 400. As entradas de
+// progressão e duelo do v34 NÃO aparecem: elas pedem materiais que esta tela não
+// tem (o atendimento anterior, o segundo log), e o laboratório corrige um log
+// colado.
+const AVALIADORES = [
+  {
+    id: 'v34',
+    label: 'v34 · pipeline (8 nós)',
+    nos: 8,
+    chamadas: 8,
+    hint: 'A mesma régua que corrige as sessões dos alunos. São 8 critérios, uma chamada por nó, e cada '
+      + 'nó situa o trabalho em cinco qualidades independentes (plena / parcial / ausente). A nota do '
+      + 'critério é a soma das cinco, de 0 a 10, e a final é a média das oito — a escala vai de 0 a 100. '
+      + 'O sintetizador escreve o feedback do aluno a partir das análises, sem ver o Bloco 1.',
+  },
+];
+const AVALIADOR_PADRAO = 'v34';
+function avaliadorDe(id) {
+  return AVALIADORES.find((a) => a.id === id) || null;
+}
+// Rótulo de uma run: o do avaliador que a rodou, ou o id cru quando a run é
+// antiga — aí o id (v28-nota, v18-25...) já é o rótulo mais honesto que existe.
 function evaluatorLabelDaRun(id) {
-  return id === AVALIADOR ? 'v29 · pipeline (15 nós)' : (id || '—');
+  const a = avaliadorDe(id);
+  return a ? a.label : (id || '—');
 }
 // `efforts` só aparece no modelo que FOGE do padrão do provedor. A família 5.6
 // aceita dois degraus a mais (xhigh, max) — por isso a lista de effort virou
@@ -70,8 +93,10 @@ function statusLabel(s) {
   if (s === 'aguardando') return 'Aguardando vaga';
   return 'Na fila';
 }
-// Linha das travas no card do critério. Mostra onde a subida parou, que é o que
-// diz se a trava está de fato segurando (um 7 exige F3 e F4 abertas).
+// Runs ANTIGAS (réguas de trava, v25 a v32): a linha das travas no card do
+// critério, mostrando onde a subida parou. Nenhuma run nova passa por aqui — a
+// régua LTS não tem trava nem faixa —, mas o histórico da aba ainda as serve, e
+// desenhá-las é a diferença entre ler a run e ver um card vazio.
 function TravasLinha({ p }) {
   if (!p.travas) return null;
   return (
@@ -93,9 +118,42 @@ function TravasLinha({ p }) {
   );
 }
 
-// Linha sob a nota final: quem ficou de fora da conta. Na régua atual é só o nó
-// cuja saída não deu para ler; nas runs ANTIGAS do v25 a confiança baixa também
-// tirava o critério, e o histórico ainda as mostra.
+// As cinco qualidades no card do critério, na ordem do prompt. É o que
+// somou a nota daquele critério: plena vale o dobro de parcial, e ausente não
+// vale nada — mas o número não aparece aqui nem no prompt, só no código do
+// servidor, para o modelo não ter alvo a mirar.
+const QUALIDADES = [
+  ['integridade', 'Integridade'],
+  ['autoria', 'Autoria'],
+  ['potencia', 'Potência'],
+  ['calibracao', 'Calibração'],
+  ['excepcionalidade', 'Excepcionalidade'],
+];
+function QualidadesLinha({ p }) {
+  if (!p.qualidades) return null;
+  return (
+    <div className="v25-card-quals">
+      {QUALIDADES.map(([chave, rotulo]) => {
+        const v = p.qualidades[chave];
+        return (
+          <span key={chave} className={`v25-qual ${v || 'na'}`} title={`${rotulo}: ${v || 'não veio'}`}>
+            <span className="v25-qual-nome">{rotulo}</span>
+            <span className="v25-qual-val">{v || '—'}</span>
+          </span>
+        );
+      })}
+      {p.qualidadesFaltantes && (
+        <span className="v25-trava-alerta" title="Sem as cinco não há soma, e o critério ficou fora da nota. Nunca vira zero: um nó que sai do formato invalida o critério, e a base da média acompanha.">
+          ⚠ faltou {p.qualidadesFaltantes.join(', ')}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Linha sob a nota final: quem ficou de fora da conta. Nas réguas atuais é só o
+// nó cuja saída não deu para ler; nas runs ANTIGAS do v25 a confiança baixa
+// também tirava o critério, e o histórico ainda as mostra.
 function subNotaPipeline(versao, incluidos, total) {
   const base = `Agregada de ${incluidos} de ${total} critérios `;
   if (versao === 'v25') return base + '(run antiga: os de confiança baixa ficaram fora).';
@@ -158,7 +216,14 @@ function buildReport(result, log) {
   L.push('— NOTAS POR CRITÉRIO —');
   if (Array.isArray(result.partes)) {
     for (const p of result.partes) {
-      L.push(`${p.num} · ${p.nome}: ${Number.isFinite(p.nota) ? p.nota + '/10' : '—'} [${p.confianca || 'sem confiança'}]${p.incluido ? '' : ' (fora da nota)'}`);
+      // O detalhe que explica a nota muda com a régua: as cinco qualidades que
+      // somaram (v34) ou a etiqueta da faixa (runs antigas). Sem ele a linha é
+      // só um número, e o relatório existe justamente para ser conferido.
+      const detalhe = p.qualidades
+        ? QUALIDADES.map(([chave, rotulo]) => `${rotulo}: ${p.qualidades[chave] || '—'}`).join(' · ')
+        // Run antiga (régua de trava): a etiqueta derivada da faixa.
+        : (p.etiqueta || p.confianca || 'sem etiqueta');
+      L.push(`${p.num} · ${p.nome}: ${Number.isFinite(p.nota) ? p.nota + '/10' : '—'} [${detalhe}]${p.incluido ? '' : ' (fora da nota)'}`);
     }
   } else if (Array.isArray(result.notasDetalhe)) {
     for (const d of result.notasDetalhe) L.push(`${d.num} · ${d.nome}: ${d.nota}`);
@@ -185,9 +250,10 @@ export default function Avaliacao({ user }) {
   const [characters, setCharacters] = useState([]);
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
   // Alternadores
-  // Abre na versão em teste (a primeira da lista) — é a que o supervisor roda
-  // hoje; as outras ficam no alternador para comparar o mesmo log.
-  const evaluator = AVALIADOR;
+  // Abre no avaliador da PRODUÇÃO: é a régua contra a qual as outras são
+  // comparadas, então ela é o ponto de partida natural de uma comparação.
+  const [evaluator, setEvaluator] = useState(AVALIADOR_PADRAO);
+  const avaliador = avaliadorDe(evaluator) || AVALIADORES[0];
   const [baixandoReasoning, setBaixandoReasoning] = useState(false);
   const [model, setModel] = useState('gpt-5.5');
   const [effort, setEffort] = useState('medium');
@@ -411,7 +477,12 @@ export default function Avaliacao({ user }) {
             </div>
             <div className="evaluating-status">
               <div className="evaluating-line"><span className="dot active" /> Lendo o Bloco 1 do caso e o log</div>
-              <div className="evaluating-line"><span className="dot active" /> {NOS} nós avaliando, um por critério</div>
+              <div className="evaluating-line">
+                <span className="dot active" />
+                {avaliador.chamadas > avaliador.nos
+                  ? `${avaliador.nos} critérios × 5 qualidades = ${avaliador.chamadas} chamadas`
+                  : `${avaliador.nos} nós avaliando, um por critério`}
+              </div>
               <div className="evaluating-line"><span className="dot pulse" /> Calculando a nota e o feedback</div>
             </div>
           </div>
@@ -512,16 +583,24 @@ export default function Avaliacao({ user }) {
                       <span className="v25-card-nota">{Number.isFinite(p.nota) ? `${p.nota}/10` : '—'}</span>
                     </div>
                     <div className="v25-card-short">{p.linhaCurta}</div>
+                    {/* Como a nota daquele critério nasceu: as cinco qualidades
+                        que somaram. Uma run ANTIGA, de régua de trava, mostra a
+                        linha de travas no lugar — uma run só tem uma das duas. */}
                     <TravasLinha p={p} />
+                    <QualidadesLinha p={p} />
                     <div className="v25-card-analise"><RichText text={p.analise} /></div>
                     <div className="v25-card-foot">
-                      {/* A confiança saiu da régua; no lugar dela, a etiqueta que o
-                          sintetizador recebe (derivada da faixa, escrita por código). */}
-                      {p.etiqueta
-                        ? <span className="v25-etiqueta">[{p.etiqueta}]</span>
-                        : <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>}
+                      {/* As cinco qualidades já estão acima e não há etiqueta a
+                          mostrar — o sintetizador recebe as cinco linhas, não um
+                          rótulo. Nas runs antigas vem a etiqueta derivada da
+                          faixa, ou a confiança que aquela régua tinha. */}
+                      {p.qualidades
+                        ? null
+                        : p.etiqueta
+                          ? <span className="v25-etiqueta">[{p.etiqueta}]</span>
+                          : <span className={`v25-conf-chip conf-${(p.confianca === 'média' || p.confianca === 'media') ? 'media' : (p.confianca || 'na')}`}>{confLabel(p.confianca)}</span>}
                       {p.analiseForaDeOrdem && (
-                        <span className="v25-trava-alerta" title="A análise veio antes das travas mesmo depois da retentativa: a prosa pode ter ancorado as respostas deste critério.">⚠ análise fora de ordem</span>
+                        <span className="v25-trava-alerta" title="A análise veio antes das escolhas mesmo depois da retentativa: a prosa pode ter ancorado as respostas deste critério.">⚠ análise fora de ordem</span>
                       )}
                       {!p.incluido && <span className="v25-excluded-tag">fora da nota</span>}
                     </div>
@@ -554,8 +633,8 @@ export default function Avaliacao({ user }) {
                   ? (
                     <div className="aval-reasoning-empty">
                       Guardado nesta avaliação: use <strong>Baixar raciocínio (.txt)</strong>, no topo. É o resumo que
-                      o provedor entrega de cada nó (a cadeia bruta não é exposta por ninguém), com a nota e a
-                      faixa ao lado. Material do supervisor — não vai para o aluno.
+                      o provedor entrega de cada nó (a cadeia bruta não é exposta por ninguém), com a nota e o que a
+                      produziu ao lado. Material do supervisor — não vai para o aluno.
                     </div>
                   )
                   : (
@@ -606,8 +685,9 @@ export default function Avaliacao({ user }) {
         <div className="eyebrow">Avaliação Independente</div>
         <h2><Typewriter text="Avaliar uma " /><span className="accent"><Typewriter text="Sessão" delayStart={520} /></span></h2>
         <p>
-          Corrige um log com a régua da produção (v29). Escolha o <strong>modelo</strong> e o <strong>effort</strong>,
-          cole a transcrição e rode — na hora ou via <strong>batch</strong> (50% mais barato). Mostra a nota e o <strong>custo exato</strong> da run.
+          Corrige um log com a régua da produção (v34). Escolha o <strong>modelo</strong> e o
+          <strong> effort</strong>, cole a transcrição e rode — na hora ou via <strong>batch</strong> (50% mais
+          barato). Mostra a nota e o <strong>custo exato</strong> da run.
         </p>
         <div className="ornament" />
       </div>
@@ -615,13 +695,11 @@ export default function Avaliacao({ user }) {
       <div className="avaliacao-intro">
         <div className="aval-controls">
           <div>
-            <label>Avaliador</label>
-            <div className="aval-ev-fixo">v29 · pipeline ({NOS} nós)</div>
-            <div className="aval-ev-hint">
-              A mesma régua que corrige as sessões dos alunos. Os {NOS} nós avaliam um critério cada,
-              respondendo as travas — a faixa e a nota saem por código, não do modelo —, e o
-              sintetizador escreve o feedback do aluno a partir das análises, sem ver o Bloco 1.
-            </div>
+            <label htmlFor="ev-select">Avaliador</label>
+            <select id="ev-select" value={evaluator} onChange={(e) => setEvaluator(e.target.value)} style={{ width: '100%' }}>
+              {AVALIADORES.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
+            <div className="aval-ev-hint">{avaliador.hint}</div>
           </div>
           <div>
             <label htmlFor="md-select">Modelo</label>

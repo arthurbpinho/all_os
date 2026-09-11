@@ -1,35 +1,52 @@
-// Pipeline multi-nó do avaliador (AvaliAllos) — o MOTOR, compartilhado por dois
-// chamadores:
+// PIPELINE DO AVALIADOR — AvaliAllos v34 (a régua LTS da escola).
 //
-//   · PRODUÇÃO (desde 2026-09): o v29 e o modo progressão dele avaliam
-//     Treinamento, Competitivo, Visitante, Processo Seletivo e a correção
-//     manual do supervisor. Quem os aciona é server/avaliacao-oficial.js.
-//   · A ABA "AVALIAR SESSÃO" (supervisor): a mesma régua, num log colado, com
-//     seletor de modelo/effort e a conta de custo da run.
+// Uma régua só, em três entradas. O v34 fechou como a versão de longo prazo em
+// 2026-09, e desde então é ele que corrige TODOS os modos de sessão que passam
+// por aqui. As três entradas são o mesmo desenho — oito nós, cinco qualidades
+// por nó, nota derivada por código, um sintetizador que nunca vê o Bloco 1 — e
+// diferem só no que chega ao nó:
 //
-// Duas versões, que são o mesmo desenho com entradas diferentes: `v29` e
-// `v29-progressao` (ver PIPELINE_VERSIONS). O nome "v25" que sobrou nas envs
-// (AVALIACAO_V25_*) e no store JSON é histórico — trocá-los apagaria a
-// configuração de quem já tem essas envs setadas no painel do Railway.
+//   v34            → um atendimento (Bloco 1 + log). Treinamento, Competitivo,
+//                    Visitante, Processo Seletivo e a correção manual do
+//                    supervisor.
+//   v34-progressao → o aluno reatende um caso: chegam os dois atendimentos, a
+//                    avaliação que ele leu do primeiro e, às vezes, a missão
+//                    ativa. Tem um nó a mais, o da missão, que decide se a
+//                    sidequest/desafio do dia foi cumprida e não pontua
+//                    critério nenhum.
+//   v34-duelo      → dois alunos atenderam o MESMO caso: cada nó lê os dois
+//                    logs e responde as cinco qualidades para cada um deles,
+//                    mais uma análise comparativa. Duas notas saem daqui, e o
+//                    vencedor é quem tirou a maior.
+//
+// O nome "v25" que sobrou nas envs (AVALIACAO_V25_*) e no store JSON é
+// histórico — trocá-los apagaria a configuração de quem já tem essas envs
+// setadas no painel do Railway.
 //
 // Roda em GPT-5.x (OpenAI) ou GLM (z.ai). Na produção o modelo vem da categoria
 // em Administração → Modelos de IA; na aba do supervisor, do seletor da tela. Os
-// avaliadores que ficaram FORA do pipeline (Duelo comparativo, Neuro e Trilha)
-// não passam aqui.
+// avaliadores que ficaram FORA do pipeline (Neuro e Trilha) não passam aqui.
 //
 // Pipeline completo:
-//   1) Um nó por critério, em paralelo (15). Cada nó vê só o seu critério + o
-//      Bloco 1 + o log, responde as quatro travas da régua e a realização da
-//      faixa que abriu, e escreve a ANÁLISE — nunca a nota.
-//   2) Agregador determinístico (código): deriva faixa e nota de cada critério
-//      das travas, aplica pesos (iguais por enquanto) e normaliza a média(1–10)
-//      para 0–100. Fica de fora só o nó cuja saída não deu para ler.
-//   3) Sintetizador (1 chamada): recebe só o log + as análises em prosa (sem
-//      números, sem Bloco 1) e devolve o corpo do feedback do aluno.
+//   1) Os nós, em paralelo. Cada um vê só o Bloco 1 + o(s) log(s) + o critério
+//      que lhe cabe, e nunca a nota. Devolve as cinco qualidades daquele
+//      critério (`plena|parcial|ausente`) e a ANÁLISE. No modo duelo são dois
+//      conjuntos de cinco, um por aluno, e a análise é comparativa.
+//   2) Agregador determinístico (código): a nota de cada critério é a soma das
+//      cinco qualidades (0–10), com pesos iguais por enquanto, e a média × 10
+//      vira a nota final (0–100). Fica de fora só o critério cuja saída não deu
+//      para ler.
+//   3) Sintetizador (1 chamada): recebe só o(s) log(s) + o material dos nós (sem
+//      números, sem Bloco 1) e devolve o corpo do feedback.
 //   4) Montagem final (código): cola a nota (no laboratório) e a saudação fixa.
 //
-// No modo progressão entra um nó a mais, o da MISSÃO, que decide se a
-// sidequest/desafio do dia foi cumprida — e não pontua critério nenhum.
+// Aqui moravam também as réguas de TRAVAS (v25, v28, v29, v31, v32), que
+// derivavam a nota de uma tabela de faixas, e o v43, que era o v34 outra vez com
+// as cinco qualidades decididas em cinco chamadas cegas. Saíram todas quando o
+// v34 virou a LTS: o app roda uma régua só, e manter as outras significava
+// manter dois parsers, dois formatos de saída e duas telas para o supervisor.
+// As runs antigas continuam legíveis no histórico da Avaliação Independente
+// porque o que ficou guardado é RESULTADO, não prompt.
 //
 // RACIOCÍNIO (`capturaReasoning`): a OpenAI não entrega a cadeia bruta
 // de raciocínio em lugar nenhum — só um RESUMO, e só pela Responses API. Por
@@ -61,79 +78,109 @@ const path = require('path');
 const { PROMPTS_DIR } = require('./paths');
 
 // Saudação colada por código no topo do feedback do aluno (o modelo não a gera
-// nem a varia). Era uma por versão, quando as versões traziam saudações
-// diferentes; hoje é uma só.
+// nem a varia). É só o enquadramento do feedback: a nota aparece como selo na
+// tela (produção) ou no cabeçalho do relatório (laboratório).
 //
-// É só o enquadramento do feedback: a nota aparece como selo na tela (produção)
-// ou no cabeçalho do relatório (laboratório), e o segundo parágrafo que as
-// versões antigas traziam — o pedido para descrever o raciocínio na caixa de
-// estrela — saiu do texto quando a régua mudou.
-const SAUDACAO = `Trate este feedback como pré-correção, um ponto de partida para a conversa com seu supervisor e colegas, não um veredito.`;
+// Era uma por versão enquanto o v34 convivia com a régua de travas, que trazia
+// uma saudação mais longa. Com uma régua só, sobrou uma saudação só.
+const SAUDACAO = `Este feedback é pré-correção: o começo da conversa com seu supervisor e seus colegas, não um veredito.`;
 
-// As DUAS versões que existem, e são o MESMO desenho: quinze nós (uma chamada
-// por critério), travas respondidas uma a uma, faixa e nota derivadas por
-// código, e um sintetizador que escreve o feedback do aluno sem nunca ver o
-// Bloco 1. A diferença está na ENTRADA:
+// As TRÊS entradas do v34. A régua, os critérios e o contrato de saída do nó são
+// os mesmos nas três — o que muda é o que chega ao nó e quem escreve o feedback.
 //
-//   v29            → um atendimento (Bloco 1 + log). É o avaliador oficial de
-//                    Treinamento, Competitivo, Visitante, Seletivo e da
-//                    correção manual do supervisor.
-//   v29-progressao → o aluno reatende um caso: chegam os dois atendimentos, a
-//                    avaliação que ele leu do primeiro e, às vezes, a missão
-//                    ativa. Tem um nó a mais, o da missão, que decide se a
-//                    sidequest/desafio do dia foi cumprida.
-//
-// Aqui moravam também v25, v28, v31 e v32, cada uma com o que o código precisava
-// para rodá-la: variantes do nó (com-feedback / só-nota), nó partido em duas
-// fases, três formatos de saída e a regra de confiança do v25. Saíram todas em
-// 2026-09, junto dos avaliadores de prompt único (v16-2, v18.25) — o app roda
-// uma régua só. As runs antigas continuam legíveis no histórico da Avaliação
-// Independente porque o que ficou guardado é RESULTADO, não prompt.
+// `criteriosDe` faz a versão LER os critérios da pasta de outra. É o mesmo
+// arquivo nas três, e duplicá-lo faria as cópias divergirem na primeira edição
+// pelo painel de Administração → Prompts.
 const PIPELINE_VERSIONS = {
-  v29: {
-    id: 'v29',
-    dir: 'v29',
-    montado: 'prompt-no-v29-montado.md',
-    criterios: 'criterios-no-v29.md',
-    sintetizador: 'sintetizador-v29.md',
-    nCriterios: 15,
+  // O modo padrão: um atendimento, um aluno.
+  v34: {
+    id: 'v34',
+    dir: 'v34',
+    montado: 'prompt-no-v34-montado.md',
+    criterios: 'criterios-no-v34.md',
+    sintetizador: 'sintetizador-v34.md',
+    nCriterios: 8,
     capturaReasoning: true,
   },
-  // Mesma grade do v29: os critérios são LIDOS DA PASTA DELE (`criteriosDe`) —
-  // é o mesmo arquivo, e duplicá-lo faria as duas cópias divergirem na primeira
-  // edição pelo painel. O que esta versão tem de próprio são os cinco slots do
-  // caso, três slots extras no sintetizador e o prompt do nó da missão.
-  'v29-progressao': {
-    id: 'v29-progressao',
-    dir: 'v29-progressao',
-    montado: 'prompt-no-v29-progressao-montado.md',
-    criterios: 'criterios-no-v29.md',
-    criteriosDe: 'v29',
-    sintetizador: 'sintetizador-v29-progressao.md',
+  // Reatendimento. O que esta versão tem de próprio são os cinco slots do caso,
+  // três slots extras no sintetizador e o prompt do nó da missão.
+  'v34-progressao': {
+    id: 'v34-progressao',
+    dir: 'v34-progressao',
+    montado: 'prompt-no-v34-progressao-montado.md',
+    criterios: 'criterios-no-v34.md',
+    criteriosDe: 'v34',
+    sintetizador: 'sintetizador-v34-progressao.md',
     slotsSintetizador: ['{{ATENDIMENTO_1}}', '{{MISSAO}}', '{{MISSAO_VEREDITO}}'],
-    missao: 'missao-v29-progressao.md',
+    missao: 'missao-v34-progressao.md',
     slotsCaso: ['{{BLOCO_1}}', '{{ATENDIMENTO_1}}', '{{AVALIACAO_1}}', '{{MISSAO}}', '{{LOG}}'],
-    nCriterios: 15,
+    nCriterios: 8,
     capturaReasoning: true,
+  },
+  // Duelo. A única entrada COMPARATIVA: o nó lê os dois logs e responde as cinco
+  // qualidades para cada aluno, na mesma chamada. É o que torna a comparação
+  // possível na régua nova — a alternativa (avaliar os dois separados e comparar
+  // as notas) não produz o texto comparativo que os dois alunos leem, e é o
+  // texto que ensina.
+  //
+  // `lados` liga o caminho comparativo: dois conjuntos de qualidades por
+  // critério, duas notas finais, e uma análise só, que fala dos dois.
+  'v34-duelo': {
+    id: 'v34-duelo',
+    dir: 'v34-duelo',
+    montado: 'prompt-no-v34-duelo-montado.md',
+    criterios: 'criterios-no-v34.md',
+    criteriosDe: 'v34',
+    sintetizador: 'sintetizador-v34-duelo.md',
+    nCriterios: 8,
+    capturaReasoning: true,
+    lados: ['A', 'B'],
+    slotsCaso: ['{{BLOCO_1}}', '{{ALUNO_A}}', '{{LOG_A}}', '{{ALUNO_B}}', '{{LOG_B}}'],
+    // O sintetizador comparativo recebe os dois logs no lugar do {{LOG}} único.
+    slotsLog: ['{{ALUNO_A}}', '{{LOG_A}}', '{{ALUNO_B}}', '{{LOG_B}}'],
+    // Sem saudação: o texto do duelo é comparativo, escrito na terceira pessoa
+    // para os dois alunos, e a saudação em segunda pessoa do singular não cabe.
+    saudacao: '',
   },
 };
 
+// Versões em que cada nó avalia DOIS alunos na mesma chamada. Muda o parser
+// (dois conjuntos de qualidades por critério), o agregador (duas notas) e o que
+// o sintetizador recebe.
+function ladosDe(cfg) {
+  return (cfg && Array.isArray(cfg.lados) && cfg.lados.length) ? cfg.lados : null;
+}
+function ehComparativa(cfg) {
+  return !!ladosDe(cfg);
+}
+
+// Slot do sintetizador que recebe o material dos nós.
+const SLOT_MATERIAL = '{{ANALISES}}';
+
 // Slots do bloco do caso (bloco B do prompt do nó) de uma versão. O padrão são
-// os dois de sempre; o modo progressão declara os seus em `slotsCaso`.
+// os dois de sempre; progressão e duelo declaram os seus em `slotsCaso`.
 const SLOTS_CASO_PADRAO = ['{{BLOCO_1}}', '{{LOG}}'];
 function slotsCasoDe(cfg) {
   return (cfg && Array.isArray(cfg.slotsCaso) && cfg.slotsCaso.length) ? cfg.slotsCaso : SLOTS_CASO_PADRAO;
 }
 
-// Slots ADICIONAIS que o sintetizador de uma versão pode usar, além do
-// {{LOG}} e do {{ANALISES}} que todos têm. O modo progressão precisa do
-// atendimento anterior e da missão (com o veredito já decidido) para escrever a
-// comparação e falar da missão sem contradizer o nó que a julgou.
+// Slots de LOG que o sintetizador de uma versão exige, e que são preenchidos a
+// partir dos materiais do caso. As versões individuais têm um só ({{LOG}}); o
+// duelo tem os dois logs e os dois nomes.
+const SLOTS_LOG_PADRAO = ['{{LOG}}'];
+function slotsLogDe(cfg) {
+  return (cfg && Array.isArray(cfg.slotsLog) && cfg.slotsLog.length) ? cfg.slotsLog : SLOTS_LOG_PADRAO;
+}
+
+// Slots ADICIONAIS que o sintetizador de uma versão pode usar, além dos de LOG e
+// do {{ANALISES}} que todos têm. O modo progressão precisa do atendimento
+// anterior e da missão (com o veredito já decidido) para escrever a comparação e
+// falar da missão sem contradizer o nó que a julgou.
 function slotsSintetizadorDe(cfg) {
   return (cfg && Array.isArray(cfg.slotsSintetizador)) ? cfg.slotsSintetizador : [];
 }
 const PIPELINE_VERSIONS_IDS = Object.keys(PIPELINE_VERSIONS);
-const DEFAULT_VERSION = 'v29';
+const DEFAULT_VERSION = 'v34';
 
 function versionConfig(version) {
   const cfg = PIPELINE_VERSIONS[version];
@@ -252,7 +299,9 @@ function resolvePrices(model) {
 //
 // Havia aqui um passo a mais: as versões até o v28 traziam DUAS variantes do nó
 // no mesmo .md (com-feedback e só-nota), em blocos `<!-- @variante:X -->`, e
-// este parser escolhia uma. Do v29 em diante o arquivo inteiro é o prompt.
+// este parser escolhia uma. Do v29 em diante o arquivo inteiro é o prompt. Havia
+// também um terceiro breakpoint, que só o v43 usava para mandar uma qualidade
+// por chamada; saiu com ele.
 function parseMontado(raw, arquivo = 'O prompt do nó montado', slotsCaso = SLOTS_CASO_PADRAO) {
   const montado = String(raw);
 
@@ -265,9 +314,9 @@ function parseMontado(raw, arquivo = 'O prompt do nó montado', slotsCaso = SLOT
   const bpAEnd = montado.indexOf('-->', bpA) + 3;
   const bpBEnd = montado.indexOf('-->', bpB) + 3;
 
-  const blockA = montado.slice(start, bpA).trim();          // estático
-  const blockB = montado.slice(bpAEnd, bpB).trim();          // {{BLOCO_1}} + {{LOG}}
-  const blockC = montado.slice(bpBEnd).trim();               // {{CRITÉRIO}}
+  const blockA = montado.slice(start, bpA).trim();  // estático
+  const blockB = montado.slice(bpAEnd, bpB).trim(); // os materiais do caso
+  const blockC = montado.slice(bpBEnd).trim();      // {{CRITÉRIO}}
 
   const exigidos = [
     ...(slotsCaso || SLOTS_CASO_PADRAO).map((slot) => ['B', blockB, slot]),
@@ -280,9 +329,12 @@ function parseMontado(raw, arquivo = 'O prompt do nó montado', slotsCaso = SLOT
 }
 
 // Sintetizador: bloco estático (do METACOMANDO até o breakpoint) vira o
-// `developer` cacheável; o resto ({{LOG}} + {{ANALISES}} + tarefa) vira `user`.
+// `developer` cacheável; o resto (os logs + {{ANALISES}} + tarefa) vira `user`.
 // Puro, pelo mesmo motivo do parseMontado.
-function parseSintetizador(sint, arquivo = 'O sintetizador', slotsExtra = []) {
+//
+// `slotsLog` são os slots de log EXIGIDOS pela versão: um só nas individuais, e
+// os dois logs (mais os dois nomes) no duelo.
+function parseSintetizador(sint, arquivo = 'O sintetizador', slotsExtra = [], slotsLog = SLOTS_LOG_PADRAO) {
   const sStart = sint.indexOf('## [METACOMANDO]');
   const sBp = sint.indexOf('<!-- CACHE BREAKPOINT');
   if (sStart === -1 || sBp === -1) {
@@ -291,12 +343,12 @@ function parseSintetizador(sint, arquivo = 'O sintetizador', slotsExtra = []) {
   const sBpEnd = sint.indexOf('-->', sBp) + 3;
   const synthStatic = sint.slice(sStart, sBp).trim();
   const synthVariable = sint.slice(sBpEnd).trim();
-  for (const slot of ['{{LOG}}', '{{ANALISES}}']) {
+  for (const slot of [...slotsLog, SLOT_MATERIAL]) {
     if (!synthVariable.includes(slot)) throw new Error(`${arquivo} não contém o slot ${slot}.`);
   }
   // Slot que o .md usa mas a versão não conhece seria enviado ao modelo como
   // texto cru `{{ASSIM}}`. Barra aqui, na gravação do prompt, e não em produção.
-  const conhecidos = ['{{LOG}}', '{{ANALISES}}', ...(slotsExtra || [])];
+  const conhecidos = [...slotsLog, SLOT_MATERIAL, ...(slotsExtra || [])];
   for (const usado of synthVariable.match(/\{\{[A-Z\u00c0-\u00da_0-9]+\}\}/g) || []) {
     if (!conhecidos.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
   }
@@ -347,11 +399,13 @@ function loadAssets(version = DEFAULT_VERSION) {
 
   const dir = versionDir(cfg);
   const slotsCaso = slotsCasoDe(cfg);
-  const { blockA, blockB, blockC } = parseMontado(fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), cfg.montado, slotsCaso);
+  const { blockA, blockB, blockC } = parseMontado(
+    fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), cfg.montado, slotsCaso,
+  );
 
   // Critérios: da pasta da própria versão, ou da versão apontada por
-  // `criteriosDe` (o modo progressão usa a MESMA grade do v29 — duplicar o .md
-  // faria as duas cópias divergirem na primeira edição do painel).
+  // `criteriosDe` (progressão e duelo usam a MESMA grade do v34 — duplicar o .md
+  // faria as cópias divergirem na primeira edição do painel).
   const dirCriterios = cfg.criteriosDe ? versionDir(versionConfig(cfg.criteriosDe)) : dir;
   const criteria = parseCriteria(fs.readFileSync(path.join(dirCriterios, cfg.criterios), 'utf8'));
   if (criteria.length !== cfg.nCriterios) {
@@ -359,7 +413,7 @@ function loadAssets(version = DEFAULT_VERSION) {
   }
 
   const { synthStatic, synthVariable } = parseSintetizador(
-    fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador, slotsSintetizadorDe(cfg),
+    fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador, slotsSintetizadorDe(cfg), slotsLogDe(cfg),
   );
 
   // Nó da MISSÃO (só o modo progressão tem): uma chamada à parte que responde se
@@ -378,21 +432,31 @@ function loadAssets(version = DEFAULT_VERSION) {
 // Extrai, do .md de critérios: a descrição completa de cada critério (o bloco
 // inteiro daquele número, que vai no slot {{CRITÉRIO}}) e o nome + linha curta
 // (rótulos para a tela do supervisor). Devolve quantos houver, na ordem — quem
-// confere se são 14 ou 15 é o loadAssets, pela versão.
+// confere se são oito é o loadAssets, pela versão.
 function parseCriteria(raw) {
   const lcIdx = raw.indexOf('## Linha curta');
   const descSection = lcIdx !== -1 ? raw.slice(0, lcIdx) : raw;
   const shortSection = lcIdx !== -1 ? raw.slice(lcIdx) : '';
 
+  // Um bloco é a seção aberta por `## 1 · Comunicação` e vai até a próxima. O
+  // bloco INTEIRO (cabeçalho incluído) é o que vai ao slot {{CRITÉRIO}}: a
+  // numeração é a ordem de um octógono, não hierarquia, e o nó não a usa — mas
+  // ela também não atrapalha, e mantê-la deixa o que o modelo leu igual ao que
+  // está no .md, que é o que se confere quando uma nota surpreende.
+  //
+  // O `$(?![\s\S])` do fim é o de VERDADE (fim do texto): com a flag `m`, um
+  // `$` sozinho casaria com o fim da primeira linha e o bloco viria só com o
+  // cabeçalho dentro.
   const descs = {};
-  const reDesc = /\*\*(\d{1,2}) · (.+?)\.\*\*[\s\S]*?(?=\n\*\*\d{1,2} · |\n---|\n## |$)/g;
   let m;
+  const reDesc = /^## (\d{1,2}) · (.+?)[^\S\n]*$[\s\S]*?(?=\n## |\n---|$(?![\s\S]))/gm;
   while ((m = reDesc.exec(descSection))) {
     descs[Number(m[1])] = m[0].trim();
   }
 
-  // Separador entre nome e linha curta: travessão até o v28, dois-pontos a
-  // partir do v31. Aceita os dois para os .md das duas gerações conviverem.
+  // Separador entre nome e linha curta: o v34 usa dois-pontos, e o travessão
+  // segue aceito porque as réguas antigas o usavam e um .md restaurado do
+  // histórico de versões ainda pode chegar assim ao parser.
   const shorts = {};
   const reShort = /^(\d{1,2})\.\s+\*\*(.+?)\*\*\s*(?:—|:)\s+(.+?)\.?\s*$/gm;
   while ((m = reShort.exec(shortSection))) {
@@ -537,7 +601,7 @@ function retriesDeOrdem() {
 // motivo é outro do que o da ordem acima: aqui não há nada a interpretar — o
 // formato pede a análise, ela é o último campo da saída, e voltar sem ela é
 // defeito objetivo. Foi visto em produção: numa run do modo progressão, doze dos
-// quinze nós devolveram as travas (logo, nota) e pararam antes da análise. A nota
+// quinze nós da régua da época devolveram a nota e pararam antes da análise. A nota
 // não se move com isso, mas o SINTETIZADOR passa a escrever o feedback do aluno
 // com um quinto da evidência — e é o feedback que o aluno lê.
 //
@@ -547,6 +611,22 @@ function retriesDeOrdem() {
 // frequência crua da omissão.
 function retriesDeAnalise() {
   const raw = process.env.AVALIACAO_V25_RETRY_ANALISE;
+  if (raw === '0') return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+// Refazer o nó do v34 quando falta uma das CINCO linhas de qualidade. Ligado por
+// padrão (uma vez), pelo mesmo motivo da análise: o formato pede as cinco, e
+// faltar uma é defeito objetivo, não interpretação. A diferença é o preço do
+// erro — sem as cinco não há soma, então o critério inteiro sai da nota, e a
+// média cai para sete oitavos do que devia medir.
+//
+// Knob próprio (e não o da análise) porque as duas frequências dizem coisas
+// diferentes sobre o modelo, e o primeiro lote precisa medi-las separadas.
+// Desligue com AVALIACAO_V34_RETRY_QUALIDADES=0 para ver a taxa crua.
+function retriesDeQualidades() {
+  const raw = process.env.AVALIACAO_V34_RETRY_QUALIDADES;
   if (raw === '0') return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 1;
@@ -705,40 +785,6 @@ function extractChatReasoning(message) {
   return tag ? tag[1].trim() : '';
 }
 
-// Notas de cada faixa: [completa (par), incompleta (ímpar)]. É a tabela que o
-// prompt do v28 NÃO mostra ao modelo — ele responde travas e realização, e o
-// número nasce aqui.
-const NOTAS_POR_FAIXA = { 1: [2, 1], 2: [4, 3], 3: [6, 5], 4: [8, 7], 5: [10, 9] };
-
-// Ordem em que as travas são testadas. A trava da FN é a passagem para a faixa N,
-// então quem não passa a da F2 fica na F1.
-const TRAVAS = [2, 3, 4, 5];
-
-// Deriva a faixa a partir das respostas: sobe de baixo para cima e para na
-// primeira que não passou. É AQUI que a hierarquia acumulativa vira regra de
-// verdade — o modelo responde as quatro, mas uma trava aberta depois de uma
-// fechada não promove ninguém.
-//
-// `inconsistente` marca justamente esse caso (respondeu `passa` numa trava acima
-// de uma que não passou). Não é erro de formato: é o sinal de que o nó não está
-// pensando em hierarquia, e vale ver na tela do supervisor.
-function derivarFaixa(travas) {
-  if (!travas || travas[2] == null) return { faixa: null, inconsistente: false };
-  let faixa = 1;
-  let parou = false;
-  let inconsistente = false;
-  for (const n of TRAVAS) {
-    const passou = travas[n] === true;
-    if (parou) {
-      if (passou) inconsistente = true; // abriu uma trava acima de uma fechada
-      continue;
-    }
-    if (passou) faixa = n;
-    else parou = true;
-  }
-  return { faixa, inconsistente };
-}
-
 // Captura do resumo do raciocínio: a versão pede, mas dá para desligar por env
 // sem deploy (AVALIACAO_V25_REASONING=0) — é o interruptor para medir se ela
 // pesa no billing ou no rate limit. Nota: a RESERVA de TPM não muda com ela,
@@ -748,68 +794,223 @@ function capturaLigada(cfg) {
   return !!(cfg && cfg.capturaReasoning);
 }
 
-// Etiqueta que o sintetizador lê no início de cada análise. Sai SÓ da faixa —
-// completa/incompleta não a muda. É escrita por código: o nó nunca a vê, então
-// não pode escolher o tom da própria análise. Ver sintetizador-v31.md.
-const ETIQUETA_POR_FAIXA = { 1: 'erro', 2: 'clichê', 3: 'potente', 4: 'preciso', 5: 'excepcional' };
+// --- v34: cinco qualidades por critério ------------------------------------
+//
+// A régua nova não tem trava, faixa nem realização. Cada nó situa o trabalho do
+// aluno em CINCO qualidades independentes, escolhendo entre três descrições em
+// cada uma, e a nota do critério é a soma delas. As qualidades estão na ordem em
+// que o prompt as apresenta — que é a ordem em que o nó deve escrevê-las e a
+// ordem em que elas vão ao sintetizador.
+const QUALIDADES_V34 = [
+  { chave: 'integridade', rotulo: 'Integridade' },
+  { chave: 'autoria', rotulo: 'Autoria' },
+  { chave: 'potencia', rotulo: 'Potência' },
+  { chave: 'calibracao', rotulo: 'Calibração' },
+  { chave: 'excepcionalidade', rotulo: 'Excepcionalidade' },
+];
 
-// Saída do nó: uma linha `Fn abre` por trava e uma `Fn realizada` por faixa
-// aberta (mais a da F1 quando a trava da F2 não abre), com a ANÁLISE no FIM.
+// O MAPA. É o único lugar do sistema onde ele existe, e é decisão de projeto que
+// ele não vaze para o prompt em forma nenhuma: sem número à vista, o modelo não
+// tem alvo a mirar. Se um dia isto aparecer num .md, a régua deixou de medir o
+// que dizia medir.
+const PONTOS_POR_QUALIDADE = { plena: 2, parcial: 1, ausente: 0 };
+
+// Rótulo do modelo → chave interna. Sem acento e em minúscula dos dois lados,
+// porque `Potencia:` e `Calibracao:` chegam assim com alguma frequência e
+// recusar a linha por causa de um til seria perder o critério inteiro.
+function normalizaRotulo(str) {
+  return String(str || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+}
+const QUALIDADE_POR_ROTULO = new Map(QUALIDADES_V34.map((q) => [normalizaRotulo(q.rotulo), q.chave]));
+
+// Uma linha de qualidade, como fonte de regex. Vem em duas peças porque ela é
+// usada de dois jeitos: ancorada em início de linha (com a flag `m`) para varrer
+// a saída, e precedida de `\n` explícito no lookahead que fecha a análise —
+// onde a flag `m` não pode entrar, senão o `$` do fim cortaria uma análise de
+// mais de uma linha. Tolera bullet, negrito e espaço sobrando: é o que muda
+// entre uma saída limpa e uma enfeitada.
+const RE_QUALIDADE_CORPO = '[^\\S\\n]*(?:[-*\u2022]\\s*)?\\**\\s*(\\p{L}+)\\s*\\**\\s*:\\s*\\**\\s*(plena|parcial|ausente)\\b';
+const RE_LINHA_QUALIDADE = '^' + RE_QUALIDADE_CORPO;
+
+// Saída do nó do v34: cinco linhas nomeadas + a ANÁLISE.
 //
-// Conviviam aqui outros dois parsers, um por formato de saída: o do v25 (o nó
-// escrevia a NOTA direto) e o do v28 (`F3: passa`, com CONFIANÇA). Saíram com
-// as versões; sobrou este, que é o do v29.
+//   Integridade: <plena|parcial|ausente>
+//   ...
+//   ANÁLISE: <uma a três frases>
 //
-// O nó responde as quatro travas como perguntas independentes e não sabe onde
-// vai parar — por isso responde a realização de todas as faixas que abriu. Só a
-// realização da faixa DERIVADA conta; as outras são descartadas aqui mesmo e não
-// chegam a ser persistidas. Se o nó soubesse qual delas contaria, saberia a nota
-// e poderia preencher as travas de trás para frente.
-function parseSaidaDoNo(text) {
+// LÊ POR NOME, e é esse o ponto. Os três valores possíveis se repetem entre as
+// cinco qualidades, então posição não identifica nada: uma linha faltando ou
+// fora de ordem deslocaria todas as seguintes em silêncio, e a run sairia com
+// nota errada sem nada acusar. Ordem trocada, por isso, não é erro — o nome
+// resolve.
+//
+// Linha FALTANDO, ao contrário, é erro explícito: o critério fica sem nota e sai
+// da conta, marcado. Não existe aqui o valor assumido que a régua de travas
+// tinha (lá a realização ímpar precisava ser afirmada, e a omissão valia
+// `completa`); nas qualidades não há valor padrão defensável — assumir `parcial`
+// inventaria um ponto e assumir `ausente` puniria um defeito de formato.
+function parseSaidaDoNoQualidades(text) {
   const t = String(text || '');
 
-  const travas = {};
-  const realizadas = {};
-  for (const n of [1, 2, 3, 4, 5]) {
-    if (n >= 2) {
-      const abre = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s+abre\\s*:\\s*(sim|n[ãa]o)`, 'im'));
-      travas[n] = abre ? /^sim$/i.test(abre[1]) : null;
+  const qualidades = {};
+  const linhas = {};
+  // Uma passada pelas linhas, casando `Rótulo: valor` com tolerância a bullet,
+  // negrito e espaço — o que muda entre uma saída limpa e uma enfeitada.
+  const re = new RegExp(RE_LINHA_QUALIDADE, 'gimu');
+  let m;
+  while ((m = re.exec(t))) {
+    const chave = QUALIDADE_POR_ROTULO.get(normalizaRotulo(m[1]));
+    // Repetição: vale a PRIMEIRA. O nó que escreve a mesma qualidade duas vezes
+    // já está fora do contrato, e trocar por cima faria a última linha (a mais
+    // provável de ser um resumo solto) decidir a nota.
+    if (chave && qualidades[chave] === undefined) {
+      qualidades[chave] = m[2].toLowerCase();
+      linhas[chave] = m[0].trim();
     }
-    const real = t.match(new RegExp(`^[^\\S\\n]*F${n}\\s+realizada\\s*:\\s*(completa|incompleta)`, 'im'));
-    realizadas[n] = real ? real[1].toLowerCase() : null;
   }
 
-  const { faixa, inconsistente } = derivarFaixa(travas);
-  // Realização ausente vale `completa`: a ímpar tem de ser afirmada, nunca
-  // acontecer por omissão. Vale inclusive na F1, onde completa é a nota maior.
-  const realizacao = faixa == null ? null : realizadas[faixa];
-  const nota = faixa == null ? null : NOTAS_POR_FAIXA[faixa][realizacao === 'incompleta' ? 1 : 0];
+  const faltantes = QUALIDADES_V34.filter((q) => qualidades[q.chave] === undefined).map((q) => q.rotulo);
+  // Soma das cinco: 0 a 10. Sem as cinco não há nota — nem soma parcial, que
+  // seria uma nota baixa fingindo de avaliação.
+  const nota = faltantes.length ? null
+    : QUALIDADES_V34.reduce((acc, q) => acc + PONTOS_POR_QUALIDADE[qualidades[q.chave]], 0);
 
-  // A ANÁLISE vem por último no formato. Se ela aparecer ANTES da primeira
-  // linha de trava, a prosa ancorou as respostas — é o que o caller retenta.
-  const idxAnalise = t.search(/^[^\S\n]*AN[ÁA]LISE\s*:/im);
-  const idxPrimeiraTrava = t.search(/^[^\S\n]*F[1-5]\s+(?:abre|realizada)\s*:/im);
-  const analiseForaDeOrdem = idxAnalise !== -1 && idxPrimeiraTrava !== -1 && idxAnalise < idxPrimeiraTrava;
+  // Mesma vigilância da régua anterior: a análise é o ÚLTIMO campo do formato,
+  // e se ela vier antes das qualidades a prosa pode ter ancorado as escolhas.
+  const idxAnalise = t.search(/^[^\S\n]*\**\s*AN[ÁA]LISE\s*\**\s*:/im);
+  const idxPrimeira = t.search(new RegExp(RE_LINHA_QUALIDADE, 'imu'));
+  const analiseForaDeOrdem = idxAnalise !== -1 && idxPrimeira !== -1 && idxAnalise < idxPrimeira;
 
-  const anaM = t.match(/AN[ÁA]LISE\s*:\s*([\s\S]*?)(?=\n[^\S\n]*F[1-5]\s+(?:abre|realizada)\s*:|$)/i);
-  const analise = anaM ? anaM[1].trim() : '';
+  // A análise vai até o fim, ou até a próxima linha de qualidade quando o nó
+  // escreveu fora de ordem — assim ela não engole as escolhas que vierem depois.
+  const anaM = t.match(new RegExp(`AN[\u00c1A]LISE\\s*\\**\\s*:\\s*([\\s\\S]*?)(?=\\n${RE_QUALIDADE_CORPO}|$)`, 'iu'));
+  const analise = anaM ? anaM[1].trim().replace(/^\**\s*/, '') : '';
 
   return {
     nota,
     analise,
-    travas,
-    faixa,
-    realizacao,
-    inconsistente,
+    qualidades,
+    // As cinco linhas como o nó as escreveu, para o supervisor conferir o que
+    // chegou antes da normalização.
+    qualidadesLinhas: linhas,
+    faltantes,
     analiseForaDeOrdem,
-    etiqueta: faixa == null ? null : ETIQUETA_POR_FAIXA[faixa],
   };
+}
+
+// As cinco linhas no formato que vai ao sintetizador: nome canônico e valor, na
+// ordem do prompt. O código não escolhe nem resume nada aqui — não existe mais
+// etiqueta única derivada de faixa, e quem conhece o significado das cinco
+// qualidades e das três posições é o sintetizador, que decide o tom com elas.
+function linhasDasQualidades(qualidades) {
+  return QUALIDADES_V34
+    .filter((q) => qualidades && qualidades[q.chave])
+    .map((q) => `${q.rotulo}: ${qualidades[q.chave]}`);
+}
+
+// --- v34-duelo: dois alunos na mesma chamada -------------------------------
+//
+// O nó comparativo lê os DOIS logs e responde as cinco qualidades para cada
+// aluno, mais uma análise que fala dos dois. É a única entrada do v34 em que uma
+// chamada produz duas notas.
+//
+// Por que o nó vê os dois logs em vez de rodarmos a régua individual duas vezes:
+// o que o duelo entrega aos alunos é o TEXTO COMPARATIVO, e ele só existe se
+// alguém tiver lido as duas condutas contra o mesmo material. Rodar duas
+// avaliações cegas daria duas notas comparáveis e nenhuma comparação.
+//
+// O preço disso é conhecido e está no prompt: um nó que vê os dois logs pode
+// deixar a leitura de um contaminar a do outro (o clássico é puxar as escolhas
+// de um para baixo porque o outro brilhou no mesmo momento). O prompt do nó
+// carrega a cláusula que barra isso; o código não tem como conferir.
+//
+// Formato da saída, por critério:
+//
+//   A · Integridade: plena
+//   ... (as cinco de A)
+//   B · Integridade: parcial
+//   ... (as cinco de B)
+//   ANÁLISE: <comparativa>
+//
+// Mesma leitura POR NOME do parser individual, com a letra do aluno na frente.
+// Posição não identifica nada aqui tampouco: os três valores se repetem entre as
+// dez linhas, e uma linha faltando deslocaria todas as seguintes em silêncio.
+const RE_LINHA_QUALIDADE_LADO = '^[^\\S\\n]*(?:[-*\u2022]\\s*)?\\**\\s*(?:Aluno\\s+)?([AB])\\s*\\**\\s*[\u00b7\u2013\u2014:.)\\-]\\s*\\**\\s*(\\p{L}+)\\s*\\**\\s*:\\s*\\**\\s*(plena|parcial|ausente)\\b';
+
+// Saída do nó comparativo: as cinco qualidades de cada lado + a ANÁLISE.
+//
+// Devolve `notas` e `qualidades` indexados pela letra do aluno, e `faltantes`
+// com os pares lado-qualidade que não vieram. A regra de invalidação é a mesma
+// da régua individual, aplicada POR LADO: sem as cinco de um aluno não há soma
+// para ele, e aquele critério sai da nota DELE — o outro lado, que veio
+// completo, continua contando. Somar as que chegaram seria uma nota baixa
+// fingindo de avaliação; derrubar os dois lados puniria um aluno pelo defeito de
+// formato da resposta sobre o outro.
+function parseSaidaDoNoComparativa(text, lados = ['A', 'B']) {
+  const t = String(text || '');
+
+  const qualidades = {};
+  const qualidadesLinhas = {};
+  for (const lado of lados) {
+    qualidades[lado] = {};
+    qualidadesLinhas[lado] = {};
+  }
+
+  const re = new RegExp(RE_LINHA_QUALIDADE_LADO, 'gimu');
+  let m;
+  while ((m = re.exec(t))) {
+    const lado = m[1].toUpperCase();
+    if (!qualidades[lado]) continue; // letra fora dos lados desta versão
+    const chave = QUALIDADE_POR_ROTULO.get(normalizaRotulo(m[2]));
+    // Repetição: vale a PRIMEIRA, pelo mesmo motivo da régua individual.
+    if (chave && qualidades[lado][chave] === undefined) {
+      qualidades[lado][chave] = m[3].toLowerCase();
+      qualidadesLinhas[lado][chave] = m[0].trim();
+    }
+  }
+
+  const faltantes = [];
+  const notas = {};
+  for (const lado of lados) {
+    const faltam = QUALIDADES_V34.filter((q) => qualidades[lado][q.chave] === undefined).map((q) => q.rotulo);
+    if (faltam.length) faltantes.push(...faltam.map((r) => `${lado} · ${r}`));
+    notas[lado] = faltam.length ? null
+      : QUALIDADES_V34.reduce((acc, q) => acc + PONTOS_POR_QUALIDADE[qualidades[lado][q.chave]], 0);
+  }
+
+  // Mesma vigilância da régua individual: a análise é o ÚLTIMO campo, e vir
+  // antes das escolhas sugere que a prosa ancorou as dez linhas.
+  const idxAnalise = t.search(/^[^\S\n]*\**\s*AN[ÁA]LISE\s*\**\s*:/im);
+  const idxPrimeira = t.search(new RegExp(RE_LINHA_QUALIDADE_LADO, 'imu'));
+  const analiseForaDeOrdem = idxAnalise !== -1 && idxPrimeira !== -1 && idxAnalise < idxPrimeira;
+
+  const anaM = t.match(new RegExp(`AN[\u00c1A]LISE\\s*\\**\\s*:\\s*([\\s\\S]*?)(?=\\n${RE_LINHA_QUALIDADE_LADO.slice(1)}|$)`, 'iu'));
+  const analise = anaM ? anaM[1].trim().replace(/^\**\s*/, '') : '';
+
+  return { notas, qualidades, qualidadesLinhas, faltantes, analise, analiseForaDeOrdem };
+}
+
+// Parser do nó pela versão: comparativo no duelo, individual nas outras duas.
+function parseSaidaDoNoDaVersao(text, cfg) {
+  const lados = ladosDe(cfg);
+  return lados ? parseSaidaDoNoComparativa(text, lados) : parseSaidaDoNoQualidades(text);
 }
 
 // Um nó: uma chamada, um critério. `developer` (bloco estático + caso) vem
 // pronto do caller — é idêntico em todos os nós, é justamente o prefixo que a
 // OpenAI cacheia, e montá-lo uma vez só evita refazer a concatenação grande a
 // cada nó. Ver buildDeveloper.
+//
+// O nó saiu com número? Uma nota na régua individual, ou a de qualquer um dos
+// dois lados no duelo. Serve para decidir se vale retentar por análise ausente:
+// quando não houve nota nenhuma o formato já quebrou antes, e a retentativa das
+// qualidades é que cobre esse caso.
+function temAlgumaNota(parsed) {
+  if (!parsed) return false;
+  if (Number.isFinite(parsed.nota)) return true;
+  return Object.values(parsed.notas || {}).some((n) => Number.isFinite(n));
+}
+
 async function runNode(openai, assets, developer, criterio, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = capturaLigada(assets.cfg)) {
   const user = fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao);
 
@@ -824,24 +1025,39 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   for (let tentativa = 0; ; tentativa++) {
     out = await gptComplete(openai, developer, user, V25_MAX_TOKENS, model, effort, provider, `nó ${criterio.num}`, captura);
     usages.push(out.usage);
-    parsed = parseSaidaDoNo(out.text);
+    parsed = parseSaidaDoNoDaVersao(out.text, assets.cfg);
 
-    // Sem ANÁLISE, mas com faixa: o nó pontuou e parou antes do último campo.
-    const semAnalise = !parsed.analise && parsed.faixa != null;
+    // Linha de qualidade faltando é saída fora do contrato — aquele critério
+    // fica SEM nota, e sem nota ele sai da conta. Vale uma retentativa pelo
+    // mesmo motivo da análise ausente: aqui não há o que interpretar, o formato
+    // pede as cinco linhas (dez no duelo) e faltar uma é defeito objetivo.
+    // Insistindo, o critério fica de fora, marcado na tela do supervisor.
+    if (parsed.faltantes && parsed.faltantes.length) {
+      if (tentativa < retriesDeQualidades()) {
+        retentativas++;
+        console.warn(`[v34-nó] nó ${criterio.num} (${criterio.nome}) voltou sem ${parsed.faltantes.join(', ')} — refazendo (${tentativa + 1}/${retriesDeQualidades()})`);
+        continue;
+      }
+      console.warn(`[v34-nó] nó ${criterio.num} (${criterio.nome}) segue sem ${parsed.faltantes.join(', ')}: fica fora da nota.`);
+      break;
+    }
+
+    // Sem ANÁLISE, mas com nota: o nó pontuou e parou antes do último campo.
+    const semAnalise = !parsed.analise && temAlgumaNota(parsed);
     if (semAnalise && tentativa < retriesDeAnalise()) {
       retentativas++;
-      console.warn(`[v29-nó] nó ${criterio.num} (${criterio.nome}) voltou sem ANÁLISE — refazendo (${tentativa + 1}/${retriesDeAnalise()})`);
+      console.warn(`[v34-nó] nó ${criterio.num} (${criterio.nome}) voltou sem ANÁLISE — refazendo (${tentativa + 1}/${retriesDeAnalise()})`);
       continue;
     }
     if (semAnalise) {
-      console.warn(`[v29-nó] nó ${criterio.num} (${criterio.nome}) segue sem ANÁLISE: conta na nota, fica fora do feedback do aluno.`);
+      console.warn(`[v34-nó] nó ${criterio.num} (${criterio.nome}) segue sem ANÁLISE: conta na nota, fica fora do feedback do aluno.`);
       break;
     }
 
     const teto = retriesDeOrdem();
     if (!parsed.analiseForaDeOrdem || tentativa >= teto) break;
     retentativas++;
-    console.warn(`[v25-ordem] nó ${criterio.num}: análise veio antes das travas — refazendo (${tentativa + 1}/${teto})`);
+    console.warn(`[v25-ordem] nó ${criterio.num}: análise veio antes das escolhas — refazendo (${tentativa + 1}/${teto})`);
   }
 
   return {
@@ -857,23 +1073,50 @@ async function runNode(openai, assets, developer, criterio, model = V25_MODEL, e
   };
 }
 
+// A nota de um critério, pelo lado. `lado` null é a régua individual (`r.nota`);
+// no duelo a nota mora em `r.notas.A` / `r.notas.B`.
+function notaDoCriterio(r, lado) {
+  if (!r) return null;
+  const n = lado ? (r.notas && r.notas[lado]) : r.nota;
+  return Number.isFinite(n) ? n : null;
+}
+
 // Um critério entra na nota quando tem nota — e só isso. (No v25 a CONFIANÇA
 // `baixa` também o tirava da conta; o campo deixou de existir na régua nova, e
 // com ele a exceção.) Nó fora de formato não devolve número e fica de fora,
 // marcado na tela do supervisor.
-function entraNaNota(r) {
-  return Number.isFinite(r.nota);
+//
+// No duelo a pergunta é por LADO: um critério pode contar para um aluno e não
+// para o outro, quando o nó devolveu as cinco qualidades de um e não as do
+// outro. Derrubar os dois puniria um aluno pelo defeito de formato da resposta
+// sobre o adversário.
+function entraNaNota(r, lado = null) {
+  return notaDoCriterio(r, lado) != null;
 }
 
-// Agregador determinístico. Pesos iguais por enquanto (parametrizáveis).
-// Normaliza a média (1–10) para 0–100.
-function aggregate(results, weights) {
+// Agregador determinístico. Pesos iguais por enquanto (parametrizáveis), e é
+// aqui que a média por critério vira a nota da escola: média × 10.
+//
+// A nota de um critério é a soma de cinco qualidades que podem ser zero, então
+// vai de 0 a 10 por critério e de 0 a 100 no fim.
+//
+// O DENOMINADOR é o número de critérios que devolveram nota legível, e não uma
+// constante: a régua não exclui critério por juízo, mas um nó cuja saída não deu
+// para ler não tem valor a somar. Contá-lo como zero transformaria um defeito de
+// formato em nota baixa; `considerados` diz sobre quantos a média foi feita, e a
+// tela mostra quem ficou de fora.
+//
+// No duelo isto roda uma vez por lado, e é por isso que as duas notas seguem
+// comparáveis mesmo quando um critério sai da conta de um só dos dois: as duas
+// são médias normalizadas, não somas.
+function aggregate(results, weights, lado = null) {
   let ws = 0;
   let wt = 0;
   results.forEach((r, i) => {
-    if (entraNaNota(r)) {
+    const nota = notaDoCriterio(r, lado);
+    if (nota != null) {
       const w = weights[i] != null ? weights[i] : 1;
-      ws += r.nota * w;
+      ws += nota * w;
       wt += w;
     }
   });
@@ -882,28 +1125,48 @@ function aggregate(results, weights) {
   return { notaFinal: Math.round(media * 10), media, considerados: wt };
 }
 
-// Monta o bloco {{ANALISES}} do sintetizador: para cada critério que entra na
-// nota, na ordem dos critérios, cabeçalho (nº + nome) + linha curta + a prosa do
-// nó. Sem NOTA (a valência já vem na etiqueta e na 1ª palavra da prosa). Vazio
-// se nenhum. Critério sem prosa (nó fora de formato) não entra.
-function buildAnalises(results) {
+// Monta o bloco {{ANALISES}} do sintetizador: um bloco por critério, na ordem
+// dos critérios, com cabeçalho (nº + nome) e a linha curta — o sintetizador não
+// conhece o vocabulário dos critérios, e é a linha curta que diz o que aquela
+// dimensão media. Vazio se nenhum; critério sem prosa (nó fora de formato) não
+// entra. Sem NOTA em versão nenhuma: o sintetizador escreve a partir do que
+// aconteceu clinicamente, não de números.
+//
+// O miolo são as CINCO linhas, uma por qualidade, como o nó as escolheu, e
+// depois a análise. O código não resume nada: quem conhece o significado das
+// cinco qualidades e das três posições é o sintetizador, e é ele quem decide o
+// tom. (A régua de travas colava aqui uma etiqueta derivada da faixa; com a
+// faixa fora, não há o que derivar.)
+//
+// No duelo o bloco traz os dois conjuntos de cinco, um por aluno, antes da
+// análise comparativa — que é uma só e fala dos dois.
+function buildAnalises(results, cfg) {
+  const lados = ladosDe(cfg);
   const blocks = results
     .filter((r) => r.analise)
     .sort((a, b) => a.num - b.num)
     .map((r) => {
-      // A etiqueta ([preciso], [clichê]...) é colada por CÓDIGO a partir da
-      // faixa. O nó não a escreve nem a vê, então não escolhe o tom com que a
-      // própria análise chega ao sintetizador.
-      const etiqueta = r.etiqueta ? `[${r.etiqueta}] ` : '';
-      return `## ${r.num} · ${r.nome}\n${r.linhaCurta}\n${etiqueta}${r.analise}`;
+      const cabeca = `## ${r.num} · ${r.nome}\n${r.linhaCurta}`;
+      if (!lados) return `${cabeca}\n${linhasDasQualidades(r.qualidades).join('\n')}\n${r.analise}`;
+      const porLado = lados
+        .map((lado) => `Aluno ${lado} — ${linhasDasQualidades((r.qualidades || {})[lado]).join(' · ')}`)
+        .join('\n');
+      return `${cabeca}\n${porLado}\n${r.analise}`;
     });
   return blocks.join('\n\n');
 }
 
 // Sintetizador: 1 chamada. developer = bloco estático (cacheável entre
-// avaliações); user = log + análises. Devolve só o corpo (sem nota, sem saudação).
-async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = false, extras = {}) {
-  let user = fill(fill(assets.synthVariable, '{{LOG}}', log), '{{ANALISES}}', analises);
+// avaliações); user = o(s) log(s) + as análises. Devolve só o corpo (sem nota,
+// sem saudação).
+//
+// Os slots de LOG saem dos materiais do caso já normalizados — um nas versões
+// individuais, os dois logs e os dois nomes no duelo.
+async function runSynthesizer(openai, assets, materiais, analises, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', captura = false, extras = {}) {
+  let user = fill(assets.synthVariable, SLOT_MATERIAL, analises);
+  for (const slot of slotsLogDe(assets.cfg)) {
+    user = fill(user, slot, (materiais && materiais[slot]) || AUSENTE_POR_SLOT[slot] || '(não informado)');
+  }
   // Slots próprios da versão (modo progressão). O que a versão declara e o
   // caller não mandou entra com a frase de ausência, nunca cru.
   for (const slot of slotsSintetizadorDe(assets.cfg)) {
@@ -914,14 +1177,19 @@ async function runSynthesizer(openai, assets, log, analises, model = V25_MODEL, 
   return { corpo: (text || '').trim(), reasoning: reasoning || '', usage };
 }
 
-// Montagem final (código): nota + saudação da versão + corpo do sintetizador.
-function montarFeedback(notaFinal, corpo, saudacao = SAUDACAO) {
-  return `Nota: ${notaFinal}/100\n\n${saudacao}\n\n${corpo}`;
+// Montagem final (código): cabeçalho de nota + saudação + corpo do sintetizador.
+//
+// `nota` é uma string já pronta, e não um número, porque o duelo tem DUAS notas
+// e nenhum "Nota: X/100" faz sentido lá. Passar '' tira o cabeçalho inteiro.
+// Saudação vazia (o duelo não tem, o texto dele é comparativo e em terceira
+// pessoa) também não deixa linha em branco sobrando.
+//
+// A produção monta o texto do aluno como SAUDACAO + corpo, sem o cabeçalho de
+// nota: lá a nota aparece como selo na tela.
+function montarFeedback(nota, corpo, saudacao = SAUDACAO) {
+  const cabecalho = nota === '' || nota == null ? '' : (typeof nota === 'number' ? `Nota: ${nota}/100` : String(nota));
+  return [cabecalho, saudacao, corpo].filter((p) => p && String(p).trim()).join('\n\n');
 }
-
-// (A saudação é uma só — ver SAUDACAO no topo. A produção monta o texto do
-// aluno como SAUDACAO + corpo, sem a linha "Nota: X/100" do montarFeedback: lá
-// a nota aparece como selo na tela.)
 
 // --- Nó da MISSÃO (modo progressão) ---------------------------------------
 //
@@ -931,7 +1199,7 @@ function montarFeedback(notaFinal, corpo, saudacao = SAUDACAO) {
 // feedback decidia a recompensa na mesma passada — dois trabalhos numa cabeça.
 // Aqui o veredito é de quem só olha a missão, e o sintetizador nem o vê.
 //
-// Formato (ver missao-v29-progressao.md):
+// Formato (ver missao-v34-progressao.md):
 //   CUMPRIDA: <sim|não>
 //   JUSTIFICATIVA: <uma a duas frases>
 function parseSaidaMissao(text) {
@@ -1043,13 +1311,13 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
 }
 
 // Monta o .txt do raciocínio que o supervisor baixa: cabeçalho com o que a run
-// foi, um bloco por nó (com a nota e a confiança ao lado, que é o que dá sentido
-// ao resumo) e o do sintetizador no fim. Puro — recebe o resultado, devolve
-// texto — para o servidor só gravar e a rota só servir.
+// foi, um bloco por nó (com as cinco escolhas e a nota ao lado, que é o que dá
+// sentido ao resumo) e o do sintetizador no fim. Puro — recebe o resultado,
+// devolve texto — para o servidor só gravar e a rota só servir.
 //
 // Devolve '' quando não há resumo nenhum: aí não existe arquivo a guardar nem
 // botão a mostrar (batch, modelo "mini", GLM com thinking desligado).
-function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, casoNome, notaFinal, partes, reasoningSintetizador, criadoEm }) {
+function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, casoNome, notaFinal, comparativo, partes, reasoningSintetizador, criadoEm }) {
   const blocos = (partes || []).filter((p) => p.reasoning && p.reasoning.trim());
   if (!blocos.length && !(reasoningSintetizador || '').trim()) return '';
 
@@ -1060,6 +1328,11 @@ function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, caso
   L.push(`Modelo: ${model || '—'} · effort: ${effort || '—'}${batch ? ' · batch' : ''}`);
   if (casoNome) L.push(`Caso: ${casoNome}`);
   if (notaFinal != null) L.push(`Nota final: ${notaFinal}/100`);
+  // Duelo: duas notas e o vencedor no lugar da nota única.
+  if (comparativo) {
+    L.push(`Notas: ${Object.entries(comparativo.notas).map(([l, n]) => `Aluno ${l} ${n == null ? '—' : `${n}/100`}`).join(' · ')}`);
+    L.push(`Vencedor: ${comparativo.vencedor === 'empate' ? 'empate' : comparativo.vencedor ? `Aluno ${comparativo.vencedor}` : 'indefinido'}`);
+  }
   if (criadoEm) L.push(`Gerado em: ${criadoEm}`);
   L.push('');
   L.push('O que é este arquivo: o RESUMO do raciocínio de cada nó, do jeito que o');
@@ -1071,19 +1344,29 @@ function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, caso
   for (const p of blocos) {
     L.push('─'.repeat(52));
     L.push(`${p.num} · ${p.nome}`);
-    const meta = [
-      Number.isFinite(p.nota) ? `nota ${p.nota}/10` : 'sem nota',
-      p.etiqueta ? `etiqueta ${p.etiqueta}` : null,
-      p.incluido ? 'na nota final' : 'fora da nota final',
-    ].filter(Boolean);
-    L.push(`[${meta.join(' · ')}]`);
-    // Como a nota foi derivada — quais travas abriram e onde parou.
-    if (p.travas) {
-      const linha = [2, 3, 4, 5].map((n) => `F${n} ${p.travas[n] === true ? '✓' : p.travas[n] === false ? '✗' : '?'}`).join('  ');
-      L.push(`[${linha}  →  faixa F${p.faixa} · realização ${p.realizacao || 'não declarada (assumida completa)'}]`);
-      if (p.travasInconsistentes) L.push('[⚠ trava aberta acima de uma fechada — descartada; o código parou na primeira fechada]');
-      if (p.analiseForaDeOrdem) L.push('[⚠ a análise veio antes das travas mesmo depois da retentativa]');
+    // As cinco escolhas que somaram a nota (dez no duelo, cinco por aluno). É o
+    // que faz o resumo do raciocínio ser legível — sem elas o supervisor lê o
+    // pensamento sem saber onde ele parou.
+    if (p.notas) {
+      for (const [lado, nota] of Object.entries(p.notas)) {
+        const dentro = p.incluido && typeof p.incluido === 'object' ? p.incluido[lado] : null;
+        const meta = [
+          Number.isFinite(nota) ? `nota ${nota}/10` : 'sem nota',
+          dentro === false ? 'fora da nota final' : 'na nota final',
+        ];
+        L.push(`[Aluno ${lado} · ${meta.join(' · ')}]`);
+        L.push(`[${linhasDasQualidades((p.qualidades || {})[lado]).join('  ·  ')}]`);
+      }
+    } else {
+      const meta = [
+        Number.isFinite(p.nota) ? `nota ${p.nota}/10` : 'sem nota',
+        p.incluido ? 'na nota final' : 'fora da nota final',
+      ];
+      L.push(`[${meta.join(' · ')}]`);
+      if (p.qualidades) L.push(`[${linhasDasQualidades(p.qualidades).join('  ·  ')}]`);
     }
+    if (p.qualidadesFaltantes) L.push(`[⚠ o nó não devolveu ${p.qualidadesFaltantes.join(', ')} — sem as cinco não há soma, e aquele lado ficou fora da nota]`);
+    if (p.analiseForaDeOrdem) L.push('[⚠ a análise veio antes das escolhas]');
     L.push('');
     L.push(p.reasoning.trim());
     L.push('');
@@ -1091,7 +1374,7 @@ function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, caso
 
   if ((reasoningSintetizador || '').trim()) {
     L.push('─'.repeat(52));
-    L.push('Sintetizador (quem escreve o feedback do aluno)');
+    L.push('Sintetizador (quem escreve o feedback que o aluno lê)');
     L.push('');
     L.push(reasoningSintetizador.trim());
     L.push('');
@@ -1136,6 +1419,12 @@ const AUSENTE_POR_SLOT = {
   '{{MISSAO}}': '(não há missão ativa neste atendimento)',
   '{{MISSAO_VEREDITO}}': '(não há missão ativa neste atendimento)',
   '{{LOG}}': '(sem mensagens)',
+  // Duelo: o nome de cada aluno e o log dele. O nome cai num rótulo neutro
+  // quando não vem — o prompt fala de "Aluno A" e "Aluno B" de qualquer jeito.
+  '{{ALUNO_A}}': 'Aluno A',
+  '{{ALUNO_B}}': 'Aluno B',
+  '{{LOG_A}}': '(sem mensagens)',
+  '{{LOG_B}}': '(sem mensagens)',
 };
 
 // Prefixo cacheável de um caso: bloco estático (A) + os materiais do caso (B).
@@ -1157,7 +1446,7 @@ async function runAvaliacaoIndependente({
   // /api/evaluate — o aluno vê uma barra, não "critério 7 de 15").
   onProgress,
   // `false` desliga a captura do resumo de raciocínio mesmo nas versões que a
-  // pedem. A produção desliga: são 15 resumos por sessão avaliada, que ninguém
+  // pedem. A produção desliga: são oito resumos por sessão avaliada, que ninguém
   // leria, e ligar troca o transporte das chamadas (Responses em vez de
   // chat.completions) sem mudar nada do que o aluno ou o supervisor recebem.
   capturarReasoning,
@@ -1167,9 +1456,9 @@ async function runAvaliacaoIndependente({
   const weights = criteria.map(() => 1);
   const captura = capturarReasoning === undefined ? capturaLigada(assets.cfg) : !!capturarReasoning;
   const materiaisCaso = normalizeMateriais(assets, { bloco1, log, materiais });
-  const logDoCaso = materiaisCaso['{{LOG}}'];
 
-  // Progresso: os nós dos critérios + o da missão (quando há) + o sintetizador.
+  // Progresso: uma unidade por nó + a da missão (quando há) + a do sintetizador.
+  // A barra do aluno não revela a aritmética; ela só precisa não pular.
   const totalPassos = criteria.length + (assets.missao ? 1 : 0) + 1;
   let feitos = 0;
   const avancar = () => {
@@ -1191,6 +1480,7 @@ async function runAvaliacaoIndependente({
   // nova, e na OpenAI o que estoura é o TPM. Lá o lote é dimensionado pelo peso
   // REAL desta run (prompt + Bloco 1 + log + teto de saída), porque o mesmo nó
   // pesa muito diferente com um log curto ou com uma sessão inteira colada.
+  //
   let conc;
   if (provider === 'glm') {
     conc = GLM_V25_CONCURRENCY;
@@ -1199,7 +1489,7 @@ async function runAvaliacaoIndependente({
     const reserva = estimarTokens(developer) + estimarTokens(assets.blockC)
       + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
     conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
-    console.log(`[v25-fanout] ${criteria.length} nós · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
+    console.log(`[v25-fanout] ${criteria.length} nó(s) · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
   }
   // O nó da MISSÃO entra no mesmo fan-out dos critérios: ele não depende de
   // nenhum deles, e serializá-lo só somaria latência à espera do aluno.
@@ -1212,7 +1502,7 @@ async function runAvaliacaoIndependente({
   const results = [first, ...rest].sort((a, b) => a.num - b.num);
 
   const out = await finishPipeline({
-    openai, assets, log: logDoCaso, results, weights, model, effort, provider, batch: false, evaluatorId,
+    openai, assets, results, weights, model, effort, provider, batch: false, evaluatorId,
     capturaSint: captura, missao, materiais: materiaisCaso,
   });
   avancar(); // sintetizador
@@ -1221,44 +1511,73 @@ async function runAvaliacaoIndependente({
 
 // Passo comum do fim do pipeline (síncrono e batch): agregador → partes →
 // sintetizador → montagem → instrumentação.
-async function finishPipeline({ openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId, capturaSint = false, missao = null, materiais = null }) {
+async function finishPipeline({ openai, assets, results, weights, model, effort, provider, batch, evaluatorId, capturaSint = false, missao = null, materiais = null }) {
   const { cfg, version } = assets;
+  const lados = ladosDe(cfg);
 
-  const { notaFinal, considerados } = aggregate(results, weights);
+  // Individual: uma nota. Duelo: uma por lado, mais o vencedor, que é só a
+  // comparação das duas — o modelo não o declara em lugar nenhum, de propósito.
+  let notaFinal = null;
+  let considerados = 0;
+  let comparativo = null;
+  if (lados) {
+    const porLado = {};
+    for (const lado of lados) porLado[lado] = aggregate(results, weights, lado);
+    const notas = {};
+    const consideradosPorLado = {};
+    for (const lado of lados) {
+      notas[lado] = porLado[lado].notaFinal;
+      consideradosPorLado[lado] = porLado[lado].considerados;
+    }
+    // Sem as duas notas não há duelo a decidir: o caller trata `vencedor: null`
+    // como "não foi possível avaliar" e devolve o duelo para pendente.
+    const [a, b] = lados;
+    const vencedor = (notas[a] == null || notas[b] == null) ? null
+      : notas[a] > notas[b] ? a : notas[b] > notas[a] ? b : 'empate';
+    comparativo = { notas, considerados: consideradosPorLado, vencedor };
+    considerados = Math.max(...Object.values(consideradosPorLado));
+  } else {
+    const ag = aggregate(results, weights);
+    notaFinal = ag.notaFinal;
+    considerados = ag.considerados;
+  }
 
   const partes = results.map((r) => ({
     num: r.num,
     nome: r.nome,
     linhaCurta: r.linhaCurta,
     analise: r.analise,
-    nota: r.nota,
-    // Como a nota foi derivada. Deixa o supervisor ver ONDE o caso parou, que é
-    // a estatística que interessa — se a F3 está segurando ou se todo mundo
-    // chega à F4.
-    travas: r.travas || null,
-    faixa: r.faixa != null ? r.faixa : null,
-    realizacao: r.realizacao || null,
-    // Etiqueta derivada da faixa (a que o sintetizador lê) e o aviso de que a
-    // prosa veio antes das travas mesmo depois da retentativa.
-    etiqueta: r.etiqueta || null,
+    // Individual: a nota do critério. Duelo: `null` aqui, e as duas em `notas`.
+    nota: lados ? null : r.nota,
+    notas: lados ? (r.notas || null) : null,
+    // Os CINCO valores, e não só a soma. É o que permite reprocessar offline se
+    // a ponderação mudar (qualquer função futura tem de ser monótona, não
+    // depender do perfil do aluno e sair destes valores) e é onde vai entrar a
+    // complexidade de agregação depois. Guardar só a nota jogaria fora
+    // justamente a informação que a régua foi feita para produzir.
+    //
+    // No duelo é um mapa por lado: { A: {...cinco}, B: {...cinco} }.
+    qualidades: r.qualidades || null,
+    // Quais não vieram, quando o nó insistiu em sair do contrato. No duelo vêm
+    // rotuladas com o lado (`A · Potência`), que é o que diz de quem foi.
+    qualidadesFaltantes: (r.faltantes && r.faltantes.length) ? r.faltantes : null,
+    // A prosa veio antes das escolhas mesmo depois da retentativa.
     analiseForaDeOrdem: !!r.analiseForaDeOrdem,
-    // Trava aberta acima de uma fechada foi DESCARTADA pelo código. Sem a
-    // confiança, este é o sinal mais próximo que sobrou de "o nó titubeou aqui".
-    travasInconsistentes: !!r.inconsistente,
     // Fora da conta final (nó que não devolveu número). Aparece na tela do
-    // supervisor de qualquer jeito, marcado.
-    incluido: entraNaNota(r),
+    // supervisor de qualquer jeito, marcado. No duelo é por lado.
+    incluido: lados ? Object.fromEntries(lados.map((l) => [l, entraNaNota(r, l)])) : entraNaNota(r),
   }));
 
   // Sintetizador + feedback do aluno só fazem sentido com pelo menos um critério
   // avaliável. Caso degenerado (nenhum nó devolveu nota legível): só o
   // supervisor vê as partes; não há feedback de aluno a montar.
-  const analises = buildAnalises(results);
+  const analises = buildAnalises(results, cfg);
+  const temNota = lados ? Object.values(comparativo.notas).some((n) => n != null) : notaFinal != null;
   let corpoSintetizador = null;
   let feedbackAluno = null;
   let synthUsage = null;
   let synthReasoning = '';
-  if (notaFinal != null && analises) {
+  if (temNota && analises) {
     // Extras do sintetizador (modo progressão): o atendimento anterior, a
     // missão e o VEREDITO dela, que já foi decidido pelo nó da missão. O
     // sintetizador recebe o veredito como fato para não escrever uma prosa que
@@ -1271,11 +1590,16 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
     if (missao) {
       extras['{{MISSAO_VEREDITO}}'] = `${missao.cumprida ? 'CUMPRIDA' : 'NÃO CUMPRIDA'}${missao.justificativa ? ` — ${missao.justificativa}` : ''}`;
     }
-    const synth = await runSynthesizer(openai, assets, log, analises, model, effort, provider, capturaSint, extras);
+    const synth = await runSynthesizer(openai, assets, materiais, analises, model, effort, provider, capturaSint, extras);
     corpoSintetizador = synth.corpo;
     synthUsage = synth.usage;
     synthReasoning = synth.reasoning || '';
-    feedbackAluno = montarFeedback(notaFinal, corpoSintetizador, cfg.saudacao);
+    // No duelo são duas notas, e o cabeçalho de nota única não cabe: as duas
+    // aparecem lado a lado na tela do resultado.
+    const cabecalho = lados
+      ? lados.map((l) => `Aluno ${l}: ${comparativo.notas[l] == null ? '—' : `${comparativo.notas[l]}/100`}`).join(' · ')
+      : notaFinal;
+    feedbackAluno = montarFeedback(cabecalho, corpoSintetizador, cfg.saudacao);
   }
 
   // O nó da missão é uma chamada como as outras: entra na conta de custo junto
@@ -1289,17 +1613,20 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
   // de engordar o store que é lido inteiro a cada avaliação.
   const reasoningTxt = buildReasoningTxt({
     evaluatorLabel: evaluatorId || version,
-    version, model, effort, batch, casoNome: null, notaFinal,
+    version, model, effort, batch, casoNome: null, notaFinal, comparativo,
     partes: partes.map((p, i) => ({ ...p, reasoning: results[i] ? results[i].reasoning : '' })),
     reasoningSintetizador: synthReasoning,
     criadoEm: new Date().toISOString(),
   });
 
-  // `evaluator` é o id do avaliador no alternador (v28, v28-nota, ...) quando o
-  // caller o informa; sem ele, a própria versão do pipeline.
+  // `evaluator` é o id do avaliador no alternador quando o caller o informa;
+  // sem ele, a própria versão do pipeline.
   return {
     evaluator: evaluatorId || version, version, notaFinal, considerados, partes,
     corpoSintetizador, feedbackAluno, instrumentacao, reasoningTxt,
+    // Duelo: as duas notas e o vencedor. `null` nas versões individuais — quem
+    // lê distingue "não é duelo" de "deu empate".
+    comparativo,
     // Veredito da missão (só o modo progressão). `null` quando a versão não tem
     // nó de missão — quem lê distingue "não há missão" de "não foi cumprida".
     missao: missao ? { cumprida: !!missao.cumprida, legivel: !!missao.legivel, justificativa: missao.justificativa || '' } : null,
@@ -1313,13 +1640,15 @@ async function finishPipeline({ openai, assets, log, results, weights, model, ef
 function buildPipelineNodeRequests({ bloco1, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION }) {
   const assets = loadAssets(version);
   const developer = buildDeveloper(assets, normalizeMateriais(assets, { bloco1, log, materiais }));
+
   return assets.criteria.map((criterio) => ({
     num: criterio.num,
+    chave: String(criterio.num),
     body: buildChatBody({
       provider,
       model,
-      maxTokens: V25_MAX_TOKENS,
       effort,
+      maxTokens: V25_MAX_TOKENS,
       messages: [
         { role: 'developer', content: developer },
         { role: 'user', content: fill(assets.blockC, '{{CRITÉRIO}}', criterio.descricao) },
@@ -1330,24 +1659,29 @@ function buildPipelineNodeRequests({ bloco1, log, materiais, model = V25_MODEL, 
 
 // Finaliza a partir das saídas dos nós do batch. `nodeOutputs` = [{ num, text, usage }].
 // Roda o agregador, o sintetizador (síncrono, 1 chamada) e a instrumentação.
-async function finalizePipeline({ openai, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, nodeOutputs, batch = false, evaluatorId, missao = null }) {
+async function finalizePipeline({ openai, bloco1, log, materiais, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', version = DEFAULT_VERSION, nodeOutputs, batch = false, evaluatorId, missao = null }) {
   const assets = loadAssets(version);
   const weights = assets.criteria.map(() => 1);
+
   const byNum = new Map((nodeOutputs || []).map((o) => [o.num, o]));
-  const results = assets.criteria
-    .map((c) => {
-      const o = byNum.get(c.num) || { text: '', usage: null };
-      return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseSaidaDoNo(o.text), usage: o.usage };
-    })
-    .sort((a, b) => a.num - b.num);
+  const results = assets.criteria.map((c) => {
+    const o = byNum.get(c.num) || { text: '', usage: null };
+    return { num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, ...parseSaidaDoNoDaVersao(o.text, assets.cfg), usage: o.usage };
+  });
+  results.sort((a, b) => a.num - b.num);
 
   // `capturaSint: false` sempre: aqui os nós vieram da Batch API, que roda em
   // /v1/chat/completions e não devolve resumo de raciocínio. Capturar só o do
-  // sintetizador daria um arquivo manco (14 ou 15 nós em branco) e ainda trocaria
+  // sintetizador daria um arquivo manco (os oito nós em branco) e ainda trocaria
   // o transporte de uma run cujo motivo de existir é medir custo.
+  // As duas formas de chamada: `{ bloco1, log }` (o laboratório, que corrige um
+  // log colado) e `{ materiais }` (a produção, um slot por material). O
+  // normalizeMateriais aceita as duas e completa o que faltar com a frase de
+  // ausência — sem isto o sintetizador do batch receberia "(sem mensagens)" no
+  // lugar do log, e escreveria o feedback sobre o nada.
   return finishPipeline({
-    openai, assets, log, results, weights, model, effort, provider, batch, evaluatorId,
-    capturaSint: false, missao, materiais: materiais ? normalizeMateriais(assets, { materiais }) : null,
+    openai, assets, results, weights, model, effort, provider, batch, evaluatorId,
+    capturaSint: false, missao, materiais: normalizeMateriais(assets, { bloco1, log, materiais }),
   });
 }
 
@@ -1355,12 +1689,15 @@ module.exports = {
   // Execução do pipeline
   runAvaliacaoIndependente,
   buildChatBody,
-  // Versões (v29 e o modo progressão dele)
+  // Versões (v34 e as duas entradas dele)
   PIPELINE_VERSIONS,
   PIPELINE_VERSIONS_IDS,
   DEFAULT_VERSION,
   SAUDACAO,
+  ladosDe,
+  ehComparativa,
   slotsCasoDe,
+  slotsLogDe,
   slotsSintetizadorDe,
   normalizeMateriais,
   // Batch API (nós no lote; sintetizador roda síncrono no coletor)
@@ -1383,11 +1720,13 @@ module.exports = {
   // Exportados para teste
   loadAssets,
   parseCriteria,
-  parseSaidaDoNo,
+  parseSaidaDoNoQualidades,
+  parseSaidaDoNoComparativa,
+  parseSaidaDoNoDaVersao,
+  linhasDasQualidades,
+  QUALIDADES_V34,
+  PONTOS_POR_QUALIDADE,
   parseSaidaMissao,
-  derivarFaixa,
-  NOTAS_POR_FAIXA,
-  ETIQUETA_POR_FAIXA,
   aggregate,
   buildAnalises,
   montarFeedback,
