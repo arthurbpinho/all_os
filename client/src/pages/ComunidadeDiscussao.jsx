@@ -100,20 +100,23 @@ export default function ComunidadeDiscussao({ user }) {
 
   const { discussion: d, canPost, blockedReason, anonymous, canModerate } = dados;
   const souAutor = !!(user && d.author.userId && d.author.userId === user.id);
+  // Visitante (sessão aberta por um link de duelo) lê igual a quem não tem
+  // sessão nenhuma: o servidor o distingue, mas para ele o recado é o mesmo.
+  const soLeitura = anonymous || user?.role === 'visitor';
 
   return (
     <div className="comunidade comunidade-discussao">
       {/* Banner de quem chegou pelo link sem conta. É o convite ao cadastro
           combinado com o botão compartilhar — sem ele, o link compartilhado
           seria um beco sem saída. */}
-      {anonymous && (
+      {soLeitura && (
         <div className="comunidade-banner-visitante">
           Essa discussão é apenas para visualização,{' '}
           <Link to="/cadastro">crie uma conta</Link> para poder contribuir com suas ideias!
         </div>
       )}
 
-      {!anonymous && (
+      {!soLeitura && (
         <Link className="comunidade-voltar" to="/comunidade">← Comunidade</Link>
       )}
 
@@ -191,7 +194,7 @@ export default function ComunidadeDiscussao({ user }) {
           onEnviado={carregar}
           placeholder="Contribua com a discussão…"
         />
-      ) : !anonymous && (
+      ) : !soLeitura && (
         <div className="comunidade-aviso-leitura">{blockedReason}</div>
       )}
 

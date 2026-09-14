@@ -24,10 +24,9 @@ function isAndroid() {
   return /Android/i.test(window.navigator.userAgent || '');
 }
 
-// `visitorAtivo`: a pessoa já está navegando como visitante e veio aqui pelo
-// botão "Entrar" do topo. Muda só o rótulo do botão de visitante, que nesse
-// caso é um "voltar" e não um "começar".
-export default function Login({ onLogin, visitorAtivo = false }) {
+// Sem "entrar como visitante": o caminho de quem não tem conta é criar uma. O
+// modo visitante só existe pelo link de um duelo (ver App.jsx).
+export default function Login({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -67,19 +66,6 @@ export default function Login({ onLogin, visitorAtivo = false }) {
       onLogin(user);
     } catch (err) {
       setError(err.message || 'Credenciais inválidas');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleVisitor() {
-    setError('');
-    setLoading(true);
-    try {
-      const user = await api.loginVisitor();
-      onLogin(user);
-    } catch (err) {
-      setError(err.message || 'Não foi possível iniciar como visitante.');
     } finally {
       setLoading(false);
     }
@@ -151,22 +137,15 @@ export default function Login({ onLogin, visitorAtivo = false }) {
 
         <div className="login-links">
           <Link to="/esqueci-senha">Esqueci minha senha</Link>
-          <span aria-hidden="true">·</span>
-          <Link to="/cadastro">Criar uma conta</Link>
         </div>
 
         <div className="login-or">
-          <span>ou</span>
+          <span>ainda não tem conta?</span>
         </div>
 
-        <button
-          type="button"
-          className="btn btn-outline btn-visitor"
-          onClick={handleVisitor}
-          disabled={loading}
-        >
-          {visitorAtivo ? 'Voltar ao modo visitante' : 'Entrar como visitante'}
-        </button>
+        <Link to="/cadastro" className="btn btn-outline btn-criar-conta">
+          Criar uma conta
+        </Link>
 
         {canShowInstall && (
           <div className="install-prompt">

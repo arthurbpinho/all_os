@@ -16,6 +16,7 @@ const CAMPOS = {
   faculdade: 'USP',
   periodo: '7º',
   consent: true,
+  feedbackIA: false,
 };
 
 describe('Processo Seletivo', () => {

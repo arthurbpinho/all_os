@@ -1574,6 +1574,9 @@ app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
         updateAllOS: dados.updateAllOS,
         updateAllos: dados.updateAllos,
         ip: clientIp(req),
+        // Duelo feito como visitante que vai para esta conta ao confirmar.
+        // Vale inválido ou vencido é só ignorado: não impede o cadastro.
+        duelClaim: readDuelClaim(req.body && req.body.duelClaim),
       });
       writeJSON(PENDENTES_FILE, restantes);
 
@@ -1692,17 +1695,26 @@ app.post('/api/confirmar-email', checagemLimiter, async (req, res) => {
       writeJSON(PENDENTES_FILE, pendentes.filter(
         (r) => r.tokenHash !== reg.tokenHash && r.emailLower !== reg.emailLower && r.usernameLower !== reg.usernameLower
       ));
-      return { user: novo };
+      return { user: novo, duelClaim: reg.duelClaim || null };
     });
 
     if (criado && criado.conflito) return res.status(409).json({ error: criado.conflito });
     if (criado && criado.user) {
+      // Fora do lock de users.json: é outro arquivo, com lock próprio. Falhar
+      // aqui não desfaz a conta — o pior caso é o duelo não vir junto.
+      let duelId = null;
+      try {
+        duelId = await applyDuelClaim(criado.duelClaim, criado.user);
+      } catch (e) {
+        registrarErro(req, e, 'cadastro/duelo-visitante', { status: 200 });
+      }
       // Entra já logado: a pessoa acabou de provar que é dona do e-mail, mandar
       // digitar a senha de novo agora só adiciona atrito.
       return res.json({
         tipo: 'cadastro',
         token: signToken(criado.user),
         user: publicUser(criado.user),
+        duelId,
       });
     }
 
@@ -6110,6 +6122,16 @@ const SELECAO_STATUS_LABEL = { ativo: 'Ativo', rejeitado: 'Rejeitado', pending: 
 // avaliador já baixa em "Tudo" na tela de Logs (client/SelecaoLogs.jsx). Usado
 // pelo backup externo (Google Apps Script), que salva isto num .txt no Drive
 // antes do TTL de 15 dias apagar o log original.
+// Mesma frase da tela SelecaoLogs.jsx (o export espelha o "Tudo" de lá).
+function rotuloFeedbackPrevio(log) {
+  if (!log.feedbackIA) return 'não pediu';
+  const estado = log.feedbackEmail && log.feedbackEmail.estado;
+  if (estado === 'enviado') return 'pediu — e-mail enviado';
+  if (estado === 'falhou') return 'pediu — o envio falhou';
+  if (estado === 'nao-configurado') return 'pediu — e-mail não configurado no servidor';
+  return 'pediu — sai quando a avaliação terminar';
+}
+
 function buildSelectionExportText(log) {
   const c = log.candidate || {};
   const transcript = buildSelectionTranscript(log.messages, log.characterName);
@@ -6120,6 +6142,7 @@ function buildSelectionExportText(log) {
     `WhatsApp: ${c.whatsapp || '—'}`,
     `Faculdade: ${c.faculdade || '—'}`,
     `Período: ${c.periodo || '—'}`,
+    `Feedback prévio (IA): ${rotuloFeedbackPrevio(log)}`,
     `Caso: ${log.characterName || '—'}`,
     `Data: ${log.timestamp ? new Date(log.timestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '—'}`, '',
     transcript || '(sem mensagens)',
@@ -6455,6 +6478,7 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
   const spec = evaluatorSpecFor('seletivo');
   const appendedList = [];
   const triList = [];
+  const feedbacksPrevios = [];
   await withFileLock('selection-logs.json', async () => {
     const arr = readJSON('selection-logs.json');
     for (const l of arr) {
@@ -6480,12 +6504,22 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
           appendedList.push({ timestamp: l.timestamp, score, status: st });
           triList.push({ characterId: l.characterId, score });
         }
+        // Avaliação com erro não vira e-mail: um texto de avaliação quebrada
+        // na caixa do candidato é pior do que nenhum.
+        const email = l.candidate && l.candidate.email;
+        if (st !== 'erro' && l.feedbackIA === true && !l.feedbackEmail && l.evaluation && contas.isEmailValido(contas.normalizeEmail(email))) {
+          feedbacksPrevios.push({ id: l.id, to: email, nome: l.candidate.nome, feedback: l.evaluation });
+        }
       } else {
         l.status = 'erro'; l.evalError = motivoSemResultado;
       }
     }
     writeJSON('selection-logs.json', arr);
   });
+  // E-mail FORA do lock: é chamada de rede e seguraria o arquivo por segundos.
+  for (const f of feedbacksPrevios) {
+    await enviarFeedbackPrevio(f);
+  }
   if (appendedList.length) {
     await withFileLock('selection-stats.json', async () => {
       const stats = readJSON('selection-stats.json');
@@ -6498,6 +6532,27 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
   for (const t of triList) {
     await registrarTriAnonimo('selecao', t.characterId, t.score);
   }
+}
+
+// Feedback prévio (IA) do candidato que pediu: só o texto qualitativo, sem nota
+// (o filtro final mora em server/email.js). O desfecho fica no log — é o que
+// impede reenvio e o que o avaliador vê quando o candidato diz que não recebeu.
+async function enviarFeedbackPrevio({ id, to, nome, feedback }) {
+  let envio;
+  try {
+    envio = await mailer.enviarFeedbackPrevioSeletivo({ to, nome, feedback });
+  } catch (e) {
+    envio = { ok: false, erro: e.message };
+  }
+  const estado = envio.ok ? 'enviado' : (envio.skipped ? 'nao-configurado' : 'falhou');
+  if (estado === 'falhou') console.error(`[selecao] feedback prévio de ${id} não saiu:`, envio.erro);
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    const alvo = arr.find((l) => String(l.id) === String(id));
+    if (!alvo) return;
+    alvo.feedbackEmail = { estado, em: new Date().toISOString(), ...(envio.erro ? { erro: clampStr(envio.erro, 300) } : {}) };
+    writeJSON('selection-logs.json', arr);
+  });
 }
 
 // Seletivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
@@ -7058,6 +7113,12 @@ app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
   if (b.consent !== true) {
     return res.status(400).json({ error: 'É necessário aceitar o termo de consentimento.' });
   }
+  // Feedback prévio da IA por e-mail: o candidato escolhe Sim ou Não. A escolha
+  // é obrigatória (o feedback é que é opcional) para nunca mandar e-mail a quem
+  // não pediu explicitamente.
+  if (typeof b.feedbackIA !== 'boolean') {
+    return res.status(400).json({ error: 'Escolha se deseja receber o feedback prévio da IA.' });
+  }
   const wa = normalizeWhatsapp(whatsapp);
   if (wa.length < 10) {
     return res.status(400).json({ error: 'Informe um número de WhatsApp válido, com DDD.' });
@@ -7090,7 +7151,9 @@ app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
   const candidate = { nome, email, whatsapp, faculdade, periodo };
   const sessionId = 'sel-' + Date.now() + '-' + crypto.randomBytes(6).toString('hex');
   const token = jwt.sign(
-    { sub: sessionId, role: 'candidate', characterId: String(c.id), candidate },
+    // feedbackIA vai assinado no token: é o /finish que o grava no log, e o
+    // candidato não consegue trocar a escolha no meio do caminho.
+    { sub: sessionId, role: 'candidate', characterId: String(c.id), candidate, feedbackIA: b.feedbackIA },
     JWT_SECRET,
     { expiresIn: SELECAO_TOKEN_TTL },
   );
@@ -7152,7 +7215,9 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
 // 4) Finalizar — grava o log completo (avaliação pendente) e responde JÁ com o
 // agradecimento. A avaliação roda depois via BATCH API (assíncrona). Preserva
 // destaque(★)/comentário e o nº de sessão de cada mensagem, pra ver a evolução do
-// candidato ao longo do acompanhamento. Nunca devolve nota/feedback ao candidato.
+// candidato ao longo do acompanhamento. Nunca devolve nota/feedback na resposta;
+// quem pediu o feedback prévio recebe SÓ o texto qualitativo, por e-mail, quando
+// a avaliação terminar (ver enviarFeedbackPrevio).
 app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
   const b = req.body || {};
   const sessionId = req.candidate.sub;
@@ -7190,6 +7255,9 @@ app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
     durationSeconds,
     sessionCount,
     messages: cleanMessages,
+    // Pediu o feedback prévio (IA) por e-mail. Tokens emitidos antes da opção
+    // existir não têm o campo: contam como "não".
+    feedbackIA: req.candidate.feedbackIA === true,
     status: 'pending', // pending → ativo | rejeitado | erro
     score: null,
     criteriaScores: null,
@@ -9029,6 +9097,51 @@ function duelIdentity(user) {
   };
 }
 
+// Duelo de visitante → conta nova. O id do visitante é efêmero (morre com o
+// token de 2h), então o lado dele no duelo ficaria órfão: ninguém mais o
+// alcança. No fim do duelo o visitante recebe este token assinado, que diz
+// "o lado X do duelo D era o visitante V". Ele viaja pelo cadastro (fica na
+// pendência) e, quando o e-mail é confirmado, o lado passa para a conta criada
+// — o log aparece nos Logs de Duelo dela. Validade = vida do duelo (30 dias).
+//
+// Não serve como token de sessão: não tem `sub`, então requireAuth não acha
+// usuário e responde 401.
+const DUEL_CLAIM_PURPOSE = 'duel-claim';
+function duelClaimToken(duel, side, user) {
+  return jwt.sign(
+    { purpose: DUEL_CLAIM_PURPOSE, duelId: duel.id, side, visitorId: user.id },
+    JWT_SECRET,
+    { expiresIn: '30d' }
+  );
+}
+function readDuelClaim(token) {
+  if (!token || typeof token !== 'string') return null;
+  try {
+    const p = jwt.verify(token, JWT_SECRET);
+    if (p.purpose !== DUEL_CLAIM_PURPOSE) return null;
+    if (p.side !== 'challenger' && p.side !== 'opponent') return null;
+    if (!p.duelId || !String(p.visitorId || '').startsWith('visitor-')) return null;
+    return { duelId: String(p.duelId), side: p.side, visitorId: String(p.visitorId) };
+  } catch {
+    return null;
+  }
+}
+// Só transfere se o lado AINDA é daquele visitante: um vale reaproveitado (ou
+// um duelo já reivindicado por outro cadastro) não mexe em nada.
+async function applyDuelClaim(claim, user) {
+  if (!claim) return null;
+  return withFileLock('duels.json', () => {
+    const duels = readDuels();
+    const d = duels.find((x) => x.id === claim.duelId);
+    const s = d && d[claim.side];
+    if (!s || !s.isVisitor || s.userId !== claim.visitorId) return null;
+    Object.assign(s, duelIdentity(user));
+    d.updatedAt = new Date().toISOString();
+    writeDuels(duels);
+    return d.id;
+  });
+}
+
 // Resolve qual lado do duelo é o usuário (challenger | opponent | null).
 function duelSideFor(duel, user) {
   if (!user) return null;
@@ -9074,6 +9187,11 @@ function sanitizeDuelForUser(duel, user) {
   };
   // Token (pro link de WhatsApp) só pro desafiante e pro admin.
   if (side === 'challenger' || isAdmin(user)) out.token = duel.token;
+  // Visitante que já enviou a sessão recebe o "vale" pra levar o duelo para
+  // uma conta nova (ver duelClaimToken). Antes do envio não há log a guardar.
+  if (side && user && user.role === 'visitor' && duel[side].state === 'submitted') {
+    out.claimToken = duelClaimToken(duel, side, user);
+  }
   if (duel.result) {
     out.result = {
       winner: duel.result.winner,
@@ -11537,5 +11655,8 @@ if (require.main === module) {
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
 }
+
+// Só nos testes: fechar uma avaliação do seletivo sem batch real da OpenAI.
+if (process.env.VITEST) app.__test = { finalizeSelectionEvals };
 
 module.exports = app;

@@ -128,7 +128,8 @@ export default function DuelAccept({ user }) {
             <button className="btn btn-primary btn-lg" onClick={accept} disabled={accepting}>
               {accepting ? 'Aceitando…' : 'Aceitar e atender'}
             </button>
-            <button className="btn btn-outline btn-lg" onClick={() => navigate('/progressao')} disabled={accepting}>
+            {/* Visitante não tem app além deste duelo: "agora não" leva ao login. */}
+            <button className="btn btn-outline btn-lg" onClick={() => navigate(user?.role === 'visitor' ? '/login' : '/progressao')} disabled={accepting}>
               Agora não
             </button>
           </div>

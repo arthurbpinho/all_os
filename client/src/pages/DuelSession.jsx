@@ -8,6 +8,7 @@ import RichText from '../components/RichText';
 import CriteriaAnalyses from '../components/CriteriaAnalyses';
 import SessionQuotaModal from '../components/SessionQuotaModal';
 import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
+import { guardarDuelClaim } from '../duelClaim';
 
 // Sessão de duelo: você atende o personagem do duelo na sua própria sessão.
 // Ao finalizar, a transcrição é enviada (submitDuel). Quando o OUTRO lado também
@@ -60,6 +61,32 @@ export default function DuelSession({ user }) {
     : (duel?.challenger?.name || 'o desafiante');
   const mySide = youAre ? duel?.[youAre] : null;
   const mySubmitted = mySide?.state === 'submitted';
+
+  // Visitante (entrou pelo link do convite, sem conta). Ao terminar, é
+  // convidado a criar a conta e levar este duelo para ela. O servidor só manda
+  // o `claimToken` depois que a sessão dele foi enviada.
+  const isVisitor = user?.role === 'visitor';
+  const podeLevarDuelo = isVisitor && !!duel?.claimToken;
+  const [conviteAberto, setConviteAberto] = useState(false);
+  const conviteVistoKey = `allos_duel_convite_visto__${id}`;
+  useEffect(() => {
+    if (!podeLevarDuelo || (view !== 'waiting' && view !== 'result')) return;
+    // Uma vez por duelo por aba: ao recarregar a página não reaparece, e o
+    // cartão fixo da tela continua oferecendo o cadastro.
+    try { if (sessionStorage.getItem(conviteVistoKey)) return; } catch {}
+    setConviteAberto(true);
+  }, [podeLevarDuelo, view, conviteVistoKey]);
+
+  function fecharConvite() {
+    setConviteAberto(false);
+    try { sessionStorage.setItem(conviteVistoKey, '1'); } catch {}
+  }
+
+  function criarContaComDuelo() {
+    guardarDuelClaim({ token: duel.claimToken, duelId: duel.id, characterName: character?.name || '' });
+    try { sessionStorage.setItem(conviteVistoKey, '1'); } catch {}
+    navigate('/cadastro');
+  }
 
   // Carrega o duelo e decide a tela.
   useEffect(() => {
@@ -253,7 +280,9 @@ export default function DuelSession({ user }) {
     return (
       <div className="post-session">
         <div className="alert error">{loadError}</div>
-        <button className="btn btn-outline" onClick={() => navigate('/duelo')}>Voltar ao Duelo</button>
+        {isVisitor
+          ? <button className="btn btn-outline" onClick={() => navigate('/login')}>Ir para o login</button>
+          : <button className="btn btn-outline" onClick={() => navigate('/duelo')}>Voltar ao Duelo</button>}
       </div>
     );
   }
@@ -304,12 +333,19 @@ export default function DuelSession({ user }) {
           <h3 style={{ marginTop: 16 }}>Aguardando {opponentName} terminar…</h3>
           <p style={{ color: 'var(--ink-soft)', maxWidth: 460, margin: '8px auto 0', lineHeight: 1.6 }}>
             Seu resultado fica pendente até a outra pessoa concluir o atendimento de <strong>{character?.name}</strong>.
-            Você pode esperar aqui (atualiza sozinho) ou ver depois nos Logs de Duelo.
+            {podeLevarDuelo
+              ? ' Você pode esperar aqui (atualiza sozinho) — ou criar sua conta e receber o resultado nela.'
+              : ' Você pode esperar aqui (atualiza sozinho) ou ver depois nos Logs de Duelo.'}
           </p>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 22, flexWrap: 'wrap' }}>
-            <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Ver depois (Logs de Duelo)</button>
+            {podeLevarDuelo
+              ? <button className="btn btn-primary" onClick={criarContaComDuelo}>Criar conta e receber o resultado</button>
+              : !isVisitor && <button className="btn btn-outline" onClick={() => navigate('/duelo/logs')}>Ver depois (Logs de Duelo)</button>}
           </div>
         </div>
+        {conviteAberto && (
+          <ConviteCadastro pendente opponentName={opponentName} onCriar={criarContaComDuelo} onFechar={fecharConvite} />
+        )}
       </div>
     );
   }
@@ -401,10 +437,25 @@ export default function DuelSession({ user }) {
           </div>
         )}
 
-        <div className="post-session-actions">
-          <button className="btn btn-primary" onClick={() => navigate('/duelo/logs')}>Logs de Duelo</button>
-          <button className="btn btn-outline" onClick={() => navigate('/duelo')}>Novo duelo</button>
-        </div>
+        {isVisitor ? (
+          podeLevarDuelo && (
+            <div className="card duel-convite-card">
+              <div>
+                <h4>Guarde este duelo</h4>
+                <p>Crie sua conta gratuita e o log completo — as duas sessões e a análise comparativa — fica salvo nela.</p>
+              </div>
+              <button className="btn btn-primary" onClick={criarContaComDuelo}>Criar minha conta</button>
+            </div>
+          )
+        ) : (
+          <div className="post-session-actions">
+            <button className="btn btn-primary" onClick={() => navigate('/duelo/logs')}>Logs de Duelo</button>
+            <button className="btn btn-outline" onClick={() => navigate('/duelo')}>Novo duelo</button>
+          </div>
+        )}
+        {conviteAberto && (
+          <ConviteCadastro opponentName={opponentName} onCriar={criarContaComDuelo} onFechar={fecharConvite} />
+        )}
       </div>
     );
   }
@@ -415,10 +466,13 @@ export default function DuelSession({ user }) {
   return (
     <div className="chat-container echo-chat">
       <div className="chat-header">
-        <button onClick={() => navigate('/duelo')} className="btn btn-outline btn-sm">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
-          Voltar
-        </button>
+        {/* Visitante não tem para onde "voltar": fora do duelo só há o login. */}
+        {!isVisitor && (
+          <button onClick={() => navigate('/duelo')} className="btn btn-outline btn-sm">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+            Voltar
+          </button>
+        )}
         <div className="chat-title">
           <h3>Duelo · {character?.name || '...'}</h3>
           <div className="chat-status">vs {opponentName}{duel?.mode === 'competitive' ? ' · Competitivo (MMR)' : ' · Treino'}</div>
@@ -566,6 +620,32 @@ export default function DuelSession({ user }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Convite ao cadastro que abre quando o visitante termina o duelo. `pendente`:
+// ele enviou, mas o oponente ainda não — o que a conta dá é o resultado depois.
+function ConviteCadastro({ pendente = false, opponentName, onCriar, onFechar }) {
+  return (
+    <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) onFechar(); }}>
+      <div className="modal duel-convite-modal" role="dialog" aria-labelledby="duel-convite-titulo">
+        <h3 id="duel-convite-titulo">Gostou da experiência?</h3>
+        <p>
+          Crie sua conta gratuita na all<span className="accent">_OS</span> para receber o log deste duelo:
+          a sua sessão, a de {opponentName} e a análise comparativa da IA.
+          {pendente
+            ? ` Quando ${opponentName} terminar, o resultado aparece direto na sua conta.`
+            : ' Ele aparece na sua conta assim que você confirmar o e-mail.'}
+        </p>
+        <p className="duel-convite-extra">
+          Com a conta você também atende outros pacientes, acompanha sua evolução e desafia quem quiser.
+        </p>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-outline" onClick={onFechar}>Agora não</button>
+          <button type="button" className="btn btn-primary" onClick={onCriar}>Criar minha conta</button>
+        </div>
+      </div>
     </div>
   );
 }

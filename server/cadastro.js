@@ -141,6 +141,7 @@ const ORIGENS = [
   { id: 'site',            label: 'Site',                          detalhe: false },
   { id: 'formacao',        label: 'Plataforma de formação gravada', detalhe: false },
   { id: 'faculdade',       label: 'Colega de faculdade',           detalhe: true,  detalheLabel: 'Qual faculdade?' },
+  { id: 'processo_seletivo', label: 'Processo seletivo da Allos',  detalhe: false },
 ];
 
 function origemPorId(id) {

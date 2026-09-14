@@ -153,6 +153,7 @@ function buildStrings(log) {
     `WhatsApp: ${c.whatsapp || '—'}`,
     `Faculdade: ${c.faculdade || '—'}`,
     `Período: ${c.periodo || '—'}`,
+    `Feedback prévio (IA): ${rotuloFeedbackPrevio(log)}`,
     `Caso: ${log.characterName || '—'}`,
     `Data: ${fmtDate(log.timestamp)}`,
     '',
@@ -172,6 +173,17 @@ function buildStrings(log) {
     : '';
 
   return { logStr, evalBody, hasEval };
+}
+
+// Candidato que pediu o feedback prévio da IA por e-mail, e o desfecho do envio.
+// Mesma frase do export do servidor (rotuloFeedbackPrevio em server/index.js).
+function rotuloFeedbackPrevio(log) {
+  if (!log.feedbackIA) return 'não pediu';
+  const estado = log.feedbackEmail && log.feedbackEmail.estado;
+  if (estado === 'enviado') return 'pediu — e-mail enviado';
+  if (estado === 'falhou') return 'pediu — o envio falhou';
+  if (estado === 'nao-configurado') return 'pediu — e-mail não configurado no servidor';
+  return 'pediu — sai quando a avaliação terminar';
 }
 
 export default function SelecaoLogs() {

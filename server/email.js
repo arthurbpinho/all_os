@@ -390,7 +390,106 @@ async function enviarAvisoSenhaAlterada({ to, nome }) {
   });
 }
 
+// --- Feedback prévio (IA) do Processo Seletivo ---
+//
+// Só vai para quem marcou "Sim" no formulário, depois que a avaliação automática
+// termina. Leva APENAS o texto qualitativo: nota final e nota por critério nunca
+// entram. O corpo vem do sintetizador, cujo prompt já proíbe números, mas o
+// e-mail sai da nossa infraestrutura para a caixa de um candidato — então há um
+// filtro próprio aqui, que derruba qualquer linha com cara de nota.
+const ASSUNTO_FEEDBACK_PREVIO = 'FEEDBACK PRÉVIO (IA) - Associação Allos';
+
+const LINHA_DE_NOTA = [
+  /^\s*[*_#>\-\s]*(nota|score|pontua[çc][ãa]o|média)\b[^\n]*\d/i,
+  /\b\d{1,3}(?:[.,]\d+)?\s*\/\s*(?:10|100)\b/,
+  /\[notas?-supervisor\]/i,
+];
+function feedbackSemNotas(texto) {
+  return String(texto || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((linha) => !LINHA_DE_NOTA.some((re) => re.test(linha)))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// *itálico* e **negrito** (o mesmo markdown inline que o app formata na tela).
+// Escapa ANTES: o texto é gerado por IA e não pode injetar HTML no e-mail.
+function inlineMarkdown(s) {
+  return escaparHtml(s)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+}
+
+const RODAPE_FEEDBACK_PREVIO = [
+  { texto: 'Participe da formação síncrona da Allos em ', href: 'https://chat.whatsapp.com/JpZtYWJovU03VlrZJ5oUxQ' },
+  { texto: 'Participe da formação gravada da Allos em ', href: 'https://allos.org.br/formacao' },
+  { texto: 'Crie uma conta gratuita no All_OS em ', href: 'https://treinamento.allos.org.br/cadastro', depois: ' e já comece a treinar para os próximos processos seletivos.' },
+];
+
+const AVISO_FEEDBACK_PREVIO = 'Esse feedback qualitativo foi executado por uma inteligência artificial e possui caráter formativo e reflexivo. Não se trata do resultado real do andamento do processo seletivo, que será enviado posteriormente no grupo do WhatsApp.';
+
+async function enviarFeedbackPrevioSeletivo({ to, nome, feedback }) {
+  const corpo = feedbackSemNotas(feedback);
+  if (!corpo) return { ok: false, erro: 'feedback vazio depois do filtro de notas' };
+  const primeiroNome = String(nome || '').trim().split(/\s+/)[0] || '';
+
+  const paragrafos = corpo.split(/\n{2,}/)
+    .map((p) => `<p style="margin:0 0 14px;">${inlineMarkdown(p).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  const rodapeHtml = RODAPE_FEEDBACK_PREVIO.map((l) =>
+    `<div style="margin:0 0 6px;">${escaparHtml(l.texto)}<a href="${l.href}" style="color:#1f6f5c;font-weight:600;word-break:break-all;">${escaparHtml(l.href)}</a>${escaparHtml(l.depois || '')}</div>`
+  ).join('');
+
+  const html = `<!doctype html>
+<html lang="pt-BR"><body style="margin:0;padding:0;background:#f4f4f2;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f2;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:12px;padding:32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+        <tr><td style="padding-bottom:18px;">
+          <div style="background:#fdecec;border:1px solid #f5c2c2;border-left:4px solid #c62828;border-radius:8px;padding:14px 16px;color:#b71c1c;font-size:14px;line-height:1.55;font-weight:600;">${escaparHtml(AVISO_FEEDBACK_PREVIO)}</div>
+        </td></tr>
+        <tr><td style="padding-bottom:6px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#8a8a83;">Associação Allos · Processo Seletivo</td></tr>
+        <tr><td style="padding-bottom:16px;font-size:26px;font-weight:700;color:#1a1a18;">all<span style="color:#1f6f5c;">_OS</span></td></tr>
+        <tr><td style="padding-bottom:14px;font-size:19px;font-weight:600;color:#1a1a18;">Feedback prévio (IA)</td></tr>
+        <tr><td style="padding-bottom:16px;color:#3a3a36;font-size:15px;line-height:1.65;">
+          ${primeiroNome ? `Olá, ${escaparHtml(primeiroNome)}. ` : ''}Como você pediu, aqui estão os pontos de reflexão clínica sobre o seu atendimento no exercício do Processo Seletivo.
+        </td></tr>
+        <tr><td style="padding-bottom:24px;">
+          <div style="background:#eef1ee;border-top:3px solid #1f6f5c;border-radius:10px;padding:22px 22px 10px;color:#2b2b28;font-size:15px;line-height:1.7;">${paragrafos}</div>
+        </td></tr>
+        <tr><td style="border-top:1px solid #e6e6e2;padding-top:18px;color:#3a3a36;font-size:13.5px;line-height:1.6;">
+          <div style="margin:0 0 10px;font-size:15px;font-weight:700;color:#1f6f5c;">Como posso melhorar minhas competências clínicas?</div>
+          ${rodapeHtml}
+        </td></tr>
+        <tr><td style="padding-top:16px;color:#8a8a83;font-size:12px;line-height:1.6;">
+          Este é um e-mail automático da plataforma all_OS. Não responda a esta mensagem.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body></html>`;
+
+  const text = [
+    `ATENÇÃO: ${AVISO_FEEDBACK_PREVIO}`,
+    '',
+    `${primeiroNome ? `Olá, ${primeiroNome}. ` : ''}Como você pediu, aqui estão os pontos de reflexão clínica sobre o seu atendimento no exercício do Processo Seletivo.`,
+    '',
+    corpo,
+    '',
+    '---',
+    'Como posso melhorar minhas competências clínicas?',
+    ...RODAPE_FEEDBACK_PREVIO.map((l) => `${l.texto}${l.href}${l.depois || ''}`),
+  ].join('\n');
+
+  return enviarEmail({ to, subject: ASSUNTO_FEEDBACK_PREVIO, html, text });
+}
+
 module.exports = {
+  ASSUNTO_FEEDBACK_PREVIO,
+  feedbackSemNotas,
+  enviarFeedbackPrevioSeletivo,
   estaConfigurado,
   modoCredencial,
   // Exportada para scripts/testar-email.js exercitar o MESMO código do servidor.

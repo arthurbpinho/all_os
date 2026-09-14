@@ -7,9 +7,10 @@ import RichText from '../components/RichText';
 // app (App.jsx intercepta /processo-seletivo antes do gate de login), então este
 // componente é auto-contido: senha → formulário + termo → simulação → agradecimento.
 //
-// Invariante crítica: a nota, o feedback qualitativo e a avaliação NUNCA chegam
-// ao candidato. A avaliação roda 100% no servidor (POST /api/selecao/finish) e só
-// alimenta os logs do avaliador.
+// Invariante crítica: a nota (final e por critério) NUNCA chega ao candidato. A
+// avaliação roda 100% no servidor (POST /api/selecao/finish) e alimenta os logs
+// do avaliador. A única exceção é opcional e só de texto: quem marca "Sim" no
+// feedback prévio recebe o feedback QUALITATIVO por e-mail, sem nenhuma nota.
 //
 // Persistência: a sessão EM ANDAMENTO (token do candidato + personagem +
 // mensagens + nº de sessão + início) é salva numa chave PRÓPRIA de localStorage
@@ -17,9 +18,18 @@ import RichText from '../components/RichText';
 // progresso. É limpa ao finalizar. O token efêmero (role candidate) fica só nessa
 // chave, então não colide com uma sessão logada aberta no mesmo navegador.
 
-const TERMO = 'Essa é uma simulação de atendimento realizada por Inteligência Artificial simulando o paciente, seu objetivo é tentar atendê-la da melhor maneira possível. Sua avaliação será enviada posteriormente para nossos avaliadores. Ao confirmar, você consente com a utilização da ferramenta de IA, e dos seus textos inseridos serem enviados para os seus servidores e para nossos avaliadores. Utilizaremos os dados para fins de apuração do processo seletivo e de forma anônima para pesquisas de inovação dentro da Associação Allos.';
+const TERMO = 'Essa é uma simulação de atendimento realizada por Inteligência Artificial. Sua avaliação será enviada posteriormente para nossos avaliadores. Ao confirmar, você consente com a utilização da ferramenta de IA e dos seus textos inseridos serem enviados para os servidores da IA e para nossos avaliadores. Utilizaremos os dados para fins de apuração do processo seletivo e de forma anônima para pesquisas de inovação dentro da Associação Allos.';
 
 const AGRADECIMENTO = 'Obrigado por participar do nosso processo seletivo. Após análise dos nossos avaliadores, entraremos em contato via WhatsApp para confirmar se você foi selecionado para a próxima fase.';
+
+// Feedback prévio (IA) por e-mail — opcional. O servidor manda só o texto
+// qualitativo, sem nota, depois que a avaliação automática termina.
+const FEEDBACK_INTRO = 'Você pode escolher receber um feedback prévio da IA por e-mail após finalização deste exercício, com objetivo de trazer pontos de reflexão clínicos que podem ser levados para sua supervisão ou trabalhados na prática em nossa formação.';
+const FEEDBACK_PS = 'PS: O feedback por IA é opcional e não garante avanço ou eliminação do processo, os avaliadores da Allos posteriormente avaliarão seu atendimento para decorrer do Processo Seletivo.';
+const FEEDBACK_PERGUNTA = 'Gostaria de receber feedback prévio da IA após finalizar o exercício, apenas para fins formativos e de reflexão clínica';
+const FEEDBACK_SIM = 'Sim, desejo receber o feedback ao final do exercício e consinto que o resultado do processo será avaliado posteriormente.';
+const FEEDBACK_NAO = 'Não, vou fazer o exercício mas não quero receber o feedback prévio da IA.';
+const FEEDBACK_AVISO_FINAL = "Como você optou pelo feedback prévio da IA, após concluída sua avaliação automática, o resultado será enviado via e-mail cadastrado com assunto 'FEEDBACK PRÉVIO (IA) - Associação Allos'";
 
 // Máximo de sessões com o mesmo paciente (igual à Simulação padrão). Passar de
 // sessão permite avaliar a evolução do candidato ao longo do acompanhamento.
@@ -80,6 +90,9 @@ export default function ProcessoSeletivo() {
   // Formulário
   const [form, setForm] = useState({ nome: '', email: '', whatsapp: '', faculdade: '', periodo: '' });
   const [consent, setConsent] = useState(false);
+  // null = ainda não escolheu. Vai salvo na sessão para a tela final saber, mesmo
+  // depois de um refresh no meio da simulação.
+  const [feedbackIA, setFeedbackIA] = useState(saved ? saved.feedbackIA === true : null);
   const [starting, setStarting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -116,11 +129,11 @@ export default function ProcessoSeletivo() {
   useEffect(() => {
     if (step !== 'chat' || !token) return;
     try {
-      localStorage.setItem(PS_KEY, JSON.stringify({ token, character, messages, sessionNumber, startedAt, step: 'chat' }));
+      localStorage.setItem(PS_KEY, JSON.stringify({ token, character, messages, sessionNumber, startedAt, feedbackIA: feedbackIA === true, step: 'chat' }));
     } catch {
       /* quota / modo privado → segue sem persistir */
     }
-  }, [step, token, character, messages, sessionNumber, startedAt]);
+  }, [step, token, character, messages, sessionNumber, startedAt, feedbackIA]);
 
   // Retomada: se a página foi recarregada ENQUANTO o paciente respondia (a última
   // mensagem com role é do candidato, sem resposta), re-solicita a resposta pra
@@ -198,6 +211,10 @@ export default function ProcessoSeletivo() {
       setFormError('É necessário aceitar o termo de consentimento.');
       return;
     }
+    if (feedbackIA === null) {
+      setFormError('Escolha se deseja receber o feedback prévio da IA.');
+      return;
+    }
     setStarting(true);
     try {
       const data = await api.selecaoIniciar({
@@ -208,6 +225,7 @@ export default function ProcessoSeletivo() {
         faculdade: faculdade.trim(),
         periodo: periodo.trim(),
         consent: true,
+        feedbackIA,
       });
       setToken(data.token);
       setCharacter(data.character);
@@ -422,9 +440,32 @@ export default function ProcessoSeletivo() {
               <span>{TERMO}</span>
             </label>
 
+            <div className="selecao-feedback">
+              <p>{FEEDBACK_INTRO}</p>
+              <p className="selecao-feedback-ps">{FEEDBACK_PS}</p>
+              <div className="selecao-feedback-pergunta" id="ps-feedback-pergunta">
+                {FEEDBACK_PERGUNTA} <span className="opcional">[OPCIONAL]</span>
+              </div>
+              <div className="selecao-feedback-opcoes" role="radiogroup" aria-labelledby="ps-feedback-pergunta">
+                {[{ valor: true, texto: FEEDBACK_SIM }, { valor: false, texto: FEEDBACK_NAO }].map((o) => (
+                  <button
+                    key={String(o.valor)}
+                    type="button"
+                    role="radio"
+                    aria-checked={feedbackIA === o.valor}
+                    className={`selecao-feedback-opcao ${feedbackIA === o.valor ? 'ativa' : ''}`}
+                    onClick={() => setFeedbackIA(o.valor)}
+                  >
+                    <span className="marca" aria-hidden="true" />
+                    <span>{o.texto}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {formError && <div className="alert error">{formError}</div>}
 
-            <button type="submit" className="btn btn-primary btn-lg" disabled={!consent || starting}>
+            <button type="submit" className="btn btn-primary btn-lg" disabled={!consent || feedbackIA === null || starting}>
               {starting ? 'Iniciando…' : 'Iniciar avaliação'}
             </button>
           </form>
@@ -491,6 +532,7 @@ export default function ProcessoSeletivo() {
               <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
             </div>
             <p>{AGRADECIMENTO}</p>
+            {feedbackIA === true && <p className="selecao-done-feedback">{FEEDBACK_AVISO_FINAL}</p>}
           </div>
         </div>
       </div>

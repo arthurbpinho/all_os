@@ -1663,10 +1663,12 @@ select option { background: var(--cream); color: var(--ink); }
   height: 1px;
   background: var(--sand);
 }
-.login-card .btn-visitor {
+.login-card .btn-criar-conta {
   width: 100%;
   padding: 12px;
   font-size: 14px;
+  text-align: center;
+  text-decoration: none;
 }
 
 /* Link "Participe do processo seletivo" (sai do modo visitante): texto laranja,
@@ -4614,6 +4616,38 @@ select option { background: var(--cream); color: var(--ink); }
 }
 .selecao-consent input[type="checkbox"] { margin-top: 3px; width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--marrs); cursor: pointer; }
 
+/* Feedback prévio (IA) por e-mail: escolha Sim/Não logo abaixo do termo. */
+.selecao-feedback {
+  margin-top: 14px;
+  background: var(--cream-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.selecao-feedback p { margin: 0 0 8px; }
+.selecao-feedback .selecao-feedback-ps { font-size: 11.5px; color: var(--muted); }
+.selecao-feedback-pergunta { margin: 12px 0 10px; font-weight: 600; font-size: 13.5px; color: var(--ink); }
+.selecao-feedback-pergunta .opcional { font-weight: 500; font-size: 11.5px; letter-spacing: 0.04em; color: var(--muted); }
+.selecao-feedback-opcoes { display: flex; flex-direction: column; gap: 8px; }
+.selecao-feedback-opcao {
+  display: flex; gap: 10px; align-items: flex-start;
+  width: 100%; text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--sand-2); color: var(--ink);
+  font: inherit; font-size: 13px; line-height: 1.45;
+  cursor: pointer;
+}
+.selecao-feedback-opcao .marca {
+  width: 16px; height: 16px; margin-top: 1px; flex-shrink: 0;
+  border-radius: 50%; border: 2px solid var(--line);
+}
+.selecao-feedback-opcao.ativa { border-color: var(--marrs); background: var(--marrs-tint); }
+.selecao-feedback-opcao.ativa .marca { border-color: var(--marrs); background: radial-gradient(circle, var(--marrs) 0 42%, transparent 48%); }
+
 .selecao-instrucoes { list-style: none; margin: 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 12px; }
 .selecao-instrucoes li {
   display: flex;
@@ -4655,6 +4689,11 @@ select option { background: var(--cream); color: var(--ink); }
   background: var(--marrs-tint); color: var(--marrs);
 }
 .selecao-done p { font-size: 14.5px; line-height: 1.65; color: var(--ink); margin: 0; }
+.selecao-done .selecao-done-feedback {
+  margin-top: 14px; padding: 12px 14px;
+  border-radius: var(--radius); background: var(--marrs-tint);
+  font-size: 13.5px; color: var(--ink);
+}
 
 .selecao-chat-wrap {
   height: 100dvh;
@@ -5168,13 +5207,40 @@ select option { background: var(--cream); color: var(--ink); }
 }
 
 /* ============================================================
-   Modo visitante — entrada sem conta.
-   O app abre direto em modo visitante; estes dois elementos deixam
-   isso explícito e oferecem o caminho pra uma conta real.
+   Modo visitante — só pelo link de um duelo.
+   Layout próprio, sem barra lateral: o visitante só alcança o duelo,
+   e o topo oferece o caminho pra uma conta real.
    ============================================================ */
+.visitor-layout { min-height: 100vh; background: var(--cream); }
+.visitor-topbar {
+  position: sticky; top: 0; z-index: 85;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 24px;
+  background: var(--cream-2); border-bottom: 1px solid var(--sand);
+}
+.visitor-topbar-logo {
+  font-family: var(--serif); font-size: 24px; color: var(--marrs-deep); letter-spacing: 0.02em;
+}
+.visitor-topbar-logo .accent { color: var(--terra); }
+.visitor-topbar-actions { display: flex; align-items: center; gap: 8px; }
+.visitor-main { max-width: 1100px; margin: 0 auto; padding: 22px 32px 40px; }
+/* Aqui o topo está em fluxo, não flutuando sobre o conteúdo: sem reserva à direita. */
+.visitor-main .visitor-banner { padding-right: 16px; }
 
-/* Botão "Entrar" na topbar, ao lado do sino/tema. Pílula em vez de círculo
-   porque é o único item com texto — precisa se ler como ação, não como ícone. */
+/* Convite ao cadastro no fim do duelo do visitante. */
+.duel-convite-modal { max-width: 480px; }
+.duel-convite-modal p { color: var(--ink-soft); font-size: 14.5px; line-height: 1.6; margin: -4px 0 12px; }
+.duel-convite-modal .accent { color: var(--terra); }
+.duel-convite-modal .duel-convite-extra { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
+.duel-convite-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--marrs); background: var(--marrs-tint);
+}
+.duel-convite-card h4 { margin: 0 0 4px; }
+.duel-convite-card p { margin: 0; color: var(--ink-soft); font-size: 14px; line-height: 1.55; max-width: 520px; }
+.cadastro-duelo-aviso { background: var(--marrs-tint); border-color: var(--marrs); margin: 0 0 16px; }
+
+/* Pílula de ação com texto na topbar (hoje: "Criar conta" do visitante). */
 .topbar-login-btn {
   height: 42px; display: inline-flex; align-items: center;
   padding: 0 18px; border-radius: 999px;
@@ -5214,6 +5280,10 @@ select option { background: var(--cream); color: var(--ink); }
 @media (max-width: 560px) {
   .topbar-login-btn { height: 38px; padding: 0 13px; font-size: 13px; }
   .visitor-banner { gap: 7px; padding: 9px 12px; font-size: 12.5px; }
+  .visitor-main .visitor-banner { padding-right: 12px; }
+  .visitor-topbar { padding: 8px 12px; }
+  .visitor-topbar-logo { font-size: 20px; }
+  .visitor-main { padding: 14px 12px 32px; }
 }
 
 /* ============================================================

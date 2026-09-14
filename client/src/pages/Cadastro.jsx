@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import Turnstile from '../components/Turnstile';
+import { lerDuelClaim } from '../duelClaim';
 
 // Cadastro de Aluno Externo — o único papel que nasce sem admin.
 //
@@ -44,6 +45,10 @@ export default function Cadastro() {
   const [reenviado, setReenviado] = useState(false);
   // null = não checado ainda | true/false = disponível
   const [dispUser, setDispUser] = useState({ estado: 'idle', motivo: null });
+  // Veio do convite no fim de um duelo feito como visitante. Não é limpo ao
+  // enviar: se a pessoa refizer o cadastro (errou o e-mail), a pendência nova
+  // substitui a antiga e precisa levar o duelo de novo.
+  const [duelo] = useState(lerDuelClaim);
 
   useEffect(() => {
     api.config().then(setCfg).catch(() => setCfg({ cadastroAberto: true, origens: [], turnstileSiteKey: '' }));
@@ -90,7 +95,7 @@ export default function Cadastro() {
     setErro('');
     setEnviando(true);
     try {
-      await api.cadastrar({ ...form, turnstileToken: captcha });
+      await api.cadastrar({ ...form, turnstileToken: captcha, duelClaim: duelo?.token });
       setPronto(true);
     } catch (err) {
       setErro(err.message || 'Não foi possível concluir o cadastro.');
@@ -141,6 +146,7 @@ export default function Cadastro() {
           <p style={{ color: 'var(--ink-soft)', fontSize: 14.5, lineHeight: 1.65 }}>
             Mandamos um link de confirmação para <strong>{form.email}</strong>. Ele vale por{' '}
             <strong>48 horas</strong> — sua conta é criada quando você clicar nele.
+            {duelo && <> O log do seu duelo entra na conta nesse mesmo momento.</>}
           </p>
           <p style={{ color: 'var(--muted)', fontSize: 13, lineHeight: 1.6, marginTop: -4 }}>
             Não chegou? Confira a caixa de spam ou lixo eletrônico.
@@ -163,6 +169,14 @@ export default function Cadastro() {
         <h1>all<span className="accent">_OS</span></h1>
         <p className="subtitle">criar conta de aluno externo</p>
         <div className="login-ornament" />
+
+        {duelo && (
+          <div className="alert cadastro-duelo-aviso">
+            Ao confirmar o e-mail, o log do seu duelo
+            {duelo.characterName ? <> atendendo <strong>{duelo.characterName}</strong></> : null}
+            {' '}vai direto para a sua conta.
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <div>

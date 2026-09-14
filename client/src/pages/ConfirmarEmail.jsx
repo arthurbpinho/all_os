@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
+import { limparDuelClaim } from '../duelClaim';
 
 // Destino dos links de e-mail. Atende os DOIS fluxos que mandam link — cadastro
 // novo e troca de endereço — porque o token não diz de qual tipo é; quem decide
@@ -15,6 +16,8 @@ export default function ConfirmarEmail({ onLogin }) {
   const [estado, setEstado] = useState(token ? 'verificando' : 'sem-token');
   const [erro, setErro] = useState('');
   const [tipo, setTipo] = useState(null);
+  // Duelo feito como visitante que o servidor transferiu para a conta nova.
+  const [duelId, setDuelId] = useState(null);
 
   // Um clique = uma tentativa. O token é de uso único: sem a trava, uma segunda
   // chamada veria o link já consumido e mostraria "link inválido" num cadastro
@@ -38,6 +41,8 @@ export default function ConfirmarEmail({ onLogin }) {
     api.confirmarEmail(token)
       .then((res) => {
         setTipo(res.tipo);
+        setDuelId(res.duelId || null);
+        if (res.tipo === 'cadastro') limparDuelClaim();
         setEstado('ok');
         // O api.confirmarEmail já guardou o token; isso avisa o App.
         if (res.tipo === 'cadastro' && res.user) onLoginRef.current?.(res.user);
@@ -78,10 +83,23 @@ export default function ConfirmarEmail({ onLogin }) {
             <h3 style={{ marginTop: 0 }}>Conta confirmada</h3>
             <p style={{ color: 'var(--ink-soft)', fontSize: 14.5, lineHeight: 1.65 }}>
               Pronto — sua conta está ativa e você já está dentro.
+              {duelId && <> O log do seu duelo já está nela.</>}
             </p>
-            <button type="button" className="btn btn-primary" onClick={() => navigate('/inicio')}>
-              Começar
-            </button>
+            {duelId ? (
+              <>
+                <button type="button" className="btn btn-primary" onClick={() => navigate(`/duelo/sessao/${duelId}`)}>
+                  Ver meu duelo
+                </button>
+                <div className="login-or"><span>ou</span></div>
+                <button type="button" className="btn btn-outline" onClick={() => navigate('/inicio')}>
+                  Começar
+                </button>
+              </>
+            ) : (
+              <button type="button" className="btn btn-primary" onClick={() => navigate('/inicio')}>
+                Começar
+              </button>
+            )}
           </>
         )}
 

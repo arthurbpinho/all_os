@@ -49,9 +49,20 @@ import ThemeToggle from './components/ThemeToggle';
 import { api, getToken, clearAuth, onSessionExpired } from './api';
 import { ICONS } from './icons';
 
-// A tela de login virou uma ROTA em vez do portão de entrada: quem chega sem
-// conta cai direto no modo visitante e chega aqui pelo botão "Entrar" do topo.
+// Quem chega sem sessão vai para o /login, que leva a criar conta. O modo
+// visitante só existe para o link de um duelo (ver ehConviteDuelo).
 const LOGIN_PATH = '/login';
+
+// Link de duelo enviado para alguém de fora: é a ÚNICA entrada que abre sessão
+// de visitante, para a pessoa duelar sem precisar se cadastrar antes. No fim do
+// duelo ela é convidada a criar a conta (e leva o log junto).
+const CONVITE_DUELO = /^\/duelo\/convite\/[^/]+$/;
+function ehConviteDuelo(pathname) {
+  return CONVITE_DUELO.test(pathname);
+}
+// Tudo que um visitante alcança: o convite e a sessão do duelo aceito. (A
+// discussão da Comunidade por link também, mas ela é renderizada fora do shell.)
+const ROTA_VISITANTE = /^\/duelo\/(convite|sessao)\/[^/]+$/;
 
 // Telas de quem ainda não tem (ou perdeu) a conta. Ficam FORA do shell do app e
 // não disparam sessão de visitante: pedir um token de visitante pra alguém que
@@ -165,8 +176,9 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Entrada sem conta: em vez de barrar com a tela de login, o app já abre em
-  // modo visitante. Quem tem conta clica em "Entrar" no topo e vai pro /login.
+  // Link de duelo aberto sem sessão: cria a sessão de visitante na hora, para
+  // quem recebeu o convite duelar sem cadastro. Em qualquer outra rota, sem
+  // sessão = tela de login (ver o gate lá embaixo).
   //
   // O ref evita duas chamadas: o efeito roda de novo a cada mudança de rota, e
   // em dev o StrictMode monta o componente duas vezes. Sem ele, cada abertura
@@ -174,12 +186,7 @@ export default function App() {
   const visitorPedidoRef = useRef(false);
   useEffect(() => {
     if (!authChecked || user || visitorPedidoRef.current) return;
-    // Nestas rotas a ausência de conta é proposital: o /login é onde a pessoa
-    // vai justamente pra sair do modo visitante, e o seletivo tem auth própria.
-    if (location.pathname === LOGIN_PATH) return;
-    if (location.pathname.startsWith('/processo-seletivo')) return;
-    if (ehRotaPublica(location.pathname)) return;
-    if (ehDiscussaoPublica(location.pathname)) return;
+    if (!ehConviteDuelo(location.pathname)) return;
 
     visitorPedidoRef.current = true;
     let cancelled = false;
@@ -201,10 +208,9 @@ export default function App() {
   // Logout automático se a API sinalizar 401 em qualquer chamada.
   useEffect(() => {
     return onSessionExpired(() => {
-      // Visitante com token vencido (dura 2h) é renovado em silêncio pelo efeito
-      // acima — ele está só passeando, não faz sentido jogá-lo numa tela de
-      // login. Sessão real expirada vai pro /login, pra ficar explícito que
-      // saiu da conta em vez de virar visitante sem perceber.
+      // Visitante com token vencido (dura 2h): no link do convite o efeito
+      // acima cria outra sessão; fora dele o gate manda pro /login. Sessão
+      // real expirada vai pro /login direto.
       const eraVisitante = user && user.role === 'visitor';
       setUser(null);
       if (!eraVisitante) navigate(LOGIN_PATH);
@@ -226,8 +232,12 @@ export default function App() {
   const handleLogin = (u, { navegar = true } = {}) => {
     setUser(u);
     localStorage.setItem('allos_user', JSON.stringify(u));
-    // O /login é uma rota agora — depois de entrar precisa sair dela.
-    if (navegar) navigate('/');
+    // O /login é uma rota — depois de entrar precisa sair dela. Volta para onde
+    // a pessoa ia quando o gate a mandou pra cá (link de notificação, log…).
+    // Só caminho interno: `//host` seria um redirecionamento para fora.
+    const from = location.state?.from;
+    const destino = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : '/';
+    if (navegar) navigate(destino, { replace: true });
   };
 
   const handleUpdateUser = (updated) => {
@@ -238,8 +248,6 @@ export default function App() {
   const handleLogout = () => {
     clearAuth();
     setUser(null);
-    // Vai pro /login em vez da home: sair da conta e reaparecer como visitante
-    // sem aviso nenhum seria confuso. De lá dá pra voltar ao modo visitante.
     navigate(LOGIN_PATH);
   };
 
@@ -267,24 +275,54 @@ export default function App() {
       </Routes>
     );
   }
-  // Tela de login: agora é uma rota, não o portão de entrada. Vale também com
-  // sessão de visitante ativa — é assim que o visitante troca por uma conta real.
+  // Tela de login. Vale também com sessão de visitante ativa — é assim que o
+  // visitante troca por uma conta real.
   if (location.pathname === LOGIN_PATH) {
-    return <Login onLogin={handleLogin} visitorAtivo={!!user && user.role === 'visitor'} />;
+    return <Login onLogin={handleLogin} />;
   }
-  // Discussão aberta por link, sem conta: renderiza a tela sozinha, fora do
-  // shell (a barra lateral pressupõe um usuário). Quem tem sessão passa direto
-  // e cai na rota normal lá embaixo, dentro do app.
-  if (!user && ehDiscussaoPublica(location.pathname)) {
+  // Discussão aberta por link, sem conta (ou como visitante de um duelo):
+  // renderiza a tela sozinha, fora do shell, em modo leitura com o banner de
+  // cadastro. Quem tem conta passa direto e cai na rota normal, dentro do app.
+  if ((!user || user.role === 'visitor') && ehDiscussaoPublica(location.pathname)) {
     return (
       <Routes>
-        <Route path="/comunidade/discussao/:id" element={<ComunidadeDiscussao user={null} />} />
+        <Route path="/comunidade/discussao/:id" element={<ComunidadeDiscussao user={user} />} />
       </Routes>
     );
   }
   if (!user) {
-    // Sessão de visitante sendo criada pelo efeito acima. Dura um round-trip.
-    return null;
+    // Link de duelo: a sessão de visitante está sendo criada pelo efeito acima
+    // (dura um round-trip). Qualquer outra rota pede login, guardando o destino.
+    if (ehConviteDuelo(location.pathname)) return null;
+    return <Navigate to={LOGIN_PATH} replace state={{ from: location.pathname + location.search }} />;
+  }
+
+  // Visitante só existe para duelar pelo link: nada de barra lateral nem do
+  // resto do app, só o duelo e o caminho para criar a conta.
+  if (user.role === 'visitor') {
+    if (!ROTA_VISITANTE.test(location.pathname)) return <Navigate to={LOGIN_PATH} replace />;
+    return (
+      <div className="visitor-layout">
+        <header className="visitor-topbar">
+          <div className="visitor-topbar-logo">all<span className="accent">_OS</span></div>
+          <div className="visitor-topbar-actions">
+            <ThemeToggle />
+            <Link to={LOGIN_PATH} className="btn btn-ghost btn-sm">Entrar</Link>
+            <Link to="/cadastro" className="topbar-login-btn">Criar conta</Link>
+          </div>
+        </header>
+        <main className="visitor-main">
+          <div className="visitor-banner">
+            <span className="visitor-banner-tag">Modo visitante</span>
+            <span className="visitor-banner-text">você está duelando sem conta — crie a sua para guardar seus atendimentos</span>
+          </div>
+          <Routes>
+            <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
+            <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
+          </Routes>
+        </main>
+      </div>
+    );
   }
 
   const isActive = (path) => location.pathname === path || location.pathname.startsWith(path + '/');
@@ -296,16 +334,15 @@ export default function App() {
   const isTherapist = user.role === 'therapist' || user.role === 'external';
   const isSupervisor = user.role === 'supervisor';
   const isAdmin = user.role === 'admin';
-  const isVisitor = user.role === 'visitor';
   const isEvaluator = user.role === 'evaluator';
 
   return (
     <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      {/* Cabeçalho único do app. As ações (tema, atualizações, sino, "Entrar")
+      {/* Cabeçalho único do app. As ações (tema, atualizações, sino)
           vivem DENTRO dele, e não soltas em position:fixed por cima — era isso
           que fazia elas cobrirem o logo "all_OS" no celular quando o papel do
-          usuário tinha um item a mais (3 ícones no admin/supervisor, a pílula
-          "Entrar" no visitante). Aqui elas são um item da mesma linha flex, então
+          usuário tinha um item a mais (3 ícones no admin/supervisor). Aqui elas
+          são um item da mesma linha flex, então
           o cabeçalho se reorganiza sozinho, com qualquer combinação de itens.
           No desktop o cabeçalho encolhe pro canto superior direito e só as ações
           aparecem — hamburger, logo e avatar são do mobile (ver .app-topbar). */}
@@ -325,27 +362,14 @@ export default function App() {
         <div className="mobile-topbar-logo">all<span className="accent">_OS</span></div>
         <div className="topbar-actions">
           <ThemeToggle />
-          {!isVisitor && <NotificationBell user={user} />}
-          {/* Visitante entra sem conta; este é o caminho de volta pra uma real. */}
-          {isVisitor && (
-            <Link to={LOGIN_PATH} className="topbar-login-btn">Entrar</Link>
-          )}
+          <NotificationBell user={user} />
         </div>
-        {isVisitor ? (
-          <span className="mobile-topbar-avatar" aria-label="Visitante">
-            {fotoDoUsuario(user)
-              ? <img src={fotoDoUsuario(user)} alt="" />
-              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
-            }
-          </span>
-        ) : (
-          <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
-            {fotoDoUsuario(user)
-              ? <img src={fotoDoUsuario(user)} alt={user.name} />
-              : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
-            }
-          </Link>
-        )}
+        <Link to="/profile" className="mobile-topbar-avatar" aria-label="Perfil">
+          {fotoDoUsuario(user)
+            ? <img src={fotoDoUsuario(user)} alt={user.name} />
+            : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
+          }
+        </Link>
       </header>
 
       <div
@@ -375,17 +399,15 @@ export default function App() {
         </div>
 
         <nav className="sidebar-nav">
-          {(isTherapist || isAdmin || isVisitor) && (
+          {(isTherapist || isAdmin) && (
             <>
               <div className="nav-section">Página inicial</div>
               <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''} title="Simulação">
                 {ICONS.home}<span>Simulação</span>
               </Link>
-              {!isVisitor && (
-                <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''} title="Desafie um amigo">
-                  {ICONS.duel}<span>Desafie um amigo</span>
-                </Link>
-              )}
+              <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''} title="Desafie um amigo">
+                {ICONS.duel}<span>Desafie um amigo</span>
+              </Link>
               {/* Progressão e Antessala são ADMIN ONLY: não aparecem para aluno
                   nem em cinza — some da barra inteira para quem não é admin.
                   (A Antessala do supervisor é outra tela, a de ler os mapas
@@ -419,7 +441,7 @@ export default function App() {
             </>
           )}
 
-          {!isVisitor && !isEvaluator && (
+          {!isEvaluator && (
             <>
               <div className="nav-section">Comunidade</div>
               <Link to="/comunidade" className={isActive('/comunidade') ? 'active' : ''} title="Comunidade">
@@ -461,17 +483,15 @@ export default function App() {
             </>
           )}
 
-          {(isTherapist || isAdmin || isVisitor) && (
+          {(isTherapist || isAdmin) && (
             <>
               {/* Perfil e Minhas sessões são entradas soltas na nova estrutura,
                   sem título de seção acima — o separador só dá o respiro que o
                   título dava. */}
               <div className="nav-separador" aria-hidden="true" />
-              {!isVisitor && (
-                <Link to="/profile" className={isActive('/profile') ? 'active' : ''} title="Perfil">
-                  {ICONS.social}<span>Perfil</span>
-                </Link>
-              )}
+              <Link to="/profile" className={isActive('/profile') ? 'active' : ''} title="Perfil">
+                {ICONS.social}<span>Perfil</span>
+              </Link>
               <Link to="/logs" className={isActive('/logs') ? 'active' : ''} title="Minhas sessões">
                 {ICONS.log}<span>Minhas sessões</span>
               </Link>
@@ -596,20 +616,6 @@ export default function App() {
         </nav>
 
         <div className="sidebar-user">
-          {isVisitor ? (
-            <div className="profile-mini" style={{ cursor: 'default' }}>
-              <span className="profile-mini-avatar">
-                {fotoDoUsuario(user)
-                  ? <img src={fotoDoUsuario(user)} alt="" />
-                  : <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="12" cy="8" r="4" /><path d="M4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" /></svg>
-                }
-              </span>
-              <div className="profile-mini-info">
-                <div className="profile-mini-name">Modo visitante</div>
-                <div className="profile-mini-role">versão de teste</div>
-              </div>
-            </div>
-          ) : (
             <Link to="/profile" className="profile-mini" title="Editar perfil">
               <span className={`profile-mini-avatar ${streak?.isAlive ? 'with-streak' : ''}`}>
                 {fotoDoUsuario(user)
@@ -631,7 +637,6 @@ export default function App() {
                 </div>
               </div>
             </Link>
-          )}
           <button onClick={handleLogout} className="btn btn-ghost btn-sm" title="Sair">
             {ICONS.exit}
           </button>
@@ -639,17 +644,6 @@ export default function App() {
       </aside>
 
       <main className="main-content">
-        {/* Deixa explícito o que a pessoa está usando. Sem isso ela pode achar
-            que o app é limitado, quando na verdade só não entrou numa conta.
-            Fica no fluxo do conteúdo (e não fixo no topo) porque a sidebar é
-            position:fixed — uma faixa fixa exigiria realinhar três breakpoints. */}
-        {isVisitor && (
-          <div className="visitor-banner">
-            <span className="visitor-banner-tag">Modo visitante</span>
-            <span className="visitor-banner-text">versão de teste com funcionalidades limitadas</span>
-            <Link to={LOGIN_PATH} className="visitor-banner-link">Entrar na minha conta</Link>
-          </div>
-        )}
         <Routes>
           <Route path="/skills" element={<SkillMap user={user} />} />
           <Route path="/chat/exercise/:id" element={<ChatSession user={user} />} />
@@ -711,6 +705,6 @@ function defaultRoute(user) {
   if (user.role === 'supervisor') return '/supervisor';
   if (user.role === 'admin') return '/admin/users';
   if (user.role === 'evaluator') return '/selecao/dashboard';
-  // Aluno e visitante: caem na Página Inicial (/inicio) — a lista de pacientes.
+  // Aluno: cai na Página Inicial (/inicio) — a lista de pacientes.
   return '/inicio';
 }
