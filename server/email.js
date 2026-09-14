@@ -425,7 +425,7 @@ function inlineMarkdown(s) {
 const RODAPE_FEEDBACK_PREVIO = [
   { texto: 'Participe da formação síncrona da Allos em ', href: 'https://chat.whatsapp.com/JpZtYWJovU03VlrZJ5oUxQ' },
   { texto: 'Participe da formação gravada da Allos em ', href: 'https://allos.org.br/formacao' },
-  { texto: 'Crie uma conta gratuita no All_OS em ', href: 'https://treinamento.allos.org.br/cadastro', depois: ' e já comece a treinar para os próximos processos seletivos.' },
+  { texto: 'Crie uma conta gratuita no All_OS em ', href: 'https://treinamento.allos.org.br/cadastro', depois: ' e continue treinando na plataforma com feedback de IA.' },
 ];
 
 const AVISO_FEEDBACK_PREVIO = 'Esse feedback qualitativo foi executado por uma inteligência artificial e possui caráter formativo e reflexivo. Não se trata do resultado real do andamento do processo seletivo, que será enviado posteriormente no grupo do WhatsApp.';
