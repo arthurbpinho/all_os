@@ -141,16 +141,17 @@ describe('session-quota (unitário)', () => {
 
 // ---------------------------------------------------------------------------
 describe('cota de sessões na API', () => {
-  beforeEach(() => {
-    resetData();
+  beforeEach(async () => {
+    await resetData();
     mailer.limparCapturados();
     // A cota conta sessões DISTINTAS (chave tipo+paciente), então o teste
     // precisa de mais de um paciente. A fixture padrão traz só o fp-test-1.
-    const chars = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'freeplay-characters.json'), 'utf-8'));
+    const base = (await request(app).get('/api/freeplay').set(authHeader(await loginAs('admin')))).body[0];
+    const chars = [{ id: base.id, name: base.name, age: base.age, description: base.description, specificInstruction: 'FP_PROMPT_SECRETO_NAO_VAZAR' }];
     for (const n of [2, 3, 4, 9]) {
       chars.push({ ...chars[0], id: `fp-test-${n}`, name: `Paciente ${n}` });
     }
-    fs.writeFileSync(path.join(DATA_DIR, 'freeplay-characters.json'), JSON.stringify(chars, null, 2));
+    await app.__test.definirCatalogo('freeplay', chars);
   });
 
   it('deixa abrir 3 sessões e barra a 4ª com a mensagem combinada', async () => {
@@ -253,10 +254,10 @@ describe('cota de sessões na API', () => {
     for (let i = 0; i < 5; i++) {
       expect((await abrirSessao(token)).status).toBe(200);
     }
-    const arquivo = path.join(DATA_DIR, 'external-session-starts.json');
     // Nada é registrado para quem não tem cota.
-    const registro = fs.existsSync(arquivo) ? JSON.parse(fs.readFileSync(arquivo, 'utf-8')) : {};
-    expect(registro['3']).toBeUndefined();
+    const { db } = require('./helpers');
+    const { rows } = await db.query('SELECT count(*)::int AS n FROM cota_sessoes WHERE user_id = 3');
+    expect(rows[0].n).toBe(0);
   });
 
   // A cota é por conta, não global: um externo esgotado não trava o outro.

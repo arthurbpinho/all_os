@@ -7,16 +7,8 @@
 //   4. comentário aninhado em UM nível só, e o que sobra quando ele é apagado;
 //   5. o selo do autor por papel, incluindo o "publicar como Associação Allos";
 //   6. moderação: excluir de qualquer um, banir por dias e purgar publicações.
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, db, inserirUsuarios } = require('./helpers');
 const comunidade = require('../server/comunidade');
-
-function escreverUsuarios(extra = []) {
-  const p = path.join(DATA_DIR, 'users.json');
-  const users = JSON.parse(fs.readFileSync(p, 'utf-8'));
-  fs.writeFileSync(p, JSON.stringify([...users, ...extra], null, 2));
-}
 
 // A suite base não tem 'evaluator' nem 'external'; a Comunidade trata os dois
 // de forma diferente (selo Recruiter vs. sem selo), então precisam existir.
@@ -30,9 +22,9 @@ async function criarDiscussao(token, body) {
   return request(app).post('/api/comunidade').set(authHeader(token)).send(body);
 }
 
-beforeEach(() => {
-  resetData();
-  escreverUsuarios([
+beforeEach(async () => {
+  await resetData();
+  await inserirUsuarios([
     conta('6', 'recruta', 'Rita Recruta', 'evaluator'),
     conta('7', 'externo', 'Edu Externo', 'external'),
   ]);
@@ -271,11 +263,11 @@ describe('enquete', () => {
   test('voto gravado no formato antigo (string) continua sendo lido', async () => {
     const autor = await loginAs('aluno');
     await criarDiscussao(autor, ENQUETE);
-    const p = path.join(DATA_DIR, 'comunidade.json');
-    const store = JSON.parse(fs.readFileSync(p, 'utf-8'));
-    store.discussions[0].poll.votes = { 'algum-id': 'o2' };
-    delete store.discussions[0].poll.multi;
-    fs.writeFileSync(p, JSON.stringify(store, null, 2));
+    await db.query(
+      `UPDATE comunidade_discussoes
+       SET doc = jsonb_set(doc, '{poll}', ((doc->'poll') - 'multi') || '{"votes": {"algum-id": "o2"}}'::jsonb)
+       WHERE id = 1`,
+    );
 
     const ver = await request(app).get('/api/comunidade/1');
     expect(ver.body.discussion.poll.total).toBe(1);
@@ -665,9 +657,9 @@ describe('selo do autor', () => {
     expect(res.body.discussion.author.photo).toBeNull();
     expect(res.body.discussion.author.userId).toBeNull();
     expect(res.body.discussion.comments[0].author.name).toBe('Conta removida');
-    // E nome/foto nunca chegaram sequer ao arquivo em disco.
-    const bruto = fs.readFileSync(path.join(DATA_DIR, 'comunidade.json'), 'utf-8');
-    expect(bruto).not.toContain('Aluno A');
+    // E nome/foto nunca chegaram sequer ao que está gravado.
+    const { rows } = await db.query('SELECT doc::text AS bruto FROM comunidade_discussoes');
+    expect(rows.map((r) => r.bruto).join('\n')).not.toContain('Aluno A');
   });
 
   test('o selo acompanha o papel ATUAL da conta', async () => {
@@ -717,10 +709,12 @@ describe('moderação', () => {
     expect(leitura.body.canPost).toBe(false);
 
     // Ban vencido simplesmente para de valer — sem rotina de limpeza.
-    const cfgPath = path.join(DATA_DIR, 'comunidade-config.json');
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
-    cfg.bans['3'].until = new Date(Date.now() - 1000).toISOString();
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+    await db.query(
+      `UPDATE configuracoes SET valor = jsonb_set(valor, '{bans,3,until}', to_jsonb($1::text))
+       WHERE chave = 'comunidade-config'`,
+      [new Date(Date.now() - 1000).toISOString()],
+    );
+    await app.__test.recarregarConfig();
     const liberado = await criarDiscussao(aluno, { title: 'Depois do ban', body: 'texto' });
     expect(liberado.status).toBe(200);
   });

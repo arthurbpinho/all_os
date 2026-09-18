@@ -5,9 +5,7 @@
 // diferentes devem convergir para a MESMA estimativa de dificuldade. Quem não
 // tem conta (candidato, visitante) entra como uma "população" — um jogador
 // persistente que começa em 50 e aprende o nível real do grupo.
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, db } = require('./helpers');
 const mmr = require('../server/mmr');
 
 describe('TRI — engine: peso do ajuste de dificuldade', () => {
@@ -104,17 +102,16 @@ describe('TRI — engine: peso do ajuste de dificuldade', () => {
 describe('TRI — dificuldade compartilhada entre as fontes', () => {
   beforeEach(() => resetData());
 
-  const arquivo = () => path.join(DATA_DIR, 'mmr.json');
-  const lerMmr = () => JSON.parse(fs.readFileSync(arquivo(), 'utf-8'));
-  function escreverMmr(data) {
-    fs.writeFileSync(arquivo(), JSON.stringify(data, null, 2));
-  }
+  const { criarRepoMmr } = require('../server/repos/mmr');
+  const mmrRepo = criarRepoMmr(db.getPool());
+  const lerMmr = () => mmrRepo.snapshot();
+  const escreverMmr = (data) => mmrRepo.importar(data);
 
   // Semeia um personagem já com dificuldade e uma população já calibrada,
   // simulando um sistema em uso. A suite roda em modo demo (sem chaves de IA),
   // então a avaliação do seletivo não fecha ponta a ponta aqui.
   function semear({ D = 50, n_D = 0, popN = 10 } = {}) {
-    escreverMmr({
+    return escreverMmr({
       players: {},
       characters: { 'fp-test-1': { D, n_D, alpha: null, beta: null, history: [] } },
       anonPlayers: { selecao: { P: 50, n: popN, W: [{ S_aj: 50, D: 50, P: 50 }] } },
@@ -123,25 +120,26 @@ describe('TRI — dificuldade compartilhada entre as fontes', () => {
   }
 
   it('o seletivo escreve na MESMA dificuldade que o competitivo lê', async () => {
-    semear({ D: 50, n_D: 5 });
-    const antes = lerMmr().characters['fp-test-1'].D;
+    await semear({ D: 50, n_D: 5 });
+    const antes = (await lerMmr()).characters['fp-test-1'].D;
 
     // Simula o efeito de um atendimento de candidato com nota baixa.
-    const atual = lerMmr();
+    const atual = await lerMmr();
     const out = mmr.updateMatch(
       atual.anonPlayers.selecao, atual.characters['fp-test-1'], 20, { dWeight: 0.35 },
     );
     atual.characters['fp-test-1'] = out.character;
     atual.anonPlayers.selecao = out.player;
-    escreverMmr(atual);
+    await escreverMmr(atual);
 
     const admin = await loginAs('admin');
     const res = await request(app).get('/api/tri/personagens').set(authHeader(admin));
     const c = res.body.characters.find((x) => x.id === 'fp-test-1');
 
-    // Não há pool separada: o número exposto é o do mmr.json compartilhado.
-    expect(c.difficulty).toBe(Math.round(lerMmr().characters['fp-test-1'].D));
-    expect(lerMmr().characters['fp-test-1'].D).toBeGreaterThan(antes);
+    // Não há pool separada: o número exposto é o da dificuldade compartilhada.
+    const depois = (await lerMmr()).characters['fp-test-1'].D;
+    expect(c.difficulty).toBe(Math.round(depois));
+    expect(depois).toBeGreaterThan(antes);
   });
 
   it('personagem sem atendimento sai na baseline', async () => {
@@ -157,7 +155,7 @@ describe('TRI — dificuldade compartilhada entre as fontes', () => {
   });
 
   it('ordena do mais difícil pro mais fácil, com os sem dado no fim', async () => {
-    semear({ D: 72, n_D: 8 });
+    await semear({ D: 72, n_D: 8 });
     const admin = await loginAs('admin');
     const res = await request(app).get('/api/tri/personagens').set(authHeader(admin));
     expect(res.body.characters[0].id).toBe('fp-test-1');
@@ -167,7 +165,7 @@ describe('TRI — dificuldade compartilhada entre as fontes', () => {
   });
 
   it('expõe o rating aprendido de cada população anônima', async () => {
-    semear({ popN: 10 });
+    await semear({ popN: 10 });
     const admin = await loginAs('admin');
     const res = await request(app).get('/api/tri/personagens').set(authHeader(admin));
 

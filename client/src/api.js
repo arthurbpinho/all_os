@@ -246,7 +246,13 @@ export const api = {
   getTrilhaStats: (userId) => request(`/trilha/${userId}`),
 
   // Logs
-  getLogs: (userId) => request(`/logs${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
+  getLogs: (userId, tag) => {
+    const q = new URLSearchParams();
+    if (userId) q.set('userId', userId);
+    if (tag) q.set('tag', tag);
+    const s = q.toString();
+    return request(`/logs${s ? `?${s}` : ''}`);
+  },
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
   // Nota e feedback POR CRITÉRIO de um log — só supervisor/admin (o servidor
   // recusa aluno com 403). O aluno tem a nota total e o feedback qualitativo;
@@ -534,7 +540,7 @@ export const api = {
   claimAchievement: (id) => request(`/achievements/${id}/claim`, { method: 'POST' }),
 
   // Ranking global de jogadores (não disponível pra visitante)
-  getRanking: () => request('/ranking'),
+  getRanking: (tag) => request(`/ranking${tag ? `?tag=${encodeURIComponent(tag)}` : ''}`),
   // MMR competitivo do próprio usuário (perfil / pós-sessão)
   getMyMmr: () => request('/me/mmr'),
   // Reset de ranking (admin): zera notas + progresso, preserva logs.
@@ -569,6 +575,10 @@ export const api = {
   // Exclui um .md do volume. O servidor recusa (409) quando o prompt está EM
   // USO por algum código vivo; o conteúdo vai para o histórico antes de sair,
   // então isto tem volta.
+  // Critérios da régua do avaliador oficial.
+  adminGetCriterios: () => request('/admin/criterios'),
+  adminAddCriterio: (dados) => request('/admin/criterios', { method: 'POST', body: dados }),
+  adminEditCriterio: (num, dados) => request(`/admin/criterios/${encodeURIComponent(num)}`, { method: 'PUT', body: dados }),
   adminDeletePrompt: (p) => request('/admin/prompts/' + encodePromptPath(p), { method: 'DELETE' }),
   adminGetPromptVersion: (p, id) => request(`/admin/prompt-versions/${encodeURIComponent(id)}?path=${encodeURIComponent(p)}`),
   adminRestorePromptVersion: (p, id) =>
@@ -605,6 +615,26 @@ export const api = {
   },
 
   // Admin: gestão de contas
+  // Acessos por funcionalidade (Administração → Acessos).
+  getAcessos: () => request('/acessos'),
+  adminGetAcessos: () => request('/admin/acessos'),
+  adminSaveAcessos: (data) => request('/admin/acessos', { method: 'PUT', body: data }),
+
+  // Média por critério das sessões avaliadas (gráfico do perfil).
+  getMeusCriterios: (userId) => request(`/me/criterios${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`),
+
+  // Uso de IA na janela de 7 dias (limite do Terapeuta externo).
+  getMeuUsoIa: () => request('/me/uso-ia'),
+  adminGetUsoIa: () => request('/admin/uso-ia'),
+
+  // Tags de terapeutas.
+  getTags: () => request('/tags'),
+  adminGetTags: () => request('/admin/tags'),
+  adminCreateTag: (nome) => request('/admin/tags', { method: 'POST', body: { nome } }),
+  adminRenameTag: (id, nome) => request(`/admin/tags/${id}`, { method: 'PUT', body: { nome } }),
+  adminDeleteTag: (id) => request(`/admin/tags/${id}`, { method: 'DELETE' }),
+  adminSetUserTags: (userId, tagIds) => request(`/admin/users/${userId}/tags`, { method: 'PUT', body: { tagIds } }),
+
   adminListUsers: () => request('/admin/users'),
   adminCreateUser: (data) => request('/admin/users', { method: 'POST', body: data }),
   adminUpdateUser: (id, data) => request(`/admin/users/${id}`, { method: 'PUT', body: data }),

@@ -1,11 +1,11 @@
 // Caminhos compartilhados entre módulos do servidor.
 //
 // DATA_DIR: volume persistente (Railway, via env) ou server/data em dev.
-// PROMPTS_DIR: dentro do DATA_DIR — guarda os .md do avaliador/entrevistador,
-// que são dados sensíveis (critérios de nota, gabaritos) e por isso NÃO ficam
-// no git. Ver seedPromptsDir() em server/index.js para a semeadura inicial e
-// as rotas /api/admin/prompts para atualizar depois (o git deixou de ser o
-// canal de deploy desses arquivos).
+// PROMPTS_DIR: dentro do DATA_DIR — onde moravam os .md do avaliador/entrevistador
+// antes de irem para o banco (005_prompts.sql). Hoje é só uma ORIGEM da
+// semeadura: no boot, o que estiver aqui e ainda não estiver no banco entra (ver
+// semearPrompts() em server/index.js). Continua servindo para validar caminho
+// de prompt (resolvePromptPath).
 const path = require('path');
 
 const SEED_DATA_DIR = path.join(__dirname, 'data');

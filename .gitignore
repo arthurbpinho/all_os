@@ -62,6 +62,15 @@ server/data/benchmark-runs/
 # via /api/admin/prompts (não por git push).
 avaliacao/
 entrevistador/
+# A cópia desses prompts no DATA_DIR de dev. O repo é público: sem esta linha,
+# um `git add .` publicaria os gabaritos que as duas linhas acima protegem.
+server/data/prompts/
+server/data/prompt-backups/
+# Cópias soltas do prompt do avaliador na raiz (idênticas ao arquivo em
+# avaliacao/v34-duelo/). Estão fora das pastas acima, então um `git add .` as
+# publicaria — e o repo é público.
+/v34.md
+/lts.md
 
 # JSONs de dados com conteúdo clínico/pedagógico sensível (gabarito de
 # neuropsicológica, evaluatorPrompt por exercício, prompts dos pacientes

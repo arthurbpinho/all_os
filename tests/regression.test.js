@@ -4,7 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR, db } = require('./helpers');
 
 describe('regressão — bugs do pentest e da rodada de QA', () => {
   beforeEach(() => resetData());
@@ -352,11 +352,8 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
       const aluno = await loginAs('aluno');
       await request(app).post('/api/logs').set(authHeader(aluno))
         .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'velho' });
-      // envelhece o log direto no JSON (40 dias atrás)
-      const file = path.join(DATA_DIR, 'logs.json');
-      const logs = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      logs[0].timestamp = new Date(Date.now() - 40 * 86400000).toISOString();
-      fs.writeFileSync(file, JSON.stringify(logs));
+      // envelhece o log direto no banco (40 dias atrás)
+      await db.query("UPDATE logs SET criado_em = now() - interval '40 days'");
       const res = await request(app).get('/api/logs').set(authHeader(aluno));
       expect(res.body.length).toBe(0);
     });

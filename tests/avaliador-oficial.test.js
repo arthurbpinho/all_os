@@ -339,13 +339,15 @@ describe('avaliador oficial v34 — sigilo do detalhe por critério', () => {
     return { logId: saved.body.id, aluno };
   }
 
-  it('o aluno recebe nota total e feedback, mas nem as notas por critério nem a chave', async () => {
+  it('o aluno recebe nota total, feedback e as notas por critério, mas não a chave das análises', async () => {
     const { logId, aluno } = await logComDetalhe();
     const meus = await request(app).get('/api/logs').set(authHeader(aluno));
     const meu = meus.body.find((l) => l.id === logId);
     expect(meu.score).toBe(72);
     expect(meu.evaluation).toContain('Você abriu bem');
-    expect(meu).not.toHaveProperty('criteriaScores');
+    // Decisão de 2026-09 (demandas.md §18): números sim, análise escrita não.
+    expect(meu.criteriaScores['1']).toBe(7);
+    expect(Object.keys(meu.criteriaNames)).toHaveLength(8);
     expect(meu).not.toHaveProperty('evalPartsId');
     // E nada da análise por critério (que cita o gabarito) no que ele recebe.
     expect(JSON.stringify(meu)).not.toContain('GABARITO_SECRETO');

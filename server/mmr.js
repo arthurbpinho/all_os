@@ -123,7 +123,20 @@ function updateMatch(playerIn, charIn, Sraw, opts = {}) {
   const S_esp = expectedScore(player, character);
 
   // Passo 2 — dificuldade (só quando o jogador NÃO está em calibração: 4ª+).
-  // Durante a calibração o sinal do jogador é ruidoso demais para mexer no D.
+  //
+  // Regra (TRI, demandas §16.7): deltaD = 0,1 × (S_esp − S). A nota esperada já
+  // embute o nível do terapeuta (gap P − D), então o D só anda pela SURPRESA:
+  //   - MMR alto e nota baixa → S_esp > S → D sobe (o caso é mais difícil);
+  //   - MMR baixo e nota alta → S_esp < S → D desce (o caso é mais fácil);
+  //   - nota igual à esperada → D fica onde está.
+  // Sem essa correção pelo nível, um paciente atendido só por alunos fracos
+  // pareceria difícil só por causa de quem o atendeu.
+  //
+  // Por que a calibração não mexe no D: nas 3 primeiras partidas o P do jogador
+  // ainda é o chute inicial (50), não o nível dele. A S_esp sairia errada e a
+  // "surpresa" seria só o erro do chute — um aluno forte recém-chegado derrubaria
+  // o D de todo paciente que atendesse. Esperamos o P convergir antes de usá-lo
+  // como régua. O mesmo vale para as populações anônimas (ver newAnonPopulation).
   const D_before = character.D;
   if (!calibrating) {
     const deltaD = dWeight * 0.1 * (S_esp - S);
