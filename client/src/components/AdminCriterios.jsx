@@ -25,6 +25,7 @@ export default function AdminCriterios({ onGravado }) {
   const [salvando, setSalvando] = useState(false);
   const [erro, setErro] = useState('');
   const [aviso, setAviso] = useState('');
+  const [removendo, setRemovendo] = useState(null); // num aguardando confirmação
 
   useEffect(() => {
     api.adminGetCriterios().then(setDados).catch((e) => setErro(e.message || 'Não foi possível carregar os critérios.'));
@@ -62,8 +63,27 @@ export default function AdminCriterios({ onGravado }) {
     }
   }
 
+  // Desativa: o critério sai da régua e das próximas avaliações, mas as notas
+  // já dadas continuam no gráfico do perfil (a linha fica no banco com
+  // ativo = false). Repor com o mesmo nome traz o histórico de volta.
+  async function remover(c) {
+    setErro(''); setAviso(''); setSalvando(true);
+    try {
+      const d = await api.adminRemoveCriterio(c.num);
+      setDados(d);
+      setAviso(`Critério "${c.nome}" desativado. As notas já dadas continuam no histórico; os próximos atendimentos são avaliados sem ele.`);
+      setRemovendo(null);
+      if (onGravado) onGravado();
+    } catch (err) {
+      setErro(err.message || 'Não foi possível desativar o critério.');
+    } finally {
+      setSalvando(false);
+    }
+  }
+
   const criterios = (dados && dados.criterios) || [];
   const cheio = dados && criterios.length >= dados.limites.max;
+  const noMinimo = dados && criterios.length <= dados.limites.min;
   const atual = typeof editando === 'number' ? criterios.find((c) => c.num === editando) : null;
   const renomeando = atual && form.nome.trim().toLowerCase() !== atual.nome.toLowerCase();
 
@@ -166,8 +186,30 @@ export default function AdminCriterios({ onGravado }) {
                       </div>
                     )}
                   </td>
-                  <td style={{ padding: '8px 6px', textAlign: 'right' }}>
-                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => abrirEdicao(c)} disabled={salvando}>Editar</button>
+                  <td style={{ padding: '8px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    {removendo === c.num ? (
+                      <>
+                        <span style={{ fontSize: 12.5, color: 'var(--ink-soft)', marginRight: 8 }}>
+                          Desativar “{c.nome}”?
+                        </span>
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRemovendo(null)} disabled={salvando}>Não</button>
+                        <button type="button" className="btn btn-danger btn-sm" onClick={() => remover(c)} disabled={salvando}>
+                          {salvando ? 'Desativando…' : 'Sim, desativar'}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => abrirEdicao(c)} disabled={salvando}>Editar</button>
+                        <button
+                          type="button" className="btn btn-ghost btn-sm"
+                          onClick={() => { setRemovendo(c.num); setErro(''); setAviso(''); }}
+                          disabled={salvando || noMinimo}
+                          title={noMinimo ? `A régua precisa de pelo menos ${dados.limites.min} critérios.` : 'Sai da régua; as notas já dadas continuam no histórico'}
+                        >
+                          Desativar
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}

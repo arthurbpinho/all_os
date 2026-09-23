@@ -11,6 +11,8 @@ export default function AdminAcessos() {
   const [matriz, setMatriz] = useState({});
   const [mensagem, setMensagem] = useState('');
   const [modos, setModos] = useState([]);
+  // Pesos do TRI como TEXTO no formulário; o servidor é quem converte e saneia.
+  const [pesos, setPesos] = useState({});
   // Terapeuta externo: modelo de IA e limite semanal. Os limites ficam como
   // texto no formulário ('' = sem limite) e viram número ao salvar.
   const [limites, setLimites] = useState({ modeloPaciente: '', modeloAvaliador: '', limiteUsd: '', limiteTokens: '' });
@@ -39,9 +41,13 @@ export default function AdminAcessos() {
 
   useEffect(() => {
     api.adminGetAcessos()
-      .then((d) => { setDados(d); setMatriz(d.matriz); setMensagem(d.mensagemCadeado || ''); setModos(d.modosPerfilCriterios || []); aplicarLimites(d.limitesExterno); })
+      .then((d) => { setDados(d); setMatriz(d.matriz); setMensagem(d.mensagemCadeado || ''); setModos(d.modosPerfilCriterios || []); aplicarPesos(d.pesosTri); aplicarLimites(d.limitesExterno); })
       .catch((e) => setErro(e.message || 'Erro ao carregar os acessos.'));
   }, []);
+
+  function aplicarPesos(p) {
+    setPesos(Object.fromEntries(Object.entries(p || {}).map(([k, v]) => [k, String(v)])));
+  }
 
   function alternar(chave, perfil) {
     setOk('');
@@ -53,6 +59,14 @@ export default function AdminAcessos() {
     try {
       const d = await api.adminSaveAcessos({
         matriz, mensagemCadeado: mensagem, modosPerfilCriterios: modos,
+        // Manda o TEXTO: campo vazio tem de virar "usa o padrão", e Number('')
+        // seria 0 — que aqui quer dizer "desligado". Quem sabe a diferença é o
+        // normalizador do servidor. A troca de vírgula por ponto é defensiva:
+        // <input type="number"> devolve '' para "0,5" na maioria dos
+        // navegadores, mas alguns entregam a vírgula crua.
+        pesosTri: Object.fromEntries(
+          Object.entries(pesos).map(([k, v]) => [k, String(v).replace(',', '.')]),
+        ),
         limitesExterno: {
           modeloPaciente: limites.modeloPaciente,
           modeloAvaliador: limites.modeloAvaliador,
@@ -61,6 +75,7 @@ export default function AdminAcessos() {
         },
       });
       setDados(d); setMatriz(d.matriz); setMensagem(d.mensagemCadeado || ''); setModos(d.modosPerfilCriterios || []);
+      aplicarPesos(d.pesosTri);
       aplicarLimites(d.limitesExterno);
       api.adminGetUsoIa().then(setUso).catch(() => {});
       setOk('Acessos salvos. Valem na próxima vez que cada pessoa abrir o app.');
@@ -240,6 +255,62 @@ export default function AdminAcessos() {
             </label>
           ))}
         </div>
+      </div>
+
+      <div className="card">
+        <h3 className="card-title">Influência no TRI (dificuldade dos pacientes)</h3>
+        <p style={{ fontSize: 13, color: 'var(--ink-soft)' }}>
+          A dificuldade de cada paciente é medida a partir das notas obtidas. Um atendimento de
+          aluno cadastrado vale <strong>1</strong>. Quem não tem conta (candidato do Processo
+          Seletivo, visitante) entra com um peso menor, porque o que se conhece é o nível médio do
+          grupo, e não o daquela pessoa — e porque o Seletivo tem muito mais volume e afogaria o
+          sinal do Competitivo. <strong>0 desliga</strong> a influência daquela população.
+        </p>
+        <div style={{ display: 'grid', gap: 14 }}>
+          {(dados.poolsTri || []).map((pool) => {
+            const valor = pesos[pool.key] ?? '';
+            const num = Number(String(valor).replace(',', '.'));
+            const desligado = Number.isFinite(num) && num === 0;
+            const inativo = pool.key === 'visitante' && !dados.visitanteTriLigado;
+            return (
+              <div key={pool.key} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 170 }}>
+                  <label htmlFor={`peso-${pool.key}`} style={{ fontWeight: 600 }}>{pool.label}</label>
+                  {inativo && (
+                    <div style={{ fontSize: 12, color: 'var(--ink-soft)' }}>
+                      sem efeito hoje: a avaliação de visitante não está ligada
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    id={`peso-${pool.key}`}
+                    type="number"
+                    step="0.05"
+                    min={dados.pesoTriMin}
+                    max={dados.pesoTriMax}
+                    value={valor}
+                    style={{ width: 96 }}
+                    onChange={(e) => { setOk(''); setPesos((p) => ({ ...p, [pool.key]: e.target.value })); }}
+                  />
+                  {desligado && <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>desligado</span>}
+                  {String(valor).trim() === '' && (
+                    <span style={{ fontSize: 12, color: 'var(--ink-soft)' }}>
+                      vazio: salva o padrão do sistema
+                    </span>
+                  )}
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--ink-soft)', margin: 0, flex: 1 }}>
+                  {pool.descricao}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--ink-soft)', marginTop: 12 }}>
+          Vale já no próximo atendimento avaliado. Não recalcula as dificuldades que já foram
+          medidas — muda só o quanto os próximos atendimentos pesam daqui para frente.
+        </p>
       </div>
 
       {erro && <div className="alert error">{erro}</div>}

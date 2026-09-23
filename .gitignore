@@ -1,6 +1,8 @@
 node_modules/
 client/dist/
 .env
+.env.*
+!.env.example
 
 # Certificado da credencial do app de e-mail (Microsoft Graph). A chave privada
 # vive só nesta máquina e no painel de variáveis do Railway — nunca no git.
@@ -39,6 +41,8 @@ server/data/tmp_audio_*.webm
 
 # Fotos de paciente enviadas em runtime (ficam no volume DATA_DIR, não no repo)
 server/data/patient-photos/
+# Fotos de exercício enviadas em runtime — mesma razão das de paciente.
+server/data/exercise-photos/
 server/data/avaliacao-v25.json
 # Resumos de raciocínio das avaliações do v28 (um .txt por run, no volume)
 server/data/avaliacao-reasoning/
@@ -108,3 +112,12 @@ server/data/avatar-pool.json
 server/data/sidequests.json
 server/data/feedback.json
 server/data/achievement-unlocks.json
+
+# Cópias do volume de produção: PII, hashes de senha e transcrições.
+# Nunca no git (os dois repositórios são públicos).
+data-backup*.tar.gz
+# Barra na frente = SÓ na raiz. Sem ela, `data/` casaria com qualquer pasta
+# chamada data em qualquer nível — inclusive server/data/, que é a semente do
+# repositório e precisa continuar versionada.
+/data/
+/data-parcial/

@@ -39,6 +39,63 @@ const FUNCIONALIDADES = [
 ];
 const FUNCIONALIDADE_KEYS = FUNCIONALIDADES.map((f) => f.key);
 
+// --- Peso do TRI por população anônima (demandas.md §16.7) -----------------
+//
+// A dificuldade dos pacientes é única e compartilhada (ver o bloco "TRI" em
+// index.js). Cada atendimento de população anônima move o D com um ganho
+// reduzido, porque o rating que entra na conta é a média de um grupo, não a
+// habilidade de uma pessoa — e porque o Seletivo tem muito mais volume que o
+// Competitivo e afogaria o sinal dele.
+//
+// O número era só variável de ambiente, o que obrigava um deploy para ajustar.
+// Agora é do admin, na tela de Acessos: é um parâmetro de calibração que só se
+// sabe afinar com dados reais na mão.
+const POOLS_TRI = [
+  {
+    key: 'selecao',
+    label: 'Processo Seletivo',
+    descricao: 'Quanto um atendimento de candidato move a dificuldade do paciente, comparado ao de um aluno cadastrado (que vale 1). Menor = o Seletivo influencia menos.',
+  },
+  {
+    key: 'visitante',
+    label: 'Visitante',
+    descricao: 'Mesma escala, para o visitante do link de duelo. Só tem efeito quando a avaliação de visitante estiver ligada (VISITOR_TRI).',
+  },
+];
+const POOL_TRI_KEYS = POOLS_TRI.map((p) => p.key);
+
+// 0 desliga a influência daquela população; 1 a iguala à de um aluno
+// cadastrado. Acima de 1 ela passaria a pesar MAIS que o aluno real, o que
+// inverteria a razão de o peso existir — por isso o teto.
+const PESO_TRI_MIN = 0;
+const PESO_TRI_MAX = 1;
+
+// Duas casas: o passo do ajuste já é 0,1 × peso, então a terceira casa não muda
+// nada que alguém consiga observar.
+function normalizarPeso(v, padrao) {
+  // null, undefined e '' precisam ser testados ANTES do Number(): os três viram
+  // 0, e 0 aqui significa "desligue esta população do TRI". Sem esta guarda, um
+  // campo apagado na tela desligaria o ajuste de dificuldade em silêncio, em vez
+  // de voltar ao padrão. Zero digitado continua valendo zero.
+  if (v === null || v === undefined || (typeof v === 'string' && v.trim() === '')) return padrao;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return padrao;
+  return Math.round(Math.min(PESO_TRI_MAX, Math.max(PESO_TRI_MIN, n)) * 100) / 100;
+}
+
+// { selecao, visitante } saneado. `padroes` são os valores de ambiente, usados
+// para a população que o admin nunca tocou.
+function normalizarPesosTri(raw, padroes = {}) {
+  const out = {};
+  for (const p of POOLS_TRI) {
+    const padrao = normalizarPeso(padroes[p.key], 0.35);
+    out[p.key] = raw && typeof raw === 'object' && p.key in raw
+      ? normalizarPeso(raw[p.key], padrao)
+      : padrao;
+  }
+  return out;
+}
+
 const MENSAGEM_PADRAO = 'Esta funcionalidade não está disponível para o seu perfil. Fale com o suporte da Allos se precisar dela.';
 const MENSAGEM_MAX = 600;
 
@@ -94,6 +151,11 @@ module.exports = {
   PERFIL_KEYS,
   FUNCIONALIDADES,
   FUNCIONALIDADE_KEYS,
+  POOLS_TRI,
+  POOL_TRI_KEYS,
+  PESO_TRI_MIN,
+  PESO_TRI_MAX,
+  normalizarPesosTri,
   MENSAGEM_PADRAO,
   matrizPadrao,
   normalizarMatriz,

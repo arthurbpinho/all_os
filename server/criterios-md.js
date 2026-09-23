@@ -112,6 +112,71 @@ function editarCriterio(raw, num, dados) {
   return r.ok ? { ...r, anterior: { nome: alvo.nome, linhaCurta: alvo.linhaCurta } } : r;
 }
 
+// Escapa um nome para entrar numa RegExp (os nomes vêm do admin).
+const re = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// { ok, raw, removido } | { ok: false, erro, naoExiste? }
+//
+// DESATIVAR, não apagar. O critério sai do arquivo, e a sincronização
+// (server/repos/prompts.js, sincronizarCriterios) marca a linha dele em
+// `criterios` com ativo = false em vez de removê-la: o nome, o histórico e os
+// nomes anteriores continuam lá, então as notas já dadas seguem casando no
+// gráfico do perfil. Voltar é colocá-lo de novo com o mesmo nome.
+//
+// Os que sobram são RENUMERADOS. A numeração é posicional — é o lado do polígono
+// do gráfico —, e não a identidade do critério (essa é o nome). Deixar buraco
+// desenharia um gráfico com um lado faltando.
+function removerCriterio(raw, num) {
+  const texto = String(raw || '');
+  const n = Number(num);
+  const atuais = parseCriteria(texto);
+  const alvo = atuais.find((c) => c.num === n);
+  if (!alvo) return { ok: false, naoExiste: true, erro: 'Critério não encontrado.' };
+  if (atuais.length <= LIMITES.min) {
+    return { ok: false, erro: `A régua precisa de pelo menos ${LIMITES.min} critérios; esta tem ${atuais.length}.` };
+  }
+
+  const lc = texto.indexOf('## Linha curta');
+  const i = texto.indexOf(alvo.descricao);
+  if (i === -1 || lc === -1 || i > lc) {
+    return { ok: false, erro: 'Não achei o bloco do critério no arquivo; edite-o em Prompts.' };
+  }
+
+  // Tira o bloco e fecha o buraco de linhas em branco que ele deixa.
+  let novo = (texto.slice(0, i) + texto.slice(i + alvo.descricao.length)).replace(/\n{3,}/g, '\n\n');
+
+  // Tira a linha curta correspondente.
+  const lc2 = novo.indexOf('## Linha curta');
+  const reLinha = new RegExp(`^${n}\\.\\s+\\*\\*${re(alvo.nome)}\\*\\*.*$\\n?`, 'm');
+  const secao = novo.slice(lc2);
+  if (!reLinha.test(secao)) {
+    return { ok: false, erro: 'Não achei a linha curta do critério no arquivo; edite-o em Prompts.' };
+  }
+  novo = novo.slice(0, lc2) + secao.replace(reLinha, '');
+
+  // Renumera os que sobraram. Em ordem crescente de propósito: como todos os
+  // números só DIMINUEM, quando o 4 vira 3 o antigo 3 já virou 2 — nenhum
+  // número colide com um que ainda não foi trocado.
+  const restantes = atuais.filter((c) => c.num !== n);
+  restantes.forEach((c, idx) => {
+    const novoNum = idx + 1;
+    if (c.num === novoNum) return;
+    novo = novo.replace(new RegExp(`^## ${c.num} · ${re(c.nome)}[^\\S\\n]*$`, 'm'), `## ${novoNum} · ${c.nome}`);
+    novo = novo.replace(new RegExp(`^${c.num}\\.\\s+\\*\\*${re(c.nome)}\\*\\*`, 'm'), `${novoNum}. **${c.nome}**`);
+  });
+
+  novo = atualizarTitulo(novo, restantes.length);
+
+  // Mesma desconfiança de `conferir`: relê no parser da produção e só aceita se
+  // sobraram exatamente os critérios certos, na ordem certa.
+  const lidos = parseCriteria(novo);
+  const esperado = restantes.map((c) => c.nome);
+  if (lidos.length !== esperado.length || lidos.some((c, idx) => c.nome !== esperado[idx] || c.num !== idx + 1)) {
+    return { ok: false, erro: 'O arquivo de critérios tem um formato que não consegui editar com segurança; edite-o em Prompts.' };
+  }
+  return { ok: true, raw: novo, removido: { nome: alvo.nome, num: n } };
+}
+
 // Relê o texto montado no parser da produção: se o critério não voltar igual,
 // o arquivo tinha alguma forma que estas funções não previram, e é melhor
 // recusar do que gravar uma régua que perdeu um critério.
@@ -143,5 +208,5 @@ function citacoesDeQuantidadeFixa(prompts) {
 }
 
 module.exports = {
-  REGUA, CAMINHO, PASTAS_PIPELINE, LIMITES, MAX, lerCriterios, sanear, adicionarCriterio, editarCriterio, citacoesDeQuantidadeFixa,
+  REGUA, CAMINHO, PASTAS_PIPELINE, LIMITES, MAX, lerCriterios, sanear, adicionarCriterio, editarCriterio, removerCriterio, citacoesDeQuantidadeFixa,
 };

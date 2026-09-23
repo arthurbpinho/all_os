@@ -579,6 +579,7 @@ export const api = {
   adminGetCriterios: () => request('/admin/criterios'),
   adminAddCriterio: (dados) => request('/admin/criterios', { method: 'POST', body: dados }),
   adminEditCriterio: (num, dados) => request(`/admin/criterios/${encodeURIComponent(num)}`, { method: 'PUT', body: dados }),
+  adminRemoveCriterio: (num) => request(`/admin/criterios/${encodeURIComponent(num)}`, { method: 'DELETE' }),
   adminDeletePrompt: (p) => request('/admin/prompts/' + encodePromptPath(p), { method: 'DELETE' }),
   adminGetPromptVersion: (p, id) => request(`/admin/prompt-versions/${encodeURIComponent(id)}?path=${encodeURIComponent(p)}`),
   adminRestorePromptVersion: (p, id) =>

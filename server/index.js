@@ -1015,9 +1015,18 @@ const TRI_POOLS = ['selecao', 'visitante'];
 // que o de um aluno conhecido (o rating usado é a média do grupo, não a
 // habilidade daquela pessoa), então recebe ganho menor — e o seletivo, que terá
 // muito mais volume, não afoga o sinal do competitivo. Aluno real = 1.
-const TRI_PESOS = {
-  selecao: Number(process.env.TRI_PESO_SELECAO) || 0.35,
-  visitante: Number(process.env.TRI_PESO_VISITANTE) || 0.5,
+// Padrões de fábrica. O valor que vale é o de Administração → Acessos
+// (`lerAcessos().pesosTri`); estes só valem enquanto o admin não tocar em nada,
+// e continuam ajustáveis por ambiente para um deploy nascer diferente.
+// `Number(x) || padrao` engoliria um 0 vindo do ambiente — e 0 aqui NÃO é
+// "não informado", é "desligue esta população".
+function pesoDoAmbiente(valor, padrao) {
+  const n = Number(valor);
+  return valor !== undefined && valor !== '' && Number.isFinite(n) ? n : padrao;
+}
+const TRI_PESOS_PADRAO = {
+  selecao: pesoDoAmbiente(process.env.TRI_PESO_SELECAO, 0.35),
+  visitante: pesoDoAmbiente(process.env.TRI_PESO_VISITANTE, 0.5),
 };
 
 // Avaliação de visitante ainda não existe. A ligação está pronta: quando ligar,
@@ -1053,20 +1062,38 @@ async function aplicarPartidaCompetitiva(userId, characterId, score) {
 async function registrarTriAnonimo(pool, characterId, score) {
   if (!TRI_POOLS.includes(pool)) return null;
   if (!characterId || !Number.isFinite(Number(score))) return null;
+  // Lido a cada atendimento, não no boot: o admin muda o peso na tela de
+  // Acessos e o próximo atendimento já usa o valor novo, sem redeploy.
+  const peso = lerAcessos().pesosTri[pool];
   let out = null;
   try {
     ({ result: out } = await mmrRepo.aplicar(
       { characterId, populacao: pool, fonte: pool },
       ({ populacao, character }) => {
-        const r = mmrEngine.updateMatch(populacao, character, Number(score), { dWeight: TRI_PESOS[pool] });
+        const r = mmrEngine.updateMatch(populacao, character, Number(score), { dWeight: peso });
+        // Peso 0 = "esta população não influencia a dificuldade". Devolver o
+        // personagem mesmo assim o gravaria com n_D a mais e um ponto novo no
+        // histórico da regressão — ou seja, ela ainda moldaria o D por outro
+        // caminho. `aplicar` só grava o que voltar daqui, então o personagem
+        // fica de fora inteiro.
+        //
+        // O rating da POPULAÇÃO continua aprendendo: se ela ficasse congelada,
+        // religar o peso mais tarde retomaria de um rating que nunca aprendeu
+        // — exatamente a inflação do D que esta camada existe para evitar.
+        const influencia = peso > 0;
         // Durante a calibração da população (3 primeiras) o engine não mexe no D;
         // só conta como contribuição o que de fato moveu a dificuldade.
-        return { populacao: r.player, character: r.character, contarFonte: !r.result.calibratingBefore, result: r.result };
+        return {
+          populacao: r.player,
+          ...(influencia ? { character: r.character } : {}),
+          contarFonte: influencia && !r.result.calibratingBefore,
+          result: r.result,
+        };
       },
     ));
     console.log(
-      `[tri:${pool}] ${characterId} nota=${Math.round(Number(score))} ` +
-      `D ${out.D_before.toFixed(1)} → ${out.D_after.toFixed(1)} · ` +
+      `[tri:${pool}] ${characterId} nota=${Math.round(Number(score))} peso=${peso} ` +
+      `D ${out.D_before.toFixed(1)} → ${peso > 0 ? out.D_after.toFixed(1) : 'intocado (peso 0)'} · ` +
       `rating da população ${out.P_before.toFixed(1)} → ${out.P_after.toFixed(1)}` +
       (out.calibratingBefore ? ' (população em calibração, D intocado)' : ''),
     );
@@ -1194,6 +1221,8 @@ function lerAcessos() {
     modosPerfilCriterios: criteriosPerfil.normalizarModos(c.modosPerfilCriterios),
     // Modelo de IA e limite semanal do Terapeuta externo.
     limitesExterno: limitesIa.normalizarConfig(c.limitesExterno, PRESETS_LIMITES),
+    // Quanto cada população anônima move a dificuldade dos pacientes.
+    pesosTri: acessos.normalizarPesosTri(c.pesosTri, TRI_PESOS_PADRAO),
   };
 }
 
@@ -2908,6 +2937,25 @@ app.put('/api/admin/criterios/:num', requireAuth, requireRole('admin'), rota(asy
   res.json({ ok: true, ...(await criteriosParaAdmin()) });
 }));
 
+// Desativa um critério da régua. Ele sai do arquivo (e, portanto, das próximas
+// avaliações) mas a linha em `criterios` fica com ativo = false, guardando nome,
+// histórico e nomes anteriores — as notas já dadas continuam casando no gráfico
+// do perfil, que junta critério pelo NOME. Repor o critério com o mesmo nome o
+// reativa com o histórico intacto.
+//
+// Não há exclusão de verdade, e é decisão do dono (demandas.md §23): apagar a
+// linha deixaria as notas antigas órfãs e mudaria a base da nota final, que é
+// nº de critérios × 10 — o ranking passaria a misturar duas réguas.
+app.delete('/api/admin/criterios/:num', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const raw = promptFiles.lerPrompt(criteriosMd.CAMINHO);
+  if (raw == null) return semArquivoDeCriterios(res);
+  const r = criteriosMd.removerCriterio(raw, req.params.num);
+  if (!r.ok) return res.status(r.naoExiste ? 404 : 400).json({ error: r.erro });
+  if (!(await gravarArquivoDeCriterios(req, res, r.raw))) return;
+  console.log(`[criterios] critério ${r.removido.num} (${r.removido.nome}) DESATIVADO por ${req.user.username}`);
+  res.json({ ok: true, removido: r.removido, ...(await criteriosParaAdmin()) });
+}));
+
 // Exclui um prompt. Quando um modo ou uma régua sai do app, os prompts dele
 // ficam para sempre, aparecendo na listagem como arquivos editáveis que nenhum
 // código lê.
@@ -3770,6 +3818,19 @@ function extractDailyMissionResult(evaluation) {
   return extractResultBlock(evaluation, 'missao-diaria-resultado', 'daily_completed');
 }
 
+// { '1': nome, ... } da régua ATIVA, se e somente se os números das notas forem
+// exatamente os da régua. Fora disso devolve null: nome errado num gráfico é
+// pior que nome nenhum.
+async function nomesDaReguaPara(notas) {
+  const ativos = (await promptsRepo.criteriosDa(criteriosMd.REGUA)).filter((c) => c.ativo);
+  if (!ativos.length) return null;
+  const daRegua = new Set(ativos.map((c) => String(c.ordem)));
+  const doLog = Object.keys(notas);
+  if (doLog.length !== daRegua.size) return null;
+  if (!doLog.every((k) => daRegua.has(String(k)))) return null;
+  return Object.fromEntries(ativos.map((c) => [String(c.ordem), c.nome]));
+}
+
 app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
   // Allowlist explícita de campos: visitor não consegue "plantar bandeira"
   // com campos arbitrários, e mass-assignment fica bloqueado. userId/userName
@@ -3870,6 +3931,32 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
     }
   }
 
+  // Nomes dos critérios gravados JUNTO com as notas. O avaliador oficial (v34)
+  // já os traz no detalhe; os outros caminhos (bloco [notas-supervisor] do
+  // v18.25, logs de texto) só mandavam os números, e aí a tela caía numa lista
+  // FIXA no cliente (labelsForCriteria). Enquanto a régua tinha os 8 nomes de
+  // sempre isso passava despercebido — mas com "Adicionar critério" (§16.6) o
+  // admin pode renomear, e a tela da sessão mostraria o nome antigo enquanto o
+  // Perfil, que resolve pela régua, mostraria o novo.
+  //
+  // Só carimba na Simulação (`freeplay`): Neuro tem régua própria (v18.25) e a
+  // Trilha tem critérios próprios, e carimbar os nomes do v34 neles seria
+  // trocar um rótulo errado por outro. E só quando as notas batem exatamente
+  // com a régua — melhor ficar sem nome (e cair no fallback de hoje) do que
+  // somar a nota de um critério ao nome de outro.
+  let criteriaNames = criteriosOficiais ? oficial.nomesPorCriterio(detalheOficial) : null;
+  const notasDoLog = criteriosOficiais || explicitCriteria || supervisorCriteria || null;
+  if (!criteriaNames && notasDoLog && body.type === 'freeplay') {
+    // Melhor um log sem os nomes (que cai no fallback da tela) do que perder o
+    // atendimento inteiro do aluno porque uma consulta falhou. O caminho antigo
+    // era puro e não podia lançar; este toca o banco, então precisa da guarda.
+    try {
+      criteriaNames = await nomesDaReguaPara(notasDoLog);
+    } catch (e) {
+      registrarErro(req, e, 'POST /api/logs (nomes dos critérios)', { status: 200 });
+    }
+  }
+
   const log = {
     id: logId,
     timestamp: new Date().toISOString(),
@@ -3881,8 +3968,8 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
     difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
     durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
     score: finalScore,
-    criteriaScores: criteriosOficiais || explicitCriteria || supervisorCriteria || null,
-    criteriaNames: criteriosOficiais ? oficial.nomesPorCriterio(detalheOficial) : null,
+    criteriaScores: notasDoLog,
+    criteriaNames,
     evaluation: clampStr(textoOficial || cleanEvaluation, LOG_MAX_EVAL_LEN),
     // Avaliador oficial: versão do pipeline que corrigiu e o id do arquivo com
     // as análises. O `evalPartsId` é só uma chave — o conteúdo é servido
@@ -4358,6 +4445,11 @@ function acessosParaAdmin() {
     mensagemPadrao: acessos.MENSAGEM_PADRAO,
     modosCriterios: criteriosPerfil.MODOS,
     modosPerfilCriterios: a.modosPerfilCriterios,
+    poolsTri: acessos.POOLS_TRI,
+    pesosTri: a.pesosTri,
+    pesoTriMin: acessos.PESO_TRI_MIN,
+    pesoTriMax: acessos.PESO_TRI_MAX,
+    visitanteTriLigado: VISITOR_TRI_ENABLED,
     limitesExterno: a.limitesExterno,
     opcoesPaciente: Object.entries(aiModels.PATIENT_PRESETS).map(([key, p]) => ({ key, label: p.label })),
     opcoesAvaliador: Object.entries(aiModels.EVALUATOR_PRESETS).map(([key, p]) => ({ key, label: p.label })),
@@ -4441,6 +4533,7 @@ app.put('/api/admin/acessos', requireAuth, requireRole('admin'), rota(async (req
     if (body.mensagemCadeado !== undefined) c.mensagemCadeado = acessos.normalizarMensagem(body.mensagemCadeado);
     if (body.modosPerfilCriterios !== undefined) c.modosPerfilCriterios = criteriosPerfil.normalizarModos(body.modosPerfilCriterios);
     if (body.limitesExterno !== undefined) c.limitesExterno = limitesIa.normalizarConfig(body.limitesExterno, PRESETS_LIMITES);
+    if (body.pesosTri !== undefined) c.pesosTri = acessos.normalizarPesosTri(body.pesosTri, TRI_PESOS_PADRAO);
   });
   console.log(`[admin] acessos atualizados por ${req.user.username}`);
   res.json(acessosParaAdmin());
@@ -7397,6 +7490,9 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
   // Rating aprendido de cada população anônima — é o número que mostra o
   // sistema funcionando: se os candidatos são mais fracos, isto fica < 50 e a
   // dificuldade deixa de ser inflada por eles.
+  // O peso vem da configuração do admin (Acessos), não mais de uma constante:
+  // este painel precisa mostrar o valor que está de fato valendo.
+  const pesosTri = lerAcessos().pesosTri;
   const populacoes = TRI_POOLS.map((p) => {
     const st = mmr.anonPlayers && mmr.anonPlayers[p];
     return {
@@ -7404,7 +7500,7 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
       rating: st ? Math.round(st.P) : mmrEngine.P0,
       n: st ? st.n : 0,
       calibrando: !st || st.n < mmrEngine.CALIBRATION_MATCHES,
-      peso: TRI_PESOS[p],
+      peso: pesosTri[p],
     };
   });
 
