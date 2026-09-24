@@ -9401,9 +9401,24 @@ async function runComparativeEvaluation(duel) {
   const c = result.comparativo;
   // `vencedor: null` = não deu para ler nota de um dos lados. O caller trata
   // como falha de avaliação e devolve o duelo para pendente.
-  const comp = (c && c.vencedor)
-    ? { scoreA: c.notas.A, scoreB: c.notas.B, winner: c.vencedor === 'empate' ? 'draw' : c.vencedor }
-    : null;
+  let comp = null;
+  if (c && c.vencedor) {
+    // Para o MMR por critério (spec §7), extrair as notas de cada critério em
+    // cada lado — cada `r` do resultado guarda `notas.A` / `notas.B` em 0..10.
+    const posicionalA = {};
+    const posicionalB = {};
+    for (const r of (result.partes || [])) {
+      if (r && Number.isFinite(r.notas && r.notas.A)) posicionalA[String(r.num)] = r.notas.A;
+      if (r && Number.isFinite(r.notas && r.notas.B)) posicionalB[String(r.num)] = r.notas.B;
+    }
+    comp = {
+      scoreA: c.notas.A, scoreB: c.notas.B,
+      winner: c.vencedor === 'empate' ? 'draw' : c.vencedor,
+      // Convertidos posicional → id estável e escala 0..100 para o motor.
+      criteriosA: await criteriosByIdParaMotor(posicionalA),
+      criteriosB: await criteriosByIdParaMotor(posicionalB),
+    };
+  }
 
   // Sem saudação: a análise do Duelo é comparativa, escrita para os dois alunos
   // (a saudação em segunda pessoa do singular não cabe aqui). A versão declara
