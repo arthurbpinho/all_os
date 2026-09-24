@@ -37,38 +37,8 @@ function sanitizeFilename(name) {
     .slice(0, 80);
 }
 
-const LOG_TTL_DAYS_FALLBACK = 30;
-
-// Data de expiração do log: usa expiresAt vindo do servidor; se ausente
-// (logs antigos), deriva do timestamp + 30 dias.
-function logExpiresAt(log) {
-  if (log.expiresAt) return new Date(log.expiresAt);
-  const base = new Date(log.timestamp || log.createdAt || 0);
-  if (isNaN(base)) return null;
-  return new Date(base.getTime() + LOG_TTL_DAYS_FALLBACK * 86400000);
-}
-
-function daysUntilExpiry(log) {
-  const exp = logExpiresAt(log);
-  if (!exp) return null;
-  return Math.ceil((exp.getTime() - Date.now()) / 86400000);
-}
-
-function ExpiryNote({ log, style }) {
-  const exp = logExpiresAt(log);
-  if (!exp) return null;
-  const days = daysUntilExpiry(log);
-  const soon = days != null && days <= 7;
-  return (
-    <span
-      title="Após esta data o log é removido automaticamente"
-      style={{ fontSize: 12, color: soon ? 'var(--terra)' : 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 4, ...style }}
-    >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 2" /></svg>
-      expira {exp.toLocaleDateString('pt-BR')}{soon && days >= 0 ? ` · ${days}d` : ''}
-    </span>
-  );
-}
+// Logs de atendimento são persistentes (demandas.md §24.0) — nada de
+// expiração para exibir.
 
 // Monta os textos de um log salvo: logStr (só transcrição), evalStr (avaliação +
 // notas por critério, quando houver) e bothStr (tudo). hasEval indica se há
@@ -214,7 +184,6 @@ function LogCard({ log, showDownload }) {
         )}
         {log.type && <span style={{ fontWeight: 500 }}>{TYPE_LABELS[log.type] || log.type}</span>}
         <span>{messages.filter((m) => !m.isSystem).length} {messages.filter((m) => !m.isSystem).length === 1 ? 'mensagem' : 'mensagens'}</span>
-        <ExpiryNote log={log} />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -598,7 +567,6 @@ function PatientSessionList({ patient, onSelect, onBack }) {
                     {' · '}
                     {(log.messages || []).filter((m) => !m.isSystem).length} mensagens
                   </span>
-                  <ExpiryNote log={log} />
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -635,7 +603,6 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>
           <span>{TYPE_LABELS[log.type] || log.type}</span>
           <ScoreBadge score={log.score} />
-          <ExpiryNote log={log} />
         </div>
         <div style={{ marginTop: 12 }}>
           <LogActions items={logItemsFor(log)} inline />
@@ -724,7 +691,6 @@ export default function Logs({ user, userId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [ttlDays, setTtlDays] = useState(LOG_TTL_DAYS_FALLBACK);
   // Aba dentro de "Minhas Sessões": sessões (Trilha/Simulação/Neuro) ou duelos.
   // "Logs de Duelo" deixou de ser item de menu próprio e virou esta aba.
   const [view, setView] = useState('sessions');
@@ -752,12 +718,6 @@ export default function Logs({ user, userId }) {
     if (!isSupervisorView) return;
     api.getTags().then((l) => setTags(Array.isArray(l) ? l : [])).catch(() => {});
   }, [isSupervisorView]);
-
-  useEffect(() => {
-    api.getLogsPolicy()
-      .then((p) => { if (p && p.ttlDays) setTtlDays(p.ttlDays); })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (isSupervisorView || isVisitor) { setMmr(null); return; }
@@ -851,19 +811,6 @@ export default function Logs({ user, userId }) {
           >
             Duelos
           </button>
-        </div>
-      )}
-
-      {(isSupervisorView || view === 'sessions') && (
-        <div className="log-expiry-banner">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
-            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <span>
-            Os logs expiram automaticamente após <strong>{ttlDays} dias</strong> e são removidos para manter o desempenho da plataforma.
-            A data de expiração aparece em cada sessão — <strong>baixe os logs que quiser guardar</strong> antes disso.
-          </span>
         </div>
       )}
 

@@ -207,15 +207,8 @@ describe.skipIf(!URL_TESTE)('repositório de logs', () => {
       }
     });
 
-    it('poda remove só o que passou do prazo, com as mensagens', async () => {
-      const trintaDias = 30 * 24 * 60 * 60 * 1000;
-      await novoLog({ timestamp: new Date(Date.now() - 40 * 86400000).toISOString() });
-      const recente = await novoLog();
-
-      expect(await logs.podarVencidos(trintaDias)).toBe(1);
-
-      expect((await logs.listarTodos()).map((l) => l.id)).toEqual([recente.id]);
-      expect(await contarMensagens()).toBe(2);
+    it('logs são persistentes (demandas.md §24.0): não há mais poda', () => {
+      expect(logs).not.toHaveProperty('podarVencidos');
     });
   });
 });

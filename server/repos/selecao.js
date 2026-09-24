@@ -29,16 +29,7 @@ function criarRepoSelecao(pool) {
     return rows.length > 0;
   }
 
-  // Momento (ms) do atendimento mais recente deste WhatsApp, ou null.
-  async function ultimoDoWhatsapp(whatsapp) {
-    const { rows } = await pool.query(
-      `SELECT (extract(epoch FROM max(criado_em)) * 1000)::float8 AS t FROM selecao_logs WHERE whatsapp = $1`,
-      [whatsapp],
-    );
-    return rows[0].t == null ? null : Number(rows[0].t);
-  }
-
-  // Todos os logs vivos, por data (`desc` = mais recentes primeiro).
+  // Todos os logs, por data (`desc` = mais recentes primeiro).
   async function listar(ordem = 'asc') {
     const dir = ordem === 'desc' ? 'DESC' : 'ASC';
     const { rows } = await pool.query(`SELECT doc FROM selecao_logs ORDER BY criado_em ${dir}, id ${dir}`);
@@ -95,14 +86,8 @@ function criarRepoSelecao(pool) {
     );
   }
 
-  // Retenção de 15 dias. As estatísticas anônimas ficam.
-  async function podarVencidos(ttlMs) {
-    const r = await pool.query(
-      `DELETE FROM selecao_logs WHERE criado_em < now() - ($1::bigint * interval '1 millisecond')`,
-      [Math.floor(ttlMs)],
-    );
-    return r.rowCount;
-  }
+  // Logs do seletivo são persistentes (demandas.md §24.0). As estatísticas
+  // anônimas continuam sendo registradas — quem consulta a Dashboard vê os dois.
 
   // --- Estatísticas ---
 
@@ -125,8 +110,8 @@ function criarRepoSelecao(pool) {
   }
 
   return {
-    criar, existeSessao, ultimoDoWhatsapp, listar, pendentes,
-    atualizar, atualizarVarios, atualizarDoBatch, podarVencidos,
+    criar, existeSessao, listar, pendentes,
+    atualizar, atualizarVarios, atualizarDoBatch,
     registrarEstatisticas, estatisticasDesde,
   };
 }

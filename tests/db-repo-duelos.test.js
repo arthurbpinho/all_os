@@ -87,14 +87,7 @@ describe.skipIf(!URL_TESTE)('repositório de duelos', () => {
     expect(['visitor-aaa111', 'visitor-bbb222']).toContain(final.opponent.userId);
   });
 
-  it('poda remove só os vencidos e devolve as chaves dos detalhes deles', async () => {
-    const velho = new Date(Date.now() - 40 * 86400000).toISOString();
-    await novoDuelo({ createdAt: velho, result: { evalPartsId: 'av-1-aaaaaaaa' } });
-    const recente = await novoDuelo();
-
-    const r = await duelos.podarVencidos(30 * 86400000);
-
-    expect(r).toEqual({ removidos: 1, evalPartsIds: ['av-1-aaaaaaaa'] });
-    expect((await duelos.listarTodos()).map((x) => x.id)).toEqual([recente.id]);
+  it('duelos são persistentes (demandas.md §24.0): não há mais poda', () => {
+    expect(duelos).not.toHaveProperty('podarVencidos');
   });
 });

@@ -83,19 +83,9 @@ function criarRepoDuelos(pool) {
     });
   }
 
-  // Retenção: remove os duelos criados há mais de `ttlMs`. Devolve quantos saíram
-  // e as chaves dos detalhes por critério deles — o detalhe mora no volume, e sem
-  // a chave ninguém mais o alcançaria.
-  async function podarVencidos(ttlMs) {
-    const { rows } = await pool.query(
-      `DELETE FROM duels WHERE criado_em < now() - ($1::bigint * interval '1 millisecond')
-       RETURNING doc->'result'->>'evalPartsId' AS eval_parts_id`,
-      [Math.floor(ttlMs)],
-    );
-    return { removidos: rows.length, evalPartsIds: rows.map((r) => r.eval_parts_id).filter(Boolean) };
-  }
+  // Duelos são persistentes (demandas.md §24.0): o histórico social não expira.
 
-  return { criar, porId, porToken, listarDoParticipante, listarTodos, travar, podarVencidos };
+  return { criar, porId, porToken, listarDoParticipante, listarTodos, travar };
 }
 
 module.exports = { criarRepoDuelos };

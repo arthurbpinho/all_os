@@ -28,14 +28,12 @@ describe.skipIf(!URL_TESTE)('seletivo e comunidade no banco', () => {
       expect(await sel.listar()).toHaveLength(1);
     });
 
-    it('dedup por WhatsApp e poda de 15 dias', async () => {
+    it('logs do seletivo são persistentes (demandas.md §24.0): sem poda e sem dedupe automático', async () => {
       await sel.criar(log('a'), '11912345678');
-      expect(await sel.ultimoDoWhatsapp('11912345678')).toBeGreaterThan(Date.now() - 60000);
-      expect(await sel.ultimoDoWhatsapp('11900000000')).toBeNull();
-
       await db.pool.query(`UPDATE selecao_logs SET criado_em = now() - interval '16 days'`);
-      expect(await sel.podarVencidos(15 * 86400000)).toBe(1);
-      expect(await sel.ultimoDoWhatsapp('11912345678')).toBeNull();
+      expect(sel).not.toHaveProperty('podarVencidos');
+      expect(sel).not.toHaveProperty('ultimoDoWhatsapp');
+      expect(await sel.listar()).toHaveLength(1);
     });
 
     it('pendentes com e sem batch, e fechar só os ainda pendentes', async () => {
