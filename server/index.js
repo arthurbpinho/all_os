@@ -977,13 +977,12 @@ const SIDEQUEST_BANK_SEED = [
 
 // Recordes por paciente (👑): mapa { <characterId>: { score, userId, userName,
 // userPhoto, at } } com a MAIOR nota já tirada naquele paciente no modo
-// COMPETITIVO. Vive fora de logs.json de propósito: os logs expiram em 30 dias
-// e o recorde é permanente. Só leitura no front — escrito em POST /api/logs.
+// COMPETITIVO. Só leitura no front — escrito em POST /api/logs.
 
 
-// Processo Seletivo — logs completos dos candidatos (selecao_logs), com retenção
-// PRÓPRIA de 15 dias (pruneExpiredSelectionLogs), e estatísticas anônimas e
-// permanentes da Dashboard (selecao_estatisticas), que sobrevivem à poda.
+// Processo Seletivo — logs completos dos candidatos (selecao_logs) são
+// persistentes (§24.0), e estatísticas anônimas e permanentes da Dashboard
+// (selecao_estatisticas) continuam sendo registradas por cima.
 
 // Avaliação Independente — FILA de jobs em batch (async). Runtime, não versionado.
 
@@ -1037,17 +1036,59 @@ const VISITOR_TRI_ENABLED = process.env.VISITOR_TRI === '1';
 // mmrRepo.aplicar) não entra no engine — é só para a dashboard poder dizer de
 // onde veio o número.
 
-// Aplica UMA partida competitiva de um aluno: MMR dele e dificuldade do paciente.
-// Devolve o `result` do engine (P_before/P_after…).
-async function aplicarPartidaCompetitiva(userId, characterId, score) {
+// Converte criteriaScores posicionais (chave "1","2",…, valor 0..10 da rubrica)
+// em { [criterios.id]: 0..100 } para o motor. Usa a régua v34 ativa como
+// referência: a N-ésima posição = o N-ésimo critério ativo, na ordem `ordem`.
+// Devolve {} quando a régua não carregou ou os números não batem com ela.
+let _criteriosAtivosCache = { at: 0, lista: null };
+async function criteriosAtivosV34() {
+  if (_criteriosAtivosCache.lista && (Date.now() - _criteriosAtivosCache.at) < 60000) {
+    return _criteriosAtivosCache.lista;
+  }
+  const todos = await promptsRepo.criteriosDa('v34').catch(() => []);
+  const ativos = (todos || []).filter((c) => c.ativo);
+  _criteriosAtivosCache = { at: Date.now(), lista: ativos };
+  return ativos;
+}
+function invalidarCriteriosAtivos() { _criteriosAtivosCache = { at: 0, lista: null }; }
+async function criteriosByIdParaMotor(criteriaScores) {
+  if (!criteriaScores || typeof criteriaScores !== 'object') return {};
+  const ativos = await criteriosAtivosV34();
+  if (!ativos.length) return {};
+  const posicoes = Object.keys(criteriaScores).map((k) => Number(k)).filter(Number.isFinite);
+  const maxPos = posicoes.length ? Math.max(...posicoes) : 0;
+  if (maxPos !== ativos.length) return {}; // régua mudou desde o log: melhor sem que errado
+  const out = {};
+  for (let i = 0; i < ativos.length; i++) {
+    const posKey = String(i + 1);
+    const val = Number(criteriaScores[posKey]);
+    if (Number.isFinite(val)) out[String(ativos[i].id)] = val * 10; // 0..10 → 0..100 interno
+  }
+  return out;
+}
+
+// Aplica UMA partida competitiva de um aluno: MMR dele por critério e
+// dificuldade do paciente por critério (spec MMR-por-criterio.md, §3).
+//
+//   criteriosById  — { [criterios.id]: nota 0..100 } (já convertida da rubrica)
+//   notaTotal      — 0..100 (usada para a trava de 25 sobre o D — spec §3.1)
+//   role           — 'admin' zera o efeito, sem tocar em nada
+//
+// Devolve o `result` do motor (com { criterios, movimentou, calibrating, ... }).
+async function aplicarPartidaCompetitiva(userId, characterId, criteriosById, notaTotal, role) {
   const { result } = await mmrRepo.aplicar(
-    { characterId, userIds: [userId], fonte: 'competitivo' },
-    ({ players, character }) => {
-      const out = mmrEngine.updateMatch(players[String(userId)], character, score);
+    { characterId, userIds: [userId] },
+    ({ players, character, fontes }) => {
+      const out = mmrEngine.updateMatch(players[String(userId)], character, fontes, {
+        criterios: criteriosById || {},
+        notaTotal,
+        isAdmin: role === 'admin',
+        fonte: 'competitivo',
+      });
       return {
         players: { [String(userId)]: out.player },
         character: out.character,
-        contarFonte: !out.result.calibratingBefore,
+        fontes: out.fontes,
         result: out.result,
       };
     },
@@ -1055,48 +1096,36 @@ async function aplicarPartidaCompetitiva(userId, characterId, score) {
   return result;
 }
 
-// Registra UM atendimento de população anônima. Atualiza a dificuldade
-// COMPARTILHADA e o rating da própria população. Idempotência não é garantida —
-// quem chama deve fazê-lo uma única vez por avaliação concluída.
-// Nunca lança: a TRI é observabilidade, não pode derrubar uma avaliação.
-async function registrarTriAnonimo(pool, characterId, score) {
+// Registra UM atendimento de população anônima (seletivo, visitante) por critério.
+// A dificuldade continua ÚNICA e compartilhada (spec §8); as populações têm o
+// mesmo peso sobre o D dos alunos (spec §15) — a única coisa que o peso do
+// admin em Acessos ainda controla é o gate liga/desliga (peso 0 = não move D).
+// A população continua aprendendo o próprio rating mesmo com peso 0.
+async function registrarTriAnonimo(pool, characterId, criteriosById, notaTotal) {
   if (!TRI_POOLS.includes(pool)) return null;
-  if (!characterId || !Number.isFinite(Number(score))) return null;
-  // Lido a cada atendimento, não no boot: o admin muda o peso na tela de
-  // Acessos e o próximo atendimento já usa o valor novo, sem redeploy.
+  if (!characterId || !criteriosById || !Object.keys(criteriosById).length) return null;
   const peso = lerAcessos().pesosTri[pool];
+  const influencia = peso > 0;
   let out = null;
   try {
     ({ result: out } = await mmrRepo.aplicar(
-      { characterId, populacao: pool, fonte: pool },
-      ({ populacao, character }) => {
-        const r = mmrEngine.updateMatch(populacao, character, Number(score), { dWeight: peso });
-        // Peso 0 = "esta população não influencia a dificuldade". Devolver o
-        // personagem mesmo assim o gravaria com n_D a mais e um ponto novo no
-        // histórico da regressão — ou seja, ela ainda moldaria o D por outro
-        // caminho. `aplicar` só grava o que voltar daqui, então o personagem
-        // fica de fora inteiro.
-        //
-        // O rating da POPULAÇÃO continua aprendendo: se ela ficasse congelada,
-        // religar o peso mais tarde retomaria de um rating que nunca aprendeu
-        // — exatamente a inflação do D que esta camada existe para evitar.
-        const influencia = peso > 0;
-        // Durante a calibração da população (3 primeiras) o engine não mexe no D;
-        // só conta como contribuição o que de fato moveu a dificuldade.
+      { characterId, populacao: pool },
+      ({ populacao, character, fontes }) => {
+        const r = mmrEngine.updateMatch(populacao, character, fontes, {
+          criterios: criteriosById,
+          notaTotal,
+          fonte: pool,
+        });
+        // Sem influência (peso 0): a POPULAÇÃO ainda aprende (o rating dela é
+        // atualizado), mas nem o personagem nem as `fontes` sobem para o disco
+        // — o D fica intocado.
         return {
           populacao: r.player,
-          ...(influencia ? { character: r.character } : {}),
-          contarFonte: influencia && !r.result.calibratingBefore,
+          ...(influencia ? { character: r.character, fontes: r.fontes } : {}),
           result: r.result,
         };
       },
     ));
-    console.log(
-      `[tri:${pool}] ${characterId} nota=${Math.round(Number(score))} peso=${peso} ` +
-      `D ${out.D_before.toFixed(1)} → ${peso > 0 ? out.D_after.toFixed(1) : 'intocado (peso 0)'} · ` +
-      `rating da população ${out.P_before.toFixed(1)} → ${out.P_after.toFixed(1)}` +
-      (out.calibratingBefore ? ' (população em calibração, D intocado)' : ''),
-    );
   } catch (e) {
     console.error(`[tri:${pool}] falha ao registrar ${characterId}:`, e && e.message);
   }
@@ -3314,8 +3343,18 @@ function publicRecord(r) {
 // { userId, userName, userPhoto } — quem chama já tem a conta em mãos (visitante
 // não tem, e nem entra aqui).
 async function updateCharacterRecord(characterId, score, holder) {
-  if (!characterId || !Number.isFinite(score) || !holder || !holder.userId) return null;
-  return mmrRepo.registrarRecorde(characterId, score, holder);
+  if (!characterId || !Number.isFinite(score) || !holder) return null;
+  const origem = holder.origem === 'selecao' ? 'selecao' : 'competitivo';
+  // Competitivo exige userId de aluno real (não candidato). Seletivo aceita
+  // userId null — o nome vem do candidato copiado agora (spec §9).
+  if (origem === 'competitivo' && !holder.userId) return null;
+  if (origem === 'selecao' && !holder.userName) return null;
+  return mmrRepo.registrarRecorde(characterId, score, {
+    userId: holder.userId || null,
+    userName: holder.userName || 'Aluno',
+    userPhoto: holder.userPhoto || null,
+    origem,
+  });
 }
 
 
@@ -3333,7 +3372,11 @@ app.get('/api/freeplay', requireAuth, rota(async (req, res) => {
   const withExtras = (base, c) => ({
     ...base,
     difficulty: mmrEngine.characterDifficulty(mmr.characters[c.id]),
-    competitiveMatches: (mmr.characters[c.id] && mmr.characters[c.id].n_D) || 0,
+    // n_D total do caso (spec §12): soma dos movimentos do D em todos os
+    // critérios. O motor por critério guarda n_D dentro de cada `criterios[id]`.
+    competitiveMatches: Object.values(
+      mmrEngine.characterView(mmr.characters[c.id]).criterios || {}
+    ).reduce((a, cc) => a + (cc.n_D || 0), 0),
     record: publicRecord(records[c.id]),
     featured: c.id === featuredId,
   });
@@ -3538,33 +3581,11 @@ app.get('/api/trilha/:userId', requireAuth, rota(async (req, res) => {
 }));
 
 // --- Logs ---
-// Logs expiram automaticamente em 30 dias e são removidos do disco — medida
-// preventiva pra conter o crescimento do logs.json a longo prazo. A data de
-// expiração de cada log é derivada (timestamp + TTL) e exposta no GET pra que
-// o cliente exiba o aviso pros 3 perfis (aluno, professor, admin).
-const LOG_TTL_DAYS = 30;
-const LOG_TTL_MS = LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
-
-function logExpiresAt(log) {
-  const t = new Date(log.timestamp || log.createdAt || 0).getTime();
-  if (!Number.isFinite(t) || t === 0) return null;
-  return new Date(t + LOG_TTL_MS).toISOString();
-}
-
-// Remove logs com mais de LOG_TTL_DAYS (as mensagens saem junto). Devolve, numa
-// Promise, a quantidade removida.
-function pruneExpiredLogs() {
-  return logsRepo.podarVencidos(LOG_TTL_MS);
-}
-
-// Anexa expiresAt (derivado) a cada log devolvido — não é persistido.
-function decorateLogs(arr) {
-  return arr.map((l) => ({ ...l, expiresAt: logExpiresAt(l) }));
-}
+// Logs de atendimento são PERSISTENTES: o histórico do aluno é o registro do
+// treino dele e do que o supervisor precisa consultar, sem janela de expiração
+// (demandas.md §24.0).
 
 app.get('/api/logs', requireAuth, rota(async (req, res) => {
-  await pruneExpiredLogs();
-
   // Aluno (interno ou externo) e visitante recebem o log SEM o evalPartsId, que
   // é a chave do arquivo com as ANÁLISES por critério (escritas com o gabarito
   // à vista; a rota que o serve exige supervisor/admin). As NOTAS por critério
@@ -3577,9 +3598,8 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
   const comTag = !isStudent && req.query.tag ? await tagsRepo.contasComTag(req.query.tag) : null;
   const serve = (lista) => {
     const arr = comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista;
-    const decorated = decorateLogs(arr);
-    if (!isStudent) return decorated;
-    return decorated.map(({ criteriaScores, criteriaNames, evalPartsId, ...rest }) => (
+    if (!isStudent) return arr;
+    return arr.map(({ criteriaScores, criteriaNames, evalPartsId, ...rest }) => (
       veNotas ? { ...rest, criteriaScores, criteriaNames } : rest
     ));
   };
@@ -3606,11 +3626,6 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
   // Admin: tudo
   res.json(serve(await logsRepo.listarTodos()));
 }));
-
-// Metadados da política de expiração — o cliente usa pra montar o aviso.
-app.get('/api/logs/policy', requireAuth, (req, res) => {
-  res.json({ ttlDays: LOG_TTL_DAYS });
-});
 
 // NOTA E FEEDBACK POR CRITÉRIO de um log — SÓ supervisor e admin.
 //
@@ -4024,18 +4039,34 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
     log.itemId &&
     req.user.role !== 'visitor'
   ) {
-    const result = await aplicarPartidaCompetitiva(req.user.id, log.itemId, log.score);
+    const criteriosById = await criteriosByIdParaMotor(log.criteriaScores);
+    const result = await aplicarPartidaCompetitiva(req.user.id, log.itemId, criteriosById, log.score, req.user.role);
     mmrResult = result;
-    // Grava o MMR antes/depois desta partida no log (conquista "Consistente":
-    // MMR arredondado inalterado). Reescreve o log já persistido.
-    log.mmrBefore = Math.round(result.P_before);
-    log.mmrAfter = Math.round(result.P_after);
-    await logsRepo.atualizar(log.id, { mmrBefore: log.mmrBefore, mmrAfter: log.mmrAfter });
+    // Total derivado antes/depois desta partida (spec §5). Guarda como inteiro
+    // para bater com a coluna mmr_before/mmr_after (que a conquista "Consistente"
+    // consulta como o MMR arredondado da época).
+    const antes = mmrEngine.agregarTotal(Object.fromEntries(
+      Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
+    const depois = mmrEngine.agregarTotal(Object.fromEntries(
+      Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
+    log.mmrBefore = antes == null ? null : Math.round(antes);
+    log.mmrAfter = depois == null ? null : Math.round(depois);
+    // mmr_delta: auditoria completa (spec §12) — MMR antes/depois por critério
+    // e total. Fica no próprio log, para o supervisor consultar depois.
+    log.mmrDelta = {
+      total: { before: antes, after: depois },
+      criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
+        [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
+      ))),
+    };
+    await logsRepo.atualizar(log.id, { mmrBefore: log.mmrBefore, mmrAfter: log.mmrAfter, mmrDelta: log.mmrDelta });
 
-    // Recorde 👑 do paciente: mesma porta de entrada do MMR (competitivo, nota
-    // numérica, usuário real). Best-effort — nada aqui derruba a submissão.
+    // Recorde 👑 do paciente: competitivo, nota numérica, usuário real (spec §9).
     try {
-      await updateCharacterRecord(log.itemId, log.score, { userId: req.user.id, userName: req.user.name, userPhoto: req.user.profilePhoto });
+      await updateCharacterRecord(log.itemId, log.score, {
+        userId: req.user.id, userName: req.user.name, userPhoto: req.user.profilePhoto,
+        origem: 'competitivo',
+      });
     } catch (err) {
       console.error('updateCharacterRecord falhou:', err.message);
     }
@@ -4052,7 +4083,9 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
     Number.isFinite(log.score) &&
     log.itemId
   ) {
-    registrarTriAnonimo('visitante', log.itemId, log.score).catch(() => {});
+    criteriosByIdParaMotor(log.criteriaScores)
+      .then((c) => registrarTriAnonimo('visitante', log.itemId, c, log.score))
+      .catch(() => {});
   }
 
   // Sidequest: só no Treinamento (freeplay + mode 'training'). Se o aluno tinha
@@ -4317,7 +4350,7 @@ app.get('/api/ranking', requireAuth, requireFeature('ranking'), rota(async (req,
     .filter((u) => u.role !== 'visitor' && (!comTag || comTag.has(u.id)))
     .map((u) => {
       const state = mmr.players[u.id];
-      if (!state || state.n < 1) return null; // só quem jogou competitivo
+      if (!state || (Number(state.nEntradas) || 0) < 1) return null; // só quem jogou competitivo
       const view = mmrEngine.playerView(state);
       let titleLabel = null, titleTier = null;
       if (u.activeTitle) {
@@ -4335,10 +4368,13 @@ app.get('/api/ranking', requireAuth, requireFeature('ranking'), rota(async (req,
         role: u.role,
         title: titleLabel,
         titleTier: titleTier,
-        mmr: view.mmr,
+        // MMR total derivado (spec §5): mesma escala de hoje, na casa de 0..100.
+        mmr: view.mmrTotal,
         calibrating: view.calibrating,
         matchesRemaining: view.matchesRemaining,
-        matches: state.n,
+        matches: view.nEntradas,
+        // Perfil por critério — o front usa para o radar do supervisor.
+        criterios: view.criterios,
       };
     })
     .filter(Boolean);
@@ -6176,8 +6212,11 @@ function selecaoExportSlug(nome) {
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
-const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
+// Logs do seletivo são PERSISTENTES (demandas.md §24.0). O controle de quem
+// pode entrar é feito pelo admin trocando a SELECAO_PASSWORD entre aberturas;
+// não há mais dedupe automático por WhatsApp — a mesma pessoa pode participar
+// em aberturas diferentes.
+
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
 // para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
 // corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
@@ -6203,17 +6242,10 @@ const selecaoLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
 
-// WhatsApp normalizado (só dígitos) — chave de deduplicação por pessoa.
+// WhatsApp normalizado (só dígitos) — persistido junto com o log para o
+// avaliador ver quem é. Não é mais chave de dedupe.
 function normalizeWhatsapp(v) {
   return String(v == null ? '' : v).replace(/\D+/g, '');
-}
-
-// Espelha pruneExpiredLogs, mas com TTL PRÓPRIO de 15 dias. Chamado no boot/6h,
-// na listagem e antes do dedup de WhatsApp. As estatísticas anônimas
-// (selecao_estatisticas) NÃO são podadas — a Dashboard mantém o histórico.
-// Devolve quantos logs saíram.
-function pruneExpiredSelectionLogs() {
-  return selecaoRepo.podarVencidos(SELECTION_LOG_TTL_MS);
 }
 
 // Auth do candidato: JWT role 'candidate' com o characterId sorteado + os dados
@@ -6641,7 +6673,12 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
       l.reasoning = '';
       if (score != null) {
         appendedList.push({ timestamp: l.timestamp, score, status: st });
-        triList.push({ characterId: l.characterId, score });
+        triList.push({
+          characterId: l.characterId,
+          score,
+          criteriaScores,
+          candidateName: l.candidate && l.candidate.nome,
+        });
       }
       // Avaliação com erro não vira e-mail: um texto de avaliação quebrada
       // na caixa do candidato é pior do que nenhum.
@@ -6660,10 +6697,27 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
   if (appendedList.length) {
     await selecaoRepo.registrarEstatisticas(appendedList);
   }
-  // TRI: o candidato entra com rating fixo 50 e o personagem aprende. Só
-  // com nota válida — avaliação com erro não é sinal.
+  // TRI: a população 'selecao' aprende o próprio rating e (se peso > 0) move o D
+  // do caso por critério (spec §8, mesma trava de 25 que o aluno). Só com nota
+  // válida — avaliação com erro não é sinal.
   for (const t of triList) {
-    await registrarTriAnonimo('selecao', t.characterId, t.score);
+    const criteriosById = await criteriosByIdParaMotor(t.criteriaScores);
+    await registrarTriAnonimo('selecao', t.characterId, criteriosById, t.score);
+    // Recorde 👑: candidato do seletivo pode bater recorde (spec §9). O nome
+    // do candidato é copiado agora — a ficha do caso segue funcionando mesmo
+    // se o log do candidato sumir.
+    if (Number.isFinite(t.score)) {
+      try {
+        await updateCharacterRecord(t.characterId, t.score, {
+          userId: null,
+          userName: t.candidateName || 'Candidato do processo seletivo',
+          userPhoto: null,
+          origem: 'selecao',
+        });
+      } catch (err) {
+        console.error('updateCharacterRecord (selecao) falhou:', err.message);
+      }
+    }
   }
 }
 
@@ -6893,13 +6947,31 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
       if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
       // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
       if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
-        const result = await aplicarPartidaCompetitiva(l.userId, l.itemId, score);
-        await logsRepo.atualizar(l.id, { mmrBefore: Math.round(result.P_before), mmrAfter: Math.round(result.P_after) });
-        // Recorde 👑 do paciente — mesmo gate do MMR. Este é o caminho normal
-        // do Competitivo (a nota só existe depois da avaliação assíncrona).
+        const dono = await contasRepo.porId(l.userId).catch(() => null);
+        const role = (dono && dono.role) || 'therapist';
+        const criteriosById = await criteriosByIdParaMotor(criteriaScores);
+        const result = await aplicarPartidaCompetitiva(l.userId, l.itemId, criteriosById, score, role);
+        const antes = mmrEngine.agregarTotal(Object.fromEntries(
+          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
+        const depois = mmrEngine.agregarTotal(Object.fromEntries(
+          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
+        const mmrDelta = {
+          total: { before: antes, after: depois },
+          criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
+            [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
+          ))),
+        };
+        await logsRepo.atualizar(l.id, {
+          mmrBefore: antes == null ? null : Math.round(antes),
+          mmrAfter: depois == null ? null : Math.round(depois),
+          mmrDelta,
+        });
+        // Recorde 👑 (spec §9): competitivo, nota numérica, usuário real.
         try {
-          const dono = await contasRepo.porId(l.userId);
-          await updateCharacterRecord(l.itemId, score, { userId: l.userId, userName: l.userName, userPhoto: dono && dono.profilePhoto });
+          await updateCharacterRecord(l.itemId, score, {
+            userId: l.userId, userName: l.userName, userPhoto: dono && dono.profilePhoto,
+            origem: 'competitivo',
+          });
         } catch (err) {
           console.error('updateCharacterRecord (batch) falhou:', err.message);
         }
@@ -7228,17 +7300,8 @@ app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
     return res.status(400).json({ error: 'Informe um número de WhatsApp válido, com DDD.' });
   }
 
-  // Dedup: 1 avaliação por WhatsApp a cada 15 dias. Baseado nos logs de seleção
-  // (que duram 15 dias) + checagem explícita de tempo, pra não depender do prune.
-  await pruneExpiredSelectionLogs();
-  const lastTs = await selecaoRepo.ultimoDoWhatsapp(wa);
-  if (lastTs) {
-    const daysLeft = Math.max(1, Math.ceil((lastTs + SELECTION_LOG_TTL_MS - Date.now()) / (24 * 60 * 60 * 1000)));
-    return res.status(403).json({
-      error: `Ainda faltam ${daysLeft} dias para você tentar realizar a avaliação novamente`,
-      daysLeft,
-    });
-  }
+  // Sem dedupe automático: quem administra a abertura controla o acesso pela
+  // senha (SELECAO_PASSWORD). Trocar a senha entre aberturas fecha a antiga.
 
   // Personagem sorteado a cada início (os mesmos do modo Treinamento).
   const chars = catalogos.ler('freeplay');
@@ -7395,14 +7458,10 @@ app.put('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admi
   res.json({ ok: true, password: novaSenha, updatedBy: cur.selecaoPasswordUpdatedBy, updatedAt: cur.selecaoPasswordUpdatedAt });
 }));
 
-// 5) Logs de avaliações — avaliador/admin. Poda os expirados (15d) e lista todos.
+// 5) Logs de avaliações — avaliador/admin. Lista tudo (logs são persistentes).
 app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
-  await pruneExpiredSelectionLogs();
   const sorted = await selecaoRepo.listar('desc');
-  res.json(sorted.map((l) => ({
-    ...l,
-    expiresAt: l.timestamp ? new Date(new Date(l.timestamp).getTime() + SELECTION_LOG_TTL_MS).toISOString() : null,
-  })));
+  res.json(sorted);
 }));
 
 // 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +
@@ -7411,7 +7470,6 @@ app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), rot
 // um script agendado, sem sessão de usuário. Idempotência de gravação fica a
 // cargo de quem chama (o script decide o que já salvou, pelo nome do arquivo).
 app.get('/api/selecao/export-all', requireSelecaoExportSecret, rota(async (req, res) => {
-  await pruneExpiredSelectionLogs();
   const sorted = await selecaoRepo.listar('asc');
   const items = sorted.map((log) => {
     const stamp = log.timestamp ? new Date(log.timestamp).toISOString().slice(0, 10) : 'sem-data';
@@ -7464,22 +7522,25 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 
   const characters = catalogo.map((c) => {
     const st = mmr.characters[String(c.id)];
-    const n = (st && Number.isFinite(st.n_D)) ? st.n_D : 0;
+    const view = mmrEngine.characterView(st);
+    const critsCount = Object.keys(view.criterios || {}).length;
+    // n_D total = soma dos movimentos do D em todos os critérios (spec §12).
+    const n = Object.values(view.criterios || {}).reduce((a, cc) => a + (cc.n_D || 0), 0);
     const avg = st ? mmrEngine.characterAvgScore(st) : null;
+    const dTotal = view.dTotal == null ? mmrEngine.D0 : view.dTotal;
+    // Regressão do CASO amadurece por critério (spec §4). O caso é "maduro"
+    // quando TODOS os critérios já passaram do teto — leitura conservadora.
+    const madura = critsCount > 0 && Object.values(view.criterios).every((cc) => cc.madura);
     return {
       id: String(c.id),
       name: c.name || 'Personagem',
-      difficulty: mmrEngine.characterDifficulty(st),
-      // Distância da baseline: diz se o personagem já se afastou do ponto de
-      // partida ou se ainda está em 50 por falta de dado.
-      delta: Math.round((st && Number.isFinite(st.D) ? st.D : mmrEngine.D0) - mmrEngine.D0),
+      difficulty: Math.round(dTotal),
+      delta: Math.round(dTotal - mmrEngine.D0),
       n,
       avgScore: avg == null ? null : Math.round(avg),
-      // De onde vieram os atendimentos deste personagem.
       fontes: fontes[String(c.id)] || {},
-      // Só a partir de CHAR_MATURE_AT o engine liga a regressão; abaixo disso o
-      // número é indicativo e a tela precisa dizer isso.
-      madura: n >= mmrEngine.CHAR_MATURE_AT,
+      madura,
+      criterios: view.criterios, // spec §10: supervisor vê D por critério.
     };
   });
 
@@ -7495,11 +7556,12 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
   const pesosTri = lerAcessos().pesosTri;
   const populacoes = TRI_POOLS.map((p) => {
     const st = mmr.anonPlayers && mmr.anonPlayers[p];
+    const view = mmrEngine.playerView(st);
     return {
       pool: p,
-      rating: st ? Math.round(st.P) : mmrEngine.P0,
-      n: st ? st.n : 0,
-      calibrando: !st || st.n < mmrEngine.CALIBRATION_MATCHES,
+      rating: view.mmrTotal == null ? mmrEngine.P0 : view.mmrTotal,
+      n: view.nEntradas,
+      calibrando: view.calibrating,
       peso: pesosTri[p],
     };
   });
@@ -8917,7 +8979,8 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
 // (A1..A15 = challenger, B1..B15 = opponent), e o backend calcula as duas notas
 // (server/scoring.js) e o vencedor. Só treino por enquanto — não toca no MMR.
 
-const DUEL_TTL_MS = 30 * 24 * 60 * 60 * 1000; // mesma janela dos logs
+// Duelos são PERSISTENTES (demandas.md §24.0): o histórico social do aluno é
+// registro do que aconteceu, sem janela de expiração.
 const DUEL_MAX_MESSAGES = 500;
 const DUEL_MAX_MESSAGE_LEN = 20000;
 
@@ -8992,18 +9055,6 @@ async function sendWebPushToUser(userId, entry) {
     })
   ));
   if (mortas.length) await notificacoesRepo.desinscrever(userId, mortas);
-}
-
-async function pruneExpiredDuels() {
-  let r;
-  try { r = await duelosRepo.podarVencidos(DUEL_TTL_MS); } catch { return 0; }
-  // O detalhe por critério do duelo é um arquivo no volume, e a chave para ele
-  // some junto com o duelo — sem isto o arquivo ficaria lá para sempre, sem
-  // ninguém que o alcance. (A poda de órfãos do avaliacao-oficial não o pega:
-  // ele nasce com `logId`, que é justamente o que a marca como "pertence a
-  // alguma coisa".)
-  for (const id of r.evalPartsIds) oficial.apagarDetalhe(id);
-  return r.removidos;
 }
 
 // Cria uma notificação para um usuário real (visitantes não recebem). Também
@@ -9501,9 +9552,8 @@ app.delete('/api/duel/:id', requireAuth, rota(async (req, res) => {
 
 // Download do log de um duelo (avaliação cruzada + notas + as duas sessões),
 // em texto. Só participantes (ou admin) baixam — cada um só acessa os seus
-// duelos. O conteúdo é apagado automaticamente 30 dias após a criação do duelo.
+// duelos.
 app.get('/api/duel/:id/export', requireAuth, rota(async (req, res) => {
-  await pruneExpiredDuels();
   const duel = await duelosRepo.porId(req.params.id);
   if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
   if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
@@ -9774,10 +9824,16 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, rota(async (req, res) =
   }
 }));
 
-// Aplica o MMR PvP a um duelo competitivo já avaliado (muta duel.result.mmr e
-// grava o MMR se rankeado). comp = { scoreA, scoreB, winner } do
-// runComparativeEvaluation (scoreA = challenger, scoreB = opponent). Para treino, ou quando algum lado
-// não é usuário cadastrado, marca não-rankeado (sem mexer no MMR).
+// Aplica o MMR PvP a um duelo competitivo já avaliado. Reforma por critério
+// (spec §7): a conta acontece POR CRITÉRIO, com soma-zero dentro de cada um.
+//
+//   comp = {
+//     scoreA, scoreB, winner,      // totais brutos 0..100 (challenger = A, opponent = B)
+//     criteriosA, criteriosB,      // { [criterios.id]: 0..100 } de cada lado
+//   }
+//
+// Se algum lado for visitante/admin, calibrando, ou tiver total < 25, o duelo
+// não rankeia (mesma trava de hoje, agora avaliada sobre o total).
 async function applyDuelMmr(duel, comp) {
   if (duel.mode !== 'competitive' || !comp) return;
   const ch = duel.challenger;
@@ -9789,25 +9845,44 @@ async function applyDuelMmr(duel, comp) {
   }
   const chId = String(ch.userId);
   const opId = String(op.userId);
-  // Os dois jogadores e o paciente travados; se o duelo não rankeia, nada é gravado.
   const out = await mmrRepo.aplicar(
     { characterId: duel.character.id, userIds: [chId, opId] },
-    ({ players, character }) => {
-      const r = mmrEngine.processDuel(players[chId], players[opId], character, comp.scoreA, comp.scoreB);
+    ({ players, character, fontes }) => {
+      const r = mmrEngine.processDuel(players[chId], players[opId], character, fontes, {
+        criteriosA: comp.criteriosA || {},
+        criteriosB: comp.criteriosB || {},
+        notaTotalA: comp.scoreA,
+        notaTotalB: comp.scoreB,
+      });
       if (!r.ranked) return r;
-      return { ...r, players: { [chId]: r.playerA, [opId]: r.playerB }, character: r.character };
+      return { ...r, players: { [chId]: r.playerA, [opId]: r.playerB }, character: r.character, fontes: r.fontes };
     },
   );
   if (!out.ranked) {
     duel.result.mmr = { ranked: false, reason: out.reason };
     return;
   }
-  const round1 = (x) => Math.round(x * 10) / 10;
+  // Totais derivados a partir dos MMRs por critério (spec §5).
+  const totalA_before = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.resultA.criterios).map(([id, r]) => [id, r.P_before])));
+  const totalA_after = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.playerA.criterios).map(([id, c]) => [id, c.P])));
+  const totalB_before = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.resultB.criterios).map(([id, r]) => [id, r.P_before])));
+  const totalB_after = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.playerB.criterios).map(([id, c]) => [id, c.P])));
+  const round1 = (x) => x == null ? null : Math.round(x * 10) / 10;
+  const dTotal = mmrEngine.characterView(out.character).dTotal;
   duel.result.mmr = {
     ranked: true,
-    challenger: { before: Math.round(out.resultA.P_before), after: Math.round(out.playerA.P), delta: round1(out.resultA.delta), pvpDelta: round1(out.pvp.deltaA) },
-    opponent: { before: Math.round(out.resultB.P_before), after: Math.round(out.playerB.P), delta: round1(out.resultB.delta), pvpDelta: round1(out.pvp.deltaB) },
-    characterDifficulty: mmrEngine.characterDifficulty(out.character),
+    challenger: { before: round1(totalA_before), after: round1(totalA_after),
+                  delta: round1((totalA_after || 0) - (totalA_before || 0)),
+                  porCriterio: out.resultA.criterios, pvp: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.deltaA])) },
+    opponent:  { before: round1(totalB_before), after: round1(totalB_after),
+                  delta: round1((totalB_after || 0) - (totalB_before || 0)),
+                  porCriterio: out.resultB.criterios, pvp: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.deltaB])) },
+    characterDifficulty: dTotal,
+    venceuCriterio: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.winner])),
   };
 }
 
@@ -9838,7 +9913,6 @@ async function notifyDuelResult(duel) {
 // de partidas (desc) e depois por nome do oponente (asc).
 app.get('/api/duels/social', requireAuth, requireFeature('logsSociais'), rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json([]);
-  await pruneExpiredDuels();
   // Admin é participante de todos os duelos (isDuelParticipant).
   const duels = isAdmin(req.user)
     ? await duelosRepo.listarTodos()
@@ -11446,29 +11520,12 @@ app.use((err, req, res, next) => {
 // Quando importado por testes (`require('./server/index.js')`), o supertest
 // cria seu próprio server interno em porta aleatória — sem precisar de listen.
 if (require.main === module) {
-  // Limpeza de logs expirados no boot + a cada 6h. unref() pra não segurar o
-  // processo vivo só por causa do timer.
-  // A poda consulta o banco: só depois de as migrações terminarem.
-  bancoPronto
-    .then(() => pruneExpiredLogs())
-    .then((removed) => { if (removed > 0) console.log(`[logs] ${removed} log(s) expirado(s) (>${LOG_TTL_DAYS} dias) removido(s) no boot.`); })
-    .catch((err) => console.error('[logs] poda no boot falhou:', err.message));
   // Uso de IA: o limite olha 7 dias; 30 dá folga para o admin conferir.
+  // (Único TTL restante em dado operacional; logs, duelos e seletivo são
+  // persistentes desde a demandas.md §24.0.)
   bancoPronto
     .then(() => usoIaRepo.podar(30 * 24 * 60 * 60 * 1000))
     .catch((err) => console.error('[uso-ia] poda no boot falhou:', err.message));
-  bancoPronto
-    .then(() => pruneExpiredSelectionLogs())
-    .then((removedSel) => { if (removedSel > 0) console.log(`[selecao] ${removedSel} log(s) de seleção expirado(s) (>${SELECTION_LOG_TTL_DAYS} dias) removido(s) no boot.`); })
-    .catch((err) => console.error('[selecao] poda no boot falhou:', err.message));
-  setInterval(() => {
-    pruneExpiredLogs()
-      .then((n) => { if (n > 0) console.log(`[logs] ${n} log(s) expirado(s) removido(s).`); })
-      .catch((err) => console.error('[logs] poda falhou:', err.message));
-    pruneExpiredSelectionLogs()
-      .then((ns) => { if (ns > 0) console.log(`[selecao] ${ns} log(s) de seleção expirado(s) removido(s).`); })
-      .catch((err) => console.error('[selecao] poda falhou:', err.message));
-  }, 6 * 60 * 60 * 1000).unref();
 
   // AVALIADOR OFICIAL: qual modelo cada modo está de fato usando agora. Vale a
   // pena no boot porque a resolução tem três camadas (escolha da categoria em

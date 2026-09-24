@@ -67,6 +67,7 @@ const OPCIONAIS = [
   ['eval_error', 'evalError'],
   ['mmr_before', 'mmrBefore'],
   ['mmr_after', 'mmrAfter'],
+  ['mmr_delta', 'mmrDelta'],
   ['criteria_names', 'criteriaNames'],
 ];
 
@@ -120,6 +121,7 @@ const CAMPOS_AVALIACAO = {
   evalError: ['eval_error', textoOuNull],
   mmrBefore: ['mmr_before', inteiroOuNull],
   mmrAfter: ['mmr_after', inteiroOuNull],
+  mmrDelta: ['mmr_delta', json], // spec MMR-por-criterio.md §12: auditoria por critério + total
 };
 
 function mapear(definicoes, dados) {
@@ -295,15 +297,7 @@ function criarRepoLogs(pool) {
     };
   }
 
-  // Retenção: remove os logs mais velhos que `ttlMs` (as mensagens vão junto).
-  // Devolve quantos saíram.
-  async function podarVencidos(ttlMs) {
-    const { rowCount } = await pool.query(
-      `DELETE FROM logs WHERE criado_em < now() - ($1::bigint * interval '1 millisecond')`,
-      [Math.floor(ttlMs)],
-    );
-    return rowCount;
-  }
+  // Logs são persistentes (demandas.md §24.0): o histórico do aluno não expira.
 
   return {
     porId,
@@ -317,7 +311,6 @@ function criarRepoLogs(pool) {
     atualizar,
     excluir,
     zerarNotas,
-    podarVencidos,
   };
 }
 

@@ -1,15 +1,17 @@
 // MMR, dificuldade dos pacientes (TRI) e recordes 👑 no PostgreSQL: substitui
 // mmr.json e character-records.json.
 //
-// O motor (server/mmr.js) continua dono das contas e do formato do estado. Este
-// repositório guarda esse estado e garante a concorrência: `aplicar` roda cada
-// partida numa transação que trava só as linhas envolvidas, então duas partidas
-// do mesmo aluno entram em fila e não se sobrescrevem.
+// O motor (server/mmr.js) é dono das contas e do formato do estado — mudou para
+// por critério na reforma da §24. Este repositório guarda esse estado e garante
+// a concorrência: `aplicar` roda cada partida numa transação que trava só as
+// linhas envolvidas, então duas partidas do mesmo aluno entram em fila e não se
+// sobrescrevem. O JSONB é opaco para o repo; ele nunca lê os campos internos.
 
 const { transacao } = require('../db');
 const mmrEngine = require('../mmr');
 
 const ID_CONTA = /^[0-9]{1,18}$/;
+const ORIGEM_VALIDA = new Set(['competitivo', 'selecao']);
 
 function criarRepoMmr(pool) {
   // --- Leitura ---
@@ -20,31 +22,29 @@ function criarRepoMmr(pool) {
     return rows[0] ? rows[0].estado : null;
   }
 
-  // { [userId]: estado }, o `players` do mmr.json.
   async function jogadores() {
     const { rows } = await pool.query('SELECT user_id::text AS id, estado FROM mmr_players');
     return Object.fromEntries(rows.map((r) => [r.id, r.estado]));
   }
 
-  // { [characterId]: estado }, o `characters` do mmr.json.
   async function personagens() {
     const { rows } = await pool.query('SELECT character_id AS id, estado FROM mmr_characters');
     return Object.fromEntries(rows.map((r) => [r.id, r.estado]));
   }
 
-  // { [characterId]: { fonte: n } }, o `charSources` do mmr.json.
+  // { [characterId]: { [criterioId]: { competitivo, selecao, visitante } } }
+  // Com a reforma da §24, `fontes` passa a ser por critério dentro de cada caso
+  // (spec §12).
   async function fontes() {
     const { rows } = await pool.query(`SELECT character_id AS id, fontes FROM mmr_characters WHERE fontes <> '{}'`);
     return Object.fromEntries(rows.map((r) => [r.id, r.fontes]));
   }
 
-  // { [pool]: estado }, o `anonPlayers` do mmr.json.
   async function populacoes() {
     const { rows } = await pool.query('SELECT pool AS id, estado FROM mmr_anon_players');
     return Object.fromEntries(rows.map((r) => [r.id, r.estado]));
   }
 
-  // Tudo no formato do mmr.json (export do admin).
   async function snapshot() {
     const [players, characters, anonPlayers, charSources] = await Promise.all([
       jogadores(), personagens(), populacoes(), fontes(),
@@ -56,24 +56,21 @@ function criarRepoMmr(pool) {
 
   // Aplica UMA partida — Competitivo, duelo ou atendimento de população anônima.
   //
-  //   alvo: { characterId, userIds, populacao, fonte }
-  //   calcular({ character, players, populacao }) →
-  //     { character?, players?, populacao?, contarFonte?, ...o que mais quiser }
+  //   alvo:      { characterId, userIds?, populacao? }
+  //   calcular({ character, fontes, players, populacao }) →
+  //     { character?, fontes?, players?, populacao?, ...o que mais quiser }
   //
   // Os estados chegam travados e já com o padrão do motor quando ainda não
-  // existem. Só é gravado o que `calcular` devolver; `fonte` só é contada quando
-  // ela devolve `contarFonte: true` (o motor não mexe no D durante a calibração).
-  // Devolve o que `calcular` devolveu.
-  async function aplicar({ characterId, userIds = [], populacao = null, fonte = null }, calcular) {
+  // existem. Só é gravado o que `calcular` devolver. A contagem por origem
+  // vive dentro de `fontes` (spec §12: por critério) — o repo grava o que o
+  // motor devolveu, sem tocar. Devolve o que `calcular` devolveu.
+  async function aplicar({ characterId, userIds = [], populacao = null }, calcular) {
     const charId = String(characterId);
     // Sempre na mesma ordem, para duas transações que travam os mesmos jogadores
     // nunca se esperarem em círculo.
     const ids = [...new Set(userIds.map(String))].filter((id) => ID_CONTA.test(id)).sort();
 
     return transacao(pool, async (client) => {
-      // A linha é criada antes de travar: SELECT ... FOR UPDATE não trava linha
-      // que ainda não existe, e duas primeiras partidas simultâneas no mesmo
-      // paciente se sobrescreveriam.
       await client.query(
         'INSERT INTO mmr_characters (character_id, estado) VALUES ($1, $2) ON CONFLICT DO NOTHING',
         [charId, JSON.stringify(mmrEngine.newCharacter())],
@@ -104,14 +101,14 @@ function criarRepoMmr(pool) {
         )).rows[0].estado;
       }
 
-      const out = (await calcular({ character: c.estado, players, populacao: anon })) || {};
+      const out = (await calcular({ character: c.estado, fontes: c.fontes || {}, players, populacao: anon })) || {};
 
-      if (out.character) {
-        const novasFontes = { ...c.fontes };
-        if (fonte && out.contarFonte) novasFontes[fonte] = (novasFontes[fonte] || 0) + 1;
+      if (out.character || out.fontes) {
+        const novoEstado = out.character || c.estado;
+        const novasFontes = out.fontes || c.fontes || {};
         await client.query(
           'UPDATE mmr_characters SET estado = $2, fontes = $3, atualizado_em = now() WHERE character_id = $1',
-          [charId, JSON.stringify(out.character), JSON.stringify(novasFontes)],
+          [charId, JSON.stringify(novoEstado), JSON.stringify(novasFontes)],
         );
       }
       for (const [id, estado] of Object.entries(out.players || {})) {
@@ -154,43 +151,51 @@ function criarRepoMmr(pool) {
     });
   }
 
-  // --- Recordes 👑 ---
+  // --- Recordes 👑 (spec §9) ---
+  //
+  // Passa a considerar Competitivo e Processo Seletivo (visitante e admin ficam
+  // de fora). Para candidato do seletivo, `userId` é null e `userName` vem
+  // copiado no momento em que o recorde é batido — a ficha do caso continua
+  // funcionando mesmo se o log do candidato sumir.
 
   function paraRecorde(r) {
     return {
       score: r.score,
-      userId: r.user_id,
+      userId: r.user_id == null ? null : String(r.user_id),
       userName: r.user_name,
       userPhoto: r.user_photo,
+      origem: r.origem || 'competitivo',
       at: r.at.toISOString(),
     };
   }
 
-  // { [characterId]: recorde }, o character-records.json.
   async function recordes() {
     const { rows } = await pool.query('SELECT * FROM character_records');
     return Object.fromEntries(rows.map((r) => [r.character_id, paraRecorde(r)]));
   }
 
-  // Registra a nota como recorde se ela SUPERAR a atual — empate não troca o dono
-  // (quem chegou primeiro fica com o 👑). A comparação e a gravação são uma
-  // instrução só, então duas notas simultâneas no mesmo paciente não se perdem.
-  // Devolve o recorde novo, ou null se a nota não bateu o atual.
-  async function registrarRecorde(characterId, score, { userId, userName, userPhoto }) {
+  // Registra a nota como recorde se ela SUPERAR a atual — empate não troca o
+  // dono. A comparação e a gravação são uma instrução só. Devolve o recorde
+  // novo, ou null se a nota não bateu o atual.
+  //
+  // `userId` pode ser null (candidato do seletivo); `origem` obriga
+  // 'competitivo' | 'selecao'.
+  async function registrarRecorde(characterId, score, { userId = null, userName, userPhoto = null, origem = 'competitivo' }) {
+    if (!ORIGEM_VALIDA.has(origem)) throw new Error(`origem inválida: ${origem}`);
+    const uid = userId == null ? null : (ID_CONTA.test(String(userId)) ? String(userId) : null);
     const { rows } = await pool.query(
-      `INSERT INTO character_records (character_id, score, user_id, user_name, user_photo)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO character_records (character_id, score, user_id, user_name, user_photo, origem, at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
        ON CONFLICT (character_id) DO UPDATE
          SET score = EXCLUDED.score, user_id = EXCLUDED.user_id, user_name = EXCLUDED.user_name,
-             user_photo = EXCLUDED.user_photo, at = now()
+             user_photo = EXCLUDED.user_photo, origem = EXCLUDED.origem, at = now()
          WHERE character_records.score < EXCLUDED.score
        RETURNING *`,
-      [String(characterId), score, String(userId), userName || 'Aluno', userPhoto || null],
+      [String(characterId), score, uid, userName || 'Candidato', userPhoto, origem],
     );
     return rows[0] ? paraRecorde(rows[0]) : null;
   }
 
-  // Reset do ranking: os recordes são notas do avaliador antigo e caem junto.
   async function limparRecordes() {
     await pool.query('DELETE FROM character_records');
   }
