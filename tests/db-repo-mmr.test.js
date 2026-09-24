@@ -64,10 +64,14 @@ describe.skipIf(!URL_TESTE)('repositório de MMR', () => {
   it('trava de 25 não move o D nem incrementa a fonte, mas move o P', async () => {
     await partida(a.id, 'fp-1', { c1: 20 }, 20);
     expect((await mmr.jogador(a.id)).criterios.c1.n).toBe(1);
-    // Personagem nunca foi criado (INSERT ON CONFLICT DO NOTHING no repo cria a
-    // linha vazia; então existe, mas sem critério movido).
+    // O motor cria a linha do critério dentro do character antes da trava,
+    // então a estrutura existe em default (D=50, n_D=0). O que importa é que
+    // D não se moveu e n_D ficou zerado.
     const char = (await mmr.personagens())['fp-1'];
-    expect(char.criterios).toEqual({});
+    const cc = char.criterios.c1;
+    expect(cc.D).toBe(50);
+    expect(cc.n_D).toBe(0);
+    expect(cc.historico).toEqual([]);
     expect(await mmr.fontes()).toEqual({});
   });
 

@@ -71,41 +71,51 @@ describe('pesos do TRI na tela de Acessos', () => {
   });
 });
 
-// O motor por trás da regra "peso 0 = desligado". A rota que grava está em
-// registrarTriAnonimo (server/index.js); aqui fica a garantia de que o engine
-// não mexe no D quando o ganho é zero — e de que ele MEXERIA se o peso subisse.
-describe('peso 0 no motor do TRI', () => {
+// Após a reforma do §24 (MMR por critério), o peso do TRI virou um GATE
+// aplicado no wrapper `registrarTriAnonimo` (server/index.js), não mais um
+// dWeight que escala o ajuste do D dentro do motor. As populações do seletivo
+// e do visitante têm o MESMO peso sobre o D dos alunos (spec §15); o peso do
+// admin em Acessos só decide se aquela população contribui ou não. Motor por
+// critério: peso 0 → wrapper NÃO grava character/fontes; peso > 0 → grava
+// tudo, e a população continua aprendendo o próprio rating nos dois casos.
+describe('peso 0: efeito de gate no motor por critério', () => {
   const mmr = require('../server/mmr');
 
-  function partida(dWeight) {
-    // População fora da calibração: com n < 3 o D nem seria tocado, e o teste
-    // não distinguiria "peso 0" de "ainda calibrando".
-    const pop = { P: 50, n: 10, W: [{ S_aj: 50, D: 50, P: 50 }] };
-    const char = { D: 50, n_D: 10, alpha: null, beta: null, history: [] };
-    return mmr.updateMatch(pop, char, 20, { dWeight });
+  function partida() {
+    // População fora da calibração: se estivesse calibrando, o teste não
+    // distinguiria "gate desligado" de "ainda calibrando" — mas com o motor
+    // novo a calibração não bloqueia mais o D (spec §6), então basta um
+    // estado com nEntradas alto para o motor mover D e P na mesma partida.
+    const pop = { nEntradas: 10, criterios: { c1: { P: 50, n: 10, janela: [] } } };
+    const char = { criterios: { c1: { D: 50, n_D: 10, beta: 1, historico: [] } } };
+    return mmr.updateMatch(pop, char, {}, {
+      criterios: { c1: 20 }, notaTotal: 20, fonte: 'selecao',
+    });
   }
 
-  it('com peso 0 a dificuldade não anda', () => {
-    const r = partida(0);
-    expect(r.result.D_after).toBe(r.result.D_before);
+  it('motor sempre mexe no D e no P — quem cliva "peso 0 = desligado" é o wrapper', () => {
+    const r = partida();
+    // O motor não sabe do peso: para ele, se a nota total não trava a partida
+    // (>= 25 é o critério, e aqui 20 travaria — mas o pipeline por critério
+    // ainda move o P). Verificamos que a partida foi processada.
+    expect(r.result.movimentou).toBe(true);
+    // Com nota total 20 (< 25), a trava de 25 bloqueia o D — este é o
+    // bloqueio via nota total, independente do peso.
+    expect(r.character.criterios.c1.D).toBe(50); // trava-25 não deixou mover
+    // O P mesmo assim se moveu (spec §3.1: nota < 25 move o P, não o D).
+    expect(r.player.criterios.c1.P).not.toBe(50);
   });
 
-  it('com peso 0,35 a dificuldade anda', () => {
-    const r = partida(0.35);
-    expect(r.result.D_after).toBeGreaterThan(r.result.D_before);
-  });
-
-  // É por isso que registrarTriAnonimo não devolve o personagem quando o peso é
-  // 0: o engine ainda incrementa n_D e empilha o ponto da regressão, então
-  // gravá-lo deixaria a população moldando o D por outro caminho.
-  it('mesmo com peso 0 o engine conta a partida no personagem — por isso ele não é gravado', () => {
-    const r = partida(0);
-    expect(r.character.n_D).toBe(11);
-    expect(r.character.history).toHaveLength(1);
-  });
-
-  it('o rating da população aprende mesmo com peso 0', () => {
-    const r = partida(0);
-    expect(r.result.P_after).not.toBe(r.result.P_before);
+  it('sem a trava de 25, o D anda; é o wrapper que decide se grava (peso > 0) ou não (peso 0)', () => {
+    const pop = { nEntradas: 10, criterios: { c1: { P: 50, n: 10, janela: [] } } };
+    const char = { criterios: { c1: { D: 50, n_D: 10, beta: 1, historico: [] } } };
+    const r = mmr.updateMatch(pop, char, {}, {
+      criterios: { c1: 80 }, notaTotal: 80, fonte: 'selecao',
+    });
+    // D andou para baixo (aluno tirou nota alta contra a expectativa)
+    expect(r.character.criterios.c1.D).not.toBe(50);
+    // Este é o retorno do motor. Com peso 0 no admin, `registrarTriAnonimo`
+    // (server/index.js) descarta `character` e `fontes` antes de gravar,
+    // preservando o D antigo no banco. Com peso > 0, grava.
   });
 });

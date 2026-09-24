@@ -395,6 +395,24 @@ export default function Profile({ user, onUpdate, onLogout }) {
                 )}
               </div>
             </div>
+            {/* MMR por critério (spec §10): 0..10 com uma casa decimal, sem
+                teto. Oculto durante a calibração (o próprio motor devolve mmr
+                como null para cada critério enquanto nEntradas < 3). */}
+            {!mmr.calibrating && mmr.criterios && Object.keys(mmr.criterios).length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div className="section-title" style={{ fontSize: 13, marginBottom: 8 }}>Por critério</div>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+                  {Object.entries(mmr.criterios)
+                    .filter(([, c]) => c.mmr != null)
+                    .map(([id, c]) => (
+                      <li key={id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--sand-2)', borderRadius: 4, fontSize: 13 }}>
+                        <span style={{ color: 'var(--ink-soft)' }}>Crit. {id}</span>
+                        <strong>{(c.mmr / 10).toFixed(1)}</strong>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
           </section>
         )}
 
