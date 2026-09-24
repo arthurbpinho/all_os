@@ -3,565 +3,428 @@
 O MMR é a pontuação competitiva da plataforma. Ele existe para responder a uma
 pergunta que a nota do atendimento, sozinha, não responde:
 
-> Um 70 num caso difícil vale mais que um 70 num caso fácil. **Quanto mais?**
+> Um 7 em *manejo do vínculo* num caso difícil vale mais que o mesmo 7 num caso
+> fácil — e o 7 do *manejo do vínculo* não conta a mesma coisa que o 7 de
+> *interpretação*, se um for mais difícil que o outro naquele paciente.
 
-O motor inteiro está em [`server/mmr.js`](server/mmr.js) — **funções puras**, sem
-banco e sem rede. A persistência fica em [`server/repos/mmr.js`](server/repos/mmr.js).
-Essa separação é deliberada: a regra pode ser testada sem subir nada, e é por
-isso que existem 67 casos de teste cobrindo o assunto.
+**Desde a reforma do §24** (spec [`MMR-por-criterio.md`](MMR-por-criterio.md)), o
+motor calcula tudo **por critério da rubrica**. O MMR total do perfil e a
+dificuldade total do caso são derivados dos valores por critério, com a mesma
+agregação linear que gera a nota final da avaliação
+([`server/scoring.js`](server/scoring.js)).
+
+O motor inteiro vive em [`server/mmr.js`](server/mmr.js) — **funções puras**,
+sem banco e sem rede. A persistência fica em
+[`server/repos/mmr.js`](server/repos/mmr.js). Essa separação é deliberada: a
+regra é testada sem subir nada. Os testes puros do motor estão em
+[`tests/mmr.test.js`](tests/mmr.test.js), cobrindo os 16 critérios de aceite da
+spec §16.
 
 **Índice**
 
 1. [O que o sistema estima](#1-o-que-o-sistema-estima)
-2. [Uma partida, passo a passo](#2-uma-partida-passo-a-passo)
-3. [Exemplo numérico completo](#3-exemplo-numérico-completo)
-4. [Calibração](#4-calibração--as-3-primeiras-partidas)
-5. [A regressão do paciente](#5-a-regressão-do-paciente)
-6. [Duelo (PvP)](#6-duelo-pvp)
+2. [Uma avaliação, passo a passo](#2-uma-avaliação-passo-a-passo)
+3. [Exemplo numérico](#3-exemplo-numérico)
+4. [Calibração](#4-calibração--as-3-primeiras-avaliações)
+5. [A regressão do caso, por critério](#5-a-regressão-do-caso-por-critério)
+6. [Duelo (PvP), por critério](#6-duelo-pvp-por-critério)
 7. [Candidatos e visitantes](#7-candidatos-e-visitantes-a-camada-anônima)
-8. [Onde isso é guardado](#8-onde-isso-é-guardado)
-9. [Concorrência](#9-concorrência-por-que-há-transação-e-trava)
-10. [O que aparece na tela](#10-o-que-aparece-na-tela)
-11. [Tabela de constantes](#11-tabela-de-constantes)
-12. [Cobertura de testes](#12-cobertura-de-testes)
-13. [Decisões e histórico](#13-decisões-e-histórico)
-14. [Perguntas frequentes](#14-perguntas-frequentes)
+8. [Totais derivados](#8-totais-derivados)
+9. [Onde isso é guardado](#9-onde-isso-é-guardado)
+10. [Concorrência](#10-concorrência-por-que-há-transação-e-trava)
+11. [O que aparece na tela](#11-o-que-aparece-na-tela)
+12. [Tabela de constantes](#12-tabela-de-constantes)
+13. [O que saiu da fórmula antiga](#13-o-que-saiu-da-fórmula-antiga)
 
 ---
 
 ## 1. O que o sistema estima
 
-O MMR não mede só o aluno. Ele estima **duas grandezas ao mesmo tempo**, cada uma
-corrigindo a outra:
+Três grandezas, **por critério** `c` da rubrica (hoje 8; o motor funciona para
+3 a 16 — [`server/limites-criterios.js`](server/limites-criterios.js)):
 
-| Símbolo | O que é | Onde aparece | Início | Faixa |
-|---|---|---|---|---|
-| **P** | Habilidade do terapeuta | o MMR do Ranking | 50 | sem teto |
-| **D** | Dificuldade do paciente simulado | ficha do paciente | 50 | 10 a 90 |
-
-A ideia é a mesma do Elo (xadrez) e da TRI — Teoria de Resposta ao Item, a mesma
-família de modelos usada no ENEM: **a dificuldade de um item não é uma opinião,
-é uma medida**, que sai do desempenho corrigido pelo nível de quem respondeu.
-
-O estado do jogador tem mais duas peças:
-
-```js
-{ P: 50, n: 0, W: [] }
-```
-
-- **`n`** — quantas partidas já concluiu. Controla a velocidade de ajuste.
-- **`W`** — a janela das **20 partidas mais recentes**. Cada entrada guarda
-  `{ S_aj, D, P }`. É o que dá memória ao sistema.
-
-E o do paciente:
-
-```js
-{ D: 50, n_D: 0, alpha: null, beta: null, history: [] }
-```
-
-- **`n_D`** — quantas partidas de fato ajustaram a dificuldade dele.
-- **`alpha` / `beta`** — os coeficientes da regressão própria dele (§5).
-- **`history`** — até **200** pontos `{ P, D, S }` para alimentar a regressão.
-
----
-
-## 2. Uma partida, passo a passo
-
-A entrada é a nota **S** (0 a 100) do atendimento avaliado. Quem calcula essa
-nota é `server/scoring.js` / o agregador do pipeline v34 — **não é a IA que emite
-a nota final**; a IA emite as notas por critério e a conta é determinística.
-
-O que segue é `updateMatch(player, character, S)`.
-
-### Passo 1 — Quanto se esperava dessa pessoa nesse caso
-
-```
-S_esp = 50 + 0,5 × (P − D)
-```
-
-Só o **gap** entre habilidade e dificuldade importa. Um aluno 20 pontos acima da
-dificuldade do caso "deveria" tirar 60; 20 pontos abaixo, 40.
-
-O coeficiente 0,5 é a inclinação de partida: a cada ponto de vantagem, meio ponto
-de nota esperada. Depois de 20 partidas, o paciente ganha uma reta própria (§5).
-
-### Passo 2 — A dificuldade do paciente se move
-
-```
-ΔD = dWeight × 0,1 × (S_esp − S)
-D  = clamp(D + ΔD, 10, 90)
-```
-
-O que move o D é a **surpresa**, não a nota:
-
-| Situação | Leitura | Efeito |
-|---|---|---|
-| MMR alto, nota baixa | `S_esp > S` | o caso é mais difícil do que se pensava → **D sobe** |
-| MMR baixo, nota alta | `S_esp < S` | o caso é mais fácil → **D desce** |
-| nota igual à esperada | `S_esp = S` | nada a aprender → **D fica** |
-
-**Por que corrigir pelo nível.** Sem essa correção, um paciente atendido só por
-alunos iniciantes pareceria dificílimo — não por ser difícil, mas por causa de
-quem o atendeu. É exatamente o viés que o modelo existe para evitar.
-
-Três detalhes que só se veem no código:
-
-- **Durante a calibração do jogador, este passo inteiro é pulado** (§4).
-- O que vai para o `history` é o **D de antes do ajuste** — é contra esse D que a
-  partida foi de fato jogada, logo é ele que explica a nota obtida.
-- `dWeight` escala o ganho. Vale 1 para aluno com conta; menos para população
-  anônima (§7).
-
-### Passo 3 — O quanto o MMR pode se mover
-
-```
-K = 0,10 + 0,40 × e^(−0,15 × n)
-```
-
-`n` é a contagem **antes** desta partida.
-
-| Partida | n | K |
-|---|---|---|
-| 1ª | 0 | **0,500** |
-| 2ª | 1 | 0,444 |
-| 4ª | 3 | 0,355 |
-| 6ª | 5 | 0,289 |
-| 11ª | 10 | 0,189 |
-| 21ª | 20 | 0,120 |
-| ∞ | — | **0,100** (assíntota) |
-
-Novato se move rápido, porque o sistema ainda não sabe quem ele é. Veterano se
-move devagar: um dia ruim não apaga um histórico longo.
-
-### Passo 4 — A nota ajustada pela dificuldade
-
-```
-S_aj = S + (50 − S_esp)
-```
-
-**Este é o coração do sistema.** A nota bruta é convertida em *"quanto acima ou
-abaixo do esperado essa pessoa foi, naquele caso"*, recentrada em 50.
-
-| Nota obtida | Esperada | S_aj | Leitura |
+| Grandeza | Símbolo | O que é | Depende de |
 |---|---|---|---|
-| 70 | 50 | **90** | muito acima do esperado |
-| 70 | 70 | **50** | exatamente o esperado |
-| 70 | 85 | **35** | abaixo do esperado, apesar do 70 |
+| MMR do aluno | `P_c` | nível do aluno naquele critério | notas ponderadas dele nesse critério |
+| Dificuldade do caso (TRI) | `D_c` | quão difícil o caso é naquele critério | notas brutas comparadas ao nível de quem atendeu |
+| Nota ponderada | `N_c` | nota daquela avaliação corrigida pelo `D_c` | **só** da nota bruta e do `D_c` do caso |
 
-Não há `clamp` aqui, de propósito: um desempenho extremo deve aparecer como
-extremo, e não ser cortado.
+- **`P` e `D` formam um circuito:** um corrige o outro.
+- **`N` fica fora do circuito.** Não usa o MMR de quem atendeu. Dois alunos com
+  a mesma nota bruta no mesmo caso têm a mesma nota ponderada.
 
-### Passo 5 — O novo MMR
+**Escala interna 0..100.** A rubrica é 0..10 por critério; internamente o motor
+multiplica por 10 para que todas as constantes (`P0=50`, `D0=50`, limites 10 e
+90) sirvam para todos os critérios. Na tela, tudo o que é por critério volta
+para 0..10, com uma casa decimal.
 
-```
-P = (1 − K) × P_janela + K × S_aj
-```
-
-`P_janela` é a média das `S_aj` da janela `W`, com **pesos lineares
-crescentes**:
-
-```
-w_i = (i + 1) / [ size × (size + 1) / 2 ]
-```
-
-com `i = 0` na partida mais antiga. Numa janela cheia de 20, a partida mais
-recente pesa **20×** o que pesa a mais antiga, e os pesos somam 1.
-
-Assim o MMR reflete a forma atual sem jogar fora o histórico.
-
-> **Fallback:** na calibração, ou se a janela estiver vazia, a fórmula vira
-> `P = (1 − K) × P + K × S_aj` — média exponencial sobre o próprio P.
-
-### Passo 6 — Manutenção
-
-```
-W.push({ S_aj, D, P })     // se passar de 20, o mais antigo sai
-n += 1
-```
+**Dificuldade única e compartilhada.** O `D_c` do caso é o mesmo para o
+competitivo, para o processo seletivo e para o visitante — é o ponto do TRI.
+Separar por população jogaria fora a propriedade central do sistema (spec §8).
 
 ---
 
-## 3. Exemplo numérico completo
+## 2. Uma avaliação, passo a passo
 
-Aluna com **P = 62**, já com 8 partidas (`n = 8`) e janela cheia cuja média
-ponderada é **P_janela = 60**. Ela atende um paciente com **D = 45** e tira
-**S = 70**.
+Para **cada critério** que a avaliação devolveu, de forma independente:
 
-**Passo 1 — esperada**
+### 2.1 A avaliação entra no sistema?
 
-```
-gap   = 62 − 45 = 17
-S_esp = 50 + 0,5 × 17 = 58,5
-```
+| Situação | O que acontece |
+|---|---|
+| Avaliação de **administrador** | Não entra. Nada muda — P, D, contagens, ranking, recorde. |
+| Nota **total bruta < 25** | O D de **nenhum** critério do caso se move. O P do aluno é atualizado normalmente. |
+| A IA não devolveu nota de um critério | Só esse critério é pulado nesta avaliação. |
+| Qualquer outra | Segue os passos abaixo. |
 
-**Passo 2 — dificuldade**
+A trava de 25 protege a dificuldade contra envio por engano, teste e candidato
+muito fraco. `TOTAL_MIN_TO_MOVE_D = 25` em `server/mmr.js`.
 
-```
-ΔD = 0,1 × (58,5 − 70) = −1,15
-D  = 45 − 1,15 = 43,85
-```
-
-Ela foi melhor que o esperado → o caso era um pouco mais fácil do que parecia.
-
-**Passo 3 — sensibilidade**
+### 2.2 Nota esperada (para ajustar o D)
 
 ```
-K = 0,10 + 0,40 × e^(−0,15 × 8) = 0,10 + 0,40 × 0,3012 = 0,2205
+S_esp_c = 50 + β_c · (P_c − D_c)
 ```
 
-**Passo 4 — nota ajustada**
+- `P_c` e `D_c` são os valores **de antes** desta avaliação.
+- `β_c = 1` enquanto o caso não amadureceu naquele critério (§5).
+
+### 2.3 Ajuste do D
 
 ```
-S_aj = 70 + (50 − 58,5) = 61,5
+g_c = 0,2 se n_D_c < 20
+      0,1 se n_D_c ≥ 20
+
+D_c = clamp( D_c + g_c · (S_esp_c − S_c) ; 10 ; 90 )
 ```
 
-O 70 bruto "vale" 61,5, porque o caso estava abaixo do nível dela.
+- `n_D_c` é quantas vezes o D daquele critério já se moveu, **antes** desta.
+- O ganho alto no começo puxa um caso novo rápido para a dificuldade real; o
+  ganho baixo depois evita oscilação.
+- O D se move **desde a primeira avaliação** — não há mais o bloqueio da
+  calibração sobre o D.
+- **Peso igual** para aluno, seletivo e visitante (a diferença de qualidade do
+  sinal é absorvida pelo MMR próprio de cada população).
+- A cada movimento do D: push no histórico do caso naquele critério com
+  `{ P: MMR de quem atendeu, D_antes, S: nota bruta }`; incrementa `n_D_c`;
+  incrementa a contagem de origem (`competitivo`, `selecao` ou `visitante`).
+- Quando o D não se move (trava-25 ou admin), nada disso acontece.
 
-**Passo 5 — novo MMR**
+### 2.4 Nota ponderada
 
 ```
-P = (1 − 0,2205) × 60 + 0,2205 × 61,5
-  = 0,7795 × 60 + 0,2205 × 61,5
-  = 46,77 + 13,56
-  = 60,33
+N_c = S_c + (D_c − 50)
 ```
 
-**Resultado:** o MMR **caiu** de 62 para 60,3 — mesmo com uma nota 70 e mesmo
-tendo ido acima do esperado. Por quê? Porque o que puxa o MMR é a **janela**, que
-estava em 60, e o 61,5 desta partida é só um pouco melhor que ela. O número que a
-aluna vê é `Math.round(60,33) = 60`.
+- **Sem teto e sem piso** — pode passar de 100 ou ficar abaixo de 0.
+- É sempre essa fórmula, mesmo depois que o caso amadurece. O β **não** entra
+  aqui.
+- Para atualizar o MMR (2.6), usa-se o D **de antes** do ajuste desta avaliação
+  — é o D contra o qual a avaliação foi jogada.
+- Para **exibir**, a nota ponderada é sempre recalculada com o D **atual** do
+  caso. Ela muda à medida que o D se refina; o MMR do aluno **não** muda por
+  isso.
 
-É contraintuitivo na primeira vez e é o comportamento correto: o MMR é o retrato
-das 20 últimas, não da última.
+### 2.5 Sensibilidade K
+
+```
+K_c = max( 1 / (n_c + 1) ; 0,20 )
+```
+
+`n_c` é quantas avaliações daquele critério o aluno já tem, antes desta.
+
+| n_c | K_c |
+|---:|---:|
+| 0 (1ª avaliação) | 1,00 |
+| 1 | 0,50 |
+| 2 | 0,33 |
+| 3 | 0,25 |
+| 4+ | 0,20 (piso) |
+
+Com esse K, as **4 primeiras avaliações** do critério produzem exatamente a
+**média simples** das notas ponderadas até ali (spec §3.6 + critério de aceite
+5). O valor inicial de 50 desaparece já na 1ª (K=1).
+
+### 2.6 Atualização do MMR
+
+- Nas 4 primeiras avaliações do critério (`n_c < 4`) ou se a janela estiver
+  vazia:
+  ```
+  P_c = (1 − K_c) · P_c + K_c · N_c
+  ```
+- A partir da 5ª (`n_c ≥ 4`):
+  ```
+  P_c = (1 − K_c) · P_janela_c + K_c · N_c
+  ```
+
+`P_janela_c` é a média das notas ponderadas da janela, com pesos lineares
+**crescentes** (a mais recente pesa mais), sobre uma janela de **10
+avaliações**.
+
+### 2.7 Manutenção
+
+- A avaliação entra na janela do critério com a nota ponderada **do momento**,
+  o D de antes e o P de antes. A janela guarda só as 10 mais recentes.
+- `n_c` sobe 1.
+- Se `movimentou` (pelo menos um critério foi processado), `nEntradas` do
+  jogador sobe 1 — inclusive quando a nota total foi < 25 (spec §6).
+- O MMR **não é recalculado retroativamente** quando o D de um caso muda
+  depois. Só a nota ponderada exibida é recalculada — assim o MMR do aluno não
+  mexe sem ele ter feito nada.
 
 ---
 
-## 4. Calibração — as 3 primeiras partidas
+## 3. Exemplo numérico
 
-Enquanto `n < CALIBRATION_MATCHES` (3), o jogador está em calibração:
+Um critério. Aluno com `P_c = 60`, 8 avaliações nesse critério, média da
+janela `58`. Caso com `D_c = 64`, ainda imaturo nesse critério
+(`n_D_c < 20`, logo `β = 1` e `g = 0,2`). Nota bruta 7 (`S_c = 70`). Nota
+total bruta acima de 25.
 
-1. **O MMR não aparece.** `playerView` devolve `mmr: null` e
-   `matchesRemaining`, e a tela mostra quantas partidas faltam.
-2. **O MMR se move por média exponencial simples**, sem usar a janela.
-3. **A dificuldade dos pacientes não é tocada.**
+```
+S_esp = 50 + 1 · (60 − 64)      = 46
+D     = 64 + 0,2 · (46 − 70)    = 59,2
+N     = 70 + (64 − 50)          = 84    (D de antes, para o MMR)
+K     = max(1/9 ; 0,20)         = 0,20
+P     = 0,80 · 58 + 0,20 · 84   = 63,2
+```
 
-O item 3 é o mais importante e o menos óbvio. Nas primeiras partidas o P ainda é
-o chute inicial de 50, não o nível da pessoa. Se ele entrasse na conta, um aluno
-forte recém-chegado derrubaria a dificuldade de todo paciente que encostasse — e
-um aluno fraco a inflaria. O sistema espera o P convergir antes de confiar nele
-como régua.
-
-A mesma regra vale para as populações anônimas (§7).
+- **O aluno vê:** nota `7,0` nesse critério e MMR `6,3` no perfil.
+- **O supervisor vê:** nota ponderada `7,9`, recalculada com o D atual
+  (`70 + (59,2 − 50) = 79,2`), e a cor da faixa da nota bruta.
 
 ---
 
-## 5. A regressão do paciente
+## 4. Calibração — as 3 primeiras avaliações
 
-Depois de **20 partidas válidas** (`n_D ≥ 20`), um paciente deixa de usar a reta
-genérica e passa a usar a **dele**:
-
-```
-S ≈ α + β × gap        , com gap = P − D
-```
-
-Ajustada por mínimos quadrados sobre o `history`:
-
-```
-β = Σ(gap_i − ḡap)(S_i − S̄) / Σ(gap_i − ḡap)²
-α = S̄ − β × ḡap
-```
-
-- Refeita **a cada 5 partidas** novas (`n_D % 5 == 0`).
-- Recusa ajustar se houver menos de 2 pontos, ou se o gap for praticamente
-  constante (`Σ(gap − ḡap)² < 1e−9`) — nesse caso a reta seria indefinida e o
-  paciente continua com a genérica.
-- O `history` tem teto de **200** pontos; o mais antigo sai.
-
-O ganho prático: um paciente pode ser "difícil para iniciante e fácil para
-veterano" (β alto) ou ter desempenho parecido em todos os níveis (β baixo). A
-reta genérica não captura isso; a própria, sim.
+- **`CALIBRATION_MATCHES = 3`.** O que conta é `nEntradas` do jogador — inclui
+  avaliações com total < 25 (que movem P mas não D).
+- Durante a calibração, o **MMR do aluno** (por critério e total) **não
+  aparece** no perfil nem no ranking. A tela mostra quantas faltam.
+- A calibração **não bloqueia mais o D** do caso — o motor antigo bloqueava; o
+  novo não.
 
 ---
 
-## 6. Duelo (PvP)
+## 5. A regressão do caso, por critério
 
-O MMR é **único** — não existe MMR de duelo separado. Num duelo, os dois alunos
-atendem o **mesmo paciente** e recebem notas independentes.
+Cada par **caso × critério** amadurece sozinho. O β do critério do caso é
+recalculado periodicamente para melhorar a nota esperada — e é só isso que ele
+faz. O β **não** entra na nota ponderada nem no MMR.
 
-### As travas, antes de tudo
-
-| Trava | Regra | O que impede |
-|---|---|---|
-| **Calibração** | os **dois** precisam ter `n ≥ 3` | inflar MMR contra conta recém-criada |
-| **Anti-smurf** | **nenhum** pode tirar menos de **25** | perder de propósito para transferir MMR |
-
-Duelo reprovado devolve `{ ranked: false, reason: 'calibrating' | 'anti_smurf' }`.
-**O feedback dos dois alunos acontece do mesmo jeito** — só MMR, janela,
-contagem e dificuldade ficam intocados.
-
-### A conta
+- Amadurece quando `n_D_c ≥ 20`. O β é reajustado a cada 5 movimentos
+  (`n_D_c % 5 == 0`).
+- Histórico de até 200 pontos por caso × critério; o mais antigo sai.
+- **Só a inclinação é ajustada. O intercepto fica fixo em 50:**
 
 ```
-aposta_A = 0,20 × P_A
-aposta_B = 0,20 × P_B
-pool     = aposta_A + aposta_B
-
-frac_A   = S_A / (S_A + S_B)
-frac_B   = S_B / (S_A + S_B)
-
-delta_A  = frac_A × pool − aposta_A
-delta_B  = frac_B × pool − aposta_B
+gap_i = P_i − D_i        (valores guardados no histórico)
+β_c   = Σ gap_i · (S_i − 50)  /  Σ gap_i²
+β_c   = clamp( β_c ; 0,5 ; 1,5 )
 ```
 
-Cada lado aposta **20% do próprio MMR**; o pool é dividido na proporção das
-notas. Como `delta_A + delta_B = 0`, o duelo é **soma zero** entre os dois.
+- Menos de 2 pontos, ou `Σ gap_i² ≈ 0`: mantém o β anterior (ou 1, se nunca
+  ajustou).
 
-### A ordem importa
+**Por que intercepto fixo.** Com intercepto livre (que era o formato antigo),
+ele absorve a dificuldade e o D para de se mover antes de chegar ao valor real.
+Como a nota ponderada depende do D, o viés iria direto para a nota. O limite
+do β existe porque β perto de zero tiraria o D da conta e o deixaria sem ponto
+de equilíbrio.
 
-Depois do cálculo do pool, **cada jogador ainda passa pelo pipeline solo
-completo** contra o paciente — primeiro A, depois B, encadeando o estado do
-paciente:
+---
 
-```js
-const upA = updateMatch(pA, char,           S_A);
-const upB = updateMatch(pB, upA.character,  S_B);
+## 6. Duelo (PvP), por critério
+
+**Travas (avaliadas sobre o total)**
+
+| Trava | Regra |
+|---|---|
+| Calibração | os dois precisam ter `nEntradas ≥ 3` |
+| Nota mínima | nenhum dos dois com nota total bruta < 25 |
+| Administrador | nenhum dos dois pode ser admin |
+
+Se qualquer trava disparar, o duelo acontece e o resultado por critério é
+mostrado normalmente, mas **nada muda**: nem P, nem D, nem contagens.
+
+**A conta, por critério:**
+
+```
+aposta_A_c = 0,20 · P_A_c
+aposta_B_c = 0,20 · P_B_c
+pool_c     = aposta_A_c + aposta_B_c
+
+fração_A_c = S_A_c / (S_A_c + S_B_c)     (NOTA BRUTA do critério)
+fração_B_c = S_B_c / (S_A_c + S_B_c)
+
+delta_A_c  = fração_A_c · pool_c − aposta_A_c
+delta_B_c  = fração_B_c · pool_c − aposta_B_c
 ```
 
-Ou seja: **a dificuldade do paciente se move como em duas partidas em
-sequência**, não em uma. Só depois disso o delta do PvP é somado por cima.
+- **Soma zero em cada critério.**
+- Se as duas notas do critério forem 0, divide meio a meio (empate).
+- Usa a **nota bruta**, não a ponderada — os dois atenderam o mesmo caso.
 
-> Se `S_A + S_B = 0` (caso degenerado), a divisão vira 50/50.
+**Ordem:** calcula os deltas com os MMRs de antes; roda o pipeline solo da §2,
+primeiro A e depois B, com o estado do caso encadeado (o D se move como em
+duas avaliações seguidas); no fim, soma o delta PvP por cima do P novo de cada
+critério.
+
+**Tela:** mostra quem venceu **cada critério** (maior nota bruta; iguais =
+empate), além do resultado total.
 
 ---
 
 ## 7. Candidatos e visitantes: a camada anônima
 
-Processo Seletivo e visitante também atendem pacientes, e essas notas são
-informação valiosa sobre a dificuldade dos casos. Mas essas pessoas **não têm
-MMR próprio**: o candidato é efêmero, o visitante recebe um id novo a cada
-sessão.
+O candidato do processo seletivo e o visitante do link de duelo não têm MMR
+próprio (o candidato é efêmero, o visitante tem id sorteado a cada sessão).
+Se entrassem com um rating fixo de 50 e o grupo fosse mais fraco, o sistema
+leria as notas baixas como "caso difícil" — enviesando o D compartilhado.
 
-**O erro a evitar.** Se entrassem com rating fixo de 50 e o grupo fosse de fato
-mais fraco, o sistema leria as notas baixas como *"paciente difícil"* em vez de
-*"respondente mais fraco"*, e empurraria para cima a dificuldade de todos os
-casos — precisamente o viés que o modelo existe para eliminar.
+**Solução:** cada população é UM jogador persistente. Começa em `P0 = 50` e
+aprende com o próprio desempenho agregado, convergindo para o nível real do
+grupo. O candidato individual vira ruído em torno dessa média.
 
-**A solução.** Cada população é **um jogador persistente**. "Candidatos do
-Processo Seletivo" é um jogador só, que começa em 50 e aprende o próprio nível
-agregado ao longo das sessões. O candidato individual vira ruído em torno dessa
-média — e a média é justamente o que se quer estimar.
+- **Mesma janela**, mesmo K, **mesmo peso sobre o D** dos alunos (spec §15 —
+  antes era um `dWeight` reduzido; a spec removeu).
+- **Peso do TRI por população** (0..1) editável em Administração → Acessos.
+  Hoje é um **gate binário na prática**: peso 0 impede o `character` e a
+  contagem de fonte de serem gravados (a população continua aprendendo o
+  próprio rating); peso > 0 grava tudo. A regra vive em
+  [`registrarTriAnonimo`](server/index.js) — o motor não sabe do peso.
+- **Recorde 👑**: candidato do seletivo pode bater recorde (spec §9);
+  visitante e admin ficam de fora. O nome do candidato é copiado no momento
+  do recorde para `character_records.user_name` — a ficha do caso segue
+  funcionando mesmo se o log do candidato sumir depois. `origem` distingue
+  `competitivo` de `selecao`.
 
-Do ponto de vista do motor é um jogador comum: mesmo `updateMatch`, **inclusive a
-calibração** (as 3 primeiras sessões da população não mexem no D, tempo de o
-rating dela sair de 50). O que muda é só o `dWeight`, menor, porque sinal de
-população é mais ruidoso e merece ganho menor.
+---
 
-### O peso de cada origem
+## 8. Totais derivados
 
-| Origem | Peso | Onde se ajusta |
-|---|---|---|
-| **Aluno cadastrado** (Competitivo) | **1** | fixo — é a referência |
-| **Processo Seletivo** | **0,35** | Administração → Acessos |
-| **Visitante** | **0,5** | Administração → Acessos (sem efeito enquanto `VISITOR_TRI` não estiver ligado) |
-
-O peso entra direto no ajuste da dificuldade:
+Nenhum total tem estado próprio (spec §5). Todo total é a agregação linear dos
+valores por critério — mesma função de `server/scoring.js`:
 
 ```
-ΔD = peso × 0,1 × (S_esp − S)
+total = média aritmética dos valores por critério    (na escala interna 0..100)
 ```
 
-Ou seja, um atendimento do Seletivo move a dificuldade com pouco mais de **um
-terço** da força de uma partida de aluno cadastrado. Duas razões:
+| Total | A partir de |
+|---|---|
+| Nota total bruta | notas brutas por critério (como hoje) |
+| Nota total ponderada | notas ponderadas por critério |
+| MMR total (perfil, ranking) | `P_c` de cada critério |
+| Dificuldade total do caso | `D_c` de cada critério |
 
-- **Sinal mais ruidoso** — o rating usado é a média do grupo, não a habilidade
-  daquela pessoa.
-- **Volume** — o Seletivo tende a ter muito mais atendimentos que o Competitivo.
-  Com pesos iguais, a dificuldade dos pacientes passaria a refletir sobretudo
-  candidatos, e não alunos.
-
-**Desde 2026-09-23 o peso é do admin**, na tela de Acessos, entre **0 e 1**
-(0 desliga aquela população; 1 a iguala ao aluno cadastrado). Antes era só
-variável de ambiente, e ajustar exigia deploy — ruim para um parâmetro de
-calibração que só se afina com dados reais na mão. As variáveis
-`TRI_PESO_SELECAO` e `TRI_PESO_VISITANTE` continuam existindo como **padrão de
-fábrica**, para um ambiente novo nascer diferente.
-
-Dois avisos que a própria tela dá:
-
-- O valor novo vale **já no próximo atendimento avaliado** — a configuração é
-  lida a cada atendimento, não no boot.
-- **Não recalcula** as dificuldades já medidas. Muda só o quanto os próximos
-  atendimentos pesam.
-
-**O TRI do Seletivo é aplicado quando a avaliação volta do lote**, não quando o
-candidato termina — sem nota não há sinal. E só com nota válida: avaliação que
-deu erro não move nada.
-
-**A dificuldade é única e compartilhada.** Competitivo, Seletivo e visitante
-alimentam o **mesmo D**. Isso é o ponto de um sistema Elo/TRI: respondentes de
-níveis diferentes devem convergir para a mesma estimativa de dificuldade.
-Separar por população jogaria fora essa propriedade e devolveria apenas "nota
-média por paciente".
+O motor exporta `agregarTotal(porCriterio, criterioIds?)` para casos em que a
+lista de critérios ativos precisa filtrar (para que critérios extintos não
+entrem no total do perfil).
 
 ---
 
-## 8. Onde isso é guardado
+## 9. Onde isso é guardado
 
-No sistema em arquivos era o `mmr.json`. No PostgreSQL:
+Três tabelas Postgres, todas com `estado JSONB` opaco (o repo não lê os campos
+internos — só grava o que o motor devolve):
 
-| Tabela | Chave | Conteúdo |
+- **`mmr_players (user_id, estado, atualizado_em)`** — estado por aluno:
+  ```
+  { nEntradas: N, criterios: { [criterioId]: { P, n, janela: [{N, D_antes, P_antes}] } } }
+  ```
+- **`mmr_characters (character_id, estado, fontes, atualizado_em)`** — estado
+  por caso:
+  ```
+  estado = { criterios: { [criterioId]: { D, n_D, beta, historico: [{P, D_antes, S}] } } }
+  fontes = { [criterioId]: { competitivo, selecao, visitante } }
+  ```
+- **`mmr_anon_players (pool, estado, atualizado_em)`** — mesmo shape de
+  `mmr_players.estado`.
+
+Cada avaliação também guarda a **auditoria** em `logs.mmr_delta JSONB` (spec
+§12): MMR antes/depois **por critério e total**, mais D antes/depois de cada
+critério. Isso vale para consulta do supervisor e da conquista "Consistente"
+(MMR arredondado inalterado).
+
+E os recordes 👑 seguem em **`character_records`**, com nova coluna `origem`
+(`competitivo` ou `selecao`) e sem a FK antiga em `user_id` (que quebrava para
+candidato do seletivo).
+
+---
+
+## 10. Concorrência: por que há transação e trava
+
+Duas partidas simultâneas no mesmo caso não podem se sobrescrever. O motor
+por critério não muda essa exigência — só o formato do JSONB de dentro. A
+porta única de escrita é `mmrRepo.aplicar({ characterId, userIds?, populacao? }, calcular)`:
+
+1. `INSERT ... ON CONFLICT DO NOTHING` no `mmr_characters` para garantir a
+   linha antes de travar (`SELECT ... FOR UPDATE` não trava linha que ainda
+   não existe).
+2. `SELECT ... FOR UPDATE` no caso.
+3. Para cada `userId` em ordem lexicográfica (evita deadlock): mesma dança.
+4. Idem para a população, quando informada.
+5. Chama `calcular({ character, fontes, players, populacao })` — devolve os
+   estados novos + `fontes`.
+6. `UPDATE` só do que voltou.
+
+---
+
+## 11. O que aparece na tela
+
+| Informação | Aluno / candidato | Supervisor / avaliador |
 |---|---|---|
-| `mmr_players` | `user_id` | `estado` JSONB — `{ P, n, W }` |
-| `mmr_characters` | `character_id` | `estado` JSONB — `{ D, n_D, alpha, beta, history }` + `fontes` |
-| `mmr_anon_players` | `pool` | estado da população anônima |
-| `character_records` | `character_id` | o recorde 👑 do paciente no Competitivo |
+| Nota da avaliação por critério | **bruta** 0,0..10,0 | **ponderada**, sem teto, com cor da faixa da bruta |
+| Nota total da avaliação | bruta | ponderada |
+| MMR por critério | 0..10 com uma decimal, **sem teto**; oculto na calibração | igual |
+| MMR total (perfil, ranking) | derivado, na escala da nota total; oculto na calibração | igual |
+| Ficha do caso | como hoje | D por critério + D total, ao lado da média bruta de cada critério |
 
-O estado vai como **documento JSONB** porque é lido e gravado sempre inteiro,
-pelo motor, e nunca consultado campo a campo.
-
-`fontes` conta de onde vieram as partidas que moveram a dificuldade daquele
-paciente (competitivo, seletivo, visitante) — e só é incrementado quando o motor
-de fato mexeu no D, nunca durante a calibração.
-
-Cada log de partida competitiva também guarda `mmrBefore` e `mmrAfter`, o que
-permite mostrar o número andando partida a partida.
+- O aluno **nunca** vê nota de avaliação acima de 10.
+- O MMR do perfil pode passar de 10 — **não cortar**.
+- A nota ponderada exibida é sempre recalculada com o D atual do caso.
 
 ---
 
-## 9. Concorrência: por que há transação e trava
+## 12. Tabela de constantes
 
-Duas partidas simultâneas no mesmo paciente, no sistema antigo de arquivos, se
-sobrescreviam — era uma das razões de peso para sair do JSON. No banco,
-`aplicar()` resolve assim:
+Definidas em [`server/mmr.js`](server/mmr.js).
 
-1. **Cria a linha antes de travar.** `SELECT ... FOR UPDATE` não trava linha que
-   ainda não existe; sem o `INSERT ... ON CONFLICT DO NOTHING` antes, duas
-   primeiras partidas simultâneas no mesmo paciente se perderiam.
-2. **Trava o paciente e cada jogador** com `FOR UPDATE`, dentro de uma transação.
-3. **Trava os jogadores sempre na mesma ordem** (ids ordenados). Sem isso, dois
-   duelos cruzados travariam em círculo — *deadlock*.
-4. **Grava só o que o cálculo devolveu**, e só para jogador travado ali.
-
-Uma partida trava **apenas o paciente e os jogadores dela** — não o sistema
-inteiro. Duas partidas em pacientes diferentes não se esperam.
-
----
-
-## 10. O que aparece na tela
-
-**`playerView(player)`** — o que o Ranking e o Perfil mostram:
-
-```js
-{
-  n,                  // partidas jogadas
-  calibrating,        // n < 3
-  matchesRemaining,   // quantas faltam para sair da calibração
-  mmr,                // Math.round(P) — null durante a calibração
-  mmrRaw,             // P sem arredondar
-}
-```
-
-**`characterDifficulty(character)`** — `Math.round(D)`, de 10 a 90. Paciente
-nunca jogado mostra a baseline, 50.
-
-**`characterAvgScore(character)`** — a média simples das notas do histórico. É o
-número que o supervisor entende de imediato, exibido ao lado do D: a dificuldade
-medida e a nota média dizem coisas diferentes, e ver as duas juntas evita
-confundi-las.
+| Constante | Valor | O que controla |
+|---|---:|---|
+| `P0`, `D0` | 50, 50 | MMR e D iniciais, por critério |
+| `D_MIN`, `D_MAX` | 10, 90 | Limites do D |
+| `WINDOW` | 10 | Janela de partidas recentes por critério |
+| `CALIBRATION_MATCHES` | 3 | Avaliações até o MMR aparecer |
+| `CHAR_MATURE_AT` | 20 | `n_D_c` a partir do qual liga a regressão |
+| `REGRESS_REFIT_EVERY` | 5 | Reajusta β a cada N movimentos do D |
+| `HISTORY_CAP` | 200 | Teto do histórico por caso × critério |
+| `SIMPLE_MEAN_UNTIL` | 4 | Média simples nas 4 primeiras avaliações do critério |
+| `K_MIN` | 0,20 | Piso da sensibilidade |
+| `BETA_DEFAULT` | 1 | β antes de amadurecer |
+| `BETA_MIN`, `BETA_MAX` | 0,5 e 1,5 | Limites do β |
+| `GAIN_IMATURE`, `GAIN_MATURE` | 0,2 e 0,1 | Ganho do D antes e depois de amadurecer |
+| `TOTAL_MIN_TO_MOVE_D` | 25 | Trava-25 sobre a nota total bruta |
+| `PVP_STAKE` | 0,20 | Fração do MMR de cada critério apostada no duelo |
+| `PVP_MIN_SCORE` | 25 | Nota total mínima em cada lado para o duelo rankear |
 
 ---
 
-## 11. Tabela de constantes
+## 13. O que saiu da fórmula antiga
 
-| Constante | Valor | O que significa |
-|---|---|---|
-| `P0` | 50 | MMR inicial do jogador |
-| `D0` | 50 | dificuldade inicial do paciente |
-| `D_MIN` / `D_MAX` | 10 / 90 | limites da dificuldade |
-| `WINDOW` | 20 | tamanho da janela de partidas recentes |
-| `CALIBRATION_MATCHES` | 3 | partidas em calibração |
-| `CHAR_MATURE_AT` | 20 | `n_D` a partir do qual o paciente ganha regressão própria |
-| `REGRESS_REFIT_EVERY` | 5 | de quantas em quantas partidas a regressão é refeita |
-| `HISTORY_CAP` | 200 | teto do histórico do paciente |
-| `PVP_STAKE` | 0,20 | fração do MMR apostada no duelo |
-| `PVP_MIN_SCORE` | 25 | nota mínima para o duelo valer MMR |
-| peso do Seletivo | 0,35 | ganho do ajuste de D vindo do Processo Seletivo (editável em Acessos) |
-| peso do visitante | 0,5 | idem, para o visitante (hoje sem efeito) |
-| — | 0,5 | inclinação da reta genérica de nota esperada |
-| — | 0,1 | ganho do ajuste de dificuldade |
-| — | 0,10 / 0,40 / 0,15 | piso, amplitude e decaimento da sensibilidade `K` |
+A reforma da §24 removeu, por decisão da spec §13:
 
----
+- `S_aj` e a fórmula `50 + (S − S_esp)`.
+- A inclinação genérica 0,5.
+- O intercepto livre da regressão (`alpha`).
+- O peso reduzido do seletivo e do visitante sobre o D (`dWeight`).
+- O bloqueio do D durante a calibração.
+- MMR e D calculados sobre a nota total.
 
-## 12. Cobertura de testes
+**Não reintroduzir.** A justificativa numérica está na spec §3.9 e §4.
 
-**67 casos** em cinco arquivos:
-
-| Arquivo | Casos | Cobre |
-|---|---|---|
-| `tests/mmr.test.js` | 20 | o motor solo: nota esperada, sensibilidade, janela, pesos, calibração |
-| `tests/tri-dificuldade.test.js` | 17 | o ajuste de D, inclusive no duelo, na calibração e abaixo do piso anti-smurf |
-| `tests/tri.test.js` | 11 | a regressão do paciente e o amadurecimento |
-| `tests/db-repo-mmr.test.js` | 11 | persistência, travas e importação |
-| `tests/mmr-pvp.test.js` | 8 | pool, distribuição, soma zero e as duas travas do duelo |
-
-Sem contar `tests/duel.test.js` e `tests/db-repo-duelos.test.js`, que cobrem o
-fluxo do duelo em volta do motor.
-
----
-
-## 13. Decisões e histórico
-
-- **Calibração de 5 → 3 partidas (29/05/2026).** Cinco partidas desengajavam o
-  aluno antes de o MMR aparecer.
-- **O histórico do paciente guarda o D de ANTES do ajuste.** O pseudocódigo
-  original gravava o D já ajustado; foi corrigido, porque é contra o D jogado que
-  a nota foi obtida — é ele que a explica.
-- **Dificuldade compartilhada entre populações**, em vez de um D por origem
-  (§7).
-- **Sem `clamp` na nota ajustada**, para preservar desempenhos extremos.
-- **Peso do TRI virou configuração do admin (23/09/2026)**, em vez de variável
-  de ambiente: é calibração, não constante de engenharia.
-- **A nota final vem de código, não da IA.** A IA erra a aritmética com
-  frequência; a conta de somar critérios e converter para 0–100 é determinística
-  e vive em `server/scoring.js`.
-
----
-
-## 14. Perguntas frequentes
-
-**O MMR pode cair?**
-Pode, e cai. Ele é a média ponderada da janela recente; uma sequência ruim
-derruba. Não há proteção de piso. Ver o exemplo do §3, em que uma nota 70 acima
-do esperado ainda assim baixou o MMR.
-
-**Dá para subir atendendo só casos fáceis?**
-Não. Caso fácil tem D baixo → `S_esp` alto → `S_aj` **abaixo** da nota bruta.
-Farmar caso fácil rende pouco, por construção.
-
-**E atendendo só casos difíceis?**
-Ajuda, se você for bem. Caso difícil tem `S_esp` baixo, então a mesma nota vale
-mais. Mas se você for mal nele, cai igual.
-
-**Quem define a dificuldade dos pacientes?**
-Ninguém digita esse número. Ela é **medida** a partir das notas obtidas,
-corrigidas pelo nível de quem atendeu.
-
-**Por que meu MMR não aparece?**
-Faltam partidas para terminar a calibração (3). A tela mostra quantas.
-
-**Por que meu MMR mal se mexeu?**
-Quanto mais partidas você tem, menor o `K`. Depois de umas 20, cada partida pesa
-cerca de 10%.
-
-**Perdi o duelo e meu MMR não mudou. Bug?**
-Provavelmente uma das travas: algum dos dois ainda estava em calibração, ou
-alguém tirou menos de 25. O feedback sai mesmo assim.
-
-**Dois alunos empataram no duelo. O que acontece?**
-Notas iguais → `frac = 0,5` para os dois → cada um recebe de volta exatamente o
-que apostou. Delta zero no PvP; o pipeline solo continua valendo para os dois.
-
-**A nota final sai da IA?**
-Não. A IA emite as notas por critério; a nota 0–100 é uma conta determinística
-(`server/scoring.js`). O MMR parte dessa nota.
+No deploy da reforma, os três `estado JSONB` (`mmr_players`,
+`mmr_characters`, `mmr_anon_players`) são **arquivados** em
+`mmr_*_arquivo_v1` para consulta via SQL no Neon (spec §11) e **truncados**.
+Todos os alunos voltam à calibração; os recordes 👑 são mantidos. A migração
+que faz isso é `server/db/migrations/017_mmr_reset_por_criterio.sql`.

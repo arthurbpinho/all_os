@@ -62,7 +62,16 @@ describe('tags de terapeutas', () => {
     const admin = await loginAs('admin');
     const tag = await criarTag(admin, 'Psicanalista');
     await request(app).put('/api/admin/users/3/tags').set(authHeader(admin)).send({ tagIds: [tag.id] });
-    await db.query(`INSERT INTO mmr_players (user_id, estado) VALUES (3, '{"P":55,"n":5,"W":[]}'), (5, '{"P":60,"n":5,"W":[]}')`);
+    // Formato JSONB novo por critério (spec MMR-por-criterio.md §12): o
+    // ranking olha state.nEntradas para decidir quem entra na lista.
+    const estado = (P) => JSON.stringify({
+      nEntradas: 5,
+      criterios: { c1: { P, n: 5, janela: [] } },
+    });
+    await db.query(
+      `INSERT INTO mmr_players (user_id, estado) VALUES (3, $1::jsonb), (5, $2::jsonb)`,
+      [estado(55), estado(60)],
+    );
 
     const aluno = await loginAs('aluno');
     const todos = await request(app).get('/api/ranking').set(authHeader(aluno));

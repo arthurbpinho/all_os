@@ -177,19 +177,19 @@ describe('Processo Seletivo', () => {
     expect(hl.comment).toBe('abertura acolhedora');
   });
 
-  it('dedup: mesmo WhatsApp em <15 dias é bloqueado com "faltam X dias"; outro número passa', async () => {
+  it('sem dedupe automático por WhatsApp (§24.0): o mesmo número pode se inscrever de novo', async () => {
     // 1ª avaliação completa (gera o log com o WhatsApp).
     const s1 = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
     await request(app).post('/api/selecao/finish').set(authHeader(s1.body.token))
       .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
 
-    // Mesmo número (formatado diferente) → bloqueado.
+    // Mesmo número (formatado diferente): SEM trava — o controle de acesso
+    // agora é feito pela troca da SELECAO_PASSWORD entre aberturas.
     const again = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '11912345678' });
-    expect(again.status).toBe(403);
-    expect(again.body.daysLeft).toBeGreaterThan(0);
-    expect(again.body.error).toMatch(/faltam .* dias/i);
+    expect(again.status).toBe(200);
+    expect(again.body.token).toBeTruthy();
 
-    // Número diferente → permitido.
+    // Número diferente também passa (contexto: qualquer WhatsApp válido entra).
     const other = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '(21) 99999-0000' });
     expect(other.status).toBe(200);
   });
