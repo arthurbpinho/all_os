@@ -6,31 +6,20 @@
 //      nem a missão diária que entraria no lugar dela;
 //   3. desligar NÃO cancela o que o supervisor atribuiu: religar devolve;
 //   4. conta antiga (sem o campo em disco) continua recebendo, como antes.
-const { app, request, resetData, loginAs, authHeader, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, loginAs, authHeader, db, lerUsuarios } = require('./helpers');
 
-function lerUsuarios() {
-  return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'users.json'), 'utf-8'));
-}
-function gravarUsuarios(users) {
-  fs.writeFileSync(path.join(DATA_DIR, 'users.json'), JSON.stringify(users, null, 2));
-}
-
-// Banco de sidequests + uma atribuída ao aluno '3'.
-function semearSidequest() {
-  fs.writeFileSync(path.join(DATA_DIR, 'sidequests.json'), JSON.stringify({
-    bank: [{
-      id: 'sq-1',
-      title: 'Sustentar o silêncio',
-      description: 'Deixe o paciente conduzir o ritmo por pelo menos três trocas.',
-      rewardTitleId: 'qt-silencio',
-      rewardTitleLabel: 'Quem escuta',
-      rewardTitleTier: 'quest',
-    }],
-    active: {},
-    completed: {},
-  }, null, 2));
+// Banco de sidequests com uma definição (a atribuição ao aluno '3' é feita pela
+// rota, em cada teste). Direto no banco, e a cópia em memória recarregada.
+async function semearSidequest() {
+  await db.query('INSERT INTO sidequests_banco (id, doc) VALUES ($1, $2)', ['sq-1', JSON.stringify({
+    id: 'sq-1',
+    title: 'Sustentar o silêncio',
+    description: 'Deixe o paciente conduzir o ritmo por pelo menos três trocas.',
+    rewardTitleId: 'qt-silencio',
+    rewardTitleLabel: 'Quem escuta',
+    rewardTitleTier: 'quest',
+  })]);
+  await app.__test.recarregarConfig();
 }
 
 async function atribuir(adminToken) {
@@ -38,9 +27,9 @@ async function atribuir(adminToken) {
     .set(authHeader(adminToken)).send({ userId: '3', sidequestId: 'sq-1' });
 }
 
-beforeEach(() => {
-  resetData();
-  semearSidequest();
+beforeEach(async () => {
+  await resetData();
+  await semearSidequest();
 });
 
 test('o campo nasce ligado e o próprio usuário desliga', async () => {
@@ -53,7 +42,7 @@ test('o campo nasce ligado e o próprio usuário desliga', async () => {
     .send({ sidequestsEnabled: false });
   expect(salvo.status).toBe(200);
   expect(salvo.body.sidequestsEnabled).toBe(false);
-  expect(lerUsuarios().find((u) => u.id === '3').sidequestsEnabled).toBe(false);
+  expect((await lerUsuarios()).find((u) => u.id === '3').sidequestsEnabled).toBe(false);
 });
 
 test('valor não-booleano é normalizado em vez de gravado cru', async () => {
@@ -77,9 +66,9 @@ test('desligado, a sidequest atribuída não é servida — mas continua guardad
   const desligado = await request(app).get('/api/me/sidequest').set(authHeader(aluno));
   expect(desligado.body.active).toBeNull();
   expect(desligado.body.enabled).toBe(false);
-  // Guardada em disco: o supervisor não perdeu a atribuição.
-  const store = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'sidequests.json'), 'utf-8'));
-  expect(store.active['3']).toBeTruthy();
+  // Guardada no banco: o supervisor não perdeu a atribuição.
+  const { rows } = await db.query('SELECT doc FROM sidequests_ativas WHERE user_id = 3');
+  expect(rows[0]).toBeTruthy();
 
   // Religar devolve exatamente a mesma.
   await request(app).put('/api/users/3').set(authHeader(aluno)).send({ sidequestsEnabled: true });
@@ -100,9 +89,9 @@ test('desligado, a missão diária TAMBÉM não entra no lugar', async () => {
 });
 
 test('conta sem o campo em disco continua recebendo o objetivo', async () => {
-  const users = lerUsuarios();
-  for (const u of users) delete u.sidequestsEnabled;
-  gravarUsuarios(users);
+  // No banco não existe "campo ausente": a coluna nasce com o padrão (ligado),
+  // que é o equivalente da conta antiga que não tinha o campo em disco.
+  await db.query('UPDATE users SET sidequests_enabled = DEFAULT');
   const aluno = await loginAs('aluno');
   const r = await request(app).get('/api/me/daily-mission').set(authHeader(aluno));
   expect(r.body.mission).not.toBeNull();

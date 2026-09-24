@@ -1,9 +1,11 @@
-// Tabela de notas por critério do avaliador.
-// DESTINADA SÓ A SUPERVISOR/ADMIN — nunca ao aluno. Quem renderiza é responsável
-// por gatear por role: nos Logs o servidor já esconde criteriaScores do aluno.
-// Renderiza qualquer criteriaScores não-vazio, ordenando por chave.
+// Notas por critério de uma sessão: radar + tabela.
+// Desde 2026-09 o aluno também vê os NÚMEROS (se "Notas por critério e gráfico"
+// estiver liberado para o perfil dele em Acessos) — é o servidor que decide se
+// criteriaScores vem no log. As ANÁLISES escritas continuam só de supervisor e
+// admin (CriteriaAnalyses).
+import RadarCriterios from './RadarCriterios';
 
-// Avaliador v18.25 (atual): 15 critérios em 6 grupos. Os critérios 10 e 13 podem
+// Avaliador v18.25: 15 critérios em 6 grupos. Os critérios 10 e 13 podem
 // sair NA quando o caso não dá material — aí a linha simplesmente não aparece.
 export const V18_CRITERIA = {
   '1': 'Precisão lexical',
@@ -42,10 +44,12 @@ export const NEURO_CRITERIA = {
   '4': 'Indicação de testes',
 };
 
-// Escolhe a grade certa para um criteriaScores: neuro tem a própria (4
-// critérios); fora dela, o número mais alto de critério distingue a grade de 15
-// (v18.25) da de 6 (logs antigos), sem precisar de campo novo no log.
-export function labelsForCriteria(criteriaScores, logType) {
+// Escolhe os nomes de um criteriaScores. Log avaliado depois de 2026-09 traz os
+// nomes gravados (`criteriaNames`), que valem sobre qualquer tabela. Fora isso:
+// neuro tem a própria grade (4 critérios); e o número mais alto de critério
+// distingue a grade de 15 (v18.25) da de 6 (logs antigos).
+export function labelsForCriteria(criteriaScores, logType, criteriaNames) {
+  if (criteriaNames && typeof criteriaNames === 'object' && Object.keys(criteriaNames).length) return criteriaNames;
   if (logType === 'neuro') return NEURO_CRITERIA;
   const keys = Object.keys(criteriaScores || {}).map((k) => Number(k)).filter(Number.isFinite);
   const max = keys.length ? Math.max(...keys) : 0;
@@ -58,17 +62,19 @@ export default function CriteriaTable({ criteriaScores, labels = V18_CRITERIA })
     .filter(([, v]) => Number.isFinite(Number(v)))
     .sort((a, b) => Number(a[0]) - Number(b[0]));
   if (entries.length === 0) return null;
+  const nome = (k) => labels[k] || `Critério ${k}`;
   return (
     <div className="criteria-table" style={{ marginBottom: 14 }}>
       <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
-        Notas por critério <span style={{ textTransform: 'none', letterSpacing: 0 }}>(visível só ao supervisor/admin)</span>
+        Notas por critério
       </div>
+      <RadarCriterios itens={entries.map(([k, v]) => ({ nome: nome(k), valor: Number(v) }))} tamanho={260} />
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5 }}>
         <tbody>
           {entries.map(([k, v]) => (
             <tr key={k} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
               <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>
-                {labels[k] || `Critério ${k}`}
+                {nome(k)}
               </td>
               <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: 'var(--marrs-deep)', whiteSpace: 'nowrap' }}>
                 {Number(v)}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>

@@ -38,26 +38,33 @@ export default function Ranking({ user }) {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [notice, setNotice] = useState('');
+  // Filtro por tag de terapeuta (as tags que o admin criou em Contas).
+  const [tags, setTags] = useState([]);
+  const [tag, setTag] = useState('');
 
   const isAdmin = user?.role === 'admin';
 
   function loadRanking() {
     setLoading(true);
-    return api.getRanking()
+    return api.getRanking(tag)
       .then((data) => setItems(Array.isArray(data) ? data : []))
       .catch((e) => setError(e.message || 'Erro ao carregar ranking'))
       .finally(() => setLoading(false));
   }
 
   useEffect(() => {
+    api.getTags().then((l) => setTags(Array.isArray(l) ? l : [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     let cancel = false;
     setLoading(true);
-    api.getRanking()
+    api.getRanking(tag)
       .then((data) => { if (!cancel) setItems(Array.isArray(data) ? data : []); })
       .catch((e) => { if (!cancel) setError(e.message || 'Erro ao carregar ranking'); })
       .finally(() => { if (!cancel) setLoading(false); });
     return () => { cancel = true; };
-  }, []);
+  }, [tag]);
 
   async function handleReset() {
     setResetting(true);
@@ -117,6 +124,17 @@ export default function Ranking({ user }) {
               {opt.label}
             </button>
           ))}
+          {tags.length > 0 && (
+            <select
+              value={tag}
+              onChange={(e) => setTag(e.target.value)}
+              aria-label="Filtrar por tag"
+              style={{ width: 'auto', fontSize: 13, padding: '6px 10px' }}
+            >
+              <option value="">Todas as tags</option>
+              {tags.map((t) => <option key={t.id} value={t.id}>{t.nome}</option>)}
+            </select>
+          )}
           {isAdmin && (
             <button
               type="button"

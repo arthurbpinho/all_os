@@ -6,9 +6,7 @@
 //   3. o e-mail leva o texto QUALITATIVO — nenhuma nota final ou por critério;
 //   4. avaliação com erro não vira e-mail, e o desfecho do envio fica no log.
 // IMPORTANTE: helpers seta as envs antes de importar o app — manter como 1º require.
-const { app, request, resetData, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, db } = require('./helpers');
 const mailer = require('../server/email');
 
 const CAMPOS = {
@@ -38,8 +36,10 @@ const RESULTADO = {
   ].join('\n'),
 };
 
-function lerLogs() {
-  return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'selection-logs.json'), 'utf-8'));
+// Os logs do seletivo como estão no banco, em ordem de criação.
+async function lerLogs() {
+  const { rows } = await db.query('SELECT doc FROM selecao_logs ORDER BY criado_em, id');
+  return rows.map((r) => r.doc);
 }
 
 async function fazerExercicio(extra) {
@@ -48,7 +48,7 @@ async function fazerExercicio(extra) {
   await request(app).post('/api/selecao/finish')
     .set({ Authorization: `Bearer ${start.body.token}` })
     .send({ messages: [{ role: 'assistant', content: 'Olá.' }, { role: 'user', content: 'Como você está?' }], durationSeconds: 60 });
-  return lerLogs().at(-1);
+  return (await lerLogs()).at(-1);
 }
 
 function feedbacksEnviados() {
@@ -56,7 +56,7 @@ function feedbacksEnviados() {
 }
 
 describe('Processo Seletivo — feedback prévio (IA)', () => {
-  beforeEach(() => { resetData(); mailer.limparCapturados(); });
+  beforeEach(async () => { await resetData(); mailer.limparCapturados(); });
 
   it('a escolha Sim/Não é obrigatória e precisa ser booleana', async () => {
     const semEscolha = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
@@ -93,7 +93,7 @@ describe('Processo Seletivo — feedback prévio (IA)', () => {
       expect(corpo).not.toContain('7/10');
     }
 
-    const depois = lerLogs().find((l) => l.id === log.id);
+    const depois = (await lerLogs()).find((l) => l.id === log.id);
     expect(depois.status).toBe('ativo');
     // Sem Graph configurado nos testes: fica registrado que não saiu por isso.
     expect(depois.feedbackEmail.estado).toBe('nao-configurado');
@@ -104,13 +104,13 @@ describe('Processo Seletivo — feedback prévio (IA)', () => {
     expect(log.feedbackIA).toBe(false);
     await app.__test.finalizeSelectionEvals([log.id], new Map([[log.id, { result: RESULTADO }]]), 'sem resultado');
     expect(feedbacksEnviados()).toHaveLength(0);
-    expect(lerLogs().find((l) => l.id === log.id).feedbackEmail).toBeUndefined();
+    expect((await lerLogs()).find((l) => l.id === log.id).feedbackEmail).toBeUndefined();
   });
 
   it('avaliação com erro não vira e-mail, mesmo com "Sim"', async () => {
     const log = await fazerExercicio({ feedbackIA: true });
     await app.__test.finalizeSelectionEvals([log.id], new Map(), 'sem resultado no batch');
-    expect(lerLogs().find((l) => l.id === log.id).status).toBe('erro');
+    expect((await lerLogs()).find((l) => l.id === log.id).status).toBe('erro');
     expect(feedbacksEnviados()).toHaveLength(0);
   });
 

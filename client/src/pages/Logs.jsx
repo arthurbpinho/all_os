@@ -5,6 +5,7 @@ import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
 import CriteriaAnalyses from '../components/CriteriaAnalyses';
+import RadarCriterios from '../components/RadarCriterios';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
 import RichText from '../components/RichText';
@@ -36,38 +37,8 @@ function sanitizeFilename(name) {
     .slice(0, 80);
 }
 
-const LOG_TTL_DAYS_FALLBACK = 30;
-
-// Data de expiração do log: usa expiresAt vindo do servidor; se ausente
-// (logs antigos), deriva do timestamp + 30 dias.
-function logExpiresAt(log) {
-  if (log.expiresAt) return new Date(log.expiresAt);
-  const base = new Date(log.timestamp || log.createdAt || 0);
-  if (isNaN(base)) return null;
-  return new Date(base.getTime() + LOG_TTL_DAYS_FALLBACK * 86400000);
-}
-
-function daysUntilExpiry(log) {
-  const exp = logExpiresAt(log);
-  if (!exp) return null;
-  return Math.ceil((exp.getTime() - Date.now()) / 86400000);
-}
-
-function ExpiryNote({ log, style }) {
-  const exp = logExpiresAt(log);
-  if (!exp) return null;
-  const days = daysUntilExpiry(log);
-  const soon = days != null && days <= 7;
-  return (
-    <span
-      title="Após esta data o log é removido automaticamente"
-      style={{ fontSize: 12, color: soon ? 'var(--terra)' : 'var(--muted)', display: 'inline-flex', alignItems: 'center', gap: 4, ...style }}
-    >
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M12 8v4l3 2" /></svg>
-      expira {exp.toLocaleDateString('pt-BR')}{soon && days >= 0 ? ` · ${days}d` : ''}
-    </span>
-  );
-}
+// Logs de atendimento são persistentes (demandas.md §24.0) — nada de
+// expiração para exibir.
 
 // Monta os textos de um log salvo: logStr (só transcrição), evalStr (avaliação +
 // notas por critério, quando houver) e bothStr (tudo). hasEval indica se há
@@ -105,17 +76,17 @@ function buildLogStrings(log) {
     ? `\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${scoreLine}${log.evaluation}`
     : '';
 
-  // Notas por critério (só nos downloads de supervisor/admin — o aluno nem
-  // recebe criteriaScores do servidor).
+  // Notas por critério (vêm só quando o servidor as manda: supervisor/admin, ou
+  // o aluno com "Notas por critério e gráfico" liberado em Acessos).
   let criteriaPart = '';
   if (log.criteriaScores && typeof log.criteriaScores === 'object') {
-    const critLabels = labelsForCriteria(log.criteriaScores, log.type);
+    const critLabels = labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames);
     const rows = Object.entries(log.criteriaScores)
       .filter(([, v]) => Number.isFinite(Number(v)))
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([k, v]) => `${critLabels[k] || `Critério ${k}`}: ${Number(v)}/10`);
     if (rows.length) {
-      criteriaPart = `\n\n===========================\nNOTAS POR CRITÉRIO (supervisor)\n===========================\n\n${rows.join('\n')}`;
+      criteriaPart = `\n\n===========================\nNOTAS POR CRITÉRIO\n===========================\n\n${rows.join('\n')}`;
     }
   }
 
@@ -213,7 +184,6 @@ function LogCard({ log, showDownload }) {
         )}
         {log.type && <span style={{ fontWeight: 500 }}>{TYPE_LABELS[log.type] || log.type}</span>}
         <span>{messages.filter((m) => !m.isSystem).length} {messages.filter((m) => !m.isSystem).length === 1 ? 'mensagem' : 'mensagens'}</span>
-        <ExpiryNote log={log} />
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -263,7 +233,7 @@ function LogCard({ log, showDownload }) {
           {tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
               <div>
-                <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
+                <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
                 <CriteriaAnalyses log={log} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
@@ -320,8 +290,23 @@ function LogCard({ log, showDownload }) {
   );
 }
 
-function TherapistGroup({ therapistName, logs }) {
+function TherapistGroup({ therapistName, userId, logs }) {
   const [open, setOpen] = useState(true);
+  // Média por critério deste terapeuta (o mesmo gráfico que ele vê no Perfil).
+  // Carregada sob demanda: seriam tantas requisições quantos grupos na tela, e o
+  // supervisor costuma querer ver a de um aluno por vez.
+  const [verGrafico, setVerGrafico] = useState(false);
+  const [grafico, setGrafico] = useState(null);
+  const [graficoErro, setGraficoErro] = useState('');
+
+  function alternarGrafico(e) {
+    e.stopPropagation(); // o cabeçalho inteiro recolhe o grupo
+    setVerGrafico((v) => !v);
+    if (grafico || !userId) return;
+    api.getMeusCriterios(userId)
+      .then(setGrafico)
+      .catch((err) => setGraficoErro(err.message || 'Não foi possível carregar o gráfico.'));
+  }
   const total = logs.length;
   // Última atividade do terapeuta — informação rápida pro supervisor.
   const lastTs = logs.reduce((acc, l) => {
@@ -356,6 +341,16 @@ function TherapistGroup({ therapistName, logs }) {
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {userId && (
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={alternarGrafico}
+              title="Média por critério deste terapeuta nas sessões avaliadas"
+            >
+              {verGrafico ? 'Ocultar gráfico' : 'Gráfico de critérios'}
+            </button>
+          )}
           <button
             type="button"
             className="btn btn-outline btn-sm"
@@ -370,6 +365,39 @@ function TherapistGroup({ therapistName, logs }) {
           </span>
         </div>
       </div>
+
+      {verGrafico && (
+        <div className="card tight" style={{ marginBottom: 12 }}>
+          {graficoErro && <div className="alert error">{graficoErro}</div>}
+          {!graficoErro && !grafico && <div style={{ color: 'var(--muted)', fontSize: 13 }}>Carregando o gráfico…</div>}
+          {grafico && (grafico.sessoes === 0 ? (
+            <div style={{ color: 'var(--muted)', fontSize: 13 }}>
+              Nenhuma sessão avaliada nos modos que alimentam o perfil (configurados em Acessos).
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>
+                Média por critério · {grafico.sessoes} {grafico.sessoes === 1 ? 'sessão avaliada' : 'sessões avaliadas'}
+                {grafico.modos && grafico.modos.length ? ` (${grafico.modos.map((m) => m.label).join(', ')})` : ''}
+              </div>
+              <RadarCriterios itens={grafico.criterios.map((c) => ({ nome: c.nome, valor: c.media }))} tamanho={260} />
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5 }}>
+                <tbody>
+                  {grafico.criterios.map((c) => (
+                    <tr key={c.nome} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
+                      <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>{c.nome}</td>
+                      <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                        {c.media}
+                        <span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10 · {c.n}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ))}
+        </div>
+      )}
 
       {open && logs.map((log, i) => (
         <LogCard key={log.id || i} log={log} showDownload />
@@ -539,7 +567,6 @@ function PatientSessionList({ patient, onSelect, onBack }) {
                     {' · '}
                     {(log.messages || []).filter((m) => !m.isSystem).length} mensagens
                   </span>
-                  <ExpiryNote log={log} />
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -576,7 +603,6 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 8, color: 'var(--muted)', fontSize: 13 }}>
           <span>{TYPE_LABELS[log.type] || log.type}</span>
           <ScoreBadge score={log.score} />
-          <ExpiryNote log={log} />
         </div>
         <div style={{ marginTop: 12 }}>
           <LogActions items={logItemsFor(log)} inline />
@@ -642,7 +668,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div className="card tight">
           {evaluation || log.criteriaScores ? (
             <div>
-              <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type)} />
+              <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
               <CriteriaAnalyses log={log} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
@@ -665,7 +691,6 @@ export default function Logs({ user, userId }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [ttlDays, setTtlDays] = useState(LOG_TTL_DAYS_FALLBACK);
   // Aba dentro de "Minhas Sessões": sessões (Trilha/Simulação/Neuro) ou duelos.
   // "Logs de Duelo" deixou de ser item de menu próprio e virou esta aba.
   const [view, setView] = useState('sessions');
@@ -676,21 +701,23 @@ export default function Logs({ user, userId }) {
 
   const isSupervisorView = !userId;
   const isVisitor = user?.role === 'visitor';
+  // Filtro por tag de terapeuta — só na visão de supervisão.
+  const [tags, setTags] = useState([]);
+  const [tag, setTag] = useState('');
 
   useEffect(() => {
     setLoading(true);
     setError('');
-    api.getLogs(userId)
+    api.getLogs(userId, isSupervisorView ? tag : '')
       .then(setLogs)
       .catch((err) => setError(err.message || 'Erro ao carregar logs'))
       .finally(() => setLoading(false));
-  }, [userId]);
+  }, [userId, tag, isSupervisorView]);
 
   useEffect(() => {
-    api.getLogsPolicy()
-      .then((p) => { if (p && p.ttlDays) setTtlDays(p.ttlDays); })
-      .catch(() => {});
-  }, []);
+    if (!isSupervisorView) return;
+    api.getTags().then((l) => setTags(Array.isArray(l) ? l : [])).catch(() => {});
+  }, [isSupervisorView]);
 
   useEffect(() => {
     if (isSupervisorView || isVisitor) { setMmr(null); return; }
@@ -708,7 +735,7 @@ export default function Logs({ user, userId }) {
     const byUser = new Map();
     for (const log of logs) {
       const key = log.userId || log.userName || '__sem-id';
-      if (!byUser.has(key)) byUser.set(key, { name: log.userName || 'Terapeuta sem nome', logs: [] });
+      if (!byUser.has(key)) byUser.set(key, { name: log.userName || 'Terapeuta sem nome', userId: log.userId, logs: [] });
       byUser.get(key).logs.push(log);
     }
     const groups = Array.from(byUser.values()).map((g) => ({
@@ -757,6 +784,16 @@ export default function Logs({ user, userId }) {
 
       {error && <div className="alert error">{error}</div>}
 
+      {isSupervisorView && tags.length > 0 && (
+        <div className="card tight" style={{ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ color: 'var(--muted)', fontSize: 13 }}>Filtrar por tag</span>
+          <select value={tag} onChange={(e) => setTag(e.target.value)} style={{ width: 'auto', fontSize: 13 }}>
+            <option value="">Todas</option>
+            {tags.map((t) => <option key={t.id} value={t.id}>{t.nome}</option>)}
+          </select>
+        </div>
+      )}
+
       {/* Aba Sessões / Duelos — só na visão do aluno ("Minhas Sessões"). */}
       {!isSupervisorView && (
         <div className="logs-tabs">
@@ -777,19 +814,6 @@ export default function Logs({ user, userId }) {
         </div>
       )}
 
-      {(isSupervisorView || view === 'sessions') && (
-        <div className="log-expiry-banner">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0 }}>
-            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <span>
-            Os logs expiram automaticamente após <strong>{ttlDays} dias</strong> e são removidos para manter o desempenho da plataforma.
-            A data de expiração aparece em cada sessão — <strong>baixe os logs que quiser guardar</strong> antes disso.
-          </span>
-        </div>
-      )}
-
       {!isSupervisorView && view === 'duels' ? (
         <LogsSociais user={user} embedded />
       ) : loading ? (
@@ -807,7 +831,7 @@ export default function Logs({ user, userId }) {
               {grouped.length} {grouped.length === 1 ? 'terapeuta' : 'terapeutas'} · {logs.length} {logs.length === 1 ? 'caso' : 'casos'} no total
             </p>
             {grouped.map((g, i) => (
-              <TherapistGroup key={i} therapistName={g.name} logs={g.logs} />
+              <TherapistGroup key={i} therapistName={g.name} userId={g.userId} logs={g.logs} />
             ))}
           </div>
         )

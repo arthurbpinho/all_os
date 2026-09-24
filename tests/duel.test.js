@@ -1,11 +1,9 @@
 // IMPORTANTE: helpers seta as envs antes de importar o app — manter como 1º require.
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, db } = require('./helpers');
+const { criarRepoMmr } = require('../server/repos/mmr');
 
-function seedMmr(players) {
-  fs.writeFileSync(path.join(DATA_DIR, 'mmr.json'), JSON.stringify({ players, characters: {} }, null, 2));
-}
+const mmrRepo = criarRepoMmr(db.getPool());
+const seedMmr = (players) => mmrRepo.importar({ players });
 
 // Duelos rodam em modo demonstração aqui (ANTHROPIC_API_KEY vazia), então a
 // avaliação comparativa usa o fallback neutro: notas 5 pros dois → 50 × 50 →
@@ -159,7 +157,7 @@ describe('duelos', () => {
     const aluno = await loginAs('aluno');
     const aluno2 = await loginAs('aluno2');
     // challenger ('3') MMR 50, opponent ('5') MMR 70, ambos fora da calibração
-    seedMmr({ '3': { P: 50, n: 10, W: [] }, '5': { P: 70, n: 10, W: [] } });
+    await seedMmr({ '3': { P: 50, n: 10, W: [] }, '5': { P: 70, n: 10, W: [] } });
 
     const create = await request(app).post('/api/duel').set(authHeader(aluno))
       .send({ characterId: CHAR, opponentUserId: '5', inviteMethod: 'system', mode: 'competitive' });
@@ -175,17 +173,17 @@ describe('duelos', () => {
     expect(m.challenger.delta).toBeGreaterThan(0);
     expect(m.opponent.delta).toBeLessThan(0);
 
-    // o mmr.json foi de fato atualizado
-    const mmrFile = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'mmr.json'), 'utf-8'));
-    expect(mmrFile.players['3'].P).not.toBe(50);
-    expect(mmrFile.players['5'].P).not.toBe(70);
+    // o MMR foi de fato gravado
+    const players = await mmrRepo.jogadores();
+    expect(players['3'].P).not.toBe(50);
+    expect(players['5'].P).not.toBe(70);
     // n incrementa (partida competitiva conta como PvE no sistema solo)
-    expect(mmrFile.players['3'].n).toBe(11);
+    expect(players['3'].n).toBe(11);
   });
 
   it('duelo competitivo contra visitante não rankeia (reason visitor)', async () => {
     const aluno = await loginAs('aluno');
-    seedMmr({ '3': { P: 60, n: 10, W: [] } });
+    await seedMmr({ '3': { P: 60, n: 10, W: [] } });
     // cria competitivo mas via link aberto (oponente será visitante)
     const create = await request(app).post('/api/duel').set(authHeader(aluno))
       .send({ characterId: CHAR, inviteMethod: 'whatsapp', mode: 'competitive' });

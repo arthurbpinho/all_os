@@ -1,6 +1,8 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const cors = require('cors');
+const ipRealMod = require('./ip-real');
+const acessos = require('./acessos');
 const helmet = require('helmet');
 const path = require('path');
 const fs = require('fs');
@@ -46,8 +48,98 @@ const contas = require('./cadastro');
 const sessionQuota = require('./session-quota');
 const mailer = require('./email');
 const turnstile = require('./turnstile');
+const db = require('./db');
+const { criarRepoContas, ErroConta } = require('./repos/contas');
+const { criarRepoLogs } = require('./repos/logs');
+const { criarRepoProgresso } = require('./repos/progresso');
+const { criarRepoMmr } = require('./repos/mmr');
+const { criarRepoDuelos } = require('./repos/duelos');
+const { criarRepoPrompts } = require('./repos/prompts');
+const { criarRepoSessoes } = require('./repos/sessoes');
+const { criarRepoCota } = require('./repos/cota');
+const { criarRepoJobs } = require('./repos/jobs');
+const { criarRepoNotificacoes } = require('./repos/notificacoes');
+const { criarRepoGamificacao } = require('./repos/gamificacao');
+const { criarRepoOperacao } = require('./repos/operacao');
+const { criarRepoSidequests } = require('./repos/sidequests');
+const { criarRepoAntessala } = require('./repos/antessala');
+const { criarRepoSelecao } = require('./repos/selecao');
+const { criarRepoComunidade } = require('./repos/comunidade');
+const { criarRepoTags } = require('./repos/tags');
+const { criarRepoCatalogo } = require('./repos/catalogo');
+const { criarCatalogo } = require('./catalogo');
+const criteriosPerfil = require('./criterios-perfil');
+const limitesIa = require('./limites-ia');
+const criteriosMd = require('./criterios-md');
+const { criarRepoUsoIa } = require('./repos/uso-ia');
 
 const app = express();
+
+// Banco de dados — obrigatório, pelo mesmo motivo do JWT_SECRET: sem ele não há
+// onde persistir, e subir mesmo assim só adiaria o erro para a primeira gravação.
+if (!process.env.DATABASE_URL) {
+  console.error('[FATAL] DATABASE_URL ausente.');
+  console.error('         Em dev: `npm run db:up` e a DATABASE_URL do docker-compose.yml no .env.');
+  process.exit(1);
+}
+// As migrações rodam no boot, e nenhuma requisição é atendida antes de elas
+// terminarem. O catch vazio só evita o aviso de rejeição não tratada enquanto
+// ninguém está esperando: quem depende do banco (este middleware e o listen, no
+// fim do arquivo) trata o erro de verdade.
+const bancoPronto = db.iniciar().then(async (aplicadas) => {
+  await semearAdmin();
+  // Configurações do admin (modelo de IA por categoria, pool de fotos…) vão para a
+  // memória antes da primeira requisição: são lidas de forma síncrona.
+  await operacaoRepo.carregarConfig();
+  // Sidequests também têm leitura síncrona (título de recompensa, missão do
+  // Treinamento): o banco inicial entra no primeiro boot, e o estado vai para a memória.
+  await sidequestsRepo.semearBancoUmaVez(SIDEQUEST_BANK_SEED);
+  await sidequestsRepo.carregar();
+  await semearPrompts();
+  // Catálogos: primeira carga do volume (ou do padrão) e cópia em memória, lida
+  // de forma síncrona pelas rotas.
+  const catalogosSemeados = await catalogos.semearDoVolume(DATA_DIR, CATALOGO_PADRAO);
+  if (catalogosSemeados.length) console.log(`[catalogo] semeado(s) no banco: ${catalogosSemeados.join(', ')}`);
+  await catalogos.carregar();
+  return aplicadas;
+});
+bancoPronto.catch(() => {});
+app.use((req, res, next) => {
+  bancoPronto.then(() => next(), next);
+});
+const contasRepo = criarRepoContas(db.getPool());
+const logsRepo = criarRepoLogs(db.getPool());
+const progressoRepo = criarRepoProgresso(db.getPool());
+const mmrRepo = criarRepoMmr(db.getPool());
+const duelosRepo = criarRepoDuelos(db.getPool());
+const promptsRepo = criarRepoPrompts(db.getPool());
+const sessoesRepo = criarRepoSessoes(db.getPool());
+const cotaRepo = criarRepoCota(db.getPool());
+const jobsRepo = criarRepoJobs(db.getPool());
+// Uma fila de documentos por ferramenta interna (ver 006_sessoes_filas.sql).
+const filaTrilha = jobsRepo.fila('trilha-avaliacao');
+const filaAvaliacao = jobsRepo.fila('avaliacao-fila');
+const resultadosAvaliacao = jobsRepo.fila('avaliacao-resultados');
+const filaBenchmark = jobsRepo.fila('benchmark-fila');
+const lotesBenchmark = jobsRepo.fila('benchmark-lotes');
+const notificacoesRepo = criarRepoNotificacoes(db.getPool());
+const gamificacaoRepo = criarRepoGamificacao(db.getPool());
+const operacaoRepo = criarRepoOperacao(db.getPool());
+const sidequestsRepo = criarRepoSidequests(db.getPool());
+const antessalaRepo = criarRepoAntessala(db.getPool());
+const selecaoRepo = criarRepoSelecao(db.getPool());
+const comunidadeRepo = criarRepoComunidade(db.getPool());
+const tagsRepo = criarRepoTags(db.getPool());
+const usoIaRepo = criarRepoUsoIa(db.getPool());
+// Pacientes, neuro, exercícios e competências da Trilha (015_catalogo.sql).
+const catalogos = criarCatalogo(criarRepoCatalogo(db.getPool()));
+
+// Express 4 não captura a rejeição de um handler async: sem isto, uma falha do
+// banco numa rota deixaria a requisição pendurada e derrubaria o processo. O erro
+// segue para o tratador do fim do arquivo, que responde no padrão de falhou().
+function rota(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
 
 // Railway/Cloudflare ficam na frente; sem isso o express-rate-limit aborta com
 // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR e req.ip fica errado.
@@ -110,15 +202,19 @@ app.use(helmet({
 // O CF-Connecting-IP é SOBRESCRITO pelo Cloudflare em toda request, então é o
 // único valor confiável aqui.
 //
-// ATENÇÃO: isso só vale enquanto o tráfego chegar pelo Cloudflare. A URL
-// *.up.railway.app fura o Cloudflare e, por ela, o CF-Connecting-IP volta a ser
-// forjável. Mantenha o domínio da Railway fora de divulgação (ver DEPLOY.md).
+// Mas o cabeçalho só é confiável quando a conexão CHEGOU pelo Cloudflare: pela
+// URL *.up.railway.app qualquer um o forja. Por isso ele só vale quando o IP da
+// conexão está nas faixas do Cloudflare (server/ip-real.js). Para conferir em
+// produção: GET /api/admin/diagnostico-ip.
+const IPS_CONFIAVEIS = ipRealMod.criarListaConfiavel(process.env.IPS_PROXY_CONFIAVEIS);
+const CONFIAR_CF_SEMPRE = process.env.CONFIAR_CF_CONNECTING_IP === 'sempre';
 function clientIp(req) {
-  const cf = req.headers['cf-connecting-ip'];
-  const raw = (typeof cf === 'string' && cf.trim()) ? cf.trim() : (req.ip || '');
-  // Express entrega IPv4 como ::ffff:1.2.3.4 quando o socket é IPv6.
-  if (raw.startsWith('::ffff:') && raw.includes('.')) return raw.slice(7);
-  return raw;
+  return ipRealMod.ipReal({
+    ipConexao: req.ip,
+    cfConnectingIp: req.headers['cf-connecting-ip'],
+    lista: IPS_CONFIAVEIS,
+    confiarSempre: CONFIAR_CF_SEMPRE,
+  });
 }
 
 // Chave de rate limit por IP. IPv6 é agrupado pelo /64 porque um único cliente
@@ -175,23 +271,29 @@ function isLocalViteDevOrigin(origin) {
 const benchmarkRouter = express.Router();
 app.use('/benchmarkpaciente', benchmarkRouter);
 
-app.use(cors((req, cb) => {
-  const origin = req.headers.origin;
+function origemPermitida(req, origin) {
   // Same-origin (sem header Origin) sempre passa.
-  if (!origin) return cb(null, { origin: true });
-  if (CORS_ALLOWLIST.includes(origin)) return cb(null, { origin: true });
+  if (!origin) return true;
+  if (CORS_ALLOWLIST.includes(origin)) return true;
   // Same-origin com header Origin: browsers modernos mandam Origin mesmo em
   // fetch mesmo-origem. Compara host do Origin com o Host da request.
   try {
     const originHost = new URL(origin).host;
-    if (originHost && originHost === req.headers.host) {
-      return cb(null, { origin: true });
-    }
+    if (originHost && originHost === req.headers.host) return true;
   } catch {}
   // Vite dev em LAN (192.168.x.x etc.) — necessário pra `vite --host`.
-  if (isLocalViteDevOrigin(origin)) return cb(null, { origin: true });
-  return cb(new Error('Origin não permitida pelo CORS: ' + origin));
-}));
+  return isLocalViteDevOrigin(origin);
+}
+
+// Origem de fora: 403 direto. Antes a recusa era um erro lançado dentro do cors,
+// que virava 500 E uma entrada no painel de Logs de Erro a cada request — e o
+// painel guarda só as 500 mais recentes: bastava repetir a request de qualquer
+// origem para empurrar os erros reais para fora dele.
+app.use((req, res, next) => {
+  if (origemPermitida(req, req.headers.origin)) return next();
+  res.status(403).json({ error: 'Origem não permitida.' });
+});
+app.use(cors((req, cb) => cb(null, { origin: true })));
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -216,66 +318,66 @@ if (DATA_DIR !== SEED_DATA_DIR && fs.existsSync(SEED_DATA_DIR)) {
   }
 }
 
-// PROMPTS_DIR guarda os .md do avaliador/entrevistador — dados sensíveis
-// (critérios de nota, gabaritos), por isso NÃO ficam versionados no git.
-// Semeia a partir da cópia local em avaliacao/ e entrevistador/ (que continuam
-// existindo em disco, só não versionadas); depois disso o volume persistente é a
-// fonte e sobrevive a redeploys mesmo sem os arquivos no git. Atualizações de
-// conteúdo vão pelas rotas /api/admin/prompts, não por git push.
+// PROMPTS NO BANCO (005_prompts.sql, server/prompt-files.js). Os .md do
+// avaliador/entrevistador são dados sensíveis (critérios de nota, gabaritos), por
+// isso NÃO ficam versionados no git. Atualizações de conteúdo vão pelas rotas
+// /api/admin/prompts, não por git push.
 //
-// A semeadura copia o que FALTA e nunca sobrescreve o que já está no volume.
-// Antes ela era só-uma-vez ("se o PROMPTS_DIR não existe"), e isso escondia uma
-// armadilha: um prompt NOVO (uma versão nova do pipeline, um modo novo de um
-// avaliador) nunca chegava a um ambiente que já tinha sido semeado — em
-// produção o arquivo simplesmente não existia, e a avaliação morria com ENOENT
-// na primeira sessão depois do deploy. Copiar o que falta resolve isso sem
-// tocar em nenhuma edição feita pelo painel: quem existe no volume manda.
-// Pastas da cópia local que NÃO são prompt do app e não têm o que fazer no
-// volume: a "benchmarking tool" é a bancada de análise do dono (scripts .py,
-// dumps de run, relatórios .html) — nenhum código lê nada de lá, e semeá-la
-// jogava ~150 arquivos no volume persistente e uma dúzia de .md na listagem de
-// Administração → Prompts.
+// A semeadura, no boot, insere no banco o que FALTA e nunca sobrescreve o que já
+// está lá — quem existe no banco manda. Um prompt NOVO (uma versão nova do
+// pipeline) chega sozinho a um ambiente já semeado, sem tocar em nenhuma edição
+// feita pelo painel. Duas origens, nesta ordem (a primeira vence):
+//   1. o PROMPTS_DIR do volume: é onde estão os prompts editados em produção
+//      antes do banco. O primeiro boot com banco os traz sem ninguém copiar, e
+//      o volume não é alterado (continua valendo como cópia);
+//   2. a cópia local em avaliacao/ e entrevistador/ (dev e testes).
+//
+// Pastas da cópia local que NÃO são prompt do app: a "benchmarking tool" é a
+// bancada de análise do dono (scripts .py, dumps de run, relatórios .html) —
+// nenhum código lê nada de lá.
 const SEED_PROMPTS_IGNORAR = new Set(['benchmarking tool']);
 
-function seedPromptsDir() {
-  fs.mkdirSync(PROMPTS_DIR, { recursive: true });
-  let copiados = 0;
-  // Cria a pasta destino só quando há o que pôr dentro: uma pasta que sobrou na
-  // cópia local sem nenhum prompt (o caso de uma versão que foi apagada e
-  // deixou um arquivo de ferramenta atrás) não deve nascer no volume.
-  const copiarFaltantes = (src, dst) => {
-    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-      // Nada que começa com ponto: são arquivos de ferramenta (.claude/, .DS_Store)
-      // que já apareceram dentro dessas pastas e não têm nada a fazer no volume.
+// Os .md de avaliacao/ e entrevistador/ debaixo de `base`, como { caminho, conteudo }.
+function lerPromptsDoDisco(base) {
+  const entradas = [];
+  const varrer = (dir, rel) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      // Nada que começa com ponto: são arquivos de ferramenta (.claude/, .DS_Store).
       if (entry.name.startsWith('.')) continue;
       if (entry.isDirectory() && SEED_PROMPTS_IGNORAR.has(entry.name)) continue;
-      const de = path.join(src, entry.name);
-      const para = path.join(dst, entry.name);
-      if (entry.isDirectory()) {
-        copiarFaltantes(de, para);
-      } else if (entry.isFile() && !fs.existsSync(para)) {
-        fs.mkdirSync(path.dirname(para), { recursive: true });
-        fs.copyFileSync(de, para);
-        copiados++;
-        console.log(`[prompts] semeado: ${path.relative(PROMPTS_DIR, para)}`);
+      const abs = path.join(dir, entry.name);
+      const caminho = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) varrer(abs, caminho);
+      else if (entry.isFile() && promptFiles.resolvePromptPath(caminho) && !ehDeReguaAntiga(caminho)) {
+        entradas.push({ caminho, conteudo: fs.readFileSync(abs, 'utf-8') });
       }
     }
   };
-  for (const name of promptFiles.PROMPT_ROOTS) {
-    const src = path.join(__dirname, '..', name);
-    if (!fs.existsSync(src)) continue;
-    copiarFaltantes(src, path.join(PROMPTS_DIR, name));
-  }
-  return copiados;
+  for (const raiz of promptFiles.PROMPT_ROOTS) varrer(path.join(base, raiz), raiz);
+  return entradas;
 }
-seedPromptsDir();
 
-// Migração one-shot: APAGA do volume os prompts das réguas que saíram do app.
-// Eles foram removidos do repositório, mas o volume é persistente: sem isto
-// continuariam lá para sempre, aparecendo na listagem de Administração →
-// Prompts como arquivos editáveis que nenhum código lê.
+async function semearPrompts() {
+  const entradas = [
+    ...lerPromptsDoDisco(PROMPTS_DIR),
+    ...lerPromptsDoDisco(path.join(__dirname, '..')),
+  ];
+  // Insere o que falta e atualiza o que ninguém editou pelo painel desde a
+  // última semeadura (ver repos/prompts.js, semear).
+  const s = await promptsRepo.semear(entradas);
+  if (s.inseridos > 0) console.log(`[prompts] ${s.inseridos} prompt(s) semeado(s) no banco.`);
+  if (s.atualizados.length) console.log(`[prompts] atualizado(s) pela semente (versão anterior no histórico): ${s.atualizados.join(', ')}`);
+  if (s.preservados.length) console.log(`[prompts] editado(s) pelo admin, semente ignorada: ${s.preservados.join(', ')}`);
+  await promptFiles.iniciar(promptsRepo);
+}
+
+// Prompts das réguas que saíram do app. Eles podem continuar no volume de
+// produção (uma migração antiga os apagava de lá, com backup), e a semeadura do
+// banco NÃO os importa: senão apareceriam na listagem de Administração → Prompts
+// como arquivos editáveis que nenhum código lê.
 //
-// Duas levas, e o marker é um só:
+// Duas levas:
 //   · 2026-09 — v16-2, v18.25 (individual/progressão/seletivo) e os pipelines
 //     v25, v28, v31 e v32, quando o v29 assumiu a avaliação individual;
 //   · a seguir — v29, v29-progressao, v43 e o comparativo v18.25 do Duelo,
@@ -284,24 +386,17 @@ seedPromptsDir();
 // Esta lista cobre só o que ESTE código deixou para trás, e é por isso que ela
 // não cresce sozinha: prompt de modo que saiu antes (o Modo Desafio, removido em
 // 2026-08-17, é o caso conhecido) continua no volume até alguém apagar. Para
-// esses existe o botão Excluir em Administração → Prompts, que mostra a lista
-// REAL do volume e marca o que ninguém lê como "órfão" — melhor do que uma
-// migração adivinhando nome de arquivo que talvez nem exista.
-//
-// Cada arquivo é COPIADO para o histórico de versões (prompt-backups/) antes de
-// sair, então nada se perde de verdade — o conteúdo continua recuperável no
-// volume, fora do caminho. Marker em migrations.json: roda uma vez.
+// esses existe o botão Excluir em Administração → Prompts, que marca o que
+// ninguém lê como "órfão".
 //
 // O que NÃO entra nesta lista, de propósito: `avaliador 18/avaliador-v18-25-neuro.md`
 // (Neuro, o último avaliador de prompt único vivo), as pastas v34/,
 // v34-progressao/ e v34-duelo/, e a `benchmarking tool/` (que não é avaliador).
-(function limparPromptsDasReguasAntigas() {
-  const migrations = readJSON('migrations.json', {});
-  if (migrations.prompts_reguas_antigas_removidos_v34) return;
-
-  // Arquivos soltos e pastas inteiras. "nova avaliacao" é o nome que a pasta do
-  // v25 tem no volume de PRODUÇÃO (no repo ela se chamava v25).
-  const arquivos = [
+//
+// Arquivos soltos e pastas inteiras. "nova avaliacao" é o nome que a pasta do
+// v25 tem no volume de PRODUÇÃO (no repo ela se chamava v25).
+const PROMPTS_REGUAS_ANTIGAS = {
+  arquivos: new Set([
     'avaliacao/avaliador-v16-2.md',
     'avaliacao/avaliador-comparativo-v1.md',
     'avaliacao/avaliador-comparativo-v2.md',
@@ -311,52 +406,18 @@ seedPromptsDir();
     'avaliacao/avaliador 18/avaliador-v18-25-processo-seletivo.md',
     'avaliacao/avaliador 18/avaliador-v18-25-progressao.md',
     'avaliacao/avaliador 18/avaliador-v18-25-duelo.md',
-  ];
-  const pastas = [
+  ]),
+  pastas: [
     'avaliacao/v25', 'avaliacao/v28', 'avaliacao/v31', 'avaliacao/v32',
     'avaliacao/nova avaliacao', 'avaliacao/neuro',
     'avaliacao/v29', 'avaliacao/v29-progressao', 'avaliacao/v43',
-  ];
+  ],
+};
 
-  const apagar = (rel) => {
-    const abs = promptFiles.resolvePromptPath(rel);
-    if (!abs || !fs.existsSync(abs)) return false;
-    try {
-      promptFiles.backupPrompt(rel); // guarda antes de sair
-      fs.unlinkSync(abs);
-      return true;
-    } catch (e) {
-      console.error(`[prompts] não deu para remover ${rel}:`, e.message);
-      return false;
-    }
-  };
-
-  let removidos = 0;
-  for (const rel of arquivos) if (apagar(rel)) removidos++;
-  for (const pasta of pastas) {
-    const dirAbs = path.join(PROMPTS_DIR, pasta);
-    if (!fs.existsSync(dirAbs)) continue;
-    for (const nome of fs.readdirSync(dirAbs)) {
-      // Só arquivo, e só o que a pasta de prompt deveria ter. Subpasta ou
-      // dotfile (um .claude/ que apareceu ali dentro) fica onde está — apagar
-      // recursivamente uma árvore no volume não é trabalho de migração.
-      const alvo = path.join(dirAbs, nome);
-      if (nome.startsWith('.') || !fs.statSync(alvo).isFile()) continue;
-      if (nome.toLowerCase().endsWith('.md')) {
-        if (apagar(`${pasta}/${nome}`)) removidos++;
-      } else {
-        try { fs.unlinkSync(alvo); removidos++; } catch {}
-      }
-    }
-    try { fs.rmdirSync(dirAbs); } catch {} // só sai se ficou vazia
-  }
-
-  migrations.prompts_reguas_antigas_removidos_v34 = new Date().toISOString();
-  writeJSON('migrations.json', migrations);
-  if (removidos > 0) {
-    console.log(`[prompts] ${removidos} arquivo(s) das réguas antigas removido(s) do volume (com backup em prompt-backups/).`);
-  }
-})();
+function ehDeReguaAntiga(caminho) {
+  return PROMPTS_REGUAS_ANTIGAS.arquivos.has(caminho)
+    || PROMPTS_REGUAS_ANTIGAS.pastas.some((pasta) => caminho.startsWith(pasta + '/'));
+}
 
 // Fotos de paciente enviadas pelo admin ficam no volume persistente (DATA_DIR),
 // não no repo — assim sobrevivem a redeploys do Railway. Servidas em
@@ -373,32 +434,19 @@ app.use('/exercise-photos', express.static(EXERCISE_PHOTOS_DIR, { maxAge: '7d' }
 
 // Pool de fotos padrão (Administração → Contas): até 10 imagens que viram o
 // avatar de quem não tem foto própria — visitante e conta que nunca subiu a
-// sua. Bytes no volume, lista em avatar-pool.json; nada disso entra no repo.
+// sua. Bytes no volume, lista no banco; nada disso entra no repo.
 const AVATAR_POOL_DIR = path.join(DATA_DIR, 'avatar-pool');
 if (!fs.existsSync(AVATAR_POOL_DIR)) fs.mkdirSync(AVATAR_POOL_DIR, { recursive: true });
 app.use('/avatar-pool', express.static(AVATAR_POOL_DIR, { maxAge: '7d' }));
 
-const AVATAR_POOL_FILE = 'avatar-pool.json';
-
-// A pool é lida em laço (o ranking e a lista de contas resolvem a foto de cada
-// usuário), então fica em cache invalidado pelo mtime do arquivo: um upload ou
-// uma remoção aparece na requisição seguinte, sem reler o JSON N vezes por
-// resposta. Cache de UM processo, que é o caso no Railway.
-let avatarPoolCache = { mtime: -1, photos: [] };
+// A lista mora no banco (configuracoes, chave 'avatar-pool'). É lida em laço (o
+// ranking e a lista de contas resolvem a foto de cada usuário), por isso sai da
+// cópia em memória das configurações (server/repos/operacao.js): um upload ou
+// uma remoção aparece na requisição seguinte, sem ir ao banco N vezes por resposta.
+const AVATAR_POOL_CHAVE = 'avatar-pool';
 
 function readAvatarPool() {
-  const p = path.join(DATA_DIR, AVATAR_POOL_FILE);
-  let mtime = 0;
-  try { mtime = fs.existsSync(p) ? fs.statSync(p).mtimeMs : 0; } catch { mtime = 0; }
-  if (mtime !== avatarPoolCache.mtime) {
-    const d = readJSON(AVATAR_POOL_FILE, { photos: [] });
-    avatarPoolCache = { mtime, photos: avatarPool.normalizarPool(d && d.photos) };
-  }
-  return avatarPoolCache.photos;
-}
-function writeAvatarPool(photos) {
-  writeJSON(AVATAR_POOL_FILE, { photos });
-  avatarPoolCache = { mtime: -1, photos: [] }; // força releitura
+  return avatarPool.normalizarPool(operacaoRepo.lerConfig(AVATAR_POOL_CHAVE, { photos: [] }).photos);
 }
 
 // A foto da pool que cabe a `userId`, ou null quando a pool está vazia — aí
@@ -439,8 +487,10 @@ const BCRYPT_ROUNDS = 10;
 
 // --- Rate limiting ---
 // Em NODE_ENV=test, todos os limiters viram no-op: a suite roda dezenas de
-// logins/requests em segundos, o que estouraria janelas reais.
-const SKIP_RATE_LIMIT = process.env.NODE_ENV === 'test';
+// logins/requests em segundos, o que estouraria janelas reais. TESTAR_LIMITES=1
+// os mantém ligados — é o que tests/seguranca-limites.test.js usa para provar
+// que eles de fato seguram.
+const SKIP_RATE_LIMIT = process.env.NODE_ENV === 'test' && process.env.TESTAR_LIMITES !== '1';
 const noopLimiter = (req, res, next) => next();
 
 // Pre-auth (chave por IP): protege contra brute-force de credenciais e flood
@@ -710,6 +760,14 @@ function writeJSON(file, data) {
 // Grava o erro COMPLETO no DATA_DIR e devolve um código curto. A resposta ao
 // usuário nunca deve conter err.message: use `falhou()` logo abaixo.
 // Nunca lança — falhar ao registrar um erro não pode virar um segundo erro.
+//
+// A entrada vai para o banco sem segurar quem chamou: falhou() responde na hora
+// com o código. As gravações em voo ficam em `errosPendentes`, e o painel as
+// espera antes de ler — senão um erro recém-registrado poderia não aparecer.
+const errosPendentes = new Set();
+function aguardarErrosPendentes() {
+  return Promise.allSettled([...errosPendentes]);
+}
 function registrarErro(req, err, where, { status = 500, extra = null } = {}) {
   let entry;
   try {
@@ -717,7 +775,11 @@ function registrarErro(req, err, where, { status = 500, extra = null } = {}) {
       err, req, where, status, extra,
       ip: (() => { try { return clientIp(req); } catch { return null; } })(),
     });
-    writeJSON(errorLog.ERROR_LOG_FILE, errorLog.appendError(readJSON(errorLog.ERROR_LOG_FILE), entry));
+    const gravacao = operacaoRepo
+      .registrarErro(entry, { maximo: errorLog.MAX_ENTRIES, ttlMs: errorLog.TTL_DAYS * 24 * 60 * 60 * 1000 })
+      .catch((e) => console.error('[error-log] não consegui gravar o erro no banco:', e && e.message))
+      .finally(() => errosPendentes.delete(gravacao));
+    errosPendentes.add(gravacao);
   } catch (e) {
     console.error('[error-log] não consegui registrar o erro:', e && e.message);
     if (!entry) return errorLog.newErrorId(); // ainda devolve código pro usuário
@@ -797,227 +859,95 @@ function hashPasswordSync(plain) {
 // em si é irrelevante — nenhuma senha jamais bate com ele.
 const HASH_ISCA = hashPasswordSync(crypto.randomBytes(32).toString('hex'));
 
-if (!fs.existsSync(path.join(DATA_DIR, 'users.json'))) {
-  // Seed inicial: apenas o admin. Demais contas são criadas pela tela de Contas.
-  // Fail-closed: sem ADMIN_INITIAL_PASSWORD setada (e forte), recusa criar o admin —
-  // evita o cenário em que um deploy "fresh" volta a aceitar admin/admin123.
+// O que da senha digitada vai ao bcrypt numa COMPARAÇÃO. O bcrypt só usa os 72
+// primeiros bytes, mas processa a string inteira que recebe — e o corpo JSON
+// aceita até 10 MB, então uma "senha" de megabytes era trabalho de CPU de graça
+// para quem quisesse. 256 caracteres cobrem com folga os 72 bytes (um caractere
+// tem no mínimo 1 byte), então nenhuma senha válida muda de resultado.
+const SENHA_COMPARACAO_MAX = 256;
+function senhaParaComparar(senha) {
+  return String(senha == null ? '' : senha).slice(0, SENHA_COMPARACAO_MAX);
+}
+// Nome de usuário tem no máximo 32 caracteres (usernameRegex). Um nome maior
+// não existe e não vai ao banco — e, sem este teto, cada tentativa com um nome
+// de megabytes virava uma chave do mesmo tamanho no contador de falhas (até
+// FALHA_MAX_ENTRADAS delas): memória do servidor a pedido de quem ataca.
+const USERNAME_LOGIN_MAX = 64;
+
+// Conta admin inicial, criada no boot só quando não existe conta nenhuma. Demais
+// contas nascem pela tela de Contas ou pelo cadastro público.
+// Fail-closed: sem ADMIN_INITIAL_PASSWORD (e forte), recusa criar o admin — evita
+// o cenário em que um deploy "fresh" volta a aceitar admin/admin123.
+//
+// As migrações one-shot que existiam aqui (senha em texto puro, foto padrão,
+// usernameLower/emailLower/tokenVersion) corrigiam contas antigas do users.json.
+// O banco começa limpo e já nasce com essas regras no schema.
+async function semearAdmin() {
+  const { rows } = await db.query('SELECT EXISTS (SELECT 1 FROM users) AS tem');
+  if (rows[0].tem) return;
   const adminInitialPassword = process.env.ADMIN_INITIAL_PASSWORD;
   if (!adminInitialPassword || adminInitialPassword.length < 12) {
     console.error('[FATAL] ADMIN_INITIAL_PASSWORD ausente ou curta demais (mínimo 12 chars).');
     console.error('         Gere com: openssl rand -base64 24');
     process.exit(1);
   }
-  writeJSON('users.json', [
-    {
-      id: '1',
+  try {
+    await contasRepo.criar({
+      ...DEFAULT_PROFILE,
       username: 'admin',
       passwordHash: hashPasswordSync(adminInitialPassword),
       name: 'Administrador',
       role: 'admin',
       teacherId: null,
-      ...DEFAULT_PROFILE,
       profilePhoto: '/profiles_icon/jung(1).png',
-    },
-  ]);
-  console.log('[auth] Seed users.json criado. Login admin: admin / <ADMIN_INITIAL_PASSWORD da env>');
+    });
+    console.log('[auth] Conta admin criada. Login admin: admin / <ADMIN_INITIAL_PASSWORD da env>');
+  } catch (e) {
+    // Dois processos subindo juntos num banco vazio: o outro criou primeiro.
+    if (!(e instanceof ErroConta && e.codigo === 'username-em-uso')) throw e;
+  }
 }
 
-// Migração one-shot: passwords em texto puro -> bcrypt hash
-(function migratePlaintextPasswords() {
-  const users = readJSON('users.json');
-  let dirty = false;
-  for (const u of users) {
-    if (u.password && !u.passwordHash) {
-      u.passwordHash = hashPasswordSync(u.password);
-      delete u.password;
-      dirty = true;
-    }
-    if (!('teacherId' in u)) {
-      u.teacherId = null;
-      dirty = true;
-    }
-  }
-  if (dirty) {
-    writeJSON('users.json', users);
-    console.log('[auth] Senhas em texto puro migradas para bcrypt.');
-  }
-})();
-
-// Migração one-shot: padroniza profilePhoto em isaacdeterno.jpeg pra TODOS os
-// usuários já cadastrados (inclusive os que tinham outra foto, por decisão do
-// admin em 2026-05-15). Roda uma única vez — marker em migrations.json garante
-// idempotência mesmo após redeploys. Visitantes são efêmeros (não vivem em
-// users.json), então não precisam de tratamento. Após esta migração, qualquer
-// usuário pode trocar a foto normalmente em /profile e a mudança persiste.
-(function migrateDefaultProfilePhoto() {
-  const migrations = readJSON('migrations.json', {});
-  if (migrations.isaac_default_photo) return;
-  const users = readJSON('users.json');
-  const target = '/profiles_icon/isaacdeterno.jpeg';
-  let changed = 0;
-  for (const u of users) {
-    if (u.profilePhoto !== target) {
-      u.profilePhoto = target;
-      changed++;
-    }
-  }
-  if (changed > 0) writeJSON('users.json', users);
-  migrations.isaac_default_photo = new Date().toISOString();
-  writeJSON('migrations.json', migrations);
-  console.log(`[migration] profilePhoto padronizado em ${changed} usuário(s).`);
-})();
-
-// Migração one-shot para o cadastro público: campos que passaram a ser
-// obrigatórios no modelo de conta.
-//
-//   usernameLower / emailLower — login e checagem de duplicidade passaram a ser
-//     case-insensitive. Enquanto só o admin criava conta isso era detalhe; com
-//     cadastro aberto, `Admin` seria uma conta LIVRE se a comparação continuasse
-//     sensível a maiúsculas (impersonação no ranking, na Comunidade, no Duelo).
-//   tokenVersion — permite revogar JWT (ver signToken).
-//   emailVerified — contas criadas pelo admin entram como verificadas: o
-//     endereço foi digitado por quem já é de confiança. Só o auto-cadastro
-//     precisa provar o e-mail por link.
-(function migrateContasCadastroPublico() {
-  const users = readJSON('users.json');
-  let dirty = false;
-  const vistos = new Map(); // usernameLower -> username original
-  for (const u of users) {
-    const lower = contas.normalizeUsername(u.username);
-    if (u.usernameLower !== lower) { u.usernameLower = lower; dirty = true; }
-    const emailLower = contas.normalizeEmail(u.email);
-    if ((u.emailLower || '') !== emailLower) { u.emailLower = emailLower; dirty = true; }
-    if (typeof u.tokenVersion !== 'number') { u.tokenVersion = 0; dirty = true; }
-    if (typeof u.emailVerified !== 'boolean') { u.emailVerified = !!emailLower; dirty = true; }
-
-    // Colisão pré-existente: duas contas cujos usernames só diferem no caixa.
-    // O login de ambas fica ambíguo, então NENHUMA das duas entra (ver
-    // acharPorUsernameUnico) — mas o resto da plataforma continua de pé.
-    //
-    // Isto já foi `process.exit(1)`, e o raio estava errado: duas contas
-    // duplicadas derrubavam o app inteiro num loop de restart, e a única tela
-    // capaz de renomear uma delas (Administração → Contas) morria junto. Fechar
-    // as duas contas é a mesma proteção com o custo proporcional.
-    if (vistos.has(lower)) {
-      console.error(`[contas] CONFLITO: "${vistos.get(lower)}" e "${u.username}" só diferem em maiúsculas. As duas ficam SEM LOGIN até um admin renomear uma em Administração → Contas.`);
-    }
-    vistos.set(lower, u.username);
-  }
-  if (dirty) {
-    writeJSON('users.json', users);
-    console.log('[migration] contas normalizadas (usernameLower/emailLower/tokenVersion/emailVerified).');
-  }
-})();
-
-// Busca de usuário por nome, ignorando maiúsculas. Todo lookup de login passa
-// por aqui — nunca compare `u.username === entrada` direto.
-function acharPorUsername(users, username) {
-  const lower = contas.normalizeUsername(username);
-  if (!lower) return null;
-  return users.find((u) => (u.usernameLower || contas.normalizeUsername(u.username)) === lower) || null;
-}
-
-// Como acharPorUsername, mas avisa quando MAIS DE UMA conta responde pelo mesmo
-// nome ignorando maiúsculas. Nesse estado não dá pra saber de quem é a senha
-// que chegou, então o login das duas é recusado.
-//
-// A checagem é feita a cada tentativa, e não uma vez no boot: assim, no instante
-// em que o admin renomeia uma das contas, a outra volta a entrar — sem restart.
-function acharPorUsernameUnico(users, username) {
-  const lower = contas.normalizeUsername(username);
-  if (!lower) return { user: null, ambiguo: false };
-  const achados = users.filter(
-    (u) => (u.usernameLower || contas.normalizeUsername(u.username)) === lower,
-  );
-  return { user: achados[0] || null, ambiguo: achados.length > 1 };
-}
-
-function acharPorEmail(users, email) {
-  const lower = contas.normalizeEmail(email);
-  if (!lower) return null;
-  return users.find((u) => (u.emailLower || contas.normalizeEmail(u.email)) === lower) || null;
-}
-
-if (!fs.existsSync(path.join(DATA_DIR, 'exercises.json'))) {
-  // Inicia sem exercícios — o admin cadastra via interface.
-  writeJSON('exercises.json', []);
-}
+// Padrões dos catálogos (015_catalogo.sql) num banco novo SEM volume antigo — dev
+// e testes de fumaça. Com volume, a primeira carga vem dos arquivos dele
+// (catalogos.semearDoVolume, no boot), uma vez só. Os exercícios começam vazios:
+// o admin cadastra via interface.
+const CATALOGO_PADRAO = { exercicios: [] };
 
 // Competências da Trilha (etiquetas que agrupam os exercícios em "lanes").
 // Deixam de ser fixas em código: o admin pode renomear, recolorir, criar e
 // excluir (bloqueado se algum exercício ainda usa a competência). `order`
 // controla a ordem de exibição no menu de escolha. Seed reproduz as 5
 // competências originais, na mesma ordem em que já apareciam (MENU_ORDER).
-if (!fs.existsSync(path.join(DATA_DIR, 'trilha-skills.json'))) {
-  writeJSON('trilha-skills.json', [
+CATALOGO_PADRAO.trilha_skills = [
     { id: 1, name: 'Hermenêutica', color: '#008f8f', order: 1 },
     { id: 5, name: 'Personalidade', color: '#A07845', order: 2 },
     { id: 2, name: 'Estrutura', color: '#B85A40', order: 3 },
     { id: 4, name: 'Especificidade do caso', color: '#5C8A82', order: 4 },
     { id: 3, name: 'Empatia', color: '#1A7A6D', order: 5 },
-  ]);
-}
+];
 
-if (!fs.existsSync(path.join(DATA_DIR, 'freeplay-characters.json'))) {
-  writeJSON('freeplay-characters.json', [
+CATALOGO_PADRAO.freeplay = [
     { id: 'fp1', name: 'Sofia', age: 25, description: 'Jovem com queixas relacionais', assistantId: '', specificInstruction: 'Você é Sofia, 25 anos, designer gráfica. Veio à terapia por dificuldades nos relacionamentos amorosos. Tem um padrão de se apegar rápido e depois sentir que o parceiro não corresponde. Fale de forma expressiva e emotiva.' },
     { id: 'fp2', name: 'Roberto', age: 55, description: 'Homem em crise de meia-idade', assistantId: '', specificInstruction: 'Você é Roberto, 55 anos, contador. Está passando por uma crise existencial: os filhos saíram de casa, sente que o casamento esfriou, questiona suas escolhas de carreira. Fale de forma contida, com dificuldade de expressar emoções.' }
-  ]);
-}
+];
 
-if (!fs.existsSync(path.join(DATA_DIR, 'neuro-characters.json'))) {
-  writeJSON('neuro-characters.json', [
+CATALOGO_PADRAO.neuro = [
     { id: 'nr1', name: 'Beatriz', age: 32, description: 'Paciente com quadro depressivo', diagnosis: 'Transtorno Depressivo Maior', assistantId: '', specificInstruction: 'Você é Beatriz, 32 anos, professora afastada do trabalho. Diagnóstico: Transtorno Depressivo Maior (moderado a grave). Apresente: humor deprimido persistente, anedonia, fadiga, dificuldade de concentração, insônia, sentimentos de inutilidade, ideação suicida passiva ("às vezes penso que seria melhor não acordar"). Responda de forma lenta, com pausas, pouca energia.' },
     { id: 'nr2', name: 'Thiago', age: 8, description: 'Criança com suspeita de TDAH', diagnosis: 'TDAH - Tipo Combinado', assistantId: '', specificInstruction: 'Você é Thiago, 8 anos. Diagnóstico: TDAH tipo combinado. Na sessão: dificuldade de ficar parado, muda de assunto constantemente, se distrai com qualquer coisa, fala muito rápido, interrompe o terapeuta. Porém quando algo te interessa muito (videogames), consegue focar. Responda como uma criança de 8 anos falaria.' }
-  ]);
-}
-
-if (!fs.existsSync(path.join(DATA_DIR, 'progress.json'))) {
-  writeJSON('progress.json', {});
-}
-
-if (!fs.existsSync(path.join(DATA_DIR, 'logs.json'))) {
-  writeJSON('logs.json', []);
-}
+];
 
 // Estado do MMR competitivo. { players: { <userId>: {P,n,W} },
 // characters: { <charId>: {D,n_D,alpha,beta,history} } }. Sobrevive ao reset de
 // ranking (decisão do dono): zerar notas dos logs NÃO zera o MMR.
-if (!fs.existsSync(path.join(DATA_DIR, 'mmr.json'))) {
-  writeJSON('mmr.json', { players: {}, characters: {} });
-}
 
 // Duelos (avaliação comparada entre dois alunos atendendo o mesmo personagem).
 // Array de duelos; cada um guarda os dois lados (challenger/opponent), as
 // transcrições e o resultado da avaliação comparativa. Só vale pra treino por
 // enquanto (não toca no MMR).
-if (!fs.existsSync(path.join(DATA_DIR, 'duels.json'))) {
-  writeJSON('duels.json', []);
-}
 
-// Notificações in-app (convite de duelo, resultado de duelo). Mapa
-// { <userId>: [ {id, type, ...} ] }. Visitantes (id efêmero) não recebem.
-if (!fs.existsSync(path.join(DATA_DIR, 'notifications.json'))) {
-  writeJSON('notifications.json', {});
-}
 
-// Comunidade: o feed de discussões e a configuração da moderação. Ficam em
-// arquivos separados porque a config (avatares + banimentos) é lida em toda
-// requisição e escrita só pelo admin — no mesmo arquivo, cada comentário
-// reescreveria a lista de banimentos junto.
-if (!fs.existsSync(path.join(DATA_DIR, 'comunidade.json'))) {
-  writeJSON('comunidade.json', { nextId: 1, discussions: [] });
-}
-if (!fs.existsSync(path.join(DATA_DIR, 'comunidade-config.json'))) {
-  writeJSON('comunidade-config.json', { institutionAvatar: null, bans: {} });
-}
 
-// Assinaturas de Web Push por usuário — { <userId>: [ {endpoint, keys, ua,
-// createdAt} ] }. Array porque a mesma pessoa pode assinar em vários
-// dispositivos (celular + PC). Cap de 10 por usuário em POST /api/push/subscribe.
-if (!fs.existsSync(path.join(DATA_DIR, 'push-subscriptions.json'))) {
-  writeJSON('push-subscriptions.json', {});
-}
 
 // Sidequests: missões clínicas que o supervisor atribui a um aluno e que viram
 // o objetivo principal no Treinamento (avaliadas pelo avaliador de progressão).
@@ -1026,11 +956,11 @@ if (!fs.existsSync(path.join(DATA_DIR, 'push-subscriptions.json'))) {
 //  - completed: { <studentId>: [ <sidequest concluída + recompensa> ] }.
 // O Competitivo (MMR) ignora sidequests inteiramente.
 //
-// O ARQUIVO NÃO É VERSIONADO: `active` e `completed` guardam conteúdo de sessão
-// de aluno (a justificativa da conclusão descreve o atendimento), e isso não
-// pode viver no git. O banco inicial, que é conteúdo autoral do admin e não
-// dado de ninguém, mora aqui embaixo e semeia o arquivo no primeiro boot; daí
-// em diante o admin edita pela tela de Terapeutas.
+// Moram no banco (008_sidequests_antessala.sql): `active` e `completed` guardam
+// conteúdo de sessão de aluno (a justificativa da conclusão descreve o
+// atendimento), e isso não pode viver no git. O banco inicial, que é conteúdo
+// autoral do admin e não dado de ninguém, mora aqui embaixo e é semeado no
+// primeiro boot; daí em diante o admin edita pela tela de Terapeutas.
 const SIDEQUEST_BANK_SEED = [
   {
     id: 'sq-1779721725367-bfdb0b',
@@ -1044,60 +974,25 @@ const SIDEQUEST_BANK_SEED = [
     createdAt: '2026-05-25T15:08:45.367Z',
   },
 ];
-if (!fs.existsSync(path.join(DATA_DIR, 'sidequests.json'))) {
-  writeJSON('sidequests.json', { bank: SIDEQUEST_BANK_SEED, active: {}, completed: {} });
-}
 
 // Recordes por paciente (👑): mapa { <characterId>: { score, userId, userName,
 // userPhoto, at } } com a MAIOR nota já tirada naquele paciente no modo
-// COMPETITIVO. Vive fora de logs.json de propósito: os logs expiram em 30 dias
-// e o recorde é permanente. Só leitura no front — escrito em POST /api/logs.
-if (!fs.existsSync(path.join(DATA_DIR, 'character-records.json'))) {
-  writeJSON('character-records.json', {});
-}
+// COMPETITIVO. Só leitura no front — escrito em POST /api/logs.
 
-// Feedback de visitantes: coletado num popup ao fim de uma sessão em modo
-// visitante (estrelas 0–5 + mensagem livre). Lista append-only.
-if (!fs.existsSync(path.join(DATA_DIR, 'feedback.json'))) {
-  writeJSON('feedback.json', []);
-}
 
-// Processo Seletivo — logs completos dos candidatos (dados do candidato +
-// mensagens + avaliação + nota + status). Retenção PRÓPRIA de 15 dias
-// (pruneExpiredSelectionLogs), independente dos 30 dias do logs.json.
-if (!fs.existsSync(path.join(DATA_DIR, 'selection-logs.json'))) {
-  writeJSON('selection-logs.json', []);
-}
-
-// Processo Seletivo — estatísticas anônimas e PERMANENTES para a Dashboard.
-// { timestamp, score, status } — sem PII, sem mensagens. Sobrevive à expiração
-// dos logs completos, de modo que a Dashboard mantém o histórico agregado.
-if (!fs.existsSync(path.join(DATA_DIR, 'selection-stats.json'))) {
-  writeJSON('selection-stats.json', []);
-}
+// Processo Seletivo — logs completos dos candidatos (selecao_logs) são
+// persistentes (§24.0), e estatísticas anônimas e permanentes da Dashboard
+// (selecao_estatisticas) continuam sendo registradas por cima.
 
 // Avaliação Independente — FILA de jobs em batch (async). Runtime, não versionado.
-if (!fs.existsSync(path.join(DATA_DIR, 'avaliacao-fila.json'))) {
-  writeJSON('avaliacao-fila.json', []);
-}
 
 // Antessala (pré-supervisão) — mapas de caso criados pelo aluno antes da
 // supervisão. Um registro por mapa, indexado por aluno (ownerId) e data — a
 // leitura longitudinal (mesma tendência do aluno por vários mapas) fica
-// consultável pelo supervisor sem refatoração.
-if (!fs.existsSync(path.join(DATA_DIR, 'antessala.json'))) {
-  writeJSON('antessala.json', []);
-}
+// consultável pelo supervisor sem refatoração. Tabela antessala_mapas.
 
-function readMMR() {
-  const data = readJSON('mmr.json', { players: {}, characters: {} });
-  if (!data.players) data.players = {};
-  if (!data.characters) data.characters = {};
-  return data;
-}
-function writeMMR(data) {
-  writeJSON('mmr.json', data);
-}
+// O estado do MMR mora no banco (server/repos/mmr.js): `mmrRepo.aplicar` roda
+// cada partida numa transação que trava só o paciente e os jogadores dela.
 
 // --- TRI: populações anônimas alimentando a MESMA dificuldade ---
 //
@@ -1119,56 +1014,118 @@ const TRI_POOLS = ['selecao', 'visitante'];
 // que o de um aluno conhecido (o rating usado é a média do grupo, não a
 // habilidade daquela pessoa), então recebe ganho menor — e o seletivo, que terá
 // muito mais volume, não afoga o sinal do competitivo. Aluno real = 1.
-const TRI_PESOS = {
-  selecao: Number(process.env.TRI_PESO_SELECAO) || 0.35,
-  visitante: Number(process.env.TRI_PESO_VISITANTE) || 0.5,
+// Padrões de fábrica. O valor que vale é o de Administração → Acessos
+// (`lerAcessos().pesosTri`); estes só valem enquanto o admin não tocar em nada,
+// e continuam ajustáveis por ambiente para um deploy nascer diferente.
+// `Number(x) || padrao` engoliria um 0 vindo do ambiente — e 0 aqui NÃO é
+// "não informado", é "desligue esta população".
+function pesoDoAmbiente(valor, padrao) {
+  const n = Number(valor);
+  return valor !== undefined && valor !== '' && Number.isFinite(n) ? n : padrao;
+}
+const TRI_PESOS_PADRAO = {
+  selecao: pesoDoAmbiente(process.env.TRI_PESO_SELECAO, 0.35),
+  visitante: pesoDoAmbiente(process.env.TRI_PESO_VISITANTE, 0.5),
 };
 
 // Avaliação de visitante ainda não existe. A ligação está pronta: quando ligar,
 // basta VISITOR_TRI=1 — o resto do caminho já está escrito e testado.
 const VISITOR_TRI_ENABLED = process.env.VISITOR_TRI === '1';
 
-// Quantos atendimentos cada fonte contribuiu para cada personagem. Não entra no
-// engine — é só para a dashboard poder dizer de onde veio o número.
-function bumpTriFonte(mmr, characterId, fonte) {
-  if (!mmr.charSources) mmr.charSources = {};
-  const id = String(characterId);
-  if (!mmr.charSources[id]) mmr.charSources[id] = {};
-  mmr.charSources[id][fonte] = (mmr.charSources[id][fonte] || 0) + 1;
+// Quantos atendimentos cada fonte contribuiu para cada personagem (`fonte` do
+// mmrRepo.aplicar) não entra no engine — é só para a dashboard poder dizer de
+// onde veio o número.
+
+// Converte criteriaScores posicionais (chave "1","2",…, valor 0..10 da rubrica)
+// em { [criterios.id]: 0..100 } para o motor. Usa a régua v34 ativa como
+// referência: a N-ésima posição = o N-ésimo critério ativo, na ordem `ordem`.
+// Devolve {} quando a régua não carregou ou os números não batem com ela.
+let _criteriosAtivosCache = { at: 0, lista: null };
+async function criteriosAtivosV34() {
+  if (_criteriosAtivosCache.lista && (Date.now() - _criteriosAtivosCache.at) < 60000) {
+    return _criteriosAtivosCache.lista;
+  }
+  const todos = await promptsRepo.criteriosDa('v34').catch(() => []);
+  const ativos = (todos || []).filter((c) => c.ativo);
+  _criteriosAtivosCache = { at: Date.now(), lista: ativos };
+  return ativos;
+}
+function invalidarCriteriosAtivos() { _criteriosAtivosCache = { at: 0, lista: null }; }
+async function criteriosByIdParaMotor(criteriaScores) {
+  if (!criteriaScores || typeof criteriaScores !== 'object') return {};
+  const ativos = await criteriosAtivosV34();
+  if (!ativos.length) return {};
+  const posicoes = Object.keys(criteriaScores).map((k) => Number(k)).filter(Number.isFinite);
+  const maxPos = posicoes.length ? Math.max(...posicoes) : 0;
+  if (maxPos !== ativos.length) return {}; // régua mudou desde o log: melhor sem que errado
+  const out = {};
+  for (let i = 0; i < ativos.length; i++) {
+    const posKey = String(i + 1);
+    const val = Number(criteriaScores[posKey]);
+    if (Number.isFinite(val)) out[String(ativos[i].id)] = val * 10; // 0..10 → 0..100 interno
+  }
+  return out;
 }
 
-// Registra UM atendimento de população anônima. Atualiza a dificuldade
-// COMPARTILHADA e o rating da própria população. Idempotência não é garantida —
-// quem chama deve fazê-lo uma única vez por avaliação concluída.
-// Nunca lança: a TRI é observabilidade, não pode derrubar uma avaliação.
-async function registrarTriAnonimo(pool, characterId, score) {
+// Aplica UMA partida competitiva de um aluno: MMR dele por critério e
+// dificuldade do paciente por critério (spec MMR-por-criterio.md, §3).
+//
+//   criteriosById  — { [criterios.id]: nota 0..100 } (já convertida da rubrica)
+//   notaTotal      — 0..100 (usada para a trava de 25 sobre o D — spec §3.1)
+//   role           — 'admin' zera o efeito, sem tocar em nada
+//
+// Devolve o `result` do motor (com { criterios, movimentou, calibrating, ... }).
+async function aplicarPartidaCompetitiva(userId, characterId, criteriosById, notaTotal, role) {
+  const { result } = await mmrRepo.aplicar(
+    { characterId, userIds: [userId] },
+    ({ players, character, fontes }) => {
+      const out = mmrEngine.updateMatch(players[String(userId)], character, fontes, {
+        criterios: criteriosById || {},
+        notaTotal,
+        isAdmin: role === 'admin',
+        fonte: 'competitivo',
+      });
+      return {
+        players: { [String(userId)]: out.player },
+        character: out.character,
+        fontes: out.fontes,
+        result: out.result,
+      };
+    },
+  );
+  return result;
+}
+
+// Registra UM atendimento de população anônima (seletivo, visitante) por critério.
+// A dificuldade continua ÚNICA e compartilhada (spec §8); as populações têm o
+// mesmo peso sobre o D dos alunos (spec §15) — a única coisa que o peso do
+// admin em Acessos ainda controla é o gate liga/desliga (peso 0 = não move D).
+// A população continua aprendendo o próprio rating mesmo com peso 0.
+async function registrarTriAnonimo(pool, characterId, criteriosById, notaTotal) {
   if (!TRI_POOLS.includes(pool)) return null;
-  if (!characterId || !Number.isFinite(Number(score))) return null;
+  if (!characterId || !criteriosById || !Object.keys(criteriosById).length) return null;
+  const peso = lerAcessos().pesosTri[pool];
+  const influencia = peso > 0;
   let out = null;
   try {
-    await withFileLock('mmr.json', async () => {
-      const mmr = readMMR();
-      if (!mmr.anonPlayers) mmr.anonPlayers = {};
-      const { player, character, result } = mmrEngine.updateMatch(
-        mmr.anonPlayers[pool] || mmrEngine.newAnonPopulation(),
-        mmr.characters[String(characterId)],
-        Number(score),
-        { dWeight: TRI_PESOS[pool] },
-      );
-      mmr.anonPlayers[pool] = player;
-      mmr.characters[String(characterId)] = character;
-      // Durante a calibração da população (3 primeiras) o engine não mexe no D;
-      // só conta como contribuição o que de fato moveu a dificuldade.
-      if (!result.calibratingBefore) bumpTriFonte(mmr, characterId, pool);
-      writeMMR(mmr);
-      out = result;
-    });
-    console.log(
-      `[tri:${pool}] ${characterId} nota=${Math.round(Number(score))} ` +
-      `D ${out.D_before.toFixed(1)} → ${out.D_after.toFixed(1)} · ` +
-      `rating da população ${out.P_before.toFixed(1)} → ${out.P_after.toFixed(1)}` +
-      (out.calibratingBefore ? ' (população em calibração, D intocado)' : ''),
-    );
+    ({ result: out } = await mmrRepo.aplicar(
+      { characterId, populacao: pool },
+      ({ populacao, character, fontes }) => {
+        const r = mmrEngine.updateMatch(populacao, character, fontes, {
+          criterios: criteriosById,
+          notaTotal,
+          fonte: pool,
+        });
+        // Sem influência (peso 0): a POPULAÇÃO ainda aprende (o rating dela é
+        // atualizado), mas nem o personagem nem as `fontes` sobem para o disco
+        // — o D fica intocado.
+        return {
+          populacao: r.player,
+          ...(influencia ? { character: r.character, fontes: r.fontes } : {}),
+          result: r.result,
+        };
+      },
+    ));
   } catch (e) {
     console.error(`[tri:${pool}] falha ao registrar ${characterId}:`, e && e.message);
   }
@@ -1194,13 +1151,7 @@ function publicUser(u) {
       safe.titleTier = quest ? quest.tier : null;
     }
   }
-  if (isAluno(safe.role) && safe.teacherId) {
-    try {
-      const users = readJSON('users.json');
-      const teacher = users.find((t) => t.id === safe.teacherId);
-      if (teacher && teacher.name) safe.teacherName = teacher.name;
-    } catch {}
-  }
+  // teacherName já vem na conta, lido pelo repositório de contas junto com ela.
   // Quem não tem foto própria (nunca subiu uma, ou ainda está com a de fábrica)
   // recebe uma da pool de fotos padrão. Vai num campo SEPARADO de propósito: o
   // Perfil grava de volta o que estiver em profilePhoto, e substituir ali faria
@@ -1238,36 +1189,43 @@ function getTokenFromReq(req) {
   return null;
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = getTokenFromReq(req);
   if (!token) return res.status(401).json({ error: 'Não autenticado' });
+  let payload;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    // Visitante: reconstrói usuário virtual a partir do JWT (não persistido em users.json)
-    if (payload.role === 'visitor') {
-      req.user = {
-        id: payload.sub,
-        username: payload.username || payload.sub,
-        name: payload.name || 'Visitante',
-        role: 'visitor',
-        teacherId: null,
-        isVisitor: true,
-      };
-      return next();
-    }
-    const users = readJSON('users.json');
-    const user = users.find(u => u.id === payload.sub);
-    if (!user) return res.status(401).json({ error: 'Sessão inválida' });
-    // Revogação: senha trocada (ou "sair de todos os dispositivos") incrementa
-    // o tokenVersion, o que invalida na hora todo token já emitido.
-    if ((payload.tv || 0) !== (user.tokenVersion || 0)) {
-      return res.status(401).json({ error: 'Sessão expirada' });
-    }
-    req.user = user;
-    next();
+    payload = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     return res.status(401).json({ error: 'Sessão expirada' });
   }
+  // Visitante: reconstrói usuário virtual a partir do JWT (não existe no banco)
+  if (payload.role === 'visitor') {
+    req.user = {
+      id: payload.sub,
+      username: payload.username || payload.sub,
+      name: payload.name || 'Visitante',
+      role: 'visitor',
+      teacherId: null,
+      isVisitor: true,
+    };
+    return next();
+  }
+  // Falha do banco não é sessão expirada: vai para o tratador de erro, e não
+  // desloga o usuário por um problema que não é dele.
+  let user;
+  try {
+    user = await contasRepo.porId(payload.sub);
+  } catch (err) {
+    return next(err);
+  }
+  if (!user) return res.status(401).json({ error: 'Sessão inválida' });
+  // Revogação: senha trocada (ou "sair de todos os dispositivos") incrementa
+  // o tokenVersion, o que invalida na hora todo token já emitido.
+  if ((payload.tv || 0) !== (user.tokenVersion || 0)) {
+    return res.status(401).json({ error: 'Sessão expirada' });
+  }
+  req.user = user;
+  next();
 }
 
 function requireRole(...roles) {
@@ -1280,51 +1238,131 @@ function requireRole(...roles) {
   };
 }
 
+// --- Acessos por funcionalidade (server/acessos.js) ---
+// A configuração mora em `configuracoes`, chave 'acessos', e é lida da cópia em
+// memória (síncrona, como as outras configurações do admin).
+function lerAcessos() {
+  const c = operacaoRepo.lerConfig('acessos', {});
+  return {
+    matriz: acessos.normalizarMatriz(c.matriz),
+    mensagemCadeado: acessos.normalizarMensagem(c.mensagemCadeado),
+    // Quais modos alimentam o gráfico de critérios do perfil.
+    modosPerfilCriterios: criteriosPerfil.normalizarModos(c.modosPerfilCriterios),
+    // Modelo de IA e limite semanal do Terapeuta externo.
+    limitesExterno: limitesIa.normalizarConfig(c.limitesExterno, PRESETS_LIMITES),
+    // Quanto cada população anônima move a dificuldade dos pacientes.
+    pesosTri: acessos.normalizarPesosTri(c.pesosTri, TRI_PESOS_PADRAO),
+  };
+}
+
+const PRESETS_LIMITES = { pacientes: aiModels.PATIENT_PRESETS, avaliadores: aiModels.EVALUATOR_PRESETS };
+
+// Spec do modelo que o admin fixou para o Terapeuta externo em Acessos, ou null
+// (quem não é externo, ou nenhum escolhido: vale o modelo da categoria).
+// `funcao` = 'patient' | 'evaluator'.
+function specDoExterno(user, funcao) {
+  if (!user || user.role !== 'external') return null;
+  const cfg = lerAcessos().limitesExterno;
+  const key = funcao === 'patient' ? cfg.modeloPaciente : cfg.modeloAvaliador;
+  const presets = funcao === 'patient' ? aiModels.PATIENT_PRESETS : aiModels.EVALUATOR_PRESETS;
+  const p = key && presets[key];
+  if (!p) return null;
+  return { preset: key, label: p.label, model: p.model, provider: p.provider, effort: p.effort, batch: false, fonte: 'externo' };
+}
+
+// Corpo do 429 quando o Terapeuta externo passou do limite semanal, ou null. No
+// primeiro estouro da janela os admins recebem um aviso no sino.
+async function limiteIaExcedido(user) {
+  if (!user || user.role !== 'external') return null;
+  const cfg = lerAcessos().limitesExterno;
+  if (!limitesIa.temLimite(cfg)) return null;
+  const est = limitesIa.estado(await usoIaRepo.somaJanela(user.id, limitesIa.JANELA_MS), cfg);
+  if (!est.excedido) return null;
+  if (await usoIaRepo.deveAlertar(user.id, limitesIa.JANELA_MS)) {
+    const quanto = est.motivo === 'tokens'
+      ? `${est.tokens.toLocaleString('pt-BR')} de ${est.limiteTokens.toLocaleString('pt-BR')} tokens`
+      : `US$ ${est.usd.toFixed(2)} de US$ ${est.limiteUsd.toFixed(2)}`;
+    for (const adminId of await usoIaRepo.idsDosAdmins()) {
+      pushNotification(adminId, {
+        type: 'admin_notice',
+        message: `${user.name || user.username} (terapeuta externo) chegou ao limite semanal de IA: ${quanto} nos últimos 7 dias.`,
+      }).catch(() => {});
+    }
+  }
+  return { error: est.mensagem, limiteIa: est };
+}
+
+// Registra o uso de uma chamada de IA do Terapeuta externo. Best-effort: falhar
+// aqui não pode custar a resposta ao aluno.
+function registrarUsoIa(user, { categoria, modelo, uso, tokens, usd }) {
+  if (!user || user.role !== 'external') return;
+  const t = tokens != null ? tokens : limitesIa.tokensDe(uso);
+  const custo = usd !== undefined ? usd : limitesIa.custoUsd(modelo, uso);
+  usoIaRepo.registrar(user.id, { categoria, modelo, tokens: t, usd: custo })
+    .catch((e) => console.error('[uso-ia] falha ao registrar:', e.message));
+}
+
+// Corpo do 403 quando a funcionalidade está bloqueada para o usuário, ou null.
+function funcionalidadeBloqueada(user, chave) {
+  if (!chave) return null;
+  const a = lerAcessos();
+  if (acessos.podeUsar(a.matriz, user, chave)) return null;
+  return { error: a.mensagemCadeado || acessos.MENSAGEM_PADRAO, funcionalidadeBloqueada: chave };
+}
+
+// Trava da funcionalidade na rota. O cadeado do menu é conveniência; esta é a
+// trava de verdade — digitar o endereço na mão não passa.
+function requireFeature(chave) {
+  return (req, res, next) => {
+    const bloqueio = funcionalidadeBloqueada(req.user, chave);
+    if (bloqueio) return res.status(403).json(bloqueio);
+    next();
+  };
+}
+
 // Permite que admin acesse qualquer recurso, professor acesse o de seus alunos,
 // aluno acesse só o próprio.
-function canAccessUserResource(actor, targetUserId) {
+// ASYNC: sempre com `await`. Sem ele a chamada devolve uma Promise, que é truthy,
+// e `if (!canAccessUserResource(...))` liberaria o recurso para qualquer um.
+async function canAccessUserResource(actor, targetUserId) {
   if (!actor) return false;
   if (actor.role === 'admin') return true;
   if (actor.id === targetUserId) return true;
   if (actor.role === 'supervisor') {
-    const users = readJSON('users.json');
-    const target = users.find(u => u.id === targetUserId);
+    const target = await contasRepo.porId(targetUserId);
     return !!(target && target.teacherId === actor.id);
   }
   return false;
 }
 
 // --- Auth ---
-app.post('/api/login', loginLimiter, async (req, res) => {
+app.post('/api/login', loginLimiter, rota(async (req, res) => {
   const { username, password } = req.body || {};
-  if (!username || !password) {
+  // Só texto: a tela sempre manda texto, e aceitar lista ou objeto deixava a
+  // conversão implícita (["admin"] vira "admin") decidir o que é o nome.
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
     return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
   }
   // Atraso progressivo por conta (ver falhasLogin). Aplicado ANTES de comparar
   // o hash e valendo mesmo pra usuário inexistente — se só as contas reais
   // atrasassem, o atraso viraria um oráculo de enumeração.
-  const chaveFalha = contas.normalizeUsername(username);
+  const nomeNormalizado = contas.normalizeUsername(username);
+  const chaveFalha = nomeNormalizado.slice(0, USERNAME_LOGIN_MAX);
   const atraso = SKIP_RATE_LIMIT ? 0 : atrasoLoginMs(chaveFalha);
   if (atraso > 0) await new Promise((r) => setTimeout(r, atraso));
 
-  const users = readJSON('users.json');
-  const { user, ambiguo } = acharPorUsernameUnico(users, username);
-  // Duas contas com o mesmo nome ignorando maiúsculas: não há como saber de quem
-  // é a senha, então nenhuma das duas entra até um admin renomear uma. O bcrypt
-  // roda mesmo assim, pra este caminho custar o mesmo que os outros.
-  if (ambiguo) {
-    await bcrypt.compare(String(password), HASH_ISCA);
-    return res.status(409).json({
-      error: 'Este nome de usuário está duplicado na base e o acesso está suspenso por segurança. Fale com a administração.',
-    });
-  }
+  // Nome duplicado só na caixa (`Joao` e `joao`) não existe mais: o índice único
+  // do banco recusa a segunda conta, então o login não precisa desempatar. Nome
+  // maior que qualquer username possível nem vai ao banco.
+  const user = nomeNormalizado.length <= USERNAME_LOGIN_MAX ? await contasRepo.porUsername(username) : null;
   // Bcrypt SEMPRE, inclusive quando o usuário não existe — comparando contra um
   // hash-isca. A mensagem de erro já era genérica, mas o relógio entregava quem
   // existe: conta inexistente respondia na hora, conta real esperava o bcrypt
   // (~80ms). Agora os dois caminhos custam o mesmo.
+  const senha = senhaParaComparar(password);
   const ok = user && user.passwordHash
-    ? await bcrypt.compare(String(password), user.passwordHash)
-    : (await bcrypt.compare(String(password), HASH_ISCA), false);
+    ? await bcrypt.compare(senha, user.passwordHash)
+    : (await bcrypt.compare(senha, HASH_ISCA), false);
   if (!ok) {
     registrarFalhaLogin(chaveFalha);
     return res.status(401).json({ error: 'Credenciais inválidas' });
@@ -1332,7 +1370,7 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   limparFalhasLogin(chaveFalha); // acertou: zera o contador
   const token = signToken(user);
   res.json({ token, user: publicUser(user) });
-});
+}));
 
 // Login como visitante: gera um JWT com role=visitor e id efêmero (não cria
 // registro em users.json). Logs gerados pelo visitante são naturalmente
@@ -1358,34 +1396,31 @@ app.get('/api/me', requireAuth, (req, res) => {
 });
 
 // Troca de senha pelo próprio usuário
-app.post('/api/me/password', requireAuth, async (req, res) => {
+app.post('/api/me/password', requireAuth, rota(async (req, res) => {
   const { currentPassword, newPassword } = req.body || {};
   if (!currentPassword || !newPassword) {
     return res.status(400).json({ error: 'Senha atual e nova são obrigatórias' });
   }
   const erroSenha = validarSenha(newPassword, req.user.role, req.user.username);
   if (erroSenha) return res.status(400).json({ error: erroSenha.replace('Senha deve', 'Nova senha deve') });
-  const ok = await bcrypt.compare(String(currentPassword), req.user.passwordHash || '');
+  const ok = await bcrypt.compare(senhaParaComparar(currentPassword), req.user.passwordHash || '');
   // 400, não 401: o cliente (api.js) trata TODO 401 como sessão expirada e
   // desloga na hora (ver onSessionExpired em App.jsx) — 401 é certo pro
   // requireAuth (token inválido), mas aqui só a senha está errada, a sessão
   // continua válida. Achado ao testar a exclusão de conta, que tinha o mesmo
   // bug (ver DELETE /api/me) — corrigido igual aqui e em /api/me/email.
   if (!ok) return res.status(400).json({ error: 'Senha atual incorreta' });
-  const users = readJSON('users.json');
-  const idx = users.findIndex(u => u.id === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
-  users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
-  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
-  writeJSON('users.json', users);
+  const hash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+  const atualizado = await contasRepo.trocarSenha(req.user.id, hash);
+  if (!atualizado) return res.status(404).json({ error: 'Usuário não encontrado' });
   // O token que o cliente está usando ACABOU de ser invalidado pelo bump acima,
   // senão a própria tela que trocou a senha cairia no 401 do requireAuth.
-  const token = signToken(users[idx]);
-  if (users[idx].emailLower && users[idx].emailVerified) {
-    mailer.enviarAvisoSenhaAlterada({ to: users[idx].email, nome: users[idx].name }).catch(() => {});
+  const token = signToken(atualizado);
+  if (atualizado.emailLower && atualizado.emailVerified) {
+    mailer.enviarAvisoSenhaAlterada({ to: atualizado.email, nome: atualizado.name }).catch(() => {});
   }
   res.json({ ok: true, token });
-});
+}));
 
 // Exclusão da PRÓPRIA conta. Distinta da exclusão de DADOS (política de
 // privacidade): isto aqui derruba o login e some da lista de usuários — os
@@ -1405,7 +1440,7 @@ app.post('/api/me/password', requireAuth, async (req, res) => {
 // exclusão, quando o esperado é mostrar "senha incorreta" e deixar tentar de
 // novo. (/api/me/password e /api/me/email têm o mesmo 401 nesse mesmo lugar —
 // bug pré-existente, fora do escopo deste endpoint novo.)
-app.delete('/api/me', requireAuth, async (req, res) => {
+app.delete('/api/me', requireAuth, rota(async (req, res) => {
   if (req.user.isVisitor) {
     return res.status(400).json({ error: 'Sessão de visitante não tem conta para excluir.' });
   }
@@ -1414,24 +1449,28 @@ app.delete('/api/me', requireAuth, async (req, res) => {
   }
   const { password } = req.body || {};
   if (!password) return res.status(400).json({ error: 'Confirme sua senha atual.' });
-  const ok = await bcrypt.compare(String(password), req.user.passwordHash || '');
+  const ok = await bcrypt.compare(senhaParaComparar(password), req.user.passwordHash || '');
   if (!ok) return res.status(400).json({ error: 'Senha incorreta.' });
 
-  const users = readJSON('users.json');
+  const mensagemVinculados = (n) => `Você tem ${n} aluno(s) vinculado(s). Peça a um administrador para reatribuí-los antes de excluir sua conta.`;
   if (req.user.role === 'supervisor') {
-    const linked = users.filter((u) => u.teacherId === req.user.id);
-    if (linked.length > 0) {
-      return res.status(400).json({
-        error: `Você tem ${linked.length} aluno(s) vinculado(s). Peça a um administrador para reatribuí-los antes de excluir sua conta.`,
-      });
-    }
+    const linked = await contasRepo.alunosDoProfessor(req.user.id);
+    if (linked.length > 0) return res.status(400).json({ error: mensagemVinculados(linked.length) });
   }
-  const idx = users.findIndex((u) => u.id === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
-  users.splice(idx, 1);
-  writeJSON('users.json', users);
+  let excluida;
+  try {
+    excluida = await contasRepo.excluir(req.user.id);
+  } catch (e) {
+    // Um aluno foi vinculado entre a contagem acima e a exclusão.
+    if (e instanceof ErroConta && e.codigo === 'professor-com-alunos') {
+      const linked = await contasRepo.alunosDoProfessor(req.user.id);
+      return res.status(400).json({ error: mensagemVinculados(linked.length) });
+    }
+    throw e;
+  }
+  if (!excluida) return res.status(404).json({ error: 'Usuário não encontrado' });
   res.json({ ok: true });
-});
+}));
 
 
 // ---------------------------------------------------------------------------
@@ -1448,10 +1487,8 @@ app.delete('/api/me', requireAuth, async (req, res) => {
 // isso a resposta é sempre a mesma, e quem descobre a diferença é o DONO do
 // endereço, pelo e-mail que recebe.
 
-const PENDENTES_FILE = 'pending-registrations.json';   // cadastros aguardando confirmação
-const TROCAS_EMAIL_FILE = 'email-changes.json';        // trocas de e-mail aguardando confirmação
-const RESETS_FILE = 'password-resets.json';            // pedidos de nova senha
-
+// Cadastros pendentes, pedidos de nova senha e trocas de e-mail vivem no banco
+// (server/repos/contas.js); o token viaja no link e lá fica só o hash.
 const TTL_CONFIRMACAO_MS = 48 * 60 * 60 * 1000; // 48h
 const TTL_RESET_MS = 60 * 60 * 1000;            // 1h — janela curta, é o link mais perigoso
 
@@ -1472,12 +1509,6 @@ const CADASTRO_ABERTO = process.env.CADASTRO_EXTERNO_ABERTO !== 'false';
 const TERMOS_URL = process.env.TERMOS_URL || '/termos-de-uso';
 const PRIVACIDADE_URL = process.env.PRIVACIDADE_URL || '/politica-de-privacidade';
 
-// Toda leitura já poda o que venceu — os três arquivos são pequenos e
-// reescritos inteiros, então não precisa de rotina de limpeza agendada.
-function lerPendencias(file) {
-  return contas.removerExpirados(readJSON(file, []));
-}
-
 // Configuração pública consumida pelo cliente no boot. Fica fora do build do
 // Vite de propósito: acoplar a site key do captcha ao build significa rebuild
 // toda vez que a chave muda, e é o tipo de coisa que quebra no pior momento.
@@ -1496,7 +1527,7 @@ app.get('/api/config', (req, res) => {
 });
 
 // Disponibilidade do nome de usuário, pra tela avisar enquanto a pessoa digita.
-app.get('/api/cadastro/disponibilidade', checagemLimiter, (req, res) => {
+app.get('/api/cadastro/disponibilidade', checagemLimiter, rota(async (req, res) => {
   const username = String(req.query.username || '').trim();
   if (!contas.usernameRegex.test(username)) {
     return res.json({ disponivel: false, motivo: 'formato' });
@@ -1504,12 +1535,9 @@ app.get('/api/cadastro/disponibilidade', checagemLimiter, (req, res) => {
   if (contas.isReservedUsername(username)) {
     return res.json({ disponivel: false, motivo: 'reservado' });
   }
-  const lower = contas.normalizeUsername(username);
-  const users = readJSON('users.json');
-  const pendentes = lerPendencias(PENDENTES_FILE);
-  const emUso = !!acharPorUsername(users, username) || pendentes.some((r) => r.usernameLower === lower);
+  const emUso = await contasRepo.usernameIndisponivel(username);
   res.json({ disponivel: !emUso, motivo: emUso ? 'em-uso' : null });
-});
+}));
 
 app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
   if (!CADASTRO_ABERTO) {
@@ -1524,17 +1552,13 @@ app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
   }
 
   try {
-    const resultado = await withFileLock(PENDENTES_FILE, async () => {
-      const users = readJSON('users.json');
-      const pendentes = lerPendencias(PENDENTES_FILE);
-
+    const resultado = await (async () => {
       // Um username pendente também "segura" o nome durante as 48h, senão duas
       // pessoas se cadastrariam com o mesmo nome e a segunda só descobriria na
       // hora de confirmar.
-      const usernamesEmUso = new Set([
-        ...users.map((u) => u.usernameLower || contas.normalizeUsername(u.username)),
-        ...pendentes.map((r) => r.usernameLower),
-      ]);
+      const username = req.body && req.body.username;
+      const emUso = await contasRepo.usernameIndisponivel(username);
+      const usernamesEmUso = new Set(emUso ? [contas.normalizeUsername(username)] : []);
 
       const { errors, dados } = contas.validarCadastroPayload(req.body, {
         usernamesEmUso,
@@ -1543,7 +1567,7 @@ app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
       if (errors.length) return { status: 400, body: { error: errors.join('; ') } };
 
       // --- A partir daqui a resposta é SEMPRE a mesma (anti-enumeração) ---
-      const donoDoEmail = acharPorEmail(users, dados.email);
+      const donoDoEmail = await contasRepo.porEmail(dados.email);
       if (donoDoEmail) {
         // Nenhuma pendência é criada. Quem descobre que já existe conta é o dono
         // do endereço, pelo e-mail — não quem preencheu o formulário.
@@ -1554,34 +1578,40 @@ app.post('/api/cadastro', cadastroLimiter, async (req, res) => {
       // própria pessoa refazendo o cadastro depois de errar o nome de usuário.
       // Não vira brecha porque o link continua indo só pro dono do endereço, e o
       // e-mail diz qual nome de usuário está sendo confirmado.
-      const restantes = pendentes.filter((r) => r.emailLower !== dados.email);
       const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
-
-      restantes.push({
-        tokenHash,
-        expiresAt,
-        criadoEm: new Date().toISOString(),
-        username: dados.username,
-        usernameLower: dados.usernameLower,
-        emailLower: dados.email,
-        name: dados.name,
-        email: dados.email,
-        // Já entra hasheada: uma pendência é um arquivo como outro qualquer, e
-        // senha em texto puro em disco não se justifica em nenhuma janela.
-        passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
-        origem: dados.origem,
-        consentimento: dados.consentimento,
-        updateAllOS: dados.updateAllOS,
-        updateAllos: dados.updateAllos,
-        ip: clientIp(req),
-        // Duelo feito como visitante que vai para esta conta ao confirmar.
-        // Vale inválido ou vencido é só ignorado: não impede o cadastro.
-        duelClaim: readDuelClaim(req.body && req.body.duelClaim),
-      });
-      writeJSON(PENDENTES_FILE, restantes);
+      try {
+        await contasRepo.criarPendencia({
+          tokenHash,
+          expiresAt,
+          username: dados.username,
+          name: dados.name,
+          email: dados.email,
+          // Já entra hasheada: senha em texto puro guardada não se justifica em
+          // nenhuma janela, nem na de uma pendência descartável.
+          passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
+          origem: dados.origem,
+          consentimento: dados.consentimento,
+          updateAllOS: dados.updateAllOS,
+          updateAllos: dados.updateAllos,
+          ip: clientIp(req),
+          // Duelo feito como visitante que vai para esta conta ao confirmar.
+          // Vale inválido ou vencido é só ignorado: não impede o cadastro.
+          duelClaim: readDuelClaim(req.body && req.body.duelClaim),
+        });
+      } catch (e) {
+        // Dois cadastros simultâneos com o mesmo nome: o índice único deixou
+        // passar só um. Com o mesmo e-mail, a resposta segue a genérica.
+        if (e instanceof ErroConta && e.codigo === 'username-em-uso') {
+          return { status: 400, body: { error: 'Este nome de usuário já está em uso' } };
+        }
+        if (e instanceof ErroConta && e.codigo === 'email-em-uso') {
+          return { status: 200, body: { ok: true } };
+        }
+        throw e;
+      }
 
       return { status: 200, body: { ok: true }, enviarConfirmacao: { token, dados } };
-    });
+    })();
 
     // E-mail FORA do lock: é chamada de rede e seguraria o arquivo por segundos.
     if (resultado.avisarJaCadastrado) {
@@ -1615,17 +1645,11 @@ app.post('/api/cadastro/reenviar', emailLimiter, async (req, res) => {
   if (!contas.isEmailValido(email)) return res.status(400).json({ error: 'E-mail inválido' });
 
   try {
-    const envio = await withFileLock(PENDENTES_FILE, async () => {
-      const pendentes = lerPendencias(PENDENTES_FILE);
-      const idx = pendentes.findIndex((r) => r.emailLower === email);
-      if (idx === -1) return null;
-      // Token NOVO a cada reenvio: o anterior deixa de valer, então um link
-      // antigo que tenha vazado (encaminhado, print) morre aqui.
-      const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
-      pendentes[idx] = { ...pendentes[idx], tokenHash, expiresAt };
-      writeJSON(PENDENTES_FILE, pendentes);
-      return { token, nome: pendentes[idx].name, username: pendentes[idx].username, to: pendentes[idx].email };
-    });
+    // Token NOVO a cada reenvio: o anterior deixa de valer, então um link
+    // antigo que tenha vazado (encaminhado, print) morre aqui.
+    const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
+    const pendencia = await contasRepo.renovarTokenPendencia(email, { tokenHash, expiresAt });
+    const envio = pendencia && { token, nome: pendencia.name, username: pendencia.username, to: pendencia.email };
 
     if (envio) {
       await mailer.enviarConfirmacaoCadastro({ to: envio.to, nome: envio.nome, username: envio.username, token: envio.token });
@@ -1653,50 +1677,18 @@ app.post('/api/confirmar-email', checagemLimiter, async (req, res) => {
 
   try {
     // --- 1. Cadastro novo ---
-    const criado = await withFileLock('users.json', async () => {
-      const pendentes = lerPendencias(PENDENTES_FILE);
-      const reg = pendentes.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
-      if (!reg) return null;
-
-      const users = readJSON('users.json');
-      // Revalida DENTRO do lock: entre o cadastro e o clique no link (até 48h) o
-      // admin pode ter criado uma conta com esse mesmo nome ou e-mail.
-      if (acharPorUsername(users, reg.username)) {
-        return { conflito: 'O nome de usuário escolhido não está mais disponível. Refaça o cadastro com outro nome.' };
-      }
-      if (acharPorEmail(users, reg.emailLower)) {
-        return { conflito: 'Este e-mail já pertence a uma conta. Use "Esqueci minha senha" para entrar.' };
-      }
-
-      const novo = {
-        id: nextUserId(users),
-        username: reg.username,
-        usernameLower: reg.usernameLower,
-        name: reg.name,
-        role: 'external',
-        // Nasce sem supervisor. O admin pode vincular depois pela tela de
-        // Contas, e aí a Antessala passa a valer pra ele como pra qualquer aluno.
-        teacherId: null,
-        passwordHash: reg.passwordHash,
-        tokenVersion: 0,
-        ...DEFAULT_PROFILE,
-        email: reg.email,
-        emailLower: reg.emailLower,
-        emailVerified: true,
-        origem: reg.origem,
-        consentimento: reg.consentimento,
-        updateAllOS: !!reg.updateAllOS,
-        updateAllos: !!reg.updateAllos,
-        criadoEm: new Date().toISOString(),
-      };
-      users.push(novo);
-      writeJSON('users.json', users);
-      // Consome a pendência usada e qualquer outra do mesmo e-mail/nome.
-      writeJSON(PENDENTES_FILE, pendentes.filter(
-        (r) => r.tokenHash !== reg.tokenHash && r.emailLower !== reg.emailLower && r.usernameLower !== reg.usernameLower
-      ));
-      return { user: novo, duelClaim: reg.duelClaim || null };
-    });
+    // Nasce como aluno externo e sem supervisor: o admin pode vincular depois pela
+    // tela de Contas, e aí a Antessala passa a valer pra ele como pra qualquer
+    // aluno. O repositório revalida nome e e-mail na mesma transação que cria a
+    // conta — entre o cadastro e o clique (até 48h) o admin pode ter tomado os dois.
+    const confirmacao = await contasRepo.confirmarCadastro(alvo, { perfilPadrao: DEFAULT_PROFILE });
+    const CONFLITO_CADASTRO = {
+      'username-em-uso': 'O nome de usuário escolhido não está mais disponível. Refaça o cadastro com outro nome.',
+      'email-em-uso': 'Este e-mail já pertence a uma conta. Use "Esqueci minha senha" para entrar.',
+    };
+    const criado = confirmacao && confirmacao.conflito
+      ? { conflito: CONFLITO_CADASTRO[confirmacao.conflito] }
+      : confirmacao;
 
     if (criado && criado.conflito) return res.status(409).json({ error: criado.conflito });
     if (criado && criado.user) {
@@ -1719,23 +1711,11 @@ app.post('/api/confirmar-email', checagemLimiter, async (req, res) => {
     }
 
     // --- 2. Troca de e-mail de uma conta existente ---
-    const trocado = await withFileLock('users.json', async () => {
-      const trocas = lerPendencias(TROCAS_EMAIL_FILE);
-      const reg = trocas.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
-      if (!reg) return null;
-
-      const users = readJSON('users.json');
-      const idx = users.findIndex((u) => u.id === reg.userId);
-      if (idx === -1) return { conflito: 'Conta não encontrada.' };
-      const dono = acharPorEmail(users, reg.emailLower);
-      if (dono && dono.id !== reg.userId) {
-        return { conflito: 'Este e-mail já pertence a outra conta.' };
-      }
-      users[idx] = { ...users[idx], email: reg.email, emailLower: reg.emailLower, emailVerified: true };
-      writeJSON('users.json', users);
-      writeJSON(TROCAS_EMAIL_FILE, trocas.filter((r) => r.userId !== reg.userId));
-      return { user: users[idx] };
-    });
+    // Conta excluída leva o pedido junto (FK em cascata): o link cai em inválido.
+    const troca = await contasRepo.confirmarTrocaEmail(alvo);
+    const trocado = troca && troca.conflito
+      ? { conflito: 'Este e-mail já pertence a outra conta.' }
+      : troca;
 
     if (trocado && trocado.conflito) return res.status(409).json({ error: trocado.conflito });
     if (trocado && trocado.user) {
@@ -1764,9 +1744,8 @@ app.post('/api/senha/esqueci', emailLimiter, async (req, res) => {
   }
 
   try {
-    const envio = await withFileLock(RESETS_FILE, async () => {
-      const users = readJSON('users.json');
-      const user = acharPorEmail(users, email);
+    const envio = await (async () => {
+      const user = await contasRepo.porEmail(email);
       // Endereço sem conta: NADA é enviado. É de propósito — o padrão de mandar
       // "não há conta com este e-mail" transformaria a rota num disparador de
       // mensagem para endereços arbitrários, gastando a cota da caixa da Allos e
@@ -1776,14 +1755,11 @@ app.post('/api/senha/esqueci', emailLimiter, async (req, res) => {
       // Visitante não tem conta; papéis privilegiados também usam este fluxo
       // normalmente — o piso de senha continua sendo o do perfil.
 
-      const resets = contas.removerExpirados(readJSON(RESETS_FILE, []));
       const { token, tokenHash, expiresAt } = contas.novoToken(TTL_RESET_MS);
       // Um pedido por conta: pedir de novo invalida o link anterior.
-      const outros = resets.filter((r) => r.userId !== user.id);
-      outros.push({ tokenHash, expiresAt, userId: user.id, criadoEm: new Date().toISOString(), ip: clientIp(req) });
-      writeJSON(RESETS_FILE, outros);
+      await contasRepo.criarReset(user.id, { tokenHash, expiresAt, ip: clientIp(req) });
       return { to: user.email, nome: user.name, token };
-    });
+    })();
 
     if (envio) {
       await mailer.enviarRedefinicaoSenha(envio);
@@ -1800,28 +1776,21 @@ app.post('/api/senha/redefinir', emailLimiter, async (req, res) => {
   const alvo = contas.hashToken(token);
 
   try {
-    const feito = await withFileLock('users.json', async () => {
-      const resets = contas.removerExpirados(readJSON(RESETS_FILE, []));
-      const reg = resets.find((r) => contas.tokenHashIgual(r.tokenHash, alvo));
-      if (!reg) return { invalido: true };
-
-      const users = readJSON('users.json');
-      const idx = users.findIndex((u) => u.id === reg.userId);
-      if (idx === -1) return { invalido: true };
+    const feito = await (async () => {
+      const dono = await contasRepo.contaDoReset(alvo);
+      if (!dono) return { invalido: true };
 
       // Piso e composição pelo perfil e nome de quem está sendo redefinido.
-      const erro = validarSenha(newPassword, users[idx].role, users[idx].username);
+      const erro = validarSenha(newPassword, dono.role, dono.username);
       if (erro) return { erroSenha: erro };
 
-      users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
-      // Derruba todas as sessões: se o motivo do reset foi invasão, o token do
-      // invasor tem que morrer junto com a senha dele.
-      users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
-      writeJSON('users.json', users);
-      // Uso único: o link consumido some, e os outros pedidos da mesma conta também.
-      writeJSON(RESETS_FILE, resets.filter((r) => r.userId !== reg.userId));
-      return { user: users[idx] };
-    });
+      const hash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
+      // Uso único e sessões derrubadas na mesma transação: o link some, e se o
+      // motivo do reset foi invasão, o token do invasor morre junto com a senha.
+      // Null aqui = o link foi consumido por outro clique enquanto o bcrypt rodava.
+      const user = await contasRepo.consumirReset(alvo, hash);
+      return user ? { user } : { invalido: true };
+    })();
 
     if (feito.invalido) return res.status(400).json({ error: 'Link inválido ou expirado. Peça um novo.' });
     if (feito.erroSenha) return res.status(400).json({ error: feito.erroSenha.replace('Senha deve', 'Nova senha deve') });
@@ -1852,24 +1821,21 @@ app.post('/api/me/email', requireAuth, emailAuthLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Este já é o e-mail da sua conta.' });
   }
   // Senha atual: sem isso, uma sessão roubada trocaria o e-mail sozinha.
-  const ok = await bcrypt.compare(String(senhaAtual || ''), req.user.passwordHash || '');
+  const ok = await bcrypt.compare(senhaParaComparar(senhaAtual), req.user.passwordHash || '');
   // 400, não 401 — ver o mesmo comentário em /api/me/password.
   if (!ok) return res.status(400).json({ error: 'Senha atual incorreta' });
 
   try {
-    const pedido = await withFileLock(TROCAS_EMAIL_FILE, async () => {
-      const users = readJSON('users.json');
-      const dono = acharPorEmail(users, email);
+    const pedido = await (async () => {
+      const dono = await contasRepo.porEmail(email);
       if (dono && dono.id !== req.user.id) {
         return { conflito: 'Este e-mail já está em uso por outra conta.' };
       }
-      const trocas = contas.removerExpirados(readJSON(TROCAS_EMAIL_FILE, []));
       const { token, tokenHash, expiresAt } = contas.novoToken(TTL_CONFIRMACAO_MS);
-      const outros = trocas.filter((r) => r.userId !== req.user.id);
-      outros.push({ tokenHash, expiresAt, userId: req.user.id, email, emailLower: email, criadoEm: new Date().toISOString() });
-      writeJSON(TROCAS_EMAIL_FILE, outros);
+      // Um pedido por conta: pedir de novo substitui o anterior.
+      await contasRepo.criarTrocaEmail(req.user.id, { email, tokenHash, expiresAt });
       return { token };
-    });
+    })();
 
     if (pedido.conflito) return res.status(409).json({ error: pedido.conflito });
 
@@ -1888,20 +1854,18 @@ app.post('/api/me/email', requireAuth, emailAuthLimiter, async (req, res) => {
 // Define o "título" (subtítulo) ativo exibido no perfil e no ranking. SÓ
 // conquistas de OURO valem como título — e somente se já RESGATADAS pelo
 // usuário (achievements.json). Sidequests (qt-*) também valem. titleId vazio limpa.
-app.post('/api/me/title', requireAuth, (req, res) => {
+app.post('/api/me/title', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não pode definir título.' });
   }
   const titleId = req.body && req.body.titleId;
-  const users = readJSON('users.json');
-  const idx = users.findIndex((u) => u.id === req.user.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  const gravar = async (valor) => {
+    const atualizado = await contasRepo.definirTitulo(req.user.id, valor);
+    if (!atualizado) return res.status(404).json({ error: 'Usuário não encontrado' });
+    return res.json(publicUser(atualizado));
+  };
 
-  if (!titleId) {
-    users[idx].activeTitle = '';
-    writeJSON('users.json', users);
-    return res.json(publicUser(users[idx]));
-  }
+  if (!titleId) return gravar('');
 
   // Título de recompensa de sidequest (qt-*): valida contra as sidequests
   // concluídas pelo próprio usuário (não vive em ACHIEVEMENT_DEFS).
@@ -1910,9 +1874,7 @@ app.post('/api/me/title', requireAuth, (req, res) => {
     if (!quest) {
       return res.status(403).json({ error: 'Você ainda não desbloqueou esse título.' });
     }
-    users[idx].activeTitle = titleId;
-    writeJSON('users.json', users);
-    return res.json(publicUser(users[idx]));
+    return gravar(titleId);
   }
 
   const def = ACHIEVEMENT_DEFS.find((d) => d.id === titleId);
@@ -1922,14 +1884,12 @@ app.post('/api/me/title', requireAuth, (req, res) => {
   }
 
   // Precisa estar RESGATADA (claim). O claim já revalidou o critério server-side.
-  const ach = readJSON('achievements.json', {});
-  if (!(ach[req.user.id] && ach[req.user.id][titleId])) {
+  const resgatadas = await gamificacaoRepo.resgatadas(req.user.id);
+  if (!resgatadas[titleId]) {
     return res.status(403).json({ error: 'Você precisa resgatar essa conquista antes de exibi-la.' });
   }
-  users[idx].activeTitle = titleId;
-  writeJSON('users.json', users);
-  res.json(publicUser(users[idx]));
-});
+  return gravar(titleId);
+}));
 
 // Descrição visual da aparência (perfil). Um agente gpt-5.4-mini descreve a
 // aparência da pessoa a partir da foto de perfil (data URI), em um parágrafo de
@@ -1996,7 +1956,7 @@ app.post('/api/me/visual-description', requireAuth, aiLimiter, async (req, res) 
 
 // Resgatar ("claim") uma conquista. Só grava se o critério estiver de fato
 // cumprido (revalidado server-side via achievementsForUser). Visitante não resgata.
-app.post('/api/achievements/:id/claim', requireAuth, (req, res) => {
+app.post('/api/achievements/:id/claim', requireAuth, requireFeature('objetivos'), rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não acumula conquistas.' });
   }
@@ -2005,45 +1965,37 @@ app.post('/api/achievements/:id/claim', requireAuth, (req, res) => {
   if (!def) return res.status(404).json({ error: 'Conquista inválida.' });
 
   const userId = req.user.id;
-  const userLogs = readJSON('logs.json').filter((l) => l.userId === userId);
+  const userLogs = await logsRepo.listarDoDono(userId);
   const streak = computeStreak(userLogs);
-  const { unlocked } = achievementsForUser(userId, userLogs, streak, readJSON('freeplay-characters.json'));
+  const { unlocked } = await achievementsForUser(userId, userLogs, streak, catalogos.ler('freeplay'), req.user.profilePhoto);
   if (!unlocked.has(id)) {
     return res.status(403).json({ error: 'Você ainda não cumpriu o requisito desta conquista.' });
   }
 
-  const ach = readJSON('achievements.json', {});
-  if (!ach[userId]) ach[userId] = {};
-  if (!ach[userId][id]) {
-    ach[userId][id] = new Date().toISOString();
-    writeJSON('achievements.json', ach);
-  }
-  res.json({ id, claimed: true, claimedAt: ach[userId][id], tier: def.tier, title: def.title });
-});
+  // Idempotente: resgatar de novo devolve a data do primeiro resgate.
+  const claimedAt = await gamificacaoRepo.resgatar(userId, id);
+  res.json({ id, claimed: true, claimedAt, tier: def.tier, title: def.title });
+}));
 
 // --- Profile ---
-app.get('/api/users/:id', requireAuth, (req, res) => {
-  if (!canAccessUserResource(req.user, req.params.id)) {
+app.get('/api/users/:id', requireAuth, rota(async (req, res) => {
+  if (!(await canAccessUserResource(req.user, req.params.id))) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
   // Visitante consultando o próprio "perfil": devolve o usuário virtual do JWT
   if (req.user.role === 'visitor' && req.params.id === req.user.id) {
     return res.json(publicUser(req.user));
   }
-  const users = readJSON('users.json');
-  const user = users.find(u => u.id === req.params.id);
+  const user = await contasRepo.porId(req.params.id);
   if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
   res.json(publicUser(user));
-});
+}));
 
-app.put('/api/users/:id', requireAuth, (req, res) => {
+app.put('/api/users/:id', requireAuth, rota(async (req, res) => {
   // Próprio usuário ou admin. Professor não edita perfil de aluno por aqui.
   if (req.user.id !== req.params.id && req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Acesso negado' });
   }
-  const users = readJSON('users.json');
-  const idx = users.findIndex(u => u.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
   // Apenas campos de perfil podem ser alterados aqui. visualDescription é
   // gerado por IA (POST /api/me/visual-description) e shareAppearance é o
   // consentimento de mostrar a aparência aos pacientes simulados (ainda não
@@ -2053,56 +2005,23 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
   // senha": deixar trocar direto seria sequestro de conta em dois passos —
   // troco pro meu endereço, peço reset, recebo a senha. A troca passa por
   // POST /api/me/email, que confirma o endereço novo por link e avisa o antigo.
-  const allowed = ['name', 'gender', 'profilePhoto', 'updateAllOS', 'updateAllos', 'visualDescription', 'shareAppearance', 'sidequestsEnabled', 'abordagem'];
-  const patch = {};
-  for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
-  // Os dois campos novos vêm de controles simples da tela, mas o endpoint é
-  // público a qualquer cliente — normaliza em vez de confiar no formato.
-  if ('sidequestsEnabled' in patch) patch.sidequestsEnabled = !!patch.sidequestsEnabled;
-  if ('abordagem' in patch) patch.abordagem = clampStr(String(patch.abordagem ?? '').trim(), 120);
-  users[idx] = { ...users[idx], ...patch };
-  writeJSON('users.json', users);
-  res.json(publicUser(users[idx]));
-});
+  //
+  // Os campos permitidos e a normalização de tipo de cada um moram em
+  // CAMPOS_PERFIL (server/repos/contas.js): o endpoint é público a qualquer
+  // cliente, e o banco recusaria um tipo errado em vez de gravá-lo cru.
+  const atualizado = await contasRepo.atualizarPerfil(req.params.id, req.body);
+  if (!atualizado) return res.status(404).json({ error: 'Usuário não encontrado' });
+  res.json(publicUser(atualizado));
+}));
 
 // --- Admin: gestão de contas ---
 const usernameRegex = /^[a-zA-Z0-9._-]{3,32}$/;
 
-// Id de conta nova. MONOTÔNICO: nunca devolve um id que já pertenceu a alguém.
-//
-// Antes isto era `max(ids) + 1`, e o máximo CAI quando a conta de id mais alto é
-// excluída — então o próximo cadastro (inclusive o auto-cadastro público)
-// recebia o id da conta apagada e herdava tudo que é indexado por userId: os
-// logs das sessões e as avaliações, o MMR, as notificações, as conquistas. Na
-// Comunidade era pior ainda: o "Conta removida" voltava a exibir um nome, o da
-// pessoa NOVA, sobre os textos da antiga.
-//
-// O contador vive em counters.json sob a chave reservada `__meta` (as demais
-// chaves do arquivo são userIds, que são numéricos — não há como colidir) e só
-// sobe. `Math.max` com o maior id em disco cobre a primeira execução e qualquer
-// conta criada fora deste caminho.
-//
-// Chamar SEMPRE dentro do lock de users.json: sem isso dois cadastros
-// simultâneos leem o mesmo contador e nascem com o mesmo id.
-function nextUserId(users) {
-  // Filtra apenas IDs numéricos. Se algum user legacy tiver id não-numérico
-  // (ex: visitor-xxx persistido por erro), o Number() retorna NaN — antes,
-  // isso corrompia o maxNumeric e o próximo user virava "NaN".
-  const maxNumeric = users.reduce((max, u) => {
-    const n = Number(u.id);
-    if (!Number.isFinite(n)) return max;
-    return n > max ? n : max;
-  }, 0);
-  const counters = readJSON('counters.json', {});
-  const meta = (counters.__meta && typeof counters.__meta === 'object') ? counters.__meta : {};
-  const ultimo = Number.isFinite(meta.lastUserId) ? meta.lastUserId : 0;
-  const proximo = Math.max(maxNumeric, ultimo) + 1;
-  counters.__meta = { ...meta, lastUserId: proximo };
-  writeJSON('counters.json', counters);
-  return String(proximo);
-}
+// O id de conta nova não é mais gerado aqui: é o IDENTITY da tabela users, que
+// nunca devolve um id que já pertenceu a alguém (ver 001_contas.sql). Reusar um
+// id faria a conta nova herdar logs, MMR, notificações e conquistas da excluída.
 
-function validateNewUserPayload(body, users, { isUpdate = false, currentUser = null } = {}) {
+async function validateNewUserPayload(body, { isUpdate = false, currentUser = null } = {}) {
   const errors = [];
   const username = (body.username || '').trim();
   const role = body.role;
@@ -2114,7 +2033,7 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
     }
     // Ignorando maiúsculas: `Joao` e `joao` não podem coexistir (ver
     // migrateContasCadastroPublico).
-    const dup = acharPorUsername(users, username);
+    const dup = await contasRepo.porUsername(username);
     if (dup && (!currentUser || dup.id !== currentUser.id)) errors.push('Usuário já existe');
   }
   // Piso depende do perfil sendo criado/editado (ver validarSenha). O username
@@ -2140,7 +2059,7 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
     if (!contas.isEmailValido(emailNovo)) {
       errors.push('E-mail inválido');
     } else {
-      const dono = acharPorEmail(users, emailNovo);
+      const dono = await contasRepo.porEmail(emailNovo);
       if (dono && (!currentUser || dono.id !== currentUser.id)) {
         errors.push('Este e-mail já está em uso por outra conta');
       }
@@ -2157,7 +2076,7 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
     errors.push('Aluno deve estar vinculado a um professor');
   }
   if (isAluno(role) && teacherId) {
-    const t = users.find(u => u.id === teacherId);
+    const t = await contasRepo.porId(teacherId);
     if (!t || t.role !== 'supervisor') errors.push('Professor inválido');
   }
   if (role && !isAluno(role) && teacherId) {
@@ -2166,10 +2085,49 @@ function validateNewUserPayload(body, users, { isUpdate = false, currentUser = n
   return errors;
 }
 
-app.get('/api/admin/users', requireAuth, requireRole('admin'), (req, res) => {
-  const users = readJSON('users.json');
-  res.json(users.map(publicUser));
-});
+app.get('/api/admin/users', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const [users, tags] = await Promise.all([contasRepo.listar(), tagsRepo.porUsuario()]);
+  res.json(users.map((u) => ({ ...publicUser(u), tags: tags[u.id] || [] })));
+}));
+
+// --- Tags de terapeutas (demandas.md §16.4) ---
+// O admin cria rótulos livres e aplica às contas; ranking e logs filtram por eles.
+// A lista de nomes é aberta a quem tem conta: é o que o filtro do ranking mostra.
+app.get('/api/tags', requireAuth, rota(async (req, res) => {
+  if (req.user.role === 'visitor') return res.json([]);
+  res.json((await tagsRepo.listar()).map(({ id, nome }) => ({ id, nome })));
+}));
+
+app.get('/api/admin/tags', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  res.json(await tagsRepo.listar());
+}));
+
+app.post('/api/admin/tags', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const nome = (req.body && req.body.nome) || '';
+  if (!String(nome).trim()) return res.status(400).json({ error: 'Dê um nome para a tag.' });
+  const tag = await tagsRepo.criar(nome);
+  if (!tag) return res.status(409).json({ error: 'Já existe uma tag com esse nome.' });
+  res.json(tag);
+}));
+
+app.put('/api/admin/tags/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const r = await tagsRepo.renomear(req.params.id, req.body && req.body.nome);
+  if (r.nomeEmUso) return res.status(409).json({ error: 'Já existe uma tag com esse nome.' });
+  if (r.naoExiste) return res.status(404).json({ error: 'Tag não encontrada.' });
+  res.json({ ok: true });
+}));
+
+app.delete('/api/admin/tags/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  if (!(await tagsRepo.excluir(req.params.id))) return res.status(404).json({ error: 'Tag não encontrada.' });
+  res.json({ ok: true });
+}));
+
+app.put('/api/admin/users/:id/tags', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const conta = await contasRepo.porId(req.params.id);
+  if (!conta) return res.status(404).json({ error: 'Usuário não encontrado' });
+  await tagsRepo.definirDoUsuario(conta.id, req.body && req.body.tagIds);
+  res.json({ tags: (await tagsRepo.porUsuario())[conta.id] || [] });
+}));
 
 // --- Pool de fotos padrão (Administração → Contas) ---
 //
@@ -2184,79 +2142,105 @@ app.get('/api/admin/avatar-pool', requireAuth, requireRole('admin'), (req, res) 
   res.json({ photos: readAvatarPool(), max: avatarPool.MAX_FOTOS });
 });
 
-app.post('/api/admin/avatar-pool', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
-  const photos = readAvatarPool();
-  if (photos.length >= avatarPool.MAX_FOTOS) {
-    return res.status(400).json({ error: `A pool aceita no máximo ${avatarPool.MAX_FOTOS} fotos.` });
-  }
+app.post('/api/admin/avatar-pool', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
+  const cheia = () => res.status(400).json({ error: `A pool aceita no máximo ${avatarPool.MAX_FOTOS} fotos.` });
+  if (readAvatarPool().length >= avatarPool.MAX_FOTOS) return cheia();
   const img = decodeImageDataUrl(req.body && req.body.image);
   if (!img) return res.status(400).json({ error: 'Envie a imagem como data URL (JPEG, PNG ou WebP).' });
   if (img.length > 6 * 1024 * 1024) return res.status(413).json({ error: 'Imagem muito grande.' });
 
   const id = 'p' + Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
+  const arquivo = path.join(AVATAR_POOL_DIR, `${id}.jpg`);
   try {
-    fs.writeFileSync(path.join(AVATAR_POOL_DIR, `${id}.jpg`), img);
+    fs.writeFileSync(arquivo, img);
   } catch (err) {
     return res.status(500).json(falhou(req, err, 'admin/avatar-pool-upload'));
   }
-  photos.push({ id, url: `/avatar-pool/${id}.jpg` });
-  writeAvatarPool(photos);
-  res.json({ photos, max: avatarPool.MAX_FOTOS });
-});
+  // O teto é conferido de novo com a lista travada: dois uploads simultâneos na
+  // última vaga não passam os dois.
+  let lotou = false;
+  const valor = await operacaoRepo.atualizarConfig(AVATAR_POOL_CHAVE, { photos: [] }, (v) => {
+    const photos = avatarPool.normalizarPool(v.photos);
+    if (photos.length >= avatarPool.MAX_FOTOS) { lotou = true; return false; }
+    photos.push({ id, url: `/avatar-pool/${id}.jpg` });
+    return { photos };
+  });
+  if (lotou) {
+    try { fs.unlinkSync(arquivo); } catch { /* ignora */ }
+    return cheia();
+  }
+  res.json({ photos: valor.photos, max: avatarPool.MAX_FOTOS });
+}));
 
-app.delete('/api/admin/avatar-pool/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.delete('/api/admin/avatar-pool/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
   // O id compõe o nome do arquivo — sem esta checagem, um ".." na URL viraria
   // unlink fora da pasta.
   if (!/^[A-Za-z0-9]+$/.test(req.params.id)) return res.status(400).json({ error: 'Id inválido.' });
-  const photos = readAvatarPool();
-  const restantes = photos.filter((f) => f.id !== req.params.id);
-  if (restantes.length === photos.length) return res.status(404).json({ error: 'Foto não encontrada.' });
+  let achou = false;
+  const valor = await operacaoRepo.atualizarConfig(AVATAR_POOL_CHAVE, { photos: [] }, (v) => {
+    const photos = avatarPool.normalizarPool(v.photos);
+    const restantes = photos.filter((f) => f.id !== req.params.id);
+    if (restantes.length === photos.length) return false;
+    achou = true;
+    return { photos: restantes };
+  });
+  if (!achou) return res.status(404).json({ error: 'Foto não encontrada.' });
   try {
     const arq = path.join(AVATAR_POOL_DIR, `${req.params.id}.jpg`);
     if (fs.existsSync(arq)) fs.unlinkSync(arq);
   } catch { /* ignora: a lista é a fonte da verdade */ }
-  writeAvatarPool(restantes);
   // Remover uma foto REDISTRIBUI quem estava nela (a escolha é o id módulo o
   // tamanho da pool). É o preço de não guardar par pessoa→imagem; em troca,
   // conta nova já entra com avatar sem ninguém precisar atribuir nada.
-  res.json({ photos: restantes, max: avatarPool.MAX_FOTOS });
-});
+  res.json({ photos: valor.photos, max: avatarPool.MAX_FOTOS });
+}));
 
-app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
-  const users = readJSON('users.json');
-  const errors = validateNewUserPayload(req.body, users);
+// Regra de conta violada no banco → mensagem da tela de Contas. Só acontece
+// quando duas edições disputam o mesmo nome ou e-mail no mesmo instante: a
+// validateNewUserPayload roda antes e pega o caso comum.
+const MENSAGEM_ERRO_CONTA = {
+  'username-em-uso': 'Usuário já existe',
+  'email-em-uso': 'Este e-mail já está em uso por outra conta',
+  'professor-invalido': 'Professor inválido',
+  'professor-so-para-aluno': 'Apenas alunos podem estar vinculados a um professor',
+};
+
+function responderErroConta(res, e) {
+  if (!(e instanceof ErroConta)) throw e;
+  return res.status(400).json({ error: MENSAGEM_ERRO_CONTA[e.codigo] || 'Conta inválida' });
+}
+
+app.post('/api/admin/users', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const errors = await validateNewUserPayload(req.body);
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
 
   const role = req.body.role;
   const username = req.body.username.trim();
   const email = contas.normalizeEmail(req.body.email);
-  const newUser = {
-    id: nextUserId(users),
-    username,
-    usernameLower: contas.normalizeUsername(username),
-    name: (req.body.name || req.body.username).trim(),
-    role,
-    teacherId: isAluno(role) ? (req.body.teacherId || null) : null,
-    passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
-    tokenVersion: 0,
-    ...DEFAULT_PROFILE,
-    gender: req.body.gender || '',
-    email,
-    emailLower: email,
-    // Endereço digitado pelo admin — não passa por link de confirmação.
-    emailVerified: !!email,
-    profilePhoto: req.body.profilePhoto || DEFAULT_PROFILE.profilePhoto,
-  };
-  users.push(newUser);
-  writeJSON('users.json', users);
+  let newUser;
+  try {
+    newUser = await contasRepo.criar({
+      ...DEFAULT_PROFILE,
+      username,
+      name: (req.body.name || req.body.username).trim(),
+      role,
+      teacherId: isAluno(role) ? (req.body.teacherId || null) : null,
+      passwordHash: await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS),
+      gender: req.body.gender || '',
+      email,
+      // Endereço digitado pelo admin — não passa por link de confirmação.
+      emailVerified: !!email,
+      profilePhoto: req.body.profilePhoto || DEFAULT_PROFILE.profilePhoto,
+    });
+  } catch (e) {
+    return responderErroConta(res, e);
+  }
   res.json(publicUser(newUser));
-});
+}));
 
-app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
-  const users = readJSON('users.json');
-  const idx = users.findIndex(u => u.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
-  const current = users[idx];
+app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const current = await contasRepo.porId(req.params.id);
+  if (!current) return res.status(404).json({ error: 'Usuário não encontrado' });
 
   // Admin não pode rebaixar/editar o role da própria conta para evitar lockout
   if (current.id === req.user.id && req.body.role && req.body.role !== current.role) {
@@ -2289,69 +2273,70 @@ app.put('/api/admin/users/:id', requireAuth, requireRole('admin'), async (req, r
   if (!VALID_ROLES.includes(merged.role)) {
     return res.status(400).json({ error: 'Função inválida' });
   }
-  const errors = validateNewUserPayload(merged, users, { isUpdate: true, currentUser: current });
+  const errors = await validateNewUserPayload(merged, { isUpdate: true, currentUser: current });
   if (errors.length) return res.status(400).json({ error: errors.join('; ') });
 
+  let passwordHash;
   if (req.body.password) {
     // Piso pelo perfil RESULTANTE: promover alguém a supervisor já na mesma
     // request exige a senha do perfil novo, não a do antigo.
     const erroSenha = validarSenha(req.body.password, merged.role, merged.username);
     if (erroSenha) return res.status(400).json({ error: erroSenha });
-    merged.passwordHash = await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS);
-    // Derruba as sessões abertas do usuário (ver signToken).
-    merged.tokenVersion = (current.tokenVersion || 0) + 1;
+    // Com senha nova, o repositório também derruba as sessões abertas.
+    passwordHash = await bcrypt.hash(String(req.body.password), BCRYPT_ROUNDS);
   }
 
-  // Se um professor mudou de função, desvincular alunos
-  if (current.role === 'supervisor' && merged.role !== 'supervisor') {
-    for (const u of users) {
-      if (u.teacherId === current.id) u.teacherId = null;
-    }
+  // Professor que muda de função tem os alunos desvinculados pelo repositório,
+  // na mesma transação que muda o papel.
+  let atualizado;
+  try {
+    atualizado = await contasRepo.atualizarPorAdmin(current.id, merged, { passwordHash });
+  } catch (e) {
+    return responderErroConta(res, e);
   }
+  if (!atualizado) return res.status(404).json({ error: 'Usuário não encontrado' });
+  res.json(publicUser(atualizado));
+}));
 
-  users[idx] = merged;
-  writeJSON('users.json', users);
-  res.json(publicUser(merged));
-});
-
-app.delete('/api/admin/users/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.delete('/api/admin/users/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
   if (req.params.id === req.user.id) {
     return res.status(400).json({ error: 'Você não pode excluir a própria conta.' });
   }
-  const users = readJSON('users.json');
-  const idx = users.findIndex(u => u.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
-  const target = users[idx];
+  const target = await contasRepo.porId(req.params.id);
+  if (!target) return res.status(404).json({ error: 'Usuário não encontrado' });
 
-  if (target.role === 'supervisor') {
-    const linked = users.filter(u => u.teacherId === target.id);
-    if (linked.length > 0) {
-      return res.status(400).json({
-        error: `Este professor tem ${linked.length} aluno(s) vinculado(s). Reatribua-os antes de excluir.`,
-      });
-    }
+  const recusaVinculados = async () => {
+    const linked = await contasRepo.alunosDoProfessor(target.id);
+    return res.status(400).json({
+      error: `Este professor tem ${linked.length} aluno(s) vinculado(s). Reatribua-os antes de excluir.`,
+    });
+  };
+  if (target.role === 'supervisor' && (await contasRepo.alunosDoProfessor(target.id)).length > 0) {
+    return recusaVinculados();
   }
 
-  users.splice(idx, 1);
-  writeJSON('users.json', users);
+  try {
+    await contasRepo.excluir(target.id);
+  } catch (e) {
+    // Um aluno foi vinculado entre a checagem acima e a exclusão.
+    if (e instanceof ErroConta && e.codigo === 'professor-com-alunos') return recusaVinculados();
+    throw e;
+  }
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'), async (req, res) => {
+app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const newPassword = req.body && req.body.newPassword;
-  const users = readJSON('users.json');
-  const idx = users.findIndex(u => u.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Usuário não encontrado' });
+  const user = await contasRepo.porId(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Usuário não encontrado' });
   // Piso pelo perfil de quem está sendo resetado (ver validarSenha).
-  const erroSenha = validarSenha(newPassword, users[idx].role, users[idx].username);
+  const erroSenha = validarSenha(newPassword, user.role, user.username);
   if (erroSenha) return res.status(400).json({ error: erroSenha });
-  users[idx].passwordHash = await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS);
   // Sessões abertas com a senha antiga morrem aqui — é justamente o cenário em
   // que o admin reseta porque a conta pode estar comprometida.
-  users[idx].tokenVersion = (users[idx].tokenVersion || 0) + 1;
-  writeJSON('users.json', users);
+  await contasRepo.trocarSenha(user.id, await bcrypt.hash(String(newPassword), BCRYPT_ROUNDS));
   res.json({ ok: true });
-});
+}));
 
 // Export completo dos JSON do DATA_DIR — admin-only. Para backup/migração
 // pra SQL. Em produção, o admin loga e baixa via interface (AdminUsers.jsx).
@@ -2363,9 +2348,10 @@ app.post('/api/admin/users/:id/reset-password', requireAuth, requireRole('admin'
 // Pra restaurar um desastre você não precisa deles: recria os usuários e emite
 // senhas novas. Quem realmente precisar pede ?includeSecrets=true, e aí é um
 // ato consciente e registrado no log.
-app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
+app.get('/api/admin/export', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const incluirSegredos = req.query.includeSecrets === 'true';
-  const users = readJSON('users.json');
+  // teacherName é derivado (JOIN), não dado da conta: fora do arquivo de backup.
+  const users = (await contasRepo.listar()).map(({ teacherName, ...conta }) => conta);
   if (incluirSegredos) {
     console.warn(`[export] ${req.user.username} exportou COM os hashes de senha.`);
   }
@@ -2377,20 +2363,21 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
     includesSecrets: incluirSegredos,
     data: {
       users: incluirSegredos ? users : users.map(({ passwordHash, ...rest }) => rest),
-      exercises: readJSON('exercises.json'),
-      freeplayCharacters: readJSON('freeplay-characters.json'),
-      neuroCharacters: readJSON('neuro-characters.json'),
-      progress: readJSON('progress.json', {}),
-      logs: readJSON('logs.json'),
-      achievements: readJSON('achievements.json', {}),
-      activeSessions: readJSON('active-sessions.json', {}),
-      mmr: readJSON('mmr.json', { players: {}, characters: {} }),
-      duels: readJSON('duels.json', []),
-      notifications: readJSON('notifications.json', {}),
-      comunidade: readJSON('comunidade.json', { nextId: 1, discussions: [] }),
+      exercises: catalogos.ler('exercicios'),
+      freeplayCharacters: catalogos.ler('freeplay'),
+      neuroCharacters: catalogos.ler('neuro'),
+      progress: await progressoRepo.todosPorDono(),
+      logs: await logsRepo.listarTodos(),
+      achievements: await gamificacaoRepo.todasResgatadas(),
+      activeSessions: await sessoesRepo.todasPorChave(),
+      mmr: await mmrRepo.snapshot(),
+      characterRecords: await mmrRepo.recordes(),
+      duels: await duelosRepo.listarTodos(),
+      notifications: await notificacoesRepo.todasPorUsuario(),
+      comunidade: { discussions: await comunidadeRepo.listar() },
       // A config leva os banimentos junto: restaurar um backup sem eles
       // desbanaria todo mundo em silêncio.
-      comunidadeConfig: readJSON('comunidade-config.json', {}),
+      comunidadeConfig: readComunidadeConfig(),
     },
   };
   // Content-Disposition: força download como arquivo em vez de renderizar JSON
@@ -2399,19 +2386,18 @@ app.get('/api/admin/export', requireAuth, requireRole('admin'), (req, res) => {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="allos-export-${stamp}.json"`);
   res.send(JSON.stringify(payload, null, 2));
-});
+}));
 
 // Professor: lista de alunos vinculados a ele
-app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const users = readJSON('users.json');
+app.get('/api/teacher/students', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
   // Aluno externo entra na mesma lista: pro supervisor, um aluno vinculado a
   // ele é um aluno — interno ou não. O externo sem vínculo (o caso comum) tem
   // teacherId null e simplesmente não aparece pra nenhum supervisor.
   const list = req.user.role === 'admin'
-    ? users.filter(u => isAluno(u.role))
-    : users.filter(u => isAluno(u.role) && u.teacherId === req.user.id);
+    ? (await contasRepo.listar()).filter(u => isAluno(u.role))
+    : await contasRepo.alunosDoProfessor(req.user.id);
   res.json(list.map(publicUser));
-});
+}));
 
 // --- Indicadores: constância, objetivos diários, metas ---
 // Conquistas separadas por dificuldade: bronze, silver (prata), gold (ouro).
@@ -2599,33 +2585,21 @@ function allDailyMissionsCompleteToday(userLogs) {
 
 // --- Contadores diversos persistidos (uso de microfone etc.) ---
 function getMicUses(userId) {
-  const c = readJSON('counters.json', {});
-  return (c[userId] && c[userId].micUses) || 0;
+  return gamificacaoRepo.usosDoMicrofone(userId);
 }
 function bumpMicUses(userId) {
-  const c = readJSON('counters.json', {});
-  if (!c[userId]) c[userId] = {};
-  c[userId].micUses = (c[userId].micUses || 0) + 1;
-  writeJSON('counters.json', c);
+  return gamificacaoRepo.contarUsoDoMicrofone(userId);
 }
 
 // --- Streak de missões diárias (conquista "Bom garoto" = 7 dias seguidos) ---
 function getDailyMissionStreak(userId) {
-  const d = readJSON('daily-missions.json', {});
-  return d[userId] || { current: 0, best: 0, lastDate: null };
+  return gamificacaoRepo.sequenciaDeMissoes(userId);
 }
-function updateDailyMissionStreak(userId, userLogs) {
+// Conta o dia de hoje (uma vez por dia): continua a sequência se o último dia
+// contado foi ontem, senão recomeça em 1.
+async function updateDailyMissionStreak(userId, userLogs) {
   if (!allDailyMissionsCompleteToday(userLogs)) return;
-  const store = readJSON('daily-missions.json', {});
-  const today = dayKey(Date.now());
-  const rec = store[userId] || { current: 0, best: 0, lastDate: null };
-  if (rec.lastDate === today) return; // já contado hoje
-  const yesterday = dayKey(Date.now() - 24 * 60 * 60 * 1000);
-  rec.current = rec.lastDate === yesterday ? (rec.current || 0) + 1 : 1;
-  rec.lastDate = today;
-  rec.best = Math.max(rec.best || 0, rec.current);
-  store[userId] = rec;
-  writeJSON('daily-missions.json', store);
+  await gamificacaoRepo.contarDiaDeMissoes(userId, dayKey(Date.now()), dayKey(Date.now() - 24 * 60 * 60 * 1000));
 }
 
 // --- Helpers de duelo (conquistas competitivas) ---
@@ -2726,36 +2700,38 @@ function computeAchievements(ctx) {
 
 // Monta o contexto e roda computeAchievements para um usuário. Centraliza a
 // leitura das várias fontes (logs, duelos, contadores, foto de perfil).
-function achievementsForUser(userId, userLogs, streak, freeplay) {
+// `profilePhoto` vem de quem chama, que já tem a conta em mãos.
+async function achievementsForUser(userId, userLogs, streak, freeplay, profilePhoto) {
   return computeAchievements({
     userLogs,
     streak,
     freeplay,
-    duels: readDuels(),
-    micUses: getMicUses(userId),
-    profilePhoto: (readJSON('users.json').find((u) => u.id === userId) || {}).profilePhoto,
-    dailyStreakBest: getDailyMissionStreak(userId).best || 0,
+    // Só as conquistas do próprio usuário olham duelos, e só os dele.
+    duels: await duelosRepo.listarDoParticipante(userId),
+    micUses: await getMicUses(userId),
+    profilePhoto,
+    dailyStreakBest: (await getDailyMissionStreak(userId)).best || 0,
     userId,
   });
 }
 
-app.get('/api/gamification/:userId', requireAuth, (req, res) => {
-  if (!canAccessUserResource(req.user, req.params.userId)) {
+app.get('/api/gamification/:userId', requireAuth, rota(async (req, res) => {
+  if (!(await canAccessUserResource(req.user, req.params.userId))) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
   const userId = req.params.userId;
-  const allLogs = readJSON('logs.json');
-  const userLogs = allLogs.filter((l) => l.userId === userId);
-  const freeplay  = readJSON('freeplay-characters.json');
+  const userLogs = await logsRepo.listarDoDono(userId);
+  const freeplay  = catalogos.ler('freeplay');
+  // Supervisor e admin também abrem o painel de um aluno: a foto é a do dono.
+  const dono = userId === req.user.id ? req.user : await contasRepo.porId(userId);
 
   const streak = computeStreak(userLogs);
   const dailyMissions = computeDailyMissions(userLogs);
-  const { unlocked, progress } = achievementsForUser(userId, userLogs, streak, freeplay);
+  const { unlocked, progress } = await achievementsForUser(userId, userLogs, streak, freeplay, dono && dono.profilePhoto);
 
-  // claimed = conquistas RESGATADAS (gravadas em achievements.json). Não há mais
+  // claimed = conquistas RESGATADAS (tabela conquistas_resgatadas). Não há mais
   // resgate automático: o usuário precisa resgatar (POST /api/achievements/:id/claim).
-  const ach = readJSON('achievements.json', {});
-  const claimedMap = ach[userId] || {};
+  const claimedMap = await gamificacaoRepo.resgatadas(userId);
 
   const achievements = ACHIEVEMENT_DEFS.map((def) => {
     const isUnlocked = unlocked.has(def.id);
@@ -2779,7 +2755,7 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
   // detectadas quando o próprio dono abre suas Metas — notifica aqui (com som no
   // sino). Idempotente via achievement-unlocks.json; só pro próprio usuário.
   if (req.params.userId === req.user.id && req.user.role !== 'visitor') {
-    try { notifyNewAchievements(userId, unlocked, claimedMap); } catch {}
+    try { await notifyNewAchievements(userId, unlocked, claimedMap); } catch {}
   }
 
   // Sidequests concluídas entram como conquistas (tier 'quest'): aparecem nas
@@ -2812,17 +2788,13 @@ app.get('/api/gamification/:userId', requireAuth, (req, res) => {
   };
 
   res.json({ streak, dailyMissions, achievements, stats });
-});
+}));
 
 // --- Entrevistador (prompt para construção de personagem) ---
 // Admin-only: o prompt do entrevistador é IP da Allos. Antes era acessível
 // por qualquer usuário autenticado (incluindo visitante).
-const ENTREVISTADOR_DIR = path.join(PROMPTS_DIR, 'entrevistador');
-
 function loadEntrevistadorPrompt() {
-  const promptFile = path.join(ENTREVISTADOR_DIR, 'promptentrevistador.md');
-  if (!fs.existsSync(promptFile)) return null;
-  return fs.readFileSync(promptFile, 'utf-8');
+  return promptFiles.lerPrompt('entrevistador/promptentrevistador.md');
 }
 
 app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, res) => {
@@ -2831,17 +2803,18 @@ app.get('/api/entrevistador-prompt', requireAuth, requireRole('admin'), (req, re
   res.json({ prompt: content });
 });
 
-// --- Administração dos prompts (PROMPTS_DIR) ---
+// --- Administração dos prompts (no banco) ---
 // Os .md de avaliacao/ e entrevistador/ saíram do git (dados sensíveis: critérios
-// de nota, gabaritos) e passaram a viver só no volume persistente (PROMPTS_DIR).
-// Essas rotas substituem o antigo fluxo "edita o .md → git push → deploy": agora
-// a atualização é feita por aqui (admin-only, tela Administração → Prompts ou
-// scripts/upload-prompt.js), com o conteúdo indo direto pro volume.
+// de nota, gabaritos) e vivem no banco (005_prompts.sql), pelo mesmo caminho que
+// tinham na pasta. Essas rotas substituem o antigo fluxo "edita o .md → git push
+// → deploy": a atualização é feita por aqui (admin-only, tela Administração →
+// Prompts ou scripts/upload-prompt.js).
 //
 // Como o git deixou de ser o histórico desses arquivos, toda gravação passa por
 // duas travas de server/prompt-files.js: VALIDAÇÃO (o rascunho tem de passar no
-// mesmo parser que a produção usa) e BACKUP (a versão anterior é copiada, e dá
-// pra restaurar). Caminho validado contra traversal e restrito a .md.
+// mesmo parser que a produção usa) e HISTÓRICO (a versão anterior fica guardada
+// numa tabela somente-inserção, e dá pra restaurar). Caminho validado contra
+// traversal e restrito a .md.
 app.get('/api/admin/prompts', requireAuth, requireRole('admin'), (req, res) => {
   // `emUso` = algum código vivo lê este .md. A tela usa para não oferecer o
   // botão de excluir nele (a rota recusa de qualquer jeito — isto é a
@@ -2859,19 +2832,19 @@ app.get('/api/admin/prompts', requireAuth, requireRole('admin'), (req, res) => {
   });
 });
 
-app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = req.params[0];
-  const target = promptFiles.resolvePromptPath(rel);
-  if (!target || !fs.existsSync(target)) return res.status(404).json({ error: 'Arquivo não encontrado.' });
-  const st = fs.statSync(target);
+  const content = promptFiles.resolvePromptPath(rel) ? promptFiles.lerPrompt(rel) : null;
+  if (content == null) return res.status(404).json({ error: 'Arquivo não encontrado.' });
+  const item = promptFiles.listPromptFiles().find((f) => f.path === rel);
   res.json({
     path: rel,
-    content: fs.readFileSync(target, 'utf-8'),
-    updatedAt: st.mtime.toISOString(),
+    content,
+    updatedAt: item ? item.updatedAt : null,
     validado: promptFiles.hasValidator(rel),
-    versoes: promptFiles.listBackups(rel),
+    versoes: await promptFiles.listBackups(rel),
   });
-});
+}));
 
 // `criar:true` no corpo CRIA um .md que ainda não existe no volume (e a pasta
 // dele). Sem isso não havia como levar uma versão nova de prompt para produção:
@@ -2886,89 +2859,184 @@ app.get('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) =>
 //   criar:true  → é CRIAÇÃO. Caminho que já existe dá 409 em vez de sobrescrever
 //                 (um caminho novo que colide com um prompt no ar não o apaga),
 //                 e o caminho passa pela política de validateNewPromptPath.
-app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+app.put('/api/admin/prompts/*', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = req.params[0];
-  const target = promptFiles.resolvePromptPath(rel);
-  if (!target) return res.status(400).json({ error: 'Caminho inválido.' });
+  if (!promptFiles.resolvePromptPath(rel)) return res.status(400).json({ error: 'Caminho inválido.' });
   const { content, criar } = req.body || {};
-  const existe = fs.existsSync(target);
+  const existe = promptFiles.lerPrompt(rel) != null;
+  const naoEncontrado = () => res.status(404).json({ error: 'Arquivo não encontrado — use "Novo arquivo" para criá-lo.' });
+  const jaExiste = () => res.status(409).json({ error: 'Já existe um arquivo nesse caminho — abra-o na lista para editar.' });
   if (criar === true) {
-    if (existe) return res.status(409).json({ error: 'Já existe um arquivo nesse caminho — abra-o na lista para editar.' });
+    if (existe) return jaExiste();
     const politica = promptFiles.validateNewPromptPath(rel);
     if (!politica.ok) return res.status(400).json({ error: politica.error });
   } else if (!existe) {
-    return res.status(404).json({ error: 'Arquivo não encontrado — use "Novo arquivo" para criá-lo no volume.' });
+    return naoEncontrado();
   }
 
-  // Valida ANTES de tocar no arquivo: prompt quebrado é recusado aqui, não na
-  // hora em que um aluno rodar uma avaliação.
+  // Valida ANTES de gravar: prompt quebrado é recusado aqui, não na hora em que
+  // um aluno rodar uma avaliação.
   const v = promptFiles.validatePromptContent(rel, content);
   if (!v.ok) return res.status(400).json({ error: v.error });
 
-  const versaoAnterior = promptFiles.backupPrompt(rel); // null quando é criação
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, content, 'utf-8');
-  clearAssetsCache(); // o pipeline memoiza os .md — sem isto o servidor serviria a versão velha
-  console.log(`[prompts] ${rel} ${existe ? 'atualizado' : 'CRIADO'} por ${req.user.username} (backup: ${versaoAnterior || 'nenhum'})`);
-  res.json({ ok: true, criado: !existe, validado: !!v.validado, versaoAnterior, versoes: promptFiles.listBackups(rel) });
-});
+  // A decisão final de "existe ou não" é do banco: uma criação simultânea no
+  // mesmo caminho não sobrescreve a outra.
+  const r = await promptFiles.salvarPrompt(rel, content, { autor: req.user.username, criar: criar === true });
+  if (!r.ok) return r.motivo === 'existe' ? jaExiste() : naoEncontrado();
+  console.log(`[prompts] ${rel} ${r.criado ? 'CRIADO' : 'atualizado'} por ${req.user.username} (versão anterior: ${r.versaoAnterior || 'nenhuma'})`);
+  res.json({ ok: true, criado: r.criado, validado: !!v.validado, versaoAnterior: r.versaoAnterior, versoes: await promptFiles.listBackups(rel) });
+}));
 
-// Exclui um .md do volume. Existe porque o volume é PERSISTENTE e o deploy não
-// leva prompts: quando um modo ou uma régua sai do app, os .md dele ficam lá
-// para sempre, aparecendo na listagem como arquivos editáveis que nenhum código
-// lê. Antes disso só uma migração one-shot os alcançava — e uma migração é
-// escrita por quem está mexendo no código, não por quem está olhando a tela.
+// --- Critérios da régua (demandas.md §16.6) ---
+// "Adicionar critério" e editar um existente sem abrir o .md: o servidor monta
+// o arquivo novo (server/criterios-md.js), valida no mesmo parser da produção e
+// grava como uma edição comum do painel de Prompts, com a versão anterior no
+// histórico. O nome identifica o critério: um novo começa sem histórico; ao
+// editar, o admin escolhe manter (as notas antigas seguem na média do perfil,
+// mesmo com nome novo) ou zerar (a média recomeça agora).
+async function criteriosParaAdmin() {
+  const raw = promptFiles.lerPrompt(criteriosMd.CAMINHO);
+  if (raw == null) return null;
+  const linhas = await promptsRepo.criteriosDa(criteriosMd.REGUA);
+  const porNome = Object.fromEntries(linhas.filter((c) => c.ativo).map((c) => [c.nome.toLowerCase(), c]));
+  return {
+    regua: criteriosMd.REGUA,
+    caminho: criteriosMd.CAMINHO,
+    limites: criteriosMd.LIMITES,
+    max: criteriosMd.MAX,
+    // Prompts do pipeline que escrevem a quantidade de critérios à mão: com
+    // critério novo, esse texto ficaria errado. O painel mostra onde trocar pelos
+    // slots {{N_CRITERIOS}} / {{LISTA_CRITERIOS}}.
+    avisos: criteriosMd.citacoesDeQuantidadeFixa(
+      promptFiles.listPromptFiles()
+        .filter((f) => criteriosMd.PASTAS_PIPELINE.some((pasta) => f.path.startsWith(pasta)))
+        .map((f) => ({ caminho: f.path, conteudo: promptFiles.lerPrompt(f.path) })),
+    ),
+    criterios: criteriosMd.lerCriterios(raw).map((c) => {
+      const linha = porNome[c.nome.toLowerCase()] || {};
+      return {
+        num: c.num, nome: c.nome, linhaCurta: c.linhaCurta, descricao: c.corpo,
+        historicoDesde: linha.historicoDesde || null, nomesAnteriores: linha.nomesAnteriores || [],
+      };
+    }),
+  };
+}
+
+const semArquivoDeCriterios = (res) => res.status(404).json({ error: 'O arquivo de critérios não está no volume; suba-o em Prompts.' });
+
+// Valida e grava o .md montado. Devolve false (com a resposta já enviada) se não deu.
+async function gravarArquivoDeCriterios(req, res, conteudo) {
+  const v = promptFiles.validatePromptContent(criteriosMd.CAMINHO, conteudo);
+  if (!v.ok) { res.status(400).json({ error: v.error }); return false; }
+  const r = await promptFiles.salvarPrompt(criteriosMd.CAMINHO, conteudo, { autor: req.user.username });
+  if (!r.ok) { semArquivoDeCriterios(res); return false; }
+  return true;
+}
+
+app.get('/api/admin/criterios', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const dados = await criteriosParaAdmin();
+  if (!dados) return semArquivoDeCriterios(res);
+  res.json(dados);
+}));
+
+app.post('/api/admin/criterios', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const raw = promptFiles.lerPrompt(criteriosMd.CAMINHO);
+  if (raw == null) return semArquivoDeCriterios(res);
+  const r = criteriosMd.adicionarCriterio(raw, req.body || {});
+  if (!r.ok) return res.status(400).json({ error: r.erro });
+  if (!(await gravarArquivoDeCriterios(req, res, r.raw))) return;
+  console.log(`[criterios] critério ${r.num} adicionado à régua ${criteriosMd.REGUA} por ${req.user.username}`);
+  res.json({ ok: true, num: r.num, ...(await criteriosParaAdmin()) });
+}));
+
+app.put('/api/admin/criterios/:num', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const body = req.body || {};
+  if (body.historico !== 'manter' && body.historico !== 'zerar') {
+    return res.status(400).json({ error: 'Escolha se o histórico do critério fica ou recomeça.' });
+  }
+  const raw = promptFiles.lerPrompt(criteriosMd.CAMINHO);
+  if (raw == null) return semArquivoDeCriterios(res);
+  const r = criteriosMd.editarCriterio(raw, req.params.num, body);
+  if (!r.ok) return res.status(r.naoExiste ? 404 : 400).json({ error: r.erro });
+  if (!(await gravarArquivoDeCriterios(req, res, r.raw))) return;
+  const nomeNovo = criteriosMd.sanear(body).campos.nome;
+  if (body.historico === 'zerar') await promptsRepo.zerarHistorico(criteriosMd.REGUA, nomeNovo);
+  else await promptsRepo.herdarHistorico(criteriosMd.REGUA, r.anterior.nome, nomeNovo);
+  console.log(`[criterios] critério ${r.num} (${r.anterior.nome} → ${nomeNovo}) editado por ${req.user.username}, histórico: ${body.historico}`);
+  res.json({ ok: true, ...(await criteriosParaAdmin()) });
+}));
+
+// Desativa um critério da régua. Ele sai do arquivo (e, portanto, das próximas
+// avaliações) mas a linha em `criterios` fica com ativo = false, guardando nome,
+// histórico e nomes anteriores — as notas já dadas continuam casando no gráfico
+// do perfil, que junta critério pelo NOME. Repor o critério com o mesmo nome o
+// reativa com o histórico intacto.
+//
+// Não há exclusão de verdade, e é decisão do dono (demandas.md §23): apagar a
+// linha deixaria as notas antigas órfãs e mudaria a base da nota final, que é
+// nº de critérios × 10 — o ranking passaria a misturar duas réguas.
+app.delete('/api/admin/criterios/:num', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const raw = promptFiles.lerPrompt(criteriosMd.CAMINHO);
+  if (raw == null) return semArquivoDeCriterios(res);
+  const r = criteriosMd.removerCriterio(raw, req.params.num);
+  if (!r.ok) return res.status(r.naoExiste ? 404 : 400).json({ error: r.erro });
+  if (!(await gravarArquivoDeCriterios(req, res, r.raw))) return;
+  console.log(`[criterios] critério ${r.removido.num} (${r.removido.nome}) DESATIVADO por ${req.user.username}`);
+  res.json({ ok: true, removido: r.removido, ...(await criteriosParaAdmin()) });
+}));
+
+// Exclui um prompt. Quando um modo ou uma régua sai do app, os prompts dele
+// ficam para sempre, aparecendo na listagem como arquivos editáveis que nenhum
+// código lê.
 //
 // Duas travas, e a segunda é a que importa:
-//   · BACKUP antes de apagar, no mesmo prompt-backups/ das gravações, então
-//     excluir por engano tem volta;
+//   · o conteúdo vai para o HISTÓRICO antes de sair, então excluir por engano
+//     tem volta;
 //   · prompt EM USO não sai. A lista é derivada do código (PIPELINE_VERSIONS +
 //     Neuro + entrevistador), não escrita à mão — ver isPromptEmUso. Apagar um
-//     .md que a produção lê quebraria a avaliação para todo mundo, e ele não vem
-//     no git para repor.
-app.delete('/api/admin/prompts/*', requireAuth, requireRole('admin'), (req, res) => {
+//     prompt que a produção lê quebraria a avaliação para todo mundo.
+app.delete('/api/admin/prompts/*', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = req.params[0];
-  const r = promptFiles.deletePrompt(rel);
+  const r = await promptFiles.deletePrompt(rel, req.user.username);
   if (!r.ok) return res.status(promptFiles.isPromptEmUso(rel) ? 409 : 400).json({ error: r.error });
-  clearAssetsCache();
-  console.log(`[prompts] ${rel} EXCLUÍDO por ${req.user.username} (backup: ${r.versaoAnterior || 'nenhum'})`);
+  console.log(`[prompts] ${rel} EXCLUÍDO por ${req.user.username} (versão guardada: ${r.versaoAnterior || 'nenhuma'})`);
   res.json({ ok: true, versaoAnterior: r.versaoAnterior });
-});
+}));
 
-// Histórico de versões de um arquivo (as MAX_BACKUPS últimas gravações).
-app.get('/api/admin/prompt-versions', requireAuth, requireRole('admin'), (req, res) => {
+// Histórico de versões de um arquivo (todas, mais recente primeiro).
+app.get('/api/admin/prompt-versions', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = String(req.query.path || '');
   if (!promptFiles.resolvePromptPath(rel)) return res.status(400).json({ error: 'Caminho inválido.' });
-  res.json({ path: rel, versoes: promptFiles.listBackups(rel) });
-});
+  res.json({ path: rel, versoes: await promptFiles.listBackups(rel) });
+}));
 
 // Conteúdo de uma versão antiga (para conferir antes de restaurar).
-app.get('/api/admin/prompt-versions/:id', requireAuth, requireRole('admin'), (req, res) => {
+app.get('/api/admin/prompt-versions/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = String(req.query.path || '');
   if (!promptFiles.resolvePromptPath(rel)) return res.status(400).json({ error: 'Caminho inválido.' });
-  const content = promptFiles.readBackup(rel, req.params.id);
+  const content = await promptFiles.readBackup(rel, req.params.id);
   if (content == null) return res.status(404).json({ error: 'Versão não encontrada.' });
   res.json({ path: rel, id: req.params.id, content });
-});
+}));
 
-// Restaura uma versão antiga. A versão ATUAL vira backup antes — restaurar por
-// engano também tem volta.
-app.post('/api/admin/prompt-versions/:id/restaurar', requireAuth, requireRole('admin'), (req, res) => {
+// Restaura uma versão antiga. A versão ATUAL vai para o histórico antes —
+// restaurar por engano também tem volta.
+app.post('/api/admin/prompt-versions/:id/restaurar', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const rel = String((req.body && req.body.path) || '');
-  const target = promptFiles.resolvePromptPath(rel);
-  if (!target || !fs.existsSync(target)) return res.status(400).json({ error: 'Caminho inválido.' });
-  const content = promptFiles.readBackup(rel, req.params.id);
+  if (!promptFiles.resolvePromptPath(rel) || promptFiles.lerPrompt(rel) == null) {
+    return res.status(400).json({ error: 'Caminho inválido.' });
+  }
+  const content = await promptFiles.readBackup(rel, req.params.id);
   if (content == null) return res.status(404).json({ error: 'Versão não encontrada.' });
 
   const v = promptFiles.validatePromptContent(rel, content);
   if (!v.ok) return res.status(400).json({ error: `A versão guardada não passa na validação atual: ${v.error}` });
 
-  promptFiles.backupPrompt(rel);
-  fs.writeFileSync(target, content, 'utf-8');
-  clearAssetsCache();
+  const r = await promptFiles.salvarPrompt(rel, content, { autor: req.user.username, motivo: 'restauracao' });
+  if (!r.ok) return res.status(400).json({ error: 'Caminho inválido.' });
   console.log(`[prompts] ${rel} restaurado para a versão ${req.params.id} por ${req.user.username}`);
-  res.json({ ok: true, content, versoes: promptFiles.listBackups(rel) });
-});
+  res.json({ ok: true, content, versoes: await promptFiles.listBackups(rel) });
+}));
 
 // Lista de fotos de perfil disponíveis (a partir da pasta profiles_icon na raiz do projeto)
 app.get('/api/profile-photos', requireAuth, (req, res) => {
@@ -3061,12 +3129,11 @@ function sanitizeNeuroTestFields(body) {
 
 // --- Exercises (System 1) ---
 app.get('/api/exercises', requireAuth, (req, res) => {
-  const list = readJSON('exercises.json');
+  const list = catalogos.ler('exercicios');
   res.json(isAdmin(req.user) ? list : list.map(publicExercise));
 });
 
-app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
-  const exercises = readJSON('exercises.json');
+app.post('/api/exercises', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const ex = { id: 'ex' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...req.body };
   // evaluatorModel/chatModel/imageSchemaModel são allowlists fechadas
   // (TRILHA_EXERCISE_MODELS/TRILHA_CHAT_MODELS/TRILHA_IMAGE_MODELS, definidas
@@ -3075,10 +3142,9 @@ app.post('/api/exercises', requireAuth, requireRole('admin'), (req, res) => {
   if (!TRILHA_CHAT_MODELS[ex.chatModel]) ex.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
   if (!TRILHA_IMAGE_MODELS[ex.imageSchemaModel]) ex.imageSchemaModel = TRILHA_IMAGE_MODEL_DEFAULT;
   ex.imageSchemaEnabled = !!ex.imageSchemaEnabled;
-  exercises.push(ex);
-  writeJSON('exercises.json', exercises);
+  await catalogos.atualizar('exercicios', (lista) => ({ lista: [...lista, ex] }));
   res.json(ex);
-});
+}));
 
 const EXERCISE_FIELDS = [
   'title', 'description', 'skillId', 'difficulty', 'specificInstruction',
@@ -3093,28 +3159,39 @@ function pickFields(body, fields) {
   return out;
 }
 
-app.put('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const exercises = readJSON('exercises.json');
-  const idx = exercises.findIndex(e => e.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
+app.put('/api/exercises/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
   // Allowlist: evita que campos arbitrários do body poluam o JSON.
   const patch = pickFields(req.body, EXERCISE_FIELDS);
   if ('evaluatorModel' in patch && !TRILHA_EXERCISE_MODELS[patch.evaluatorModel]) patch.evaluatorModel = TRILHA_EXERCISE_MODEL_DEFAULT;
   if ('chatModel' in patch && !TRILHA_CHAT_MODELS[patch.chatModel]) patch.chatModel = TRILHA_CHAT_MODEL_DEFAULT;
   if ('imageSchemaModel' in patch && !TRILHA_IMAGE_MODELS[patch.imageSchemaModel]) patch.imageSchemaModel = TRILHA_IMAGE_MODEL_DEFAULT;
   if ('imageSchemaEnabled' in patch) patch.imageSchemaEnabled = !!patch.imageSchemaEnabled;
-  exercises[idx] = { ...exercises[idx], ...patch };
-  writeJSON('exercises.json', exercises);
-  res.json(exercises[idx]);
-});
+  const salvo = await catalogos.atualizar('exercicios', (lista) => {
+    const idx = lista.findIndex((e) => e.id === req.params.id);
+    if (idx === -1) return {};
+    lista[idx] = { ...lista[idx], ...patch };
+    return { lista, valor: lista[idx] };
+  });
+  if (!salvo) return res.status(404).json({ error: 'Não encontrado' });
+  res.json(salvo);
+}));
 
-app.delete('/api/exercises/:id', requireAuth, requireRole('admin'), (req, res) => {
-  let exercises = readJSON('exercises.json');
-  exercises = exercises.filter(e => e.id !== req.params.id);
-  writeJSON('exercises.json', exercises);
+app.delete('/api/exercises/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  await catalogos.atualizar('exercicios', (lista) => ({ lista: lista.filter((e) => e.id !== req.params.id) }));
   removeExercisePhotoFiles(req.params.id); // limpa o avatar do volume junto
   res.json({ ok: true });
-});
+}));
+
+// Aplica `fn(item)` ao item `id` de um catálogo e grava. Devolve o item
+// atualizado, ou null se ele não existe. Usado pelas rotas de foto.
+function atualizarItemDoCatalogo(tipo, id, fn) {
+  return catalogos.atualizar(tipo, (lista) => {
+    const idx = lista.findIndex((x) => x.id === id);
+    if (idx === -1) return {};
+    fn(lista[idx]);
+    return { lista, valor: lista[idx] };
+  }).then((v) => v || null);
+}
 
 function removeExercisePhotoFiles(id) {
   for (const suf of ['-icon.jpg', '-full.jpg']) {
@@ -3128,17 +3205,14 @@ function removeExercisePhotoFiles(id) {
 // Avatar da IA do exercício ("a bolinha" no chat da Trilha) — mesmo esquema da
 // foto de paciente: o cliente recorta no canvas e manda icon+full já prontos
 // como JPEG data URL; o servidor só grava os bytes. `clear:true` remove.
-app.put('/api/exercises/:id/photo', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
-  const exercises = readJSON('exercises.json');
-  const idx = exercises.findIndex((e) => e.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
+app.put('/api/exercises/:id/photo', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
+  if (!catalogos.ler('exercicios').some((e) => e.id === req.params.id)) return res.status(404).json({ error: 'Não encontrado' });
 
   if (req.body && req.body.clear) {
     removeExercisePhotoFiles(req.params.id);
-    delete exercises[idx].photoIcon;
-    delete exercises[idx].photoFull;
-    writeJSON('exercises.json', exercises);
-    return res.json(exercises[idx]);
+    const limpo = await atualizarItemDoCatalogo('exercicios', req.params.id, (e) => { delete e.photoIcon; delete e.photoFull; });
+    if (!limpo) return res.status(404).json({ error: 'Não encontrado' });
+    return res.json(limpo);
   }
 
   const icon = decodeImageDataUrl(req.body && req.body.icon);
@@ -3156,11 +3230,13 @@ app.put('/api/exercises/:id/photo', requireAuth, requireRole('admin'), writeLimi
   }
   // ?v=<ts> quebra o cache do navegador quando a foto muda.
   const v = Date.now();
-  exercises[idx].photoIcon = `/exercise-photos/${req.params.id}-icon.jpg?v=${v}`;
-  exercises[idx].photoFull = `/exercise-photos/${req.params.id}-full.jpg?v=${v}`;
-  writeJSON('exercises.json', exercises);
-  res.json(exercises[idx]);
-});
+  const comFoto = await atualizarItemDoCatalogo('exercicios', req.params.id, (e) => {
+    e.photoIcon = `/exercise-photos/${req.params.id}-icon.jpg?v=${v}`;
+    e.photoFull = `/exercise-photos/${req.params.id}-full.jpg?v=${v}`;
+  });
+  if (!comFoto) return res.status(404).json({ error: 'Não encontrado' });
+  res.json(comFoto);
+}));
 
 // --- Trilha Skills (competências) ---
 // Etiquetas que agrupam os exercícios em "lanes" no mapa da Trilha. Antes eram
@@ -3178,30 +3254,29 @@ function sanitizeSkillColor(v) {
 }
 
 app.get('/api/trilha-skills', requireAuth, (req, res) => {
-  const skills = readJSON('trilha-skills.json', []);
+  const skills = catalogos.ler('trilha_skills');
   res.json([...skills].sort((a, b) => (Number(a.order) || 0) - (Number(b.order) || 0)));
 });
 
-app.post('/api/trilha-skills', requireAuth, requireRole('admin'), (req, res) => {
-  const skills = readJSON('trilha-skills.json', []);
+app.post('/api/trilha-skills', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const name = clampStr(req.body && req.body.name, 60).trim();
   if (!name) return res.status(400).json({ error: 'Nome é obrigatório' });
-  const skill = {
-    id: nextTrilhaSkillId(skills),
-    name,
-    color: sanitizeSkillColor(req.body && req.body.color),
-    order: nextTrilhaSkillOrder(skills),
-  };
-  skills.push(skill);
-  writeJSON('trilha-skills.json', skills);
+  // Id e ordem saem da lista DENTRO da fila: duas criações simultâneas não
+  // ganham o mesmo id.
+  const skill = await catalogos.atualizar('trilha_skills', (skills) => {
+    const nova = {
+      id: nextTrilhaSkillId(skills),
+      name,
+      color: sanitizeSkillColor(req.body && req.body.color),
+      order: nextTrilhaSkillOrder(skills),
+    };
+    return { lista: [...skills, nova], valor: nova };
+  });
   res.json(skill);
-});
+}));
 
 const TRILHA_SKILL_FIELDS = ['name', 'color', 'order'];
-app.put('/api/trilha-skills/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const skills = readJSON('trilha-skills.json', []);
-  const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
-  if (idx === -1) return res.status(404).json({ error: 'Competência não encontrada' });
+app.put('/api/trilha-skills/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const patch = pickFields(req.body, TRILHA_SKILL_FIELDS);
   if ('name' in patch) {
     const name = clampStr(patch.name, 60).trim();
@@ -3209,25 +3284,34 @@ app.put('/api/trilha-skills/:id', requireAuth, requireRole('admin'), (req, res) 
     patch.name = name;
   }
   if ('color' in patch) patch.color = sanitizeSkillColor(patch.color);
-  if ('order' in patch) patch.order = Number.isFinite(Number(patch.order)) ? Number(patch.order) : skills[idx].order;
-  skills[idx] = { ...skills[idx], ...patch };
-  writeJSON('trilha-skills.json', skills);
-  res.json(skills[idx]);
-});
+  const salva = await catalogos.atualizar('trilha_skills', (skills) => {
+    const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
+    if (idx === -1) return {};
+    const p = { ...patch };
+    if ('order' in p) p.order = Number.isFinite(Number(p.order)) ? Number(p.order) : skills[idx].order;
+    skills[idx] = { ...skills[idx], ...p };
+    return { lista: skills, valor: skills[idx] };
+  });
+  if (!salva) return res.status(404).json({ error: 'Competência não encontrada' });
+  res.json(salva);
+}));
 
-app.delete('/api/trilha-skills/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const skills = readJSON('trilha-skills.json', []);
-  const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
-  if (idx === -1) return res.status(404).json({ error: 'Competência não encontrada' });
-  const skillId = skills[idx].id;
-  const inUse = readJSON('exercises.json', []).filter((e) => String(e.skillId) === String(skillId)).length;
-  if (inUse > 0) {
-    return res.status(409).json({ error: `Existem ${inUse} exercício(s) usando esta competência. Mova-os para outra competência antes de excluir.` });
+app.delete('/api/trilha-skills/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const r = await catalogos.atualizar('trilha_skills', (skills) => {
+    const idx = skills.findIndex((s) => String(s.id) === String(req.params.id));
+    if (idx === -1) return { valor: { status: 404 } };
+    const skillId = skills[idx].id;
+    const inUse = catalogos.ler('exercicios').filter((e) => String(e.skillId) === String(skillId)).length;
+    if (inUse > 0) return { valor: { status: 409, inUse } };
+    skills.splice(idx, 1);
+    return { lista: skills, valor: { status: 200 } };
+  });
+  if (r.status === 404) return res.status(404).json({ error: 'Competência não encontrada' });
+  if (r.status === 409) {
+    return res.status(409).json({ error: `Existem ${r.inUse} exercício(s) usando esta competência. Mova-os para outra competência antes de excluir.` });
   }
-  skills.splice(idx, 1);
-  writeJSON('trilha-skills.json', skills);
   res.json({ ok: true });
-});
+}));
 
 // --- FreePlay Characters (System 2) ---
 function sanitizeCharacterPayload(body) {
@@ -3239,14 +3323,8 @@ function sanitizeCharacterPayload(body) {
 // --- Recorde 👑 por paciente (maior nota do Competitivo) ---
 // Substituiu o Modo Desafio: o 👑 no card não é mais uma disputa à parte, é só a
 // MAIOR nota que alguém já tirou naquele paciente no modo Competitivo. Mora fora
-// de logs.json porque os logs expiram em 30 dias e o recorde é permanente.
-function readCharacterRecords() {
-  const data = readJSON('character-records.json', {});
-  return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
-}
-function writeCharacterRecords(data) {
-  writeJSON('character-records.json', data);
-}
+// dos logs porque os logs expiram em 30 dias e o recorde é permanente
+// (tabela character_records).
 // Snapshot público: nota + quem tirou. Sem userId — o card não precisa e não vale
 // expor id de aluno pra turma inteira.
 function publicRecord(r) {
@@ -3261,56 +3339,29 @@ function publicRecord(r) {
   };
 }
 // Registra a nota como recorde do paciente se ela superar a atual. Empate NÃO
-// troca o dono (quem chegou primeiro fica com o 👑). `holder` é { userId, userName }
-// — a foto é buscada em users.json na hora (visitante não tem, e nem entra aqui).
-function updateCharacterRecord(characterId, score, holder) {
-  if (!characterId || !Number.isFinite(score) || !holder || !holder.userId) return null;
-  const records = readCharacterRecords();
-  const cur = records[characterId];
-  if (cur && Number.isFinite(cur.score) && cur.score >= score) return null;
-  const photo = (readJSON('users.json').find((u) => u.id === holder.userId) || {}).profilePhoto || null;
-  records[characterId] = {
-    score,
-    userId: holder.userId,
+// troca o dono (quem chegou primeiro fica com o 👑). `holder` é
+// { userId, userName, userPhoto } — quem chama já tem a conta em mãos (visitante
+// não tem, e nem entra aqui).
+async function updateCharacterRecord(characterId, score, holder) {
+  if (!characterId || !Number.isFinite(score) || !holder) return null;
+  const origem = holder.origem === 'selecao' ? 'selecao' : 'competitivo';
+  // Competitivo exige userId de aluno real (não candidato). Seletivo aceita
+  // userId null — o nome vem do candidato copiado agora (spec §9).
+  if (origem === 'competitivo' && !holder.userId) return null;
+  if (origem === 'selecao' && !holder.userName) return null;
+  return mmrRepo.registrarRecorde(characterId, score, {
+    userId: holder.userId || null,
     userName: holder.userName || 'Aluno',
-    userPhoto: photo,
-    at: new Date().toISOString(),
-  };
-  writeCharacterRecords(records);
-  return records[characterId];
+    userPhoto: holder.userPhoto || null,
+    origem,
+  });
 }
 
-// Backfill one-shot: semeia os recordes com as notas competitivas que já estão
-// em logs.json (antes desta funcionalidade existir). Idempotente via marker.
-(function migrateCharacterRecords() {
-  const migrations = readJSON('migrations.json', {});
-  if (migrations.character_records_backfill) return;
-  const records = readCharacterRecords();
-  let seeded = 0;
-  for (const l of readJSON('logs.json')) {
-    if (l.type !== 'freeplay' || l.mode !== 'competitive') continue;
-    if (!l.itemId || !Number.isFinite(l.score)) continue;
-    const cur = records[l.itemId];
-    if (cur && Number.isFinite(cur.score) && cur.score >= l.score) continue;
-    records[l.itemId] = {
-      score: l.score,
-      userId: l.userId || null,
-      userName: l.userName || 'Aluno',
-      userPhoto: null,
-      at: l.timestamp || null,
-    };
-    seeded++;
-  }
-  if (seeded > 0) writeCharacterRecords(records);
-  migrations.character_records_backfill = new Date().toISOString();
-  writeJSON('migrations.json', migrations);
-  console.log(`[migration] recordes 👑 semeados a partir de ${seeded} log(s) competitivo(s).`);
-})();
 
-app.get('/api/freeplay', requireAuth, (req, res) => {
-  const list = readJSON('freeplay-characters.json');
-  const mmr = readMMR();
-  const records = readCharacterRecords();
+app.get('/api/freeplay', requireAuth, rota(async (req, res) => {
+  const list = catalogos.ler('freeplay');
+  const [characters, records] = await Promise.all([mmrRepo.personagens(), mmrRepo.recordes()]);
+  const mmr = { characters };
   // "Paciente em Destaque": o ÚLTIMO personagem cadastrado (a lista é gravada em
   // ordem de inserção). É só um truque de front — o card ganha fundo amarelo no
   // Competitivo pra puxar atenção e calibrar o TRI do personagem novo, que ainda
@@ -3321,41 +3372,39 @@ app.get('/api/freeplay', requireAuth, (req, res) => {
   const withExtras = (base, c) => ({
     ...base,
     difficulty: mmrEngine.characterDifficulty(mmr.characters[c.id]),
-    competitiveMatches: (mmr.characters[c.id] && mmr.characters[c.id].n_D) || 0,
+    // n_D total do caso (spec §12): soma dos movimentos do D em todos os
+    // critérios. O motor por critério guarda n_D dentro de cada `criterios[id]`.
+    competitiveMatches: Object.values(
+      mmrEngine.characterView(mmr.characters[c.id]).criterios || {}
+    ).reduce((a, cc) => a + (cc.n_D || 0), 0),
     record: publicRecord(records[c.id]),
     featured: c.id === featuredId,
   });
   res.json(
     list.map((c) => withExtras(isAdmin(req.user) ? c : publicFreeplayChar(c), c)),
   );
-});
+}));
 
-app.post('/api/freeplay', requireAuth, requireRole('admin'), (req, res) => {
-  const chars = readJSON('freeplay-characters.json');
+app.post('/api/freeplay', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const c = { id: 'fp' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'), ...sanitizeCharacterPayload(req.body) };
-  chars.push(c);
-  writeJSON('freeplay-characters.json', chars);
+  await catalogos.atualizar('freeplay', (lista) => ({ lista: [...lista, c] }));
   res.json(c);
-});
+}));
 
 const FREEPLAY_FIELDS = ['name', 'age', 'description', 'assistantId', 'specificInstruction', 'evaluationCriteria'];
 
-app.put('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const chars = readJSON('freeplay-characters.json');
-  const idx = chars.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  chars[idx] = { ...chars[idx], ...sanitizeCharacterPayload(pickFields(req.body, FREEPLAY_FIELDS)) };
-  writeJSON('freeplay-characters.json', chars);
-  res.json(chars[idx]);
-});
+app.put('/api/freeplay/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const patch = sanitizeCharacterPayload(pickFields(req.body, FREEPLAY_FIELDS));
+  const salvo = await atualizarItemDoCatalogo('freeplay', req.params.id, (c) => Object.assign(c, patch));
+  if (!salvo) return res.status(404).json({ error: 'Não encontrado' });
+  res.json(salvo);
+}));
 
-app.delete('/api/freeplay/:id', requireAuth, requireRole('admin'), (req, res) => {
-  let chars = readJSON('freeplay-characters.json');
-  chars = chars.filter(c => c.id !== req.params.id);
-  writeJSON('freeplay-characters.json', chars);
+app.delete('/api/freeplay/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  await catalogos.atualizar('freeplay', (lista) => ({ lista: lista.filter((c) => c.id !== req.params.id) }));
   removePatientPhotoFiles(req.params.id); // limpa a foto do volume junto
   res.json({ ok: true });
-});
+}));
 
 // data:image/jpeg;base64,XXXX → Buffer. Aceita só imagem; null se inválido.
 function decodeImageDataUrl(s) {
@@ -3376,17 +3425,14 @@ function removePatientPhotoFiles(id) {
 // Foto do paciente: o cliente manda o ícone (quadrado) + a imagem inteira já
 // processados (canvas → JPEG data URL). O servidor não tem lib de imagem — só
 // grava os bytes no volume e guarda a URL no personagem. `clear:true` remove.
-app.put('/api/freeplay/:id/photo', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
-  const chars = readJSON('freeplay-characters.json');
-  const idx = chars.findIndex((c) => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
+app.put('/api/freeplay/:id/photo', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
+  if (!catalogos.ler('freeplay').some((c) => c.id === req.params.id)) return res.status(404).json({ error: 'Não encontrado' });
 
   if (req.body && req.body.clear) {
     removePatientPhotoFiles(req.params.id);
-    delete chars[idx].photoIcon;
-    delete chars[idx].photoFull;
-    writeJSON('freeplay-characters.json', chars);
-    return res.json(chars[idx]);
+    const limpo = await atualizarItemDoCatalogo('freeplay', req.params.id, (c) => { delete c.photoIcon; delete c.photoFull; });
+    if (!limpo) return res.status(404).json({ error: 'Não encontrado' });
+    return res.json(limpo);
   }
 
   const icon = decodeImageDataUrl(req.body && req.body.icon);
@@ -3404,11 +3450,13 @@ app.put('/api/freeplay/:id/photo', requireAuth, requireRole('admin'), writeLimit
   }
   // ?v=<ts> quebra o cache do navegador quando a foto muda.
   const v = Date.now();
-  chars[idx].photoIcon = `/patient-photos/${req.params.id}-icon.jpg?v=${v}`;
-  chars[idx].photoFull = `/patient-photos/${req.params.id}-full.jpg?v=${v}`;
-  writeJSON('freeplay-characters.json', chars);
-  res.json(chars[idx]);
-});
+  const comFoto = await atualizarItemDoCatalogo('freeplay', req.params.id, (c) => {
+    c.photoIcon = `/patient-photos/${req.params.id}-icon.jpg?v=${v}`;
+    c.photoFull = `/patient-photos/${req.params.id}-full.jpg?v=${v}`;
+  });
+  if (!comFoto) return res.status(404).json({ error: 'Não encontrado' });
+  res.json(comFoto);
+}));
 
 // --- Neuro Characters (System 3) ---
 app.get('/api/neuro', requireAuth, (req, res) => {
@@ -3418,24 +3466,22 @@ app.get('/api/neuro', requireAuth, (req, res) => {
   if (!canUseNeuro(req.user)) {
     return res.status(403).json({ error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' });
   }
-  const list = readJSON('neuro-characters.json');
+  const list = catalogos.ler('neuro');
   res.json(canUseNeuro(req.user) ? list : list.map(publicNeuroChar));
 });
 
 const NEURO_FIELDS = ['name', 'age', 'description', 'diagnosis', 'assistantId', 'specificInstruction', 'evaluationCriteria', 'evaluationAppendix', 'recommendedTests', 'testResults'];
 
-app.post('/api/neuro', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
-  const chars = readJSON('neuro-characters.json');
+app.post('/api/neuro', requireAuth, requireRole('admin', 'supervisor'), rota(async (req, res) => {
   const base = sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS));
   const c = {
     id: 'nr' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     ...base,
     ...sanitizeNeuroTestFields(req.body),
   };
-  chars.push(c);
-  writeJSON('neuro-characters.json', chars);
+  await catalogos.atualizar('neuro', (lista) => ({ lista: [...lista, c] }));
   res.json(c);
-});
+}));
 
 // Catálogo de testes neuropsicológicos (fonte única — server/neuro-tests.js).
 // Não é gabarito: é a lista pública usada pelo TestSelector do aluno e pelo
@@ -3451,52 +3497,54 @@ app.post('/api/neuro/:id/compare-tests', requireAuth, (req, res) => {
   if (!canUseNeuro(req.user)) {
     return res.status(403).json({ error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' });
   }
-  const char = readJSON('neuro-characters.json').find((c) => String(c.id) === String(req.params.id));
+  const char = catalogos.ler('neuro').find((c) => String(c.id) === String(req.params.id));
   if (!char) return res.status(404).json({ error: 'Paciente não encontrado' });
   const selected = Array.isArray(req.body && req.body.selectedTests) ? req.body.selectedTests : [];
   const comparison = compareNeuroTests(char.recommendedTests, char.testResults, selected);
   res.json(comparison);
 });
 
-app.put('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
-  const chars = readJSON('neuro-characters.json');
-  const idx = chars.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Não encontrado' });
-  chars[idx] = {
-    ...chars[idx],
+app.put('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), rota(async (req, res) => {
+  const patch = {
     ...sanitizeCharacterPayload(pickFields(req.body, NEURO_FIELDS)),
     ...sanitizeNeuroTestFields(req.body),
   };
-  writeJSON('neuro-characters.json', chars);
-  res.json(chars[idx]);
-});
+  const salvo = await atualizarItemDoCatalogo('neuro', req.params.id, (c) => Object.assign(c, patch));
+  if (!salvo) return res.status(404).json({ error: 'Não encontrado' });
+  res.json(salvo);
+}));
 
-app.delete('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), (req, res) => {
-  let chars = readJSON('neuro-characters.json');
-  chars = chars.filter(c => c.id !== req.params.id);
-  writeJSON('neuro-characters.json', chars);
+app.delete('/api/neuro/:id', requireAuth, requireRole('admin', 'supervisor'), rota(async (req, res) => {
+  await catalogos.atualizar('neuro', (lista) => ({ lista: lista.filter((c) => c.id !== req.params.id) }));
   res.json({ ok: true });
-});
+}));
 
 // --- Progress ---
-app.get('/api/progress/:userId', requireAuth, (req, res) => {
-  if (!canAccessUserResource(req.user, req.params.userId)) {
+app.get('/api/progress/:userId', requireAuth, rota(async (req, res) => {
+  if (!(await canAccessUserResource(req.user, req.params.userId))) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
-  const progress = readJSON('progress.json', {});
-  res.json(progress[req.params.userId] || {});
-});
+  res.json(await progressoRepo.doDono(req.params.userId));
+}));
 
-app.post('/api/progress/:userId', requireAuth, (req, res) => {
+app.post('/api/progress/:userId', requireAuth, rota(async (req, res) => {
   // Apenas o próprio aluno (ou admin) salva progresso
   if (req.user.id !== req.params.userId && req.user.role !== 'admin') {
     return res.status(403).json({ error: 'Acesso negado' });
   }
-  const progress = readJSON('progress.json', {});
-  progress[req.params.userId] = { ...progress[req.params.userId], ...req.body };
-  writeJSON('progress.json', progress);
-  res.json(progress[req.params.userId]);
-});
+  // Merge raso de cada chave do corpo, como o JSON fazia (ver server/repos/progresso.js).
+  const patch = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  let progresso;
+  try {
+    progresso = await progressoRepo.mesclar(req.params.userId, patch);
+  } catch (e) {
+    // Admin gravando para um id de conta que não existe (a FK recusa).
+    if (e.code === '23503') return res.status(404).json({ error: 'Usuário não encontrado' });
+    throw e;
+  }
+  if (!progresso) return res.status(404).json({ error: 'Usuário não encontrado' });
+  res.json(progresso);
+}));
 
 // Estatísticas da Trilha (barra superior): exercícios concluídos (distintos,
 // aprovados com nota ≥ 75), nível derivado dessa contagem e Constância (streak
@@ -3509,12 +3557,11 @@ function trilhaLevel(completed) {
   for (const t of TRILHA_LEVEL_THRESHOLDS) if (completed >= t) level++;
   return level; // 1..5
 }
-app.get('/api/trilha/:userId', requireAuth, (req, res) => {
-  if (!canAccessUserResource(req.user, req.params.userId)) {
+app.get('/api/trilha/:userId', requireAuth, rota(async (req, res) => {
+  if (!(await canAccessUserResource(req.user, req.params.userId))) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
-  const progressAll = readJSON('progress.json', {});
-  const userProgress = progressAll[req.params.userId] || {};
+  const userProgress = await progressoRepo.doDono(req.params.userId);
   let completed = 0;
   for (const k of Object.keys(userProgress)) {
     const p = userProgress[k];
@@ -3526,96 +3573,59 @@ app.get('/api/trilha/:userId', requireAuth, (req, res) => {
   const level = trilhaLevel(completed);
   const nextThreshold = level < 5 ? TRILHA_LEVEL_THRESHOLDS[level - 1] : null;
 
-  const exerciseLogs = readJSON('logs.json', [])
-    .filter((l) => l && String(l.userId) === String(req.params.userId) && l.type === 'exercise');
+  const exerciseLogs = (await logsRepo.listarDoDono(req.params.userId))
+    .filter((l) => l.type === 'exercise');
   const constancia = computeDailyStreak(exerciseLogs);
 
   res.json({ completed, level, nextThreshold, pass: TRILHA_PASS, constancia });
-});
+}));
 
 // --- Logs ---
-// Logs expiram automaticamente em 30 dias e são removidos do disco — medida
-// preventiva pra conter o crescimento do logs.json a longo prazo. A data de
-// expiração de cada log é derivada (timestamp + TTL) e exposta no GET pra que
-// o cliente exiba o aviso pros 3 perfis (aluno, professor, admin).
-const LOG_TTL_DAYS = 30;
-const LOG_TTL_MS = LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
+// Logs de atendimento são PERSISTENTES: o histórico do aluno é o registro do
+// treino dele e do que o supervisor precisa consultar, sem janela de expiração
+// (demandas.md §24.0).
 
-function logExpiresAt(log) {
-  const t = new Date(log.timestamp || log.createdAt || 0).getTime();
-  if (!Number.isFinite(t) || t === 0) return null;
-  return new Date(t + LOG_TTL_MS).toISOString();
-}
-
-// Remove logs com mais de LOG_TTL_DAYS. Idempotente; só grava se algo mudou.
-// Logs sem timestamp válido são preservados (não dá pra estimar a idade).
-// Retorna a quantidade removida.
-function pruneExpiredLogs() {
-  let logs;
-  try { logs = readJSON('logs.json'); } catch { return 0; }
-  if (!Array.isArray(logs) || logs.length === 0) return 0;
-  const cutoff = Date.now() - LOG_TTL_MS;
-  const kept = logs.filter((l) => {
-    const t = new Date(l.timestamp || l.createdAt || 0).getTime();
-    if (!Number.isFinite(t) || t === 0) return true;
-    return t >= cutoff;
-  });
-  if (kept.length === logs.length) return 0;
-  writeJSON('logs.json', kept);
-  return logs.length - kept.length;
-}
-
-// Anexa expiresAt (derivado) a cada log devolvido — não é persistido.
-function decorateLogs(arr) {
-  return arr.map((l) => ({ ...l, expiresAt: logExpiresAt(l) }));
-}
-
-app.get('/api/logs', requireAuth, (req, res) => {
-  pruneExpiredLogs();
-  const logs = readJSON('logs.json');
-  const users = readJSON('users.json');
-
-  // criteriaScores (notas por critério do avaliador) são só pra supervisor/admin.
-  // Aluno (interno ou externo) e visitante recebem o log SEM esse campo — e sem
-  // o evalPartsId, que é a chave do arquivo com as ANÁLISES por critério
-  // (a rota que o serve já exige supervisor/admin, mas o aluno não tem por que
-  // receber nem a chave).
+app.get('/api/logs', requireAuth, rota(async (req, res) => {
+  // Aluno (interno ou externo) e visitante recebem o log SEM o evalPartsId, que
+  // é a chave do arquivo com as ANÁLISES por critério (escritas com o gabarito
+  // à vista; a rota que o serve exige supervisor/admin). As NOTAS por critério
+  // (criteriaScores) o aluno vê, desde que "Notas por critério e gráfico"
+  // esteja liberado para o perfil dele em Acessos (decisão de 2026-09, §18).
   const isStudent = isAluno(req.user.role) || req.user.role === 'visitor';
-  const serve = (arr) => {
-    const decorated = decorateLogs(arr);
-    if (!isStudent) return decorated;
-    return decorated.map(({ criteriaScores, evalPartsId, ...rest }) => rest);
+  const veNotas = !isStudent || !funcionalidadeBloqueada(req.user, 'graficoCriterios');
+  // Filtro por tag (?tag=<id>) na visão de supervisor e admin: só os logs das
+  // contas com aquela tag.
+  const comTag = !isStudent && req.query.tag ? await tagsRepo.contasComTag(req.query.tag) : null;
+  const serve = (lista) => {
+    const arr = comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista;
+    if (!isStudent) return arr;
+    return arr.map(({ criteriaScores, criteriaNames, evalPartsId, ...rest }) => (
+      veNotas ? { ...rest, criteriaScores, criteriaNames } : rest
+    ));
   };
 
   // Aluno e visitante: só os próprios.
   if (isAluno(req.user.role) || req.user.role === 'visitor') {
-    return res.json(serve(logs.filter(l => l.userId === req.user.id)));
+    return res.json(serve(await logsRepo.listarDoDono(req.user.id)));
   }
 
   // Filtro por userId específico
   if (req.query.userId) {
-    if (!canAccessUserResource(req.user, req.query.userId)) {
+    if (!(await canAccessUserResource(req.user, req.query.userId))) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
-    return res.json(serve(logs.filter(l => l.userId === req.query.userId)));
+    return res.json(serve(await logsRepo.listarDoDono(req.query.userId)));
   }
 
   // Professor: apenas logs de seus alunos
   if (req.user.role === 'supervisor') {
-    const myStudents = new Set(
-      users.filter(u => isAluno(u.role) && u.teacherId === req.user.id).map(u => u.id)
-    );
-    return res.json(serve(logs.filter(l => myStudents.has(l.userId))));
+    const myStudents = (await contasRepo.alunosDoProfessor(req.user.id)).map(u => u.id);
+    return res.json(serve(await logsRepo.listarDeContas(myStudents)));
   }
 
   // Admin: tudo
-  res.json(serve(logs));
-});
-
-// Metadados da política de expiração — o cliente usa pra montar o aviso.
-app.get('/api/logs/policy', requireAuth, (req, res) => {
-  res.json({ ttlDays: LOG_TTL_DAYS });
-});
+  res.json(serve(await logsRepo.listarTodos()));
+}));
 
 // NOTA E FEEDBACK POR CRITÉRIO de um log — SÓ supervisor e admin.
 //
@@ -3626,11 +3636,11 @@ app.get('/api/logs/policy', requireAuth, (req, res) => {
 //
 // O gate é de ROLE, não de propriedade — de propósito. Um supervisor lê os
 // critérios de qualquer log; um aluno não lê nem os do log dele.
-app.get('/api/logs/:id/criterios', requireAuth, (req, res) => {
+app.get('/api/logs/:id/criterios', requireAuth, rota(async (req, res) => {
   if (!oficial.podeVerCriterios(req.user.role)) {
     return res.status(403).json({ error: 'Nota e feedback por critério são visíveis apenas a supervisor e administrador.' });
   }
-  const log = readJSON('logs.json').find((l) => String(l.id) === String(req.params.id));
+  const log = await logsRepo.porId(req.params.id);
   if (!log) return res.status(404).json({ error: 'Log não encontrado' });
   if (!log.evalPartsId) {
     // Log antigo (avaliador de prompt único) ou sem avaliação: as notas por
@@ -3640,7 +3650,7 @@ app.get('/api/logs/:id/criterios', requireAuth, (req, res) => {
   const detalhe = oficial.lerDetalhe(log.evalPartsId);
   if (!detalhe) return res.json({ disponivel: false, motivo: 'O detalhe desta avaliação não está mais no volume.' });
   res.json({ disponivel: true, ...oficial.detalheParaSupervisor(detalhe) });
-});
+}));
 
 // Cap de tamanho pra prevenir bloat em logs.json e ataques de fillup.
 const LOG_MAX_TITLE = 200;
@@ -3823,7 +3833,20 @@ function extractDailyMissionResult(evaluation) {
   return extractResultBlock(evaluation, 'missao-diaria-resultado', 'daily_completed');
 }
 
-app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
+// { '1': nome, ... } da régua ATIVA, se e somente se os números das notas forem
+// exatamente os da régua. Fora disso devolve null: nome errado num gráfico é
+// pior que nome nenhum.
+async function nomesDaReguaPara(notas) {
+  const ativos = (await promptsRepo.criteriosDa(criteriosMd.REGUA)).filter((c) => c.ativo);
+  if (!ativos.length) return null;
+  const daRegua = new Set(ativos.map((c) => String(c.ordem)));
+  const doLog = Object.keys(notas);
+  if (doLog.length !== daRegua.size) return null;
+  if (!doLog.every((k) => daRegua.has(String(k)))) return null;
+  return Object.fromEntries(ativos.map((c) => [String(c.ordem), c.nome]));
+}
+
+app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
   // Allowlist explícita de campos: visitor não consegue "plantar bandeira"
   // com campos arbitrários, e mass-assignment fica bloqueado. userId/userName
   // são sempre forçados do JWT.
@@ -3904,7 +3927,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // adulteração) — o cliente só manda os ids selecionados. Só para type 'neuro'.
   let neuroTests = null;
   if (body.type === 'neuro' && Array.isArray(body.neuroSelectedTests)) {
-    const nchar = readJSON('neuro-characters.json').find((c) => String(c.id) === String(body.itemId));
+    const nchar = catalogos.ler('neuro').find((c) => String(c.id) === String(body.itemId));
     if (nchar) {
       neuroTests = compareNeuroTests(nchar.recommendedTests, nchar.testResults, body.neuroSelectedTests);
       // Justificativas do aluno por teste (só ids válidos, texto limitado).
@@ -3923,6 +3946,32 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     }
   }
 
+  // Nomes dos critérios gravados JUNTO com as notas. O avaliador oficial (v34)
+  // já os traz no detalhe; os outros caminhos (bloco [notas-supervisor] do
+  // v18.25, logs de texto) só mandavam os números, e aí a tela caía numa lista
+  // FIXA no cliente (labelsForCriteria). Enquanto a régua tinha os 8 nomes de
+  // sempre isso passava despercebido — mas com "Adicionar critério" (§16.6) o
+  // admin pode renomear, e a tela da sessão mostraria o nome antigo enquanto o
+  // Perfil, que resolve pela régua, mostraria o novo.
+  //
+  // Só carimba na Simulação (`freeplay`): Neuro tem régua própria (v18.25) e a
+  // Trilha tem critérios próprios, e carimbar os nomes do v34 neles seria
+  // trocar um rótulo errado por outro. E só quando as notas batem exatamente
+  // com a régua — melhor ficar sem nome (e cair no fallback de hoje) do que
+  // somar a nota de um critério ao nome de outro.
+  let criteriaNames = criteriosOficiais ? oficial.nomesPorCriterio(detalheOficial) : null;
+  const notasDoLog = criteriosOficiais || explicitCriteria || supervisorCriteria || null;
+  if (!criteriaNames && notasDoLog && body.type === 'freeplay') {
+    // Melhor um log sem os nomes (que cai no fallback da tela) do que perder o
+    // atendimento inteiro do aluno porque uma consulta falhou. O caminho antigo
+    // era puro e não podia lançar; este toca o banco, então precisa da guarda.
+    try {
+      criteriaNames = await nomesDaReguaPara(notasDoLog);
+    } catch (e) {
+      registrarErro(req, e, 'POST /api/logs (nomes dos critérios)', { status: 200 });
+    }
+  }
+
   const log = {
     id: logId,
     timestamp: new Date().toISOString(),
@@ -3934,7 +3983,8 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     difficulty: typeof body.difficulty === 'string' ? body.difficulty.slice(0, 32) : null,
     durationSeconds: Number.isFinite(body.durationSeconds) ? Math.max(0, Math.floor(body.durationSeconds)) : 0,
     score: finalScore,
-    criteriaScores: criteriosOficiais || explicitCriteria || supervisorCriteria || null,
+    criteriaScores: notasDoLog,
+    criteriaNames,
     evaluation: clampStr(textoOficial || cleanEvaluation, LOG_MAX_EVAL_LEN),
     // Avaliador oficial: versão do pipeline que corrigiu e o id do arquivo com
     // as análises. O `evalPartsId` é só uma chave — o conteúdo é servido
@@ -3954,9 +4004,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     userName: req.user.name,
   };
 
-  const logs = readJSON('logs.json');
-  logs.push(log);
-  writeJSON('logs.json', logs);
+  await logsRepo.criar(log);
 
   // Atendimento finalizado: fecha a sessão daquela chave na cota do Aluno
   // Externo. O slot já gasto continua contando; o que muda é que reabrir aquele
@@ -3972,7 +4020,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // /api/competitive/finish + finalizeCompetitiveEvals. Sem evaluation/score
   // não há o que anunciar (ex.: Simulação Livre do visitante, sem avaliador).
   if (mode !== 'competitive' && (log.evaluation || Number.isFinite(log.score))) {
-    upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
+    await upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
       type: 'evaluation_ready',
       message: `Sua avaliação${log.itemTitle ? ` de "${log.itemTitle}"` : ''} está pronta.`,
     });
@@ -3981,8 +4029,8 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // MMR competitivo: partida válida = freeplay + mode competitive + nota
   // numérica + usuário real (visitante tem id efêmero, fica de fora). A nota S
   // é a nota crua (0..100) do avaliador, parseada no cliente — mesmo modelo de
-  // confiança do ranking de notas que já existia. Atualização atômica do
-  // mmr.json (read-modify-write na mesma request).
+  // confiança do ranking de notas que já existia. Transação no banco com o
+  // aluno e o paciente travados.
   let mmrResult = null;
   if (
     mode === 'competitive' &&
@@ -3991,27 +4039,34 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     log.itemId &&
     req.user.role !== 'visitor'
   ) {
-    const mmr = readMMR();
-    const { player, character, result } = mmrEngine.updateMatch(
-      mmr.players[req.user.id],
-      mmr.characters[log.itemId],
-      log.score,
-    );
-    mmr.players[req.user.id] = player;
-    mmr.characters[log.itemId] = character;
-    if (!result.calibratingBefore) bumpTriFonte(mmr, log.itemId, 'competitivo');
-    writeMMR(mmr);
+    const criteriosById = await criteriosByIdParaMotor(log.criteriaScores);
+    const result = await aplicarPartidaCompetitiva(req.user.id, log.itemId, criteriosById, log.score, req.user.role);
     mmrResult = result;
-    // Grava o MMR antes/depois desta partida no log (conquista "Consistente":
-    // MMR arredondado inalterado). Reescreve o log já persistido.
-    log.mmrBefore = Math.round(result.P_before);
-    log.mmrAfter = Math.round(result.P_after);
-    writeJSON('logs.json', logs);
+    // Total derivado antes/depois desta partida (spec §5). Guarda como inteiro
+    // para bater com a coluna mmr_before/mmr_after (que a conquista "Consistente"
+    // consulta como o MMR arredondado da época).
+    const antes = mmrEngine.agregarTotal(Object.fromEntries(
+      Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
+    const depois = mmrEngine.agregarTotal(Object.fromEntries(
+      Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
+    log.mmrBefore = antes == null ? null : Math.round(antes);
+    log.mmrAfter = depois == null ? null : Math.round(depois);
+    // mmr_delta: auditoria completa (spec §12) — MMR antes/depois por critério
+    // e total. Fica no próprio log, para o supervisor consultar depois.
+    log.mmrDelta = {
+      total: { before: antes, after: depois },
+      criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
+        [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
+      ))),
+    };
+    await logsRepo.atualizar(log.id, { mmrBefore: log.mmrBefore, mmrAfter: log.mmrAfter, mmrDelta: log.mmrDelta });
 
-    // Recorde 👑 do paciente: mesma porta de entrada do MMR (competitivo, nota
-    // numérica, usuário real). Best-effort — nada aqui derruba a submissão.
+    // Recorde 👑 do paciente: competitivo, nota numérica, usuário real (spec §9).
     try {
-      updateCharacterRecord(log.itemId, log.score, { userId: req.user.id, userName: req.user.name });
+      await updateCharacterRecord(log.itemId, log.score, {
+        userId: req.user.id, userName: req.user.name, userPhoto: req.user.profilePhoto,
+        origem: 'competitivo',
+      });
     } catch (err) {
       console.error('updateCharacterRecord falhou:', err.message);
     }
@@ -4028,7 +4083,9 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     Number.isFinite(log.score) &&
     log.itemId
   ) {
-    registrarTriAnonimo('visitante', log.itemId, log.score).catch(() => {});
+    criteriosByIdParaMotor(log.criteriaScores)
+      .then((c) => registrarTriAnonimo('visitante', log.itemId, c, log.score))
+      .catch(() => {});
   }
 
   // Sidequest: só no Treinamento (freeplay + mode 'training'). Se o aluno tinha
@@ -4041,7 +4098,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
   // concedendo uma missão que nunca foi ao prompt do avaliador.
   const missionEligible = log.type === 'freeplay' && mode === 'training' && req.user.role !== 'visitor';
   const { sidequest: activeMissionSq, daily: activeMissionDaily } = missionEligible
-    ? resolveTrainingMission(req.user.id)
+    ? resolveTrainingMission(req.user)
     : { sidequest: null, daily: null };
 
   let sidequestOutcome = null;
@@ -4049,7 +4106,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     const active = activeMissionSq;
     if (active && sidequestResult) {
       if (sidequestResult.completed) {
-        const record = completeSidequest(req.user.id, sidequestResult.justification, {
+        const record = await completeSidequest(req.user.id, sidequestResult.justification, {
           characterId: log.itemId,
           characterName: log.itemTitle,
         });
@@ -4061,7 +4118,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
             rewardTitleLabel: record.rewardTitleLabel,
           };
           // Avisa no sino (com som): ganhou a sidequest e o título de recompensa.
-          pushNotification(req.user.id, {
+          await pushNotification(req.user.id, {
             type: 'sidequest_completed',
             sidequestId: record.sidequestId,
             title: record.title,
@@ -4085,7 +4142,7 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
     const activeDaily = activeMissionDaily;
     if (activeDaily && dailyResult) {
       if (dailyResult.completed) {
-        const record = completeDailyMission(req.user.id, dailyResult.justification, {
+        const record = await completeDailyMission(req.user.id, dailyResult.justification, {
           characterId: log.itemId,
           characterName: log.itemTitle,
         });
@@ -4105,31 +4162,46 @@ app.post('/api/logs', requireAuth, writeLimiter, (req, res) => {
 
   // Streak de missões diárias (conquista "Bom garoto" = 7 dias seguidos). Conta
   // com o novo log já incluído; visitante não acumula.
+  // Os logs do aluno, já com o novo — valem para o streak e para as conquistas.
+  const meusLogs = req.user.role !== 'visitor' ? await logsRepo.listarDoDono(req.user.id) : [];
   if (req.user.role !== 'visitor') {
-    updateDailyMissionStreak(req.user.id, logs.filter((l) => l.userId === req.user.id));
+    await updateDailyMissionStreak(req.user.id, meusLogs);
   }
 
   // Conquistas que esta sessão acabou de desbloquear → notifica no sino (com som).
   // Best-effort: nada aqui pode derrubar a submissão da sessão.
   if (req.user.role !== 'visitor') {
     try {
-      const myLogs = logs.filter((l) => l.userId === req.user.id);
+      const myLogs = meusLogs;
       const stk = computeStreak(myLogs);
-      const { unlocked } = achievementsForUser(req.user.id, myLogs, stk, readJSON('freeplay-characters.json'));
-      const claimedMap = readJSON('achievements.json', {})[req.user.id] || {};
-      notifyNewAchievements(req.user.id, unlocked, claimedMap);
+      const { unlocked } = await achievementsForUser(req.user.id, myLogs, stk, catalogos.ler('freeplay'), req.user.profilePhoto);
+      const claimedMap = await gamificacaoRepo.resgatadas(req.user.id);
+      await notifyNewAchievements(req.user.id, unlocked, claimedMap);
     } catch (err) {
       console.error('notifyNewAchievements (pós-sessão) falhou:', err.message);
     }
   }
 
-  res.json({ ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome });
-});
+  // Mesma regra do GET /api/logs: o aluno leva as próprias notas por critério
+  // (e os nomes) quando "Notas por critério e gráfico" está liberado para o
+  // perfil dele — é o que desenha o gráfico da sessão na tela pós-atendimento.
+  // A chave das ANÁLISES (evalPartsId) não vai junto: ela abre o texto escrito
+  // com o gabarito à vista, que continua só de supervisor e admin.
+  const resposta = { ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome };
+  if (isAluno(req.user.role) || req.user.role === 'visitor') {
+    resposta.evalPartsId = null;
+    if (funcionalidadeBloqueada(req.user, 'graficoCriterios')) {
+      resposta.criteriaScores = undefined;
+      resposta.criteriaNames = undefined;
+    }
+  }
+  res.json(resposta);
+}));
 
 // --- Feedback (popup ao fim da sessão, principalmente do visitante) ---
-// Coleta uma nota de 0 a 5 estrelas + mensagem livre. Lista append-only em
-// feedback.json. Qualquer usuário autenticado (inclusive visitante) pode enviar.
-app.post('/api/feedback', requireAuth, writeLimiter, (req, res) => {
+// Coleta uma nota de 0 a 5 estrelas + mensagem livre (tabela feedback). Qualquer
+// usuário autenticado (inclusive visitante) pode enviar.
+app.post('/api/feedback', requireAuth, writeLimiter, rota(async (req, res) => {
   const body = req.body || {};
   const stars = Number.isFinite(body.stars)
     ? Math.min(5, Math.max(0, Math.round(body.stars)))
@@ -4147,38 +4219,50 @@ app.post('/api/feedback', requireAuth, writeLimiter, (req, res) => {
     stars,
     message,
   };
-  const all = readJSON('feedback.json', []);
-  all.push(entry);
-  writeJSON('feedback.json', all);
+  await operacaoRepo.criarFeedback(entry);
   res.json({ ok: true });
-});
+}));
 
 // Admin: lista todo o feedback coletado (mais recente primeiro).
-app.get('/api/admin/feedback', requireAuth, requireRole('admin'), (req, res) => {
-  const all = readJSON('feedback.json', []);
-  res.json([...all].reverse());
-});
+app.get('/api/admin/feedback', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  res.json(await operacaoRepo.feedbacks());
+}));
 
 // Admin: remove uma entrada de feedback (ex.: teste do próprio admin).
-app.delete('/api/admin/feedback/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const all = readJSON('feedback.json', []);
-  const next = all.filter((f) => f.id !== req.params.id);
-  if (next.length === all.length) return res.status(404).json({ error: 'Feedback não encontrado.' });
-  writeJSON('feedback.json', next);
+app.delete('/api/admin/feedback/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  if (!(await operacaoRepo.excluirFeedback(req.params.id))) {
+    return res.status(404).json({ error: 'Feedback não encontrado.' });
+  }
   res.json({ ok: true });
+}));
+
+// --- Diagnóstico do IP (admin) ---
+// Serve para a virada: diz se o app está vendo o Cloudflare na frente. Se
+// `conexaoEhCloudflare` vier false acessando pelo domínio próprio, os limites de
+// tentativa estão usando o IP da conexão (que seria o mesmo para todo mundo) —
+// ver server/ip-real.js e a saída de emergência CONFIAR_CF_CONNECTING_IP.
+app.get('/api/admin/diagnostico-ip', requireAuth, requireRole('admin'), (req, res) => {
+  const conexao = ipRealMod.normalizarIp(req.ip);
+  res.json({
+    ipDaConexao: conexao,
+    cfConnectingIp: req.headers['cf-connecting-ip'] || null,
+    conexaoEhCloudflare: ipRealMod.ehConfiavel(IPS_CONFIAVEIS, conexao),
+    confiarSempre: CONFIAR_CF_SEMPRE,
+    ipUsadoNosLimites: clientIp(req),
+  });
 });
 
 // --- Logs de Erro (painel do admin) ---
 // Contrapartida do `falhou()`: o usuário recebe só a mensagem genérica + código,
 // e o detalhe (mensagem real, stack, quem, onde, quando) vive aqui.
-app.get('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) => {
-  const all = readJSON(errorLog.ERROR_LOG_FILE, []);
-  // Já vem do mais recente pro mais antigo (appendError insere no topo).
+app.get('/api/admin/error-logs', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  await aguardarErrosPendentes();
+  // Já vem do mais recente pro mais antigo.
   res.json({
-    errors: all,
+    errors: await operacaoRepo.erros(),
     meta: { max: errorLog.MAX_ENTRIES, ttlDays: errorLog.TTL_DAYS },
   });
-});
+}));
 
 // --- Suporte (mensagem do usuário para a administração) ---
 // A pessoa escreve na página /suporte e a mensagem cai no MESMO painel dos Logs
@@ -4218,24 +4302,24 @@ app.post('/api/suporte', requireAuth, writeLimiter, (req, res) => {
 
 // Admin: limpa o painel. Útil depois de resolver uma leva de erros, pra a
 // próxima falha não se perder no meio das antigas.
-app.delete('/api/admin/error-logs', requireAuth, requireRole('admin'), (req, res) => {
-  const antes = readJSON(errorLog.ERROR_LOG_FILE, []).length;
-  writeJSON(errorLog.ERROR_LOG_FILE, []);
+app.delete('/api/admin/error-logs', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  await aguardarErrosPendentes();
+  const antes = await operacaoRepo.limparErros();
   console.log(`[error-log] painel limpo por ${req.user.username} (${antes} entradas)`);
   res.json({ ok: true, removidos: antes });
-});
+}));
 
 // Admin: dispara um aviso (notificação in-app) para TODOS os usuários reais.
 // Cai no sino de notificações (type 'admin_notice'). Visitantes não recebem.
-app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, res) => {
+app.post('/api/admin/notifications', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const message = clampStr(req.body && req.body.message, 500).trim();
   const title = clampStr(req.body && req.body.title, 120).trim();
   if (!message) return res.status(400).json({ error: 'A mensagem do aviso é obrigatória.' });
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   let count = 0;
   for (const u of users) {
     if (!u || u.role === 'visitor') continue;
-    pushNotification(u.id, {
+    await pushNotification(u.id, {
       type: 'admin_notice',
       title: title || 'Aviso',
       message,
@@ -4245,7 +4329,7 @@ app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, re
   }
   console.log(`[admin] aviso enviado por ${req.user.username} para ${count} usuário(s)`);
   res.json({ ok: true, count });
-});
+}));
 
 // --- Ranking global de jogadores (por MMR competitivo) ---
 // O ranking ordena pelo MMR (P) do modo Competitivo. Só entra quem jogou ao
@@ -4253,18 +4337,20 @@ app.post('/api/admin/notifications', requireAuth, requireRole('admin'), (req, re
 // (calibrating=true, mmr=null) — o cliente mostra "faltam X partidas".
 //
 // Visitante não acessa nem pontua (id efêmero, sem registro de MMR).
-app.get('/api/ranking', requireAuth, (req, res) => {
+app.get('/api/ranking', requireAuth, requireFeature('ranking'), rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não tem acesso ao ranking.' });
   }
-  const users = readJSON('users.json');
-  const mmr = readMMR();
+  const users = await contasRepo.listar();
+  const mmr = { players: await mmrRepo.jogadores() };
+  // Filtro por tag (?tag=<id>): só as contas com aquela tag.
+  const comTag = req.query.tag ? await tagsRepo.contasComTag(req.query.tag) : null;
 
   const ranking = users
-    .filter((u) => u.role !== 'visitor')
+    .filter((u) => u.role !== 'visitor' && (!comTag || comTag.has(u.id)))
     .map((u) => {
       const state = mmr.players[u.id];
-      if (!state || state.n < 1) return null; // só quem jogou competitivo
+      if (!state || (Number(state.nEntradas) || 0) < 1) return null; // só quem jogou competitivo
       const view = mmrEngine.playerView(state);
       let titleLabel = null, titleTier = null;
       if (u.activeTitle) {
@@ -4282,61 +4368,55 @@ app.get('/api/ranking', requireAuth, (req, res) => {
         role: u.role,
         title: titleLabel,
         titleTier: titleTier,
-        mmr: view.mmr,
+        // MMR total derivado (spec §5): mesma escala de hoje, na casa de 0..100.
+        mmr: view.mmrTotal,
         calibrating: view.calibrating,
         matchesRemaining: view.matchesRemaining,
-        matches: state.n,
+        matches: view.nEntradas,
+        // Perfil por critério — o front usa para o radar do supervisor.
+        criterios: view.criterios,
       };
     })
     .filter(Boolean);
 
   res.json(ranking);
-});
+}));
 
 // MMR do próprio usuário (perfil / tela pós-sessão). Visitante recebe um estado
 // neutro (nunca pontua).
-app.get('/api/me/mmr', requireAuth, (req, res) => {
+app.get('/api/me/mmr', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.json(mmrEngine.playerView(null));
   }
-  const mmr = readMMR();
-  res.json(mmrEngine.playerView(mmr.players[req.user.id]));
-});
+  res.json(mmrEngine.playerView(await mmrRepo.jogador(req.user.id)));
+}));
 
 // Reset de ranking (admin-only). Zera as NOTAS de todas as sessões e o
 // progresso da trilha, mas PRESERVA os logs/transcrições e o texto das
 // avaliações — o supervisor continua revisitando as conversas, e os logs
 // seguem a regra de expiração de 30 dias normalmente. Use quando o modelo do
 // avaliador muda e as notas antigas perdem validade comparativa.
-// NÃO toca no mmr.json: por decisão do dono, o MMR competitivo sobrevive ao
+// NÃO toca no MMR: por decisão do dono, o MMR competitivo sobrevive ao
 // reset (o ranking por MMR continua intacto).
-app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, res) => {
-  const logs = readJSON('logs.json');
-  let clearedScores = 0;
+app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  // Zera nota e notas por critério de todos os logs. O detalhe por critério do
+  // avaliador oficial também é NOTA (oito delas por sessão), então cai no mesmo
+  // reset — se ficasse, o supervisor continuaria vendo notas do avaliador antigo
+  // numa tela que diz que as notas foram zeradas. O TEXTO da avaliação, que o
+  // aluno leu, é preservado como sempre: ele está no próprio log.
+  const { notasZeradas: clearedScores, evalPartsIds } = await logsRepo.zerarNotas();
   let clearedParts = 0;
-  for (const l of logs) {
-    if (l.score !== null && l.score !== undefined) clearedScores++;
-    l.score = null;
-    l.criteriaScores = null;
-    // O detalhe por critério do avaliador oficial também é NOTA (oito delas
-    // por sessão), então cai no mesmo reset — se ficasse, o supervisor
-    // continuaria vendo notas do avaliador antigo numa tela que diz que as
-    // notas foram zeradas. O TEXTO da avaliação, que o aluno leu, é preservado
-    // como sempre: ele está no próprio log.
-    if (l.evalPartsId) {
-      if (oficial.apagarDetalhe(l.evalPartsId)) clearedParts++;
-      l.evalPartsId = null;
-    }
+  for (const id of evalPartsIds) {
+    if (oficial.apagarDetalhe(id)) clearedParts++;
   }
-  writeJSON('logs.json', logs);
-  writeJSON('progress.json', {});
+  await progressoRepo.limparTudo();
   // Os recordes 👑 dos pacientes são notas do avaliador antigo — caem junto.
-  writeCharacterRecords({});
+  await mmrRepo.limparRecordes();
   console.log(`[admin] Ranking resetado por ${req.user.username}: ${clearedScores} nota(s) zerada(s), ${clearedParts} detalhe(s) por critério apagado(s), progresso e recordes limpos.`);
   res.json({ ok: true, clearedScores });
-});
+}));
 
-// --- Configurações globais da plataforma (settings.json) ---
+// --- Configurações globais da plataforma (configuracoes, chave 'settings') ---
 // Chaves controladas pelo admin (tela Administração → Modelos de IA):
 //   visitorEvaluationEnabled — liga a avaliação para VISITANTES (via Simulação
 //     Livre, o único modo que o visitante acessa). Default FALSE: no dia a dia o
@@ -4349,8 +4429,10 @@ app.post('/api/admin/ranking/reset', requireAuth, requireRole('admin'), (req, re
 // visitante, da época em que ela morava na aba Contas. Saiu em 2026-09 — o
 // visitante entrou no avaliador oficial junto com todo mundo, e trocar o modelo
 // dele é escolher na categoria "Visitante" em Administração → Modelos de IA.)
+// Cópia das configurações, da memória (server/repos/operacao.js). Síncrona de
+// propósito: o modelo de IA de cada categoria sai daqui em muitos pontos.
 function readSettings() {
-  return readJSON('settings.json', {});
+  return operacaoRepo.lerConfig('settings', {});
 }
 function visitorEvaluationEnabled() {
   return readSettings().visitorEvaluationEnabled === true;
@@ -4368,16 +4450,130 @@ app.get('/api/settings', requireAuth, (req, res) => {
 });
 
 // Toggle das flags (admin-only).
-app.put('/api/admin/settings', requireAuth, requireRole('admin'), (req, res) => {
-  const cur = readSettings();
+app.put('/api/admin/settings', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const body = req.body || {};
-  if (typeof body.visitorEvaluationEnabled === 'boolean') {
-    cur.visitorEvaluationEnabled = body.visitorEvaluationEnabled;
-  }
-  writeJSON('settings.json', cur);
+  const cur = await operacaoRepo.atualizarConfig('settings', {}, (s) => {
+    if (typeof body.visitorEvaluationEnabled !== 'boolean') return false;
+    s.visitorEvaluationEnabled = body.visitorEvaluationEnabled;
+  });
   console.log(`[admin] settings atualizado por ${req.user.username}: visitorEvaluationEnabled=${cur.visitorEvaluationEnabled === true}`);
   res.json({ visitorEvaluationEnabled: cur.visitorEvaluationEnabled === true });
+}));
+
+// --- Acessos (Administração → Acessos) --------------------------------------
+// Quem está logado recebe o que está bloqueado PARA ELE (o cliente desenha o
+// cadeado); o admin recebe e grava a matriz inteira.
+app.get('/api/acessos', requireAuth, (req, res) => {
+  const a = lerAcessos();
+  res.json({
+    bloqueadas: acessos.bloqueadasPara(a.matriz, req.user),
+    mensagemCadeado: a.mensagemCadeado || acessos.MENSAGEM_PADRAO,
+  });
 });
+
+function acessosParaAdmin() {
+  const a = lerAcessos();
+  return {
+    funcionalidades: acessos.FUNCIONALIDADES,
+    perfis: acessos.PERFIS,
+    matriz: a.matriz,
+    mensagemCadeado: a.mensagemCadeado,
+    mensagemPadrao: acessos.MENSAGEM_PADRAO,
+    modosCriterios: criteriosPerfil.MODOS,
+    modosPerfilCriterios: a.modosPerfilCriterios,
+    poolsTri: acessos.POOLS_TRI,
+    pesosTri: a.pesosTri,
+    pesoTriMin: acessos.PESO_TRI_MIN,
+    pesoTriMax: acessos.PESO_TRI_MAX,
+    visitanteTriLigado: VISITOR_TRI_ENABLED,
+    limitesExterno: a.limitesExterno,
+    opcoesPaciente: Object.entries(aiModels.PATIENT_PRESETS).map(([key, p]) => ({ key, label: p.label })),
+    opcoesAvaliador: Object.entries(aiModels.EVALUATOR_PRESETS).map(([key, p]) => ({ key, label: p.label })),
+    // Quanto o limite em dólar compra em tokens, modelo a modelo.
+    equivalencias: limitesIa.equivalencias(
+      a.limitesExterno.limiteUsd || 1,
+      Object.entries({ ...aiModels.PATIENT_PRESETS, ...aiModels.EVALUATOR_PRESETS })
+        .map(([key, p]) => ({ key, label: p.label, model: p.model })),
+    ),
+  };
+}
+
+// Média por critério das sessões avaliadas: o gráfico do perfil. A pessoa vê a
+// própria (se "Notas por critério e gráfico" estiver liberado para o perfil);
+// supervisor e admin veem a de quem acompanham (?userId=). Só números: as
+// análises escritas continuam em GET /api/logs/:id/criterios.
+app.get('/api/me/criterios', requireAuth, rota(async (req, res) => {
+  let alvo = req.user.id;
+  if (req.query.userId && String(req.query.userId) !== String(req.user.id)) {
+    if (!(await canAccessUserResource(req.user, req.query.userId))) return res.status(403).json({ error: 'Acesso negado' });
+    alvo = String(req.query.userId);
+  } else {
+    const bloqueio = funcionalidadeBloqueada(req.user, 'graficoCriterios');
+    if (bloqueio) return res.status(403).json(bloqueio);
+  }
+  if (req.user.role === 'visitor' && alvo === req.user.id) return res.json({ criterios: [], sessoes: 0, modos: [] });
+  const { modosPerfilCriterios } = lerAcessos();
+  const logs = await logsRepo.listarDoDono(alvo);
+  // Logs de antes de o nome ir junto: nomes atuais da régua que corrigiu.
+  const reguas = {};
+  for (const v of new Set(logs.filter((l) => !l.criteriaNames && l.evalVersion).map((l) => l.evalVersion))) {
+    const lista = (await promptsRepo.criteriosDa(v)).filter((c) => c.ativo);
+    reguas[v] = lista.length ? Object.fromEntries(lista.map((c) => [String(c.ordem), c.nome])) : null;
+  }
+  // Critérios renomeados com "manter histórico" e editados com "zerar".
+  const apelidos = {};
+  const desde = {};
+  for (const c of await promptsRepo.identidadesDeCriterios()) {
+    for (const antigo of c.nomesAnteriores) apelidos[criteriosPerfil.chaveDoNome(antigo)] = c.nome;
+    if (c.historicoDesde) desde[criteriosPerfil.chaveDoNome(c.nome)] = c.historicoDesde;
+  }
+  const r = criteriosPerfil.mediasPorCriterio(logs, {
+    modos: modosPerfilCriterios, nomesDaRegua: (v) => reguas[v], apelidos, desde,
+  });
+  res.json({ ...r, modos: criteriosPerfil.MODOS.filter((m) => modosPerfilCriterios.includes(m.key)) });
+}));
+
+// Uso de IA do próprio Terapeuta externo na janela de 7 dias (para a tela
+// explicar o bloqueio). Outros perfis não têm limite.
+app.get('/api/me/uso-ia', requireAuth, rota(async (req, res) => {
+  if (req.user.role !== 'external') return res.json({ temLimite: false });
+  const cfg = lerAcessos().limitesExterno;
+  if (!limitesIa.temLimite(cfg)) return res.json({ temLimite: false });
+  const est = limitesIa.estado(await usoIaRepo.somaJanela(req.user.id, limitesIa.JANELA_MS), cfg);
+  res.json({ temLimite: true, ...est });
+}));
+
+// Uso de cada Terapeuta externo nos últimos 7 dias, contra o limite.
+app.get('/api/admin/uso-ia', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const cfg = lerAcessos().limitesExterno;
+  const linhas = await usoIaRepo.resumoDoPapel('external', limitesIa.JANELA_MS);
+  res.json({
+    janelaDias: 7,
+    limiteUsd: cfg.limiteUsd,
+    limiteTokens: cfg.limiteTokens,
+    contas: linhas.map((l) => ({
+      userId: l.userId, name: l.name, username: l.username,
+      ...limitesIa.estado(l, cfg),
+    })),
+  });
+}));
+
+app.get('/api/admin/acessos', requireAuth, requireRole('admin'), (req, res) => {
+  res.json(acessosParaAdmin());
+});
+
+app.put('/api/admin/acessos', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const body = req.body || {};
+  await operacaoRepo.atualizarConfig('acessos', {}, (c) => {
+    if (body.matriz !== undefined) c.matriz = acessos.normalizarMatriz(body.matriz);
+    if (body.mensagemCadeado !== undefined) c.mensagemCadeado = acessos.normalizarMensagem(body.mensagemCadeado);
+    if (body.modosPerfilCriterios !== undefined) c.modosPerfilCriterios = criteriosPerfil.normalizarModos(body.modosPerfilCriterios);
+    if (body.limitesExterno !== undefined) c.limitesExterno = limitesIa.normalizarConfig(body.limitesExterno, PRESETS_LIMITES);
+    if (body.pesosTri !== undefined) c.pesosTri = acessos.normalizarPesosTri(body.pesosTri, TRI_PESOS_PADRAO);
+  });
+  console.log(`[admin] acessos atualizados por ${req.user.username}`);
+  res.json(acessosParaAdmin());
+}));
 
 // --- Modelos de IA por categoria (admin-only) -------------------------------
 // GET devolve as opções + o que cada categoria está rodando agora (spec efetivo,
@@ -4387,86 +4583,80 @@ app.get('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) =>
   res.json(aiModels.catalogo({ settings: readSettings(), fallbacks: aiCategoryDefaults() }));
 });
 
-app.put('/api/admin/ai-models', requireAuth, requireRole('admin'), (req, res) => {
+app.put('/api/admin/ai-models', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const { categoria, evaluator, patient, global: escopoGlobal } = req.body || {};
-  const cur = readSettings();
+  // A escolha é aplicada com as configurações travadas: dois admins mexendo em
+  // categorias diferentes ao mesmo tempo não apagam a escolha um do outro.
+  let erro = null;
 
   // `global: true` grava o PADRÃO DE TODAS as categorias de uma vez (quem tem
   // escolha própria continua com ela — ver precedência em ai-models.js).
   if (escopoGlobal === true) {
-    const g = aiModels.applyGlobalChoice(cur, { evaluator, patient });
-    if (!g.ok) return res.status(400).json({ error: g.error });
-    cur.aiModelsGlobal = g.aiModelsGlobal;
-    writeJSON('settings.json', cur);
+    const cur = await operacaoRepo.atualizarConfig('settings', {}, (s) => {
+      const g = aiModels.applyGlobalChoice(s, { evaluator, patient });
+      if (!g.ok) { erro = g.error; return false; }
+      s.aiModelsGlobal = g.aiModelsGlobal;
+    });
+    if (erro) return res.status(400).json({ error: erro });
     console.log(`[admin] padrão global de modelos por ${req.user.username}: avaliador=${cur.aiModelsGlobal.evaluator || '—'} paciente=${cur.aiModelsGlobal.patient || '—'}`);
     return res.json(aiModels.catalogo({ settings: cur, fallbacks: aiCategoryDefaults() }));
   }
 
-  const aplicado = aiModels.applyCategoryChoice(cur, categoria, { evaluator, patient });
-  if (!aplicado.ok) return res.status(400).json({ error: aplicado.error });
-  cur.aiModels = aplicado.aiModels;
-  writeJSON('settings.json', cur);
+  const cur = await operacaoRepo.atualizarConfig('settings', {}, (s) => {
+    const aplicado = aiModels.applyCategoryChoice(s, categoria, { evaluator, patient });
+    if (!aplicado.ok) { erro = aplicado.error; return false; }
+    s.aiModels = aplicado.aiModels;
+  });
+  if (erro) return res.status(400).json({ error: erro });
   const ev = evaluatorSpecFor(categoria);
   console.log(`[admin] modelos de IA (${categoria}) por ${req.user.username}: avaliador=${ev.model}/${ev.effort}${ev.batch ? ' (batch)' : ''}`);
   res.json(aiModels.catalogo({ settings: cur, fallbacks: aiCategoryDefaults() }));
-});
+}));
 
 // DELETE admin-only — permite limpeza de logs (ex: remover entradas de teste
 // plantadas durante pentest). Antes não havia rota; só dava pra apagar
 // editando o JSON manualmente.
-app.delete('/api/logs/:id', requireAuth, requireRole('admin'), (req, res) => {
-  const logs = readJSON('logs.json');
-  const idx = logs.findIndex((l) => l.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Log não encontrado' });
-  const removed = logs.splice(idx, 1)[0];
-  writeJSON('logs.json', logs);
+app.delete('/api/logs/:id', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const removed = await logsRepo.excluir(req.params.id);
+  if (!removed) return res.status(404).json({ error: 'Log não encontrado' });
   res.json({ ok: true, removed });
-});
+}));
 
 // --- Active sessions (sessões em andamento, ainda não finalizadas) ---
 // Permite F5 / sair e voltar sem perder a conversa nem o cronômetro.
-// Estrutura em disco: active-sessions.json = { "<userId>__<type>__<itemId>": { ... } }
+// Mora no banco (server/repos/sessoes.js): uma linha por sessão, uma por mensagem.
 
 const VALID_SESSION_TYPES = ['exercise', 'freeplay', 'neuro'];
 
-function activeSessionKey(userId, type, itemId) {
-  return `${userId}__${type}__${itemId}`;
-}
-
-function readActiveSessions() {
-  return readJSON('active-sessions.json', {});
-}
+// Sessão abandonada (sem salvamento) expira em 15 dias (perguntas.md A4). A poda
+// roda no boot e a cada listagem das sessões de alguém.
+const SESSAO_ATIVA_TTL_MS = 15 * 24 * 60 * 60 * 1000;
+bancoPronto.then(() => sessoesRepo.podarVencidas(SESSAO_ATIVA_TTL_MS)).catch(() => {});
 
 // Lista todas as sessões ativas do usuário autenticado
-app.get('/api/active-sessions', requireAuth, (req, res) => {
-  const all = readActiveSessions();
-  const mine = Object.values(all).filter((s) => s.userId === req.user.id);
-  res.json(mine);
-});
+app.get('/api/active-sessions', requireAuth, rota(async (req, res) => {
+  await sessoesRepo.podarVencidas(SESSAO_ATIVA_TTL_MS);
+  res.json(await sessoesRepo.listarDoDono(req.user.id));
+}));
 
 // Busca uma sessão ativa específica
-app.get('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+app.get('/api/active-sessions/:type/:itemId', requireAuth, rota(async (req, res) => {
   const { type, itemId } = req.params;
   if (!VALID_SESSION_TYPES.includes(type)) {
     return res.status(400).json({ error: 'Tipo de sessão inválido' });
   }
-  const all = readActiveSessions();
-  const session = all[activeSessionKey(req.user.id, type, itemId)];
-  res.json(session || null);
-});
+  res.json(await sessoesRepo.porChave(req.user.id, type, itemId));
+}));
 
 // Salva/atualiza (upsert) uma sessão ativa
-app.put('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+app.put('/api/active-sessions/:type/:itemId', requireAuth, rota(async (req, res) => {
   const { type, itemId } = req.params;
   if (!VALID_SESSION_TYPES.includes(type)) {
     return res.status(400).json({ error: 'Tipo de sessão inválido' });
   }
   const body = req.body || {};
-  const all = readActiveSessions();
-  const key = activeSessionKey(req.user.id, type, itemId);
-  all[key] = {
-    userId: req.user.id,
-    type,
+  const sessao = await sessoesRepo.salvar(req.user.id, {
+    tipo: type,
     itemId,
     messages: Array.isArray(body.messages) ? body.messages : [],
     elapsedSeconds: Number.isFinite(body.elapsedSeconds) ? Math.max(0, Math.floor(body.elapsedSeconds)) : 0,
@@ -4475,26 +4665,19 @@ app.put('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
     // Rascunho da escolha de testes (só Neuroavaliação): preserva os testes
     // indicados + justificativas se o aluno recarregar durante a etapa de testes.
     neuroTests: (type === 'neuro' && body.neuroTests && typeof body.neuroTests === 'object') ? body.neuroTests : null,
-    lastSavedAt: new Date().toISOString(),
-  };
-  writeJSON('active-sessions.json', all);
-  res.json(all[key]);
-});
+  });
+  res.json(sessao);
+}));
 
 // Descarta uma sessão ativa (chamado ao finalizar)
-app.delete('/api/active-sessions/:type/:itemId', requireAuth, (req, res) => {
+app.delete('/api/active-sessions/:type/:itemId', requireAuth, rota(async (req, res) => {
   const { type, itemId } = req.params;
   if (!VALID_SESSION_TYPES.includes(type)) {
     return res.status(400).json({ error: 'Tipo de sessão inválido' });
   }
-  const all = readActiveSessions();
-  const key = activeSessionKey(req.user.id, type, itemId);
-  if (key in all) {
-    delete all[key];
-    writeJSON('active-sessions.json', all);
-  }
+  await sessoesRepo.excluir(req.user.id, type, itemId);
   res.json({ ok: true });
-});
+}));
 
 // --- Provedores de IA ---
 // Tudo roda na OpenAI por design:
@@ -4846,7 +5029,7 @@ function sanitizeUsageInput(raw) {
 // client-supplied, o resto (preço, qual modelo rodou) é recalculado aqui.
 function buildTrilhaCost(body) {
   if (body.type !== 'exercise' || !body.itemId) return null;
-  const ex = readJSON('exercises.json').find((e) => String(e.id) === String(body.itemId));
+  const ex = catalogos.ler('exercicios').find((e) => String(e.id) === String(body.itemId));
   if (!ex) return null;
 
   const parts = {};
@@ -5030,7 +5213,7 @@ function resolveChatSystemPrompt({ context, mode, user }) {
   if (!itemId) return { status: 400, error: 'context.itemId é obrigatório' };
 
   if (type === 'exercise') {
-    const ex = readJSON('exercises.json').find((e) => String(e.id) === String(itemId));
+    const ex = catalogos.ler('exercicios').find((e) => String(e.id) === String(itemId));
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
     // O exercício nem sempre é uma simulação de paciente — a instrução define
     // o papel (paciente, colega, escrita livre etc.). O avaliador customizado
@@ -5040,7 +5223,7 @@ function resolveChatSystemPrompt({ context, mode, user }) {
     return { systemPrompt: buildTrilhaExercisePrompt(ex.specificInstruction), chatModelKey };
   }
   if (type === 'freeplay') {
-    const c = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
+    const c = catalogos.ler('freeplay').find((c) => String(c.id) === String(itemId));
     if (!c) return { status: 404, error: 'Personagem não encontrado' };
     return { systemPrompt: buildFreeplayPrompt(c.specificInstruction) };
   }
@@ -5050,7 +5233,7 @@ function resolveChatSystemPrompt({ context, mode, user }) {
     if (!canUseNeuro(user)) {
       return { status: 403, error: 'Neuroavaliação está disponível apenas para professores e administradores no momento.' };
     }
-    const c = readJSON('neuro-characters.json').find((c) => String(c.id) === String(itemId));
+    const c = catalogos.ler('neuro').find((c) => String(c.id) === String(itemId));
     if (!c) return { status: 404, error: 'Paciente não encontrado' };
     return { systemPrompt: buildNeuroPrompt(c.specificInstruction) };
   }
@@ -5058,25 +5241,24 @@ function resolveChatSystemPrompt({ context, mode, user }) {
 }
 
 // --- Cota diária de sessões do Aluno Externo ---
-// Regra e janela em server/session-quota.js. Aqui fica só o I/O:
-// external-session-starts.json = { "<userId>": [<timestamp ms>, ...] }.
+// Regra e janela em server/session-quota.js. Aqui fica só o I/O, no banco
+// (server/repos/cota.js): uma linha por abertura de sessão.
 
-const SESSION_STARTS_FILE = 'external-session-starts.json';
-
-function readSessionStarts() {
-  return readJSON(SESSION_STARTS_FILE, {});
+// Aberturas do usuário dentro da janela, no formato que session-quota.js lê.
+function inicioDeSessoes(user) {
+  return cotaRepo.inicios(user.id, sessionQuota.QUOTA_WINDOW_MS);
 }
 
 // Estado da cota de um usuário do JWT. Papel sem cota devolve o mesmo shape,
 // com enabled:false — a UI não precisa saber quem tem limite.
-function sessionQuotaFor(user) {
+async function sessionQuotaFor(user) {
   if (!sessionQuota.hasSessionQuota(user && user.role)) return sessionQuota.unlimitedState();
-  return sessionQuota.quotaState(readSessionStarts()[user.id]);
+  return sessionQuota.quotaState(await inicioDeSessoes(user));
 }
 
-// Cobra um slot para a CHAVE de sessão (tipo+paciente). Sob lock porque é
-// ler→modificar→gravar: dois cliques em "Iniciar" ao mesmo tempo não podem
-// virar um registro só.
+// Cobra um slot para a CHAVE de sessão (tipo+paciente). Com a cota do usuário
+// travada no banco, porque é ler→decidir→gravar: dois cliques em "Iniciar" ao
+// mesmo tempo não podem virar um registro só.
 //
 // Se a chave já está aberta, não cobra nada — é a conversa em andamento. Quem
 // decide isso é o registro do servidor, NUNCA o histórico que veio no corpo da
@@ -5085,16 +5267,14 @@ function sessionQuotaFor(user) {
 // Devolve { ok, state }: `ok` diz se ESTA abertura foi autorizada, e não se
 // ainda sobra cota — a terceira sessão é liberada e já deixa o estado esgotado.
 async function consumeSessionQuota(user, key) {
-  return withFileLock(SESSION_STARTS_FILE, () => {
-    const all = readSessionStarts();
-    if (sessionQuota.hasOpenSession(all[user.id], key)) {
-      return { ok: true, state: sessionQuota.quotaState(all[user.id]) };
+  return cotaRepo.comTrava(user.id, sessionQuota.QUOTA_WINDOW_MS, async (inicios, { registrar }) => {
+    if (sessionQuota.hasOpenSession(inicios, key)) {
+      return { ok: true, state: sessionQuota.quotaState(inicios) };
     }
-    const antes = sessionQuota.quotaState(all[user.id]);
+    const antes = sessionQuota.quotaState(inicios);
     if (antes.blocked) return { ok: false, state: antes };
-    all[user.id] = sessionQuota.registerStart(all[user.id], key);
-    writeJSON(SESSION_STARTS_FILE, all);
-    return { ok: true, state: sessionQuota.quotaState(all[user.id]) };
+    await registrar(key);
+    return { ok: true, state: sessionQuota.quotaState(sessionQuota.registerStart(inicios, key)) };
   });
 }
 
@@ -5103,12 +5283,7 @@ async function consumeSessionQuota(user, key) {
 // custar um slot novo, em vez de continuar de graça pra sempre.
 async function closeSessionQuota(user, key) {
   if (!sessionQuota.hasSessionQuota(user && user.role) || !key) return;
-  await withFileLock(SESSION_STARTS_FILE, () => {
-    const all = readSessionStarts();
-    if (!all[user.id]) return;
-    all[user.id] = sessionQuota.closeSession(all[user.id], key);
-    writeJSON(SESSION_STARTS_FILE, all);
-  });
+  await cotaRepo.fechar(user.id, key);
 }
 
 // O cliente consulta ANTES de abrir a sessão pra já mostrar o aviso em vez de
@@ -5118,14 +5293,14 @@ async function closeSessionQuota(user, key) {
 // resposta seria "bloqueado" para quem esgotou a cota mas está RETOMANDO um
 // atendimento já aberto, e a tela o impediria de terminar o que começou (o
 // /api/chat deixaria passar, porque lá a chave aberta é isenta).
-app.get('/api/session-quota', requireAuth, (req, res) => {
-  const estado = sessionQuotaFor(req.user);
+app.get('/api/session-quota', requireAuth, rota(async (req, res) => {
+  const estado = await sessionQuotaFor(req.user);
   const chave = sessionQuota.sessionKey({ type: req.query.type, itemId: req.query.itemId });
-  if (estado.blocked && chave && sessionQuota.hasOpenSession(readSessionStarts()[req.user.id], chave)) {
+  if (estado.blocked && chave && sessionQuota.hasOpenSession(await inicioDeSessoes(req.user), chave)) {
     return res.json({ ...estado, blocked: false });
   }
   res.json(estado);
-});
+}));
 
 app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   const { messages, context, mode, maxTokens } = req.body || {};
@@ -5137,6 +5312,15 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
       error: 'systemPrompt não é mais aceito no body. Use context: { type, itemId } ou mode.',
     });
   }
+
+  // Funcionalidade do atendimento (Simulação, Trilha, Neuro) bloqueada para o perfil.
+  const bloqueioChat = funcionalidadeBloqueada(req.user, acessos.funcionalidadeDoContexto(context));
+  if (bloqueioChat) return res.status(403).json(bloqueioChat);
+
+  // Limite semanal de IA do Terapeuta externo (Acessos). Antes da cota de
+  // sessões, para uma conversa recusada não gastar um atendimento.
+  const limiteChat = await limiteIaExcedido(req.user);
+  if (limiteChat) return res.status(429).json(limiteChat);
 
   const resolved = resolveChatSystemPrompt({ context, mode, user: req.user });
   if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
@@ -5218,7 +5402,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
         : 'treinamento';
   const chatModelSpec = isExerciseChat
     ? (TRILHA_CHAT_MODELS[resolved.chatModelKey] || TRILHA_CHAT_MODELS[TRILHA_CHAT_MODEL_DEFAULT])
-    : patientSpecFor(patientCategory);
+    : (specDoExterno(req.user, 'patient') || patientSpecFor(patientCategory));
 
   // Modo demonstração: sem cliente pro provedor escolhido E sem OpenAI (que é o
   // fallback de qualquer paciente), não há como responder — devolve a fala
@@ -5251,6 +5435,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     // O log usa o normalizado (e não logOpenAIUsage) porque aqui pode ter
     // respondido GLM ou Anthropic, cujos campos de usage têm outros nomes.
     const uso = normalizeUsage(turno.provider, turno.usage);
+    registrarUsoIa(req.user, { categoria: isExerciseChat ? 'trilha' : patientCategory, modelo: turno.model, uso });
     console.log(
       `Chat paciente (${turno.model} · ${isExerciseChat ? 'trilha' : patientCategory}): cached=${uso.cacheRead} in=${uso.input} out=${uso.output}`,
     );
@@ -5285,14 +5470,11 @@ function sanitizeAssistantId(input) {
 // (individual, progressão, processo seletivo, v16-2 e o comparativo do Duelo)
 // foram apagados junto das estruturas que os rodavam; o Duelo foi o último, e
 // saiu quando ganhou uma entrada própria no pipeline (v34-duelo).
-const AVALIACAO_18_DIR = path.join(PROMPTS_DIR, 'avaliacao', 'avaliador 18');
-
 function loadEvaluatorFile(fileName) {
-  const promptFile = path.join(AVALIACAO_18_DIR, fileName);
-  if (!fs.existsSync(promptFile)) {
-    throw new Error(`Prompt do avaliador não encontrado em ${promptFile}`);
-  }
-  return fs.readFileSync(promptFile, 'utf-8');
+  const caminho = `avaliacao/avaliador 18/${fileName}`;
+  const conteudo = promptFiles.lerPrompt(caminho);
+  if (conteudo == null) throw new Error(`Prompt do avaliador não encontrado: ${caminho}`);
+  return conteudo;
 }
 
 // Avaliador dedicado da Neuroavaliação: sessão única, 4 critérios próprios
@@ -5309,7 +5491,7 @@ function loadNeuroEvaluatorPrompt() {
 // (400). Também resolve QUAL MODELO roda o avaliador (evaluatorModel).
 function resolveEvaluatorSystemPrompt({ context }) {
   if (context && typeof context === 'object' && context.type === 'exercise' && context.itemId) {
-    const ex = readJSON('exercises.json').find((e) => String(e.id) === String(context.itemId));
+    const ex = catalogos.ler('exercicios').find((e) => String(e.id) === String(context.itemId));
     if (!ex) return { status: 404, error: 'Exercício não encontrado' };
     if (!ex.evaluatorPrompt || !String(ex.evaluatorPrompt).trim()) {
       return { status: 400, error: 'Este exercício não tem avaliador configurado — a avaliação não está disponível.' };
@@ -5355,9 +5537,9 @@ function resolveBloco1({ context }) {
   if (!context || typeof context !== 'object' || !context.itemId) return '';
   let char = null;
   if (context.type === 'freeplay') {
-    char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
+    char = catalogos.ler('freeplay').find((c) => String(c.id) === String(context.itemId));
   } else if (context.type === 'neuro') {
-    char = readJSON('neuro-characters.json').find((c) => String(c.id) === String(context.itemId));
+    char = catalogos.ler('neuro').find((c) => String(c.id) === String(context.itemId));
   }
   if (!char) return '';
   let bloco = char.evaluationCriteria && String(char.evaluationCriteria).trim()
@@ -5400,7 +5582,7 @@ function withBloco1(messages, bloco1) {
   ];
 }
 
-app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
   const { messages, context, showReasoning } = req.body || {};
   const openai = getOpenAI();
 
@@ -5413,6 +5595,15 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   if (!Array.isArray(messages)) {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
+
+  // Acessos: a Avaliação por IA e a funcionalidade do atendimento precisam
+  // estar liberadas para o perfil.
+  const bloqueioAvaliacao = funcionalidadeBloqueada(req.user, 'avaliacao')
+    || funcionalidadeBloqueada(req.user, acessos.funcionalidadeDoContexto(context));
+  if (bloqueioAvaliacao) return res.status(403).json(bloqueioAvaliacao);
+
+  const limiteAvaliacao = await limiteIaExcedido(req.user);
+  if (limiteAvaliacao) return res.status(429).json(limiteAvaliacao);
 
   // Gate de visitante: avaliação só roda pra visitante quando o admin liga o
   // toggle (eventos/palestras). Server-side por segurança — o cliente já evita
@@ -5458,7 +5649,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     ? (TRILHA_EXERCISE_MODELS[resolved.evaluatorModelKey] || TRILHA_EXERCISE_MODELS[TRILHA_EXERCISE_MODEL_DEFAULT])
     : null;
   // Spec efetivo da categoria (escolha do admin ou padrão do sistema).
-  const categorySpec = evalCategory ? evaluatorSpecFor(evalCategory) : null;
+  const categorySpec = evalCategory ? (specDoExterno(req.user, 'evaluator') || evaluatorSpecFor(evalCategory)) : null;
   // Provedor que não é OpenAI (GLM hoje; Claude só via Trilha) roda BUFFERED:
   // uma chamada chat.completions, resposta escrita de uma vez no SSE — a UI já
   // mostra a tela "avaliando", então não perde nada, e o heartbeat segura a
@@ -5500,16 +5691,16 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // próprios — e um nó a mais, que decide se a missão foi cumprida. O
   // Competitivo (MMR) nunca entra aqui.
   if (isFreeSim && context.itemId && req.user.role !== 'visitor') {
-    const prevLog = getLastLogForCharacter(req.user.id, context.itemId);
+    const prevLog = await getLastLogForCharacter(req.user.id, context.itemId);
     // Uma missão OU outra (ver resolveTrainingMission): no máximo um dos dois vem
     // preenchido, então o avaliador recebe um único objetivo de missão.
-    const { sidequest: activeSq, daily: activeDaily } = resolveTrainingMission(req.user.id);
+    const { sidequest: activeSq, daily: activeDaily } = resolveTrainingMission(req.user);
     if (prevLog || activeSq || activeDaily) {
       progressionMode = true;
       sidequestActive = !!activeSq;
 
       const studentName = req.user.name || 'Aluno';
-      const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(context.itemId));
+      const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(context.itemId));
       const characterName = (prevLog && prevLog.itemTitle) || (freeChar && freeChar.name) || 'Paciente';
       const bloco1p = resolveBloco1({ context });
 
@@ -5520,7 +5711,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         atendimento1: prevLog
           ? `[ATENDIMENTO 1 — ${studentName} com ${characterName}]\n${transcriptFromMessages(prevLog.messages, studentName, characterName) || '(sem mensagens)'}`
           : '',
-        avaliacao1: prevLog ? buildPreviousEvalSection(getPreviousFeedback(req.user.id, context.itemId)) : '',
+        avaliacao1: prevLog ? buildPreviousEvalSection(await getPreviousFeedback(req.user.id, context.itemId)) : '',
         missao: missaoAtiva
           ? `TÍTULO: ${missaoAtiva.title}\nDESCRIÇÃO: ${missaoAtiva.description}\nTIPO: ${activeSq ? 'sidequest atribuída pelo supervisor' : 'desafio do dia'}`
           : '',
@@ -5585,13 +5776,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       error: null,
       createdAt: new Date().toISOString(),
     };
-    await withFileLock('trilha-eval-queue.json', async () => {
-      const arr = readJSON('trilha-eval-queue.json');
-      arr.push(job);
-      writeJSON('trilha-eval-queue.json', arr);
-    });
+    await filaTrilha.criar(job);
     sweepTrilhaEvalBatches().catch(() => {});
-    upsertEvaluationNotification(req.user.id, 'trilha-job:' + job.id, {
+    await upsertEvaluationNotification(req.user.id, 'trilha-job:' + job.id, {
       type: 'evaluation_queued',
       message: EVAL_QUEUED_MESSAGE,
     });
@@ -5608,7 +5795,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
   // client; um slot por usuário é suficiente (o pior caso de duas avaliações
   // simultâneas do mesmo aluno só reusa a mesma linha, sem quebrar nada).
   if (isFreeSim || isNeuroEval || isExercise) {
-    upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
+    await upsertEvaluationNotification(req.user.id, 'eval:' + req.user.id, {
       type: 'evaluation_queued',
       message: EVAL_QUEUED_MESSAGE,
     });
@@ -5742,6 +5929,11 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
         const t = (result.instrumentacao && result.instrumentacao.totais) || null;
         if (t) {
           const custo = result.instrumentacao.custo;
+          registrarUsoIa(req.user, {
+            categoria: evalCategory, modelo: usouModel,
+            tokens: (t.input || 0) + (t.cached || 0) + (t.output || 0),
+            usd: custo && Number.isFinite(custo.usd) ? custo.usd : null,
+          });
           console.log(
             `Evaluate (${usouModel} · ${evalCategory}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : ''} · ${versaoOficial}): `
             + `nota=${result.notaFinal} chamadas=${result.instrumentacao.chamadas} cached=${t.cached} in=${t.input} out=${t.output}`
@@ -5857,6 +6049,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
     let normalizedUsage = null;
     if (usage) {
       normalizedUsage = normalizeUsage(usageProvider, usage);
+      registrarUsoIa(req.user, { categoria: isExercise ? 'trilha' : evalCategory, modelo: usageModel, uso: normalizedUsage });
       console.log(
         `Evaluate (${usageModel}${progressionMode ? ' · progressão' + (sidequestActive ? '+sidequest' : '') : (isExercise ? ' · trilha' : ` · ${evalCategory}`)}): cached=${normalizedUsage.cacheRead} in=${normalizedUsage.input} out=${normalizedUsage.output}`,
       );
@@ -5878,14 +6071,14 @@ app.post('/api/evaluate', requireAuth, aiLimiter, async (req, res) => {
       res.status(500).json(corpo);
     }
   }
-});
+}));
 
 // Esquema visual (SVG) OPCIONAL ao final de um exercício da Trilha — só roda
 // se o admin ligou imageSchemaEnabled nesse exercício (ver TRILHA_IMAGE_MODELS
 // e buildImageSchemaPrompt). O cliente manda a transcrição (messages); a
 // observação do admin (imageSchemaPrompt) é injetada AQUI, server-side — nunca
 // sai pro aluno, mesma lógica do evaluatorPrompt.
-app.post('/api/trilha/image-schema', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/trilha/image-schema', requireAuth, aiLimiter, requireFeature('trilha'), async (req, res) => {
   const { itemId, messages } = req.body || {};
 
   // Mesmo gate de custo de IA que a avaliação usa pra visitante.
@@ -5897,7 +6090,7 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, async (req, res) =>
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
-  const ex = readJSON('exercises.json').find((e) => String(e.id) === String(itemId));
+  const ex = catalogos.ler('exercicios').find((e) => String(e.id) === String(itemId));
   if (!ex) return res.status(404).json({ error: 'Exercício não encontrado' });
   if (!ex.imageSchemaEnabled) {
     return res.status(400).json({ error: 'Este exercício não tem esquema visual habilitado.' });
@@ -6019,8 +6212,11 @@ function selecaoExportSlug(nome) {
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-const SELECTION_LOG_TTL_DAYS = 15; // regra "1 avaliação por WhatsApp a cada 15 dias"
-const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
+// Logs do seletivo são PERSISTENTES (demandas.md §24.0). O controle de quem
+// pode entrar é feito pelo admin trocando a SELECAO_PASSWORD entre aberturas;
+// não há mais dedupe automático por WhatsApp — a mesma pessoa pode participar
+// em aberturas diferentes.
+
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
 // para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
 // corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
@@ -6046,27 +6242,10 @@ const selecaoLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   message: { error: 'Muitas tentativas. Tente novamente em alguns minutos.' },
 });
 
-// WhatsApp normalizado (só dígitos) — chave de deduplicação por pessoa.
+// WhatsApp normalizado (só dígitos) — persistido junto com o log para o
+// avaliador ver quem é. Não é mais chave de dedupe.
 function normalizeWhatsapp(v) {
   return String(v == null ? '' : v).replace(/\D+/g, '');
-}
-
-// Espelha pruneExpiredLogs (logs.json), mas com TTL PRÓPRIO de 15 dias. Chamado
-// no boot/6h, na listagem e antes do dedup de WhatsApp. As estatísticas anônimas
-// (selection-stats.json) NÃO são podadas — a Dashboard mantém o histórico.
-function pruneExpiredSelectionLogs() {
-  let logs;
-  try { logs = readJSON('selection-logs.json'); } catch { return 0; }
-  if (!Array.isArray(logs) || logs.length === 0) return 0;
-  const cutoff = Date.now() - SELECTION_LOG_TTL_MS;
-  const kept = logs.filter((l) => {
-    const t = new Date((l && l.timestamp) || 0).getTime();
-    if (!Number.isFinite(t) || t === 0) return true;
-    return t >= cutoff;
-  });
-  if (kept.length === logs.length) return 0;
-  writeJSON('selection-logs.json', kept);
-  return logs.length - kept.length;
 }
 
 // Auth do candidato: JWT role 'candidate' com o characterId sorteado + os dados
@@ -6173,7 +6352,7 @@ function buildSelectionExportText(log) {
 // .md continua no volume, e o Seletivo será retrabalhado depois — por ora ele
 // muda de avaliador e nada mais (candidato segue sem devolutiva).
 function selectionMateriais(log) {
-  const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.characterId))
+  const char = catalogos.ler('freeplay').find((c) => String(c.id) === String(log.characterId))
     || { id: log.characterId, name: log.characterName || 'Paciente' };
   const transcript = buildSelectionTranscript(log.messages, char.name || 'Paciente');
   return oficial.materiaisPadrao({
@@ -6227,8 +6406,10 @@ function parseSelectionEval(rawText) {
 // janela de 24h, caso o coletor tenha perdido o desfecho).
 //
 // A régua de decisão está em server/batch-fila.js (pura, testada). Aqui mora só
-// o I/O: ler o ledger, gravar, e responder "cabe agora?".
-const LEDGER_FILE = 'batch-ledger.json';
+// o I/O: ler o ledger (tabela batches_em_voo), gravar, e responder "cabe agora?".
+
+// Idade em que uma entrada do ledger sai sozinha (a mesma de batchFila.ledgerExpirado).
+const LEDGER_IDADE_MAXIMA_MS = 26 * 60 * 60 * 1000;
 
 // Tokens que este conjunto de corpos de requisição vai RESERVAR na fila.
 function tokensDoLote(bodies) {
@@ -6236,32 +6417,24 @@ function tokensDoLote(bodies) {
 }
 
 // Quanto do teto do modelo já está ocupado por batches em voo (de qualquer modo).
-function tokensEmVoo(model) {
-  return batchFila.tokensEmVooDe(readJSON(LEDGER_FILE, []), model);
+async function tokensEmVoo(model) {
+  return batchFila.tokensEmVooDe(await jobsRepo.batchesEmVoo(model), model);
 }
 
 // Cabe um lote de `tokens` deste modelo agora?
-function cabeNaFilaDaOpenAI(model, tokens) {
-  return batchFila.temVaga({ model, tokens, tokensEmVoo: tokensEmVoo(model) });
+async function cabeNaFilaDaOpenAI(model, tokens) {
+  return batchFila.temVaga({ model, tokens, tokensEmVoo: await tokensEmVoo(model) });
 }
 
 // Registra um batch recém-criado como ocupante da fila.
 async function registrarBatchEmVoo({ batchId, model, tokens, modo }) {
-  await withFileLock(LEDGER_FILE, async () => {
-    const arr = readJSON(LEDGER_FILE, []).filter((e) => e && !batchFila.ledgerExpirado(e));
-    arr.push({ batchId, model, tokens, modo, criadoEm: new Date().toISOString() });
-    writeJSON(LEDGER_FILE, arr);
-  });
+  await jobsRepo.registrarBatch({ batchId, model, tokens, modo });
 }
 
 // Libera a vaga: chamado assim que um batch chega a estado terminal. Sem isto o
 // ledger só esvaziaria pela idade (26h) e a fila ficaria artificialmente cheia.
 async function liberarBatchDaFila(batchId) {
-  await withFileLock(LEDGER_FILE, async () => {
-    const arr = readJSON(LEDGER_FILE, []);
-    const restante = arr.filter((e) => e && e.batchId !== batchId && !batchFila.ledgerExpirado(e));
-    if (restante.length !== arr.length) writeJSON(LEDGER_FILE, restante);
-  });
+  await jobsRepo.liberarBatch(batchId, LEDGER_IDADE_MAXIMA_MS);
 }
 
 // Cria o batch a partir dos corpos já montados, com a vaga já conferida por quem
@@ -6297,7 +6470,7 @@ async function submeterPendentesEmLotes({ openai, itens, model, modo, rotulo }) 
     ...it,
     tokens: tokensDoLote(requisicoesDe(it).map((r) => r.body)),
   }));
-  const lotes = batchFila.dividirEmLotes({ itens: comTokens, model, tokensEmVoo: tokensEmVoo(model) });
+  const lotes = batchFila.dividirEmLotes({ itens: comTokens, model, tokensEmVoo: await tokensEmVoo(model) });
 
   for (const lote of lotes) {
     const requests = lote.flatMap(requisicoesDe);
@@ -6446,7 +6619,7 @@ let selectionSweepRunning = false;
 async function submitSelectionBatches(openai) {
   const spec = evaluatorSpecFor('seletivo');
   if (!spec.batch) return;
-  const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
+  const pending = await selecaoRepo.pendentes({ comBatch: false });
   if (!pending.length) return;
   const itens = [];
   for (const log of pending) {
@@ -6455,13 +6628,11 @@ async function submitSelectionBatches(openai) {
   }
   const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'selecao-batch', rotulo: 'candidato(s)' });
   if (!destino.size) return;
-  await withFileLock('selection-logs.json', async () => {
-    const arr = readJSON('selection-logs.json');
-    for (const l of arr) {
-      const bid = destino.get(l.id);
-      if (bid && l.status === 'pending' && !l.evalBatchId) { l.evalBatchId = bid; l.evalBatchAt = new Date().toISOString(); }
-    }
-    writeJSON('selection-logs.json', arr);
+  await selecaoRepo.atualizarVarios([...destino.keys()], (l) => {
+    const bid = destino.get(l.id);
+    if (!bid || l.status !== 'pending' || l.evalBatchId) return false;
+    l.evalBatchId = bid;
+    l.evalBatchAt = new Date().toISOString();
   });
 }
 
@@ -6479,58 +6650,74 @@ async function finalizeSelectionEvals(ids, results, motivoSemResultado) {
   const appendedList = [];
   const triList = [];
   const feedbacksPrevios = [];
-  await withFileLock('selection-logs.json', async () => {
-    const arr = readJSON('selection-logs.json');
-    for (const l of arr) {
-      if (!alvo.has(String(l.id)) || l.status !== 'pending') continue;
-      const campos = camposDaAvaliacaoAssincrona(results.get(l.id), {
-        logId: l.id, dono: l.id, spec, categoria: 'seletivo',
-        itemId: l.characterId, itemTitle: l.characterName || '',
-        // Quem lê é o recrutador: sem a saudação que enquadra o texto como
-        // pré-correção para conversar com o supervisor.
-        textoParaAluno: false,
-      });
-      if (campos && (campos.score != null || campos.evaluation)) {
-        const { evaluation, criteriaScores, score } = campos;
-        const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
-        l.status = st;
-        l.score = score;
-        l.criteriaScores = criteriaScores;
-        l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
-        l.evalVersion = campos.evalVersion || null;
-        l.evalPartsId = campos.evalPartsId || null;
-        l.reasoning = '';
-        if (score != null) {
-          appendedList.push({ timestamp: l.timestamp, score, status: st });
-          triList.push({ characterId: l.characterId, score });
-        }
-        // Avaliação com erro não vira e-mail: um texto de avaliação quebrada
-        // na caixa do candidato é pior do que nenhum.
-        const email = l.candidate && l.candidate.email;
-        if (st !== 'erro' && l.feedbackIA === true && !l.feedbackEmail && l.evaluation && contas.isEmailValido(contas.normalizeEmail(email))) {
-          feedbacksPrevios.push({ id: l.id, to: email, nome: l.candidate.nome, feedback: l.evaluation });
-        }
-      } else {
-        l.status = 'erro'; l.evalError = motivoSemResultado;
+  // Os logs da rodada ficam travados enquanto fecham; um log que outro
+  // fechamento já tirou de 'pending' não conta de novo.
+  await selecaoRepo.atualizarVarios([...alvo], (l) => {
+    if (l.status !== 'pending') return false;
+    const campos = camposDaAvaliacaoAssincrona(results.get(l.id), {
+      logId: l.id, dono: l.id, spec, categoria: 'seletivo',
+      itemId: l.characterId, itemTitle: l.characterName || '',
+      // Quem lê é o recrutador: sem a saudação que enquadra o texto como
+      // pré-correção para conversar com o supervisor.
+      textoParaAluno: false,
+    });
+    if (campos && (campos.score != null || campos.evaluation)) {
+      const { evaluation, criteriaScores, score } = campos;
+      const st = score == null ? 'erro' : (score >= SELECTION_ACTIVE_THRESHOLD ? 'ativo' : 'rejeitado');
+      l.status = st;
+      l.score = score;
+      l.criteriaScores = criteriaScores;
+      l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
+      l.evalVersion = campos.evalVersion || null;
+      l.evalPartsId = campos.evalPartsId || null;
+      l.reasoning = '';
+      if (score != null) {
+        appendedList.push({ timestamp: l.timestamp, score, status: st });
+        triList.push({
+          characterId: l.characterId,
+          score,
+          criteriaScores,
+          candidateName: l.candidate && l.candidate.nome,
+        });
       }
+      // Avaliação com erro não vira e-mail: um texto de avaliação quebrada
+      // na caixa do candidato é pior do que nenhum.
+      const email = l.candidate && l.candidate.email;
+      if (st !== 'erro' && l.feedbackIA === true && !l.feedbackEmail && l.evaluation && contas.isEmailValido(contas.normalizeEmail(email))) {
+        feedbacksPrevios.push({ id: l.id, to: email, nome: l.candidate.nome, feedback: l.evaluation });
+      }
+    } else {
+      l.status = 'erro'; l.evalError = motivoSemResultado;
     }
-    writeJSON('selection-logs.json', arr);
   });
-  // E-mail FORA do lock: é chamada de rede e seguraria o arquivo por segundos.
+  // E-mail FORA da transação: é chamada de rede e seguraria os logs por segundos.
   for (const f of feedbacksPrevios) {
     await enviarFeedbackPrevio(f);
   }
   if (appendedList.length) {
-    await withFileLock('selection-stats.json', async () => {
-      const stats = readJSON('selection-stats.json');
-      stats.push(...appendedList);
-      writeJSON('selection-stats.json', stats);
-    });
+    await selecaoRepo.registrarEstatisticas(appendedList);
   }
-  // TRI: o candidato entra com rating fixo 50 e o personagem aprende. Só
-  // com nota válida — avaliação com erro não é sinal.
+  // TRI: a população 'selecao' aprende o próprio rating e (se peso > 0) move o D
+  // do caso por critério (spec §8, mesma trava de 25 que o aluno). Só com nota
+  // válida — avaliação com erro não é sinal.
   for (const t of triList) {
-    await registrarTriAnonimo('selecao', t.characterId, t.score);
+    const criteriosById = await criteriosByIdParaMotor(t.criteriaScores);
+    await registrarTriAnonimo('selecao', t.characterId, criteriosById, t.score);
+    // Recorde 👑: candidato do seletivo pode bater recorde (spec §9). O nome
+    // do candidato é copiado agora — a ficha do caso segue funcionando mesmo
+    // se o log do candidato sumir.
+    if (Number.isFinite(t.score)) {
+      try {
+        await updateCharacterRecord(t.characterId, t.score, {
+          userId: null,
+          userName: t.candidateName || 'Candidato do processo seletivo',
+          userPhoto: null,
+          origem: 'selecao',
+        });
+      } catch (err) {
+        console.error('updateCharacterRecord (selecao) falhou:', err.message);
+      }
+    }
   }
 }
 
@@ -6546,12 +6733,8 @@ async function enviarFeedbackPrevio({ id, to, nome, feedback }) {
   }
   const estado = envio.ok ? 'enviado' : (envio.skipped ? 'nao-configurado' : 'falhou');
   if (estado === 'falhou') console.error(`[selecao] feedback prévio de ${id} não saiu:`, envio.erro);
-  await withFileLock('selection-logs.json', async () => {
-    const arr = readJSON('selection-logs.json');
-    const alvo = arr.find((l) => String(l.id) === String(id));
-    if (!alvo) return;
+  await selecaoRepo.atualizar(id, (alvo) => {
     alvo.feedbackEmail = { estado, em: new Date().toISOString(), ...(envio.erro ? { erro: clampStr(envio.erro, 300) } : {}) };
-    writeJSON('selection-logs.json', arr);
   });
 }
 
@@ -6561,7 +6744,7 @@ async function enviarFeedbackPrevio({ id, to, nome, feedback }) {
 async function runSelectionEvalsWithoutBatch() {
   const spec = evaluatorSpecFor('seletivo');
   if (spec.batch) return;
-  const pending = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && !l.evalBatchId);
+  const pending = await selecaoRepo.pendentes({ comBatch: false });
   for (const log of pending) {
     try {
       const result = await runPipelineSemBatch({ spec, materiais: selectionMateriais(log), rotulo: 'selecao-sync' });
@@ -6570,13 +6753,10 @@ async function runSelectionEvalsWithoutBatch() {
     } catch (e) {
       const tentativas = (Number(log.evalAttempts) || 0) + 1;
       const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
-      await withFileLock('selection-logs.json', async () => {
-        const arr = readJSON('selection-logs.json');
-        const alvo = arr.find((l) => String(l.id) === String(log.id) && l.status === 'pending');
-        if (!alvo) return;
+      await selecaoRepo.atualizar(log.id, (alvo) => {
+        if (alvo.status !== 'pending') return false;
         alvo.evalAttempts = tentativas;
         if (desistiu) { alvo.status = 'erro'; alvo.evalError = `avaliação síncrona falhou: ${e.message}`; }
-        writeJSON('selection-logs.json', arr);
       });
       console.error(`[selecao-sync] ${log.id} falhou (tentativa ${tentativas}/${EVAL_SYNC_MAX_ATTEMPTS})${desistiu ? ' — marcado com erro' : ''}:`, e.message);
     }
@@ -6585,7 +6765,7 @@ async function runSelectionEvalsWithoutBatch() {
 
 // Coleta os batches prontos e fecha os logs (ver finalizeSelectionEvals).
 async function collectSelectionBatches(openai) {
-  const withBatch = readJSON('selection-logs.json').filter((l) => l && l.status === 'pending' && l.evalBatchId);
+  const withBatch = await selecaoRepo.pendentes({ comBatch: true });
   if (!withBatch.length) return;
   const batchIds = [...new Set(withBatch.map((l) => l.evalBatchId))];
   for (const bid of batchIds) {
@@ -6618,16 +6798,12 @@ async function collectSelectionBatches(openai) {
       // resubmete. Só vira erro o que não tem volta.
       const tentativas = Math.max(0, ...withBatch.filter((l) => l.evalBatchId === bid).map((l) => Number(l.evalBatchTentativas) || 0));
       const r = await fecharBatchQueFalhou({ batchObj: batch, model: evaluatorSpecFor('seletivo').model, tentativas, modo: 'selecao-batch' });
-      await withFileLock('selection-logs.json', async () => {
-        const arr = readJSON('selection-logs.json');
-        for (const l of arr) {
-          if (l.evalBatchId !== bid || l.status !== 'pending') continue;
-          if (r.acao === 'erro') { l.status = 'erro'; l.evalError = r.motivo; continue; }
-          l.evalBatchId = null;
-          l.evalBatchEspera = r.motivo;
-          if (r.acao === 'retenta') l.evalBatchTentativas = (Number(l.evalBatchTentativas) || 0) + 1;
-        }
-        writeJSON('selection-logs.json', arr);
+      await selecaoRepo.atualizarDoBatch(bid, (l) => {
+        if (l.status !== 'pending') return false;
+        if (r.acao === 'erro') { l.status = 'erro'; l.evalError = r.motivo; return; }
+        l.evalBatchId = null;
+        l.evalBatchEspera = r.motivo;
+        if (r.acao === 'retenta') l.evalBatchTentativas = (Number(l.evalBatchTentativas) || 0) + 1;
       });
     }
   }
@@ -6667,7 +6843,7 @@ async function sweepSelectionBatches() {
 // do log guardado, então uma resubmissão produz exatamente as mesmas
 // requisições.
 function competitiveMateriais(log) {
-  const char = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(log.itemId));
+  const char = catalogos.ler('freeplay').find((c) => String(c.id) === String(log.itemId));
   const patientName = log.itemTitle || (char && char.name) || 'Paciente';
   const transcript = transcriptFromMessages(log.messages || [], log.userName || 'Aluno', patientName);
   return oficial.materiaisPadrao({
@@ -6691,7 +6867,7 @@ let competitiveSweepRunning = false;
 async function submitCompetitiveBatches(openai) {
   const spec = evaluatorSpecFor('competitivo');
   if (!spec.batch) return;
-  const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
+  const pending = await logsRepo.pendentesCompetitivos();
   if (!pending.length) return;
   const itens = [];
   for (const log of pending) {
@@ -6700,14 +6876,11 @@ async function submitCompetitiveBatches(openai) {
   }
   const destino = await submeterPendentesEmLotes({ openai, itens, model: spec.model, modo: 'comp-batch', rotulo: 'competitivo(s)' });
   if (!destino.size) return;
-  await withFileLock('logs.json', async () => {
-    const arr = readJSON('logs.json');
-    for (const l of arr) {
-      const bid = destino.get(l.id);
-      if (bid && l.evaluationPending && !l.evalBatchId) { l.evalBatchId = bid; l.evalBatchAt = new Date().toISOString(); }
-    }
-    writeJSON('logs.json', arr);
-  });
+  // Marca cada log no lote dele, só se ainda está pendente e sem lote: outro
+  // sweep pode ter chegado antes.
+  for (const [id, bid] of destino) {
+    await logsRepo.atualizar(id, { evalBatchId: bid, evalBatchAt: new Date().toISOString() }, { soSePendente: true, loteAtual: null });
+  }
 }
 
 // Traduz o desfecho de UMA avaliação assíncrona nos campos que o registro
@@ -6740,50 +6913,73 @@ function camposDaAvaliacaoAssincrona(entrada, { logId, dono, spec, categoria, it
 // do MMR existir num só lugar. `results` é um Map id → { result } | { text }
 // (ver camposDaAvaliacaoAssincrona).
 async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
-  const alvo = new Set(ids.map(String));
   const spec = evaluatorSpecFor('competitivo');
-  const ready = []; // { userId, refId, itemTitle } — notificados DEPOIS do lock (ver fim da função)
-  await withFileLock('logs.json', async () => {
-    const arr = readJSON('logs.json');
-    let mmr = null; let mmrChanged = false;
-    for (const l of arr) {
-      if (!alvo.has(String(l.id)) || !l.evaluationPending) continue;
+  const ready = []; // { userId, refId, itemTitle } — notificados no fim
+  // Cada log é fechado no banco com a condição de ainda estar pendente: se outro
+  // fechamento chegou antes, a partida não conta duas vezes no MMR. O MMR de cada
+  // partida é uma transação própria, com o aluno e o paciente travados.
+  {
+    // Em ordem cronológica: com mais de uma partida do mesmo aluno no lote, o
+    // MMR é aplicado na ordem em que elas aconteceram.
+    const logs = (await Promise.all([...new Set(ids.map(String))].map((id) => logsRepo.porId(id))))
+      .filter(Boolean)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
+    for (const l of logs) {
+      if (!l.evaluationPending) continue;
       const campos = camposDaAvaliacaoAssincrona(results.get(l.id), {
         logId: l.id, dono: l.userId, spec, categoria: 'competitivo', itemId: l.itemId, itemTitle: l.itemTitle,
       });
-      if (campos && (campos.score != null || campos.evaluation)) {
-        const { evaluation, criteriaScores, score } = campos;
-        l.evaluation = clampStr(evaluation, LOG_MAX_EVAL_LEN);
-        l.criteriaScores = criteriaScores;
-        l.score = score;
-        l.evalVersion = campos.evalVersion || null;
-        l.evalPartsId = campos.evalPartsId || null;
-        l.evaluationPending = false;
-        if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
-        // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
-        if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
-          if (!mmr) mmr = readMMR();
-          const { player, character, result } = mmrEngine.updateMatch(mmr.players[l.userId], mmr.characters[l.itemId], score);
-          mmr.players[l.userId] = player; mmr.characters[l.itemId] = character; mmrChanged = true;
-          if (!result.calibratingBefore) bumpTriFonte(mmr, l.itemId, 'competitivo');
-          l.mmrBefore = Math.round(result.P_before); l.mmrAfter = Math.round(result.P_after);
-          // Recorde 👑 do paciente — mesmo gate do MMR. Este é o caminho normal
-          // do Competitivo (a nota só existe depois da avaliação assíncrona).
-          try {
-            updateCharacterRecord(l.itemId, score, { userId: l.userId, userName: l.userName });
-          } catch (err) {
-            console.error('updateCharacterRecord (batch) falhou:', err.message);
-          }
+      if (!(campos && (campos.score != null || campos.evaluation))) {
+        await logsRepo.atualizar(l.id, { evaluationPending: false, evalError: motivoSemResultado }, { soSePendente: true });
+        continue;
+      }
+      const { evaluation, criteriaScores, score } = campos;
+      const fechado = await logsRepo.atualizar(l.id, {
+        evaluation: clampStr(evaluation, LOG_MAX_EVAL_LEN),
+        criteriaScores,
+        criteriaNames: campos.criteriaNames || null,
+        score,
+        evalVersion: campos.evalVersion || null,
+        evalPartsId: campos.evalPartsId || null,
+        evaluationPending: false,
+      }, { soSePendente: true });
+      if (!fechado) continue;
+      if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
+      // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
+      if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
+        const dono = await contasRepo.porId(l.userId).catch(() => null);
+        const role = (dono && dono.role) || 'therapist';
+        const criteriosById = await criteriosByIdParaMotor(criteriaScores);
+        const result = await aplicarPartidaCompetitiva(l.userId, l.itemId, criteriosById, score, role);
+        const antes = mmrEngine.agregarTotal(Object.fromEntries(
+          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
+        const depois = mmrEngine.agregarTotal(Object.fromEntries(
+          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
+        const mmrDelta = {
+          total: { before: antes, after: depois },
+          criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
+            [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
+          ))),
+        };
+        await logsRepo.atualizar(l.id, {
+          mmrBefore: antes == null ? null : Math.round(antes),
+          mmrAfter: depois == null ? null : Math.round(depois),
+          mmrDelta,
+        });
+        // Recorde 👑 (spec §9): competitivo, nota numérica, usuário real.
+        try {
+          await updateCharacterRecord(l.itemId, score, {
+            userId: l.userId, userName: l.userName, userPhoto: dono && dono.profilePhoto,
+            origem: 'competitivo',
+          });
+        } catch (err) {
+          console.error('updateCharacterRecord (batch) falhou:', err.message);
         }
-      } else {
-        l.evaluationPending = false; l.evalError = motivoSemResultado;
       }
     }
-    writeJSON('logs.json', arr);
-    if (mmrChanged) writeMMR(mmr);
-  });
+  }
   for (const r of ready) {
-    upsertEvaluationNotification(r.userId, r.refId, {
+    await upsertEvaluationNotification(r.userId, r.refId, {
       type: 'evaluation_ready',
       message: `Sua avaliação${r.itemTitle ? ` de "${r.itemTitle}"` : ''} está pronta.`,
     });
@@ -6796,7 +6992,7 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
 async function runCompetitiveEvalsWithoutBatch() {
   const spec = evaluatorSpecFor('competitivo');
   if (spec.batch) return;
-  const pending = readJSON('logs.json').filter((l) => l && l.mode === 'competitive' && l.evaluationPending && !l.evalBatchId);
+  const pending = await logsRepo.pendentesCompetitivos();
   for (const log of pending) {
     try {
       const result = await runPipelineSemBatch({ spec, materiais: competitiveMateriais(log), rotulo: 'comp-sync' });
@@ -6805,14 +7001,9 @@ async function runCompetitiveEvalsWithoutBatch() {
     } catch (e) {
       const tentativas = (Number(log.evalAttempts) || 0) + 1;
       const desistiu = tentativas >= EVAL_SYNC_MAX_ATTEMPTS;
-      await withFileLock('logs.json', async () => {
-        const arr = readJSON('logs.json');
-        const alvo = arr.find((l) => String(l.id) === String(log.id) && l.evaluationPending);
-        if (!alvo) return;
-        alvo.evalAttempts = tentativas;
-        if (desistiu) { alvo.evaluationPending = false; alvo.evalError = `avaliação síncrona falhou: ${e.message}`; }
-        writeJSON('logs.json', arr);
-      });
+      await logsRepo.atualizar(log.id, desistiu
+        ? { evalAttempts: tentativas, evaluationPending: false, evalError: `avaliação síncrona falhou: ${e.message}` }
+        : { evalAttempts: tentativas }, { soSePendente: true });
       console.error(`[comp-sync] ${log.id} falhou (tentativa ${tentativas}/${EVAL_SYNC_MAX_ATTEMPTS})${desistiu ? ' — marcado com erro' : ''}:`, e.message);
     }
   }
@@ -6820,7 +7011,7 @@ async function runCompetitiveEvalsWithoutBatch() {
 
 // Coleta os batches prontos e fecha os logs (ver finalizeCompetitiveEvals).
 async function collectCompetitiveBatches(openai) {
-  const withBatch = readJSON('logs.json').filter((l) => l && l.evaluationPending && l.evalBatchId);
+  const withBatch = await logsRepo.pendentesCompetitivos({ comLote: true });
   if (!withBatch.length) return;
   const batchIds = [...new Set(withBatch.map((l) => l.evalBatchId))];
   for (const bid of batchIds) {
@@ -6856,17 +7047,17 @@ async function collectCompetitiveBatches(openai) {
       // ao conjunto de pendentes, e o próximo ciclo tenta de novo.
       const tentativas = Math.max(0, ...withBatch.filter((l) => l.evalBatchId === bid).map((l) => Number(l.evalBatchTentativas) || 0));
       const r = await fecharBatchQueFalhou({ batchObj: batch, model: evaluatorSpecFor('competitivo').model, tentativas, modo: 'comp-batch' });
-      await withFileLock('logs.json', async () => {
-        const arr = readJSON('logs.json');
-        for (const l of arr) {
-          if (l.evalBatchId !== bid || !l.evaluationPending) continue;
-          if (r.acao === 'erro') { l.evaluationPending = false; l.evalError = r.motivo; continue; }
-          l.evalBatchId = null;
-          l.evalBatchEspera = r.motivo;
-          if (r.acao === 'retenta') l.evalBatchTentativas = (Number(l.evalBatchTentativas) || 0) + 1;
-        }
-        writeJSON('logs.json', arr);
-      });
+      // Cada log do lote, só se ainda está pendente e naquele lote.
+      for (const l of withBatch.filter((x) => x.evalBatchId === bid)) {
+        const campos = r.acao === 'erro'
+          ? { evaluationPending: false, evalError: r.motivo }
+          : {
+            evalBatchId: null,
+            evalBatchEspera: r.motivo,
+            ...(r.acao === 'retenta' ? { evalBatchTentativas: (Number(l.evalBatchTentativas) || 0) + 1 } : {}),
+          };
+        await logsRepo.atualizar(l.id, campos, { soSePendente: true, loteAtual: bid });
+      }
     }
   }
 }
@@ -6892,7 +7083,7 @@ async function sweepCompetitiveBatches() {
 
 // ============================================================================
 // TRILHA (exercícios) — avaliador OpenAI (mini/5.4/5.5) SEMPRE em Batch. Fila
-// própria (trilha-eval-queue.json) porque o job carrega prompt+turnos inteiros
+// própria (jobs 'trilha-avaliacao') porque o job carrega prompt+turnos inteiros
 // (o exercício não tem "log" prévio como logs.json/selection-logs.json). O
 // aluno vê "Calculando a nota final" (ChatSession) até o poll do cliente trazer
 // o resultado — pode levar minutos a até 24h, mesma natureza do Competitivo.
@@ -6910,7 +7101,7 @@ let trilhaEvalSweepRunning = false;
 
 // Submete os jobs pendentes (status 'processing' && !batchId).
 async function submitTrilhaEvalBatches(openai) {
-  const pending = readJSON('trilha-eval-queue.json').filter((j) => j && j.status === 'processing' && !j.batchId);
+  const pending = await filaTrilha.listar({ status: 'processing', semBatch: true });
   if (!pending.length) return;
   // O teto de tokens enfileirados é POR MODELO, e cada exercício escolhe o seu
   // avaliador — então os pendentes vão agrupados por modelo, cada grupo com o
@@ -6927,20 +7118,18 @@ async function submitTrilhaEvalBatches(openai) {
     const enviados = await submeterPendentesEmLotes({ openai, itens, model: modelo, modo: 'trilha-batch', rotulo: 'exercício(s)' });
     for (const [id, bid] of enviados) destino.set(id, bid);
   }
-  if (!destino.size) return;
-  await withFileLock('trilha-eval-queue.json', async () => {
-    const arr = readJSON('trilha-eval-queue.json');
-    for (const j of arr) {
-      const bid = destino.get(j.id);
-      if (bid && j.status === 'processing' && !j.batchId) { j.batchId = bid; j.batchAt = new Date().toISOString(); }
-    }
-    writeJSON('trilha-eval-queue.json', arr);
-  });
+  for (const [id, bid] of destino) {
+    await filaTrilha.atualizar(id, (j) => {
+      if (j.status !== 'processing' || j.batchId) return false;
+      j.batchId = bid;
+      j.batchAt = new Date().toISOString();
+    });
+  }
 }
 
 // Coleta os batches prontos: grava o resultado (content + usage normalizado) no job.
 async function collectTrilhaEvalBatches(openai) {
-  const withBatch = readJSON('trilha-eval-queue.json').filter((j) => j && j.status === 'processing' && j.batchId);
+  const withBatch = await filaTrilha.listar({ status: 'processing', comBatch: true });
   if (!withBatch.length) return;
   const batchIds = [...new Set(withBatch.map((j) => j.batchId))];
   for (const bid of batchIds) {
@@ -6963,27 +7152,23 @@ async function collectTrilhaEvalBatches(openai) {
           } catch {}
         }
       }
-      const ready = []; // { userId, refId, itemId } — notificados DEPOIS do lock
-      await withFileLock('trilha-eval-queue.json', async () => {
-        const arr = readJSON('trilha-eval-queue.json');
-        for (const j of arr) {
-          if (j.batchId !== bid || j.status !== 'processing') continue;
-          if (contents.has(j.id) && contents.get(j.id)) {
-            const rawUsage = usages.get(j.id) || null;
-            j.status = 'completed';
-            j.result = { content: contents.get(j.id), usage: rawUsage ? normalizeUsage('openai', rawUsage) : null };
-            if (j.userId) ready.push({ userId: j.userId, refId: 'trilha-job:' + j.id, itemId: j.itemId });
-          } else {
-            j.status = 'error'; j.error = 'sem resultado no batch';
-          }
+      const ready = []; // { userId, refId, itemId } — notificados DEPOIS de gravar
+      await filaTrilha.atualizarDoBatch(bid, (j) => {
+        if (j.status !== 'processing') return false;
+        if (contents.has(j.id) && contents.get(j.id)) {
+          const rawUsage = usages.get(j.id) || null;
+          j.status = 'completed';
+          j.result = { content: contents.get(j.id), usage: rawUsage ? normalizeUsage('openai', rawUsage) : null };
+          if (j.userId) ready.push({ userId: j.userId, refId: 'trilha-job:' + j.id, itemId: j.itemId });
+        } else {
+          j.status = 'error'; j.error = 'sem resultado no batch';
         }
-        writeJSON('trilha-eval-queue.json', arr);
       });
       if (ready.length) {
-        const exercises = readJSON('exercises.json');
+        const exercises = catalogos.ler('exercicios');
         for (const r of ready) {
           const ex = exercises.find((e) => String(e.id) === String(r.itemId));
-          upsertEvaluationNotification(r.userId, r.refId, {
+          await upsertEvaluationNotification(r.userId, r.refId, {
             type: 'evaluation_ready',
             message: `Sua avaliação${ex ? ` de "${ex.title}"` : ''} está pronta.`,
           });
@@ -6997,16 +7182,12 @@ async function collectTrilhaEvalBatches(openai) {
       const doBatch = withBatch.filter((j) => j.batchId === bid);
       const tentativas = Math.max(0, ...doBatch.map((j) => Number(j.batchTentativas) || 0));
       const r = await fecharBatchQueFalhou({ batchObj: batch, model: (doBatch[0] && doBatch[0].model) || '', tentativas, modo: 'trilha-batch' });
-      await withFileLock('trilha-eval-queue.json', async () => {
-        const arr = readJSON('trilha-eval-queue.json');
-        for (const j of arr) {
-          if (j.batchId !== bid || j.status !== 'processing') continue;
-          if (r.acao === 'erro') { j.status = 'error'; j.error = r.motivo; continue; }
-          j.batchId = null;
-          j.batchEspera = r.motivo;
-          if (r.acao === 'retenta') j.batchTentativas = (Number(j.batchTentativas) || 0) + 1;
-        }
-        writeJSON('trilha-eval-queue.json', arr);
+      await filaTrilha.atualizarDoBatch(bid, (j) => {
+        if (j.status !== 'processing') return false;
+        if (r.acao === 'erro') { j.status = 'error'; j.error = r.motivo; return; }
+        j.batchId = null;
+        j.batchEspera = r.motivo;
+        if (r.acao === 'retenta') j.batchTentativas = (Number(j.batchTentativas) || 0) + 1;
       });
     }
   }
@@ -7030,19 +7211,18 @@ async function sweepTrilhaEvalBatches() {
 // Poll do cliente enquanto o job do batch não termina (ver /api/evaluate,
 // branch isExercise && !isExerciseAltProvider). Só o dono do job (mesmo
 // usuário que gerou a avaliação) pode ler o resultado.
-app.get('/api/trilha/evaluate-batch/:jobId', requireAuth, (req, res) => {
-  const arr = readJSON('trilha-eval-queue.json');
-  const job = arr.find((j) => j && j.id === req.params.jobId);
+app.get('/api/trilha/evaluate-batch/:jobId', requireAuth, rota(async (req, res) => {
+  const job = await filaTrilha.porId(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Avaliação não encontrada.' });
   if (job.userId !== req.user.id) return res.status(403).json({ error: 'Sem acesso a esta avaliação.' });
   if (job.status === 'processing') return res.json({ status: 'processing' });
   if (job.status === 'error') return res.json({ status: 'error', error: job.error || 'Falha na avaliação em lote.' });
   return res.json({ status: 'completed', content: job.result.content, usage: job.result.usage });
-});
+}));
 
 // POST /api/competitive/finish — salva o log competitivo PENDENTE em logs.json e
 // dispara o batch. Responde na hora (o aluno vê só o agradecimento; nota em 24h).
-app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/competitive/finish', requireAuth, writeLimiter, requireFeature('simulacao'), requireFeature('competitivo'), rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.status(403).json({ error: 'Competitivo não disponível para visitantes.' });
   const b = req.body || {};
   const itemId = b.itemId;
@@ -7053,7 +7233,7 @@ app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) 
     .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
     .slice(0, LOG_MAX_MESSAGES)
     .map((m) => ({ role: m.role, content: clampStr(m.content, LOG_MAX_MESSAGE_LEN), highlighted: !!m.highlighted, comment: clampStr(m.comment, 2000) }));
-  const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(itemId));
+  const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(itemId));
   const log = {
     id: 'log' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
@@ -7071,22 +7251,18 @@ app.post('/api/competitive/finish', requireAuth, writeLimiter, async (req, res) 
     userId: req.user.id,
     userName: req.user.name,
   };
-  await withFileLock('logs.json', async () => {
-    const arr = readJSON('logs.json');
-    arr.push(log);
-    writeJSON('logs.json', arr);
-  });
+  await logsRepo.criar(log);
   // Responde na hora — o aluno vê só o agradecimento ("nota em até 24h").
   res.json({ ok: true, pending: true, logId: log.id });
   // refId = 'log:'+log.id (não 'eval:'+userId): este id sobrevive até
   // finalizeCompetitiveEvals, que é onde a notificação vira "pronta".
-  upsertEvaluationNotification(req.user.id, 'log:' + log.id, {
+  await upsertEvaluationNotification(req.user.id, 'log:' + log.id, {
     type: 'evaluation_queued',
     message: EVAL_QUEUED_MESSAGE,
   });
   // Dispara o batch já (submete este log). O collect roda no boot + intervalo.
   sweepCompetitiveBatches().catch(() => {});
-});
+}));
 
 // 1) Senha — só destrava a UI do formulário. A senha é revalidada no /iniciar.
 app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
@@ -7097,7 +7273,7 @@ app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
 
 // 2) Iniciar — valida senha + campos + termo; dedup 15 dias por WhatsApp; sorteia
 // personagem do Treinamento; emite o JWT do candidato com o characterId + dados.
-app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
+app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
   const b = req.body || {};
   if (!senhaSelecaoConfere(b.password)) {
     return res.status(401).json({ error: 'Senha incorreta.' });
@@ -7124,25 +7300,11 @@ app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
     return res.status(400).json({ error: 'Informe um número de WhatsApp válido, com DDD.' });
   }
 
-  // Dedup: 1 avaliação por WhatsApp a cada 15 dias. Baseado nos logs de seleção
-  // (que duram 15 dias) + checagem explícita de tempo, pra não depender do prune.
-  pruneExpiredSelectionLogs();
-  const logs = readJSON('selection-logs.json');
-  const lastTs = logs
-    .filter((l) => l && normalizeWhatsapp(l.candidate && l.candidate.whatsapp) === wa)
-    .map((l) => new Date(l.timestamp || 0).getTime())
-    .filter((t) => Number.isFinite(t) && t > 0)
-    .sort((a, c) => c - a)[0];
-  if (lastTs) {
-    const daysLeft = Math.max(1, Math.ceil((lastTs + SELECTION_LOG_TTL_MS - Date.now()) / (24 * 60 * 60 * 1000)));
-    return res.status(403).json({
-      error: `Ainda faltam ${daysLeft} dias para você tentar realizar a avaliação novamente`,
-      daysLeft,
-    });
-  }
+  // Sem dedupe automático: quem administra a abertura controla o acesso pela
+  // senha (SELECAO_PASSWORD). Trocar a senha entre aberturas fecha a antiga.
 
   // Personagem sorteado a cada início (os mesmos do modo Treinamento).
-  const chars = readJSON('freeplay-characters.json');
+  const chars = catalogos.ler('freeplay');
   if (!Array.isArray(chars) || chars.length === 0) {
     return res.status(500).json({ error: 'Nenhum personagem disponível no momento.' });
   }
@@ -7169,7 +7331,7 @@ app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
       photoFull: c.photoFull || '',
     },
   });
-});
+}));
 
 // 3) Chat do candidato (paciente). O characterId vem do JWT (candidato NÃO escolhe
 // o caso). Monta o prompt do paciente server-side, igual ao /api/chat freeplay.
@@ -7178,7 +7340,7 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
   if (!Array.isArray(messages)) {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
-  const c = readJSON('freeplay-characters.json').find((x) => String(x.id) === String(req.candidate.characterId));
+  const c = catalogos.ler('freeplay').find((x) => String(x.id) === String(req.candidate.characterId));
   if (!c) return res.status(404).json({ error: 'Personagem não encontrado' });
   // Paciente do Seletivo: modelo da categoria (Administração → Modelos de IA).
   const spec = patientSpecFor('seletivo');
@@ -7218,7 +7380,7 @@ app.post('/api/selecao/chat', requireCandidate, aiLimiter, async (req, res) => {
 // candidato ao longo do acompanhamento. Nunca devolve nota/feedback na resposta;
 // quem pediu o feedback prévio recebe SÓ o texto qualitativo, por e-mail, quando
 // a avaliação terminar (ver enviarFeedbackPrevio).
-app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
+app.post('/api/selecao/finish', requireCandidate, rota(async (req, res) => {
   const b = req.body || {};
   const sessionId = req.candidate.sub;
   const cleanMessages = (Array.isArray(b.messages) ? b.messages : [])
@@ -7234,13 +7396,12 @@ app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
   const sessionCount = cleanMessages.reduce((mx, m) => Math.max(mx, m.session || 1), 1);
   const durationSeconds = Number.isFinite(b.durationSeconds) ? Math.max(0, Math.floor(b.durationSeconds)) : 0;
 
-  const chars = readJSON('freeplay-characters.json');
+  const chars = catalogos.ler('freeplay');
   const c = chars.find((x) => String(x.id) === String(req.candidate.characterId))
     || { id: req.candidate.characterId, name: 'Paciente' };
 
   // Idempotência: um segundo finish da mesma sessão não regrava (nem duplica stats).
-  const existing = readJSON('selection-logs.json');
-  if (existing.some((l) => l && l.sessionId === sessionId)) {
+  if (await selecaoRepo.existeSessao(sessionId)) {
     return res.json({ ok: true });
   }
 
@@ -7263,19 +7424,15 @@ app.post('/api/selecao/finish', requireCandidate, async (req, res) => {
     criteriaScores: null,
     evaluation: '',
   };
-  await withFileLock('selection-logs.json', async () => {
-    const arr = readJSON('selection-logs.json');
-    if (arr.some((l) => l && l.sessionId === sessionId)) return;
-    arr.push(log);
-    writeJSON('selection-logs.json', arr);
-  });
+  // Um log por sessão: dois /finish simultâneos não duplicam (decidido pelo banco).
+  await selecaoRepo.criar(log, normalizeWhatsapp(log.candidate && log.candidate.whatsapp));
 
   // Responde imediatamente — o candidato vê o agradecimento sem esperar a IA.
   res.json({ ok: true });
 
   // Dispara o batch já (submete este log). O collect roda no boot + intervalo.
   sweepSelectionBatches().catch(() => {});
-});
+}));
 
 // 4b) Senha de acesso — avaliador/admin vê a senha atual + quem trocou por
 // último, e pode trocá-la (fica salva em settings.json, sem precisar reiniciar
@@ -7288,39 +7445,32 @@ app.get('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admi
     updatedAt: s.selecaoPasswordUpdatedAt || null,
   });
 });
-app.put('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+app.put('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
   const novaSenha = clampStr((req.body && req.body.password) || '', 60).trim();
   if (novaSenha.length < 4) {
     return res.status(400).json({ error: 'A senha precisa ter pelo menos 4 caracteres.' });
   }
-  const cur = readSettings();
-  cur.selecaoPassword = novaSenha;
-  cur.selecaoPasswordUpdatedBy = req.user.name || req.user.username || 'Avaliador';
-  cur.selecaoPasswordUpdatedAt = new Date().toISOString();
-  writeJSON('settings.json', cur);
+  const cur = await operacaoRepo.atualizarConfig('settings', {}, (s) => {
+    s.selecaoPassword = novaSenha;
+    s.selecaoPasswordUpdatedBy = req.user.name || req.user.username || 'Avaliador';
+    s.selecaoPasswordUpdatedAt = new Date().toISOString();
+  });
   res.json({ ok: true, password: novaSenha, updatedBy: cur.selecaoPasswordUpdatedBy, updatedAt: cur.selecaoPasswordUpdatedAt });
-});
+}));
 
-// 5) Logs de avaliações — avaliador/admin. Poda os expirados (15d) e lista todos.
-app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
-  pruneExpiredSelectionLogs();
-  const logs = readJSON('selection-logs.json');
-  const sorted = [...logs].sort((a, c) => new Date(c.timestamp || 0) - new Date(a.timestamp || 0));
-  res.json(sorted.map((l) => ({
-    ...l,
-    expiresAt: l.timestamp ? new Date(new Date(l.timestamp).getTime() + SELECTION_LOG_TTL_MS).toISOString() : null,
-  })));
-});
+// 5) Logs de avaliações — avaliador/admin. Lista tudo (logs são persistentes).
+app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
+  const sorted = await selecaoRepo.listar('desc');
+  res.json(sorted);
+}));
 
 // 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +
 // avaliação, já formatados como .txt) pra salvar no Drive antes da poda de 15
 // dias. M2M por secret fixo no header (X-Export-Secret), não JWT: quem chama é
 // um script agendado, sem sessão de usuário. Idempotência de gravação fica a
 // cargo de quem chama (o script decide o que já salvou, pelo nome do arquivo).
-app.get('/api/selecao/export-all', requireSelecaoExportSecret, (req, res) => {
-  pruneExpiredSelectionLogs();
-  const logs = readJSON('selection-logs.json');
-  const sorted = [...logs].sort((a, c) => new Date(a.timestamp || 0) - new Date(c.timestamp || 0));
+app.get('/api/selecao/export-all', requireSelecaoExportSecret, rota(async (req, res) => {
+  const sorted = await selecaoRepo.listar('asc');
   const items = sorted.map((log) => {
     const stamp = log.timestamp ? new Date(log.timestamp).toISOString().slice(0, 10) : 'sem-data';
     const slug = selecaoExportSlug(log.candidate && log.candidate.nome) || 'candidato';
@@ -7335,19 +7485,17 @@ app.get('/api/selecao/export-all', requireSelecaoExportSecret, (req, res) => {
     };
   });
   res.json({ generatedAt: new Date().toISOString(), count: items.length, logs: items });
-});
+}));
 
-// 6) Dashboard — avaliador/admin. Agrega selection-stats.json (anônimo, permanente)
-// no período pedido: ativos e rejeitados pelo SELECTION_ACTIVE_THRESHOLD (que vai
-// no payload, pra tela não repetir o número em código) e média das notas.
-app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
+// 6) Dashboard — avaliador/admin. Agrega as estatísticas anônimas e permanentes
+// (selecao_estatisticas) no período pedido: ativos e rejeitados pelo
+// SELECTION_ACTIVE_THRESHOLD (que vai no payload, pra tela não repetir o número
+// em código) e média das notas.
+app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
   const range = ['day', 'week', 'month', 'year'].includes(req.query.range) ? req.query.range : 'month';
   const spanMs = ({ day: 1, week: 7, month: 30, year: 365 }[range]) * 24 * 60 * 60 * 1000;
   const cutoff = Date.now() - spanMs;
-  const stats = readJSON('selection-stats.json').filter((s) => {
-    const t = new Date((s && s.timestamp) || 0).getTime();
-    return Number.isFinite(t) && t >= cutoff;
-  });
+  const stats = await selecaoRepo.estatisticasDesde(new Date(cutoff));
   const scored = stats.filter((s) => Number.isFinite(Number(s.score)));
   const activeCount = scored.filter((s) => Number(s.score) >= SELECTION_ACTIVE_THRESHOLD).length;
   const rejectedCount = scored.filter((s) => Number(s.score) < SELECTION_ACTIVE_THRESHOLD).length;
@@ -7355,7 +7503,7 @@ app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin')
     ? Math.round(scored.reduce((a, s) => a + Number(s.score), 0) / scored.length)
     : null;
   res.json({ range, total: scored.length, activeCount, rejectedCount, avgScore, threshold: SELECTION_ACTIVE_THRESHOLD });
-});
+}));
 
 // 6b) TRI dos personagens — quais casos são mais difíceis. A dificuldade é
 // ÚNICA e vem de todas as fontes juntas (competitivo + seletivo + visitante):
@@ -7365,29 +7513,34 @@ app.get('/api/selecao/dashboard', requireAuth, requireRole('evaluator', 'admin')
 // Cumulativo, sem recorte por período: a estimativa se acumula atendimento a
 // atendimento, e filtrar por data devolveria um número diferente do que o
 // engine está de fato usando.
-app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), (req, res) => {
-  const mmr = readMMR();
-  const fontes = mmr.charSources || {};
-  const catalogo = readJSON('freeplay-characters.json');
+app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
+  const [estados, fontes, anonPlayers] = await Promise.all([
+    mmrRepo.personagens(), mmrRepo.fontes(), mmrRepo.populacoes(),
+  ]);
+  const mmr = { characters: estados, anonPlayers };
+  const catalogo = catalogos.ler('freeplay');
 
   const characters = catalogo.map((c) => {
     const st = mmr.characters[String(c.id)];
-    const n = (st && Number.isFinite(st.n_D)) ? st.n_D : 0;
+    const view = mmrEngine.characterView(st);
+    const critsCount = Object.keys(view.criterios || {}).length;
+    // n_D total = soma dos movimentos do D em todos os critérios (spec §12).
+    const n = Object.values(view.criterios || {}).reduce((a, cc) => a + (cc.n_D || 0), 0);
     const avg = st ? mmrEngine.characterAvgScore(st) : null;
+    const dTotal = view.dTotal == null ? mmrEngine.D0 : view.dTotal;
+    // Regressão do CASO amadurece por critério (spec §4). O caso é "maduro"
+    // quando TODOS os critérios já passaram do teto — leitura conservadora.
+    const madura = critsCount > 0 && Object.values(view.criterios).every((cc) => cc.madura);
     return {
       id: String(c.id),
       name: c.name || 'Personagem',
-      difficulty: mmrEngine.characterDifficulty(st),
-      // Distância da baseline: diz se o personagem já se afastou do ponto de
-      // partida ou se ainda está em 50 por falta de dado.
-      delta: Math.round((st && Number.isFinite(st.D) ? st.D : mmrEngine.D0) - mmrEngine.D0),
+      difficulty: Math.round(dTotal),
+      delta: Math.round(dTotal - mmrEngine.D0),
       n,
       avgScore: avg == null ? null : Math.round(avg),
-      // De onde vieram os atendimentos deste personagem.
       fontes: fontes[String(c.id)] || {},
-      // Só a partir de CHAR_MATURE_AT o engine liga a regressão; abaixo disso o
-      // número é indicativo e a tela precisa dizer isso.
-      madura: n >= mmrEngine.CHAR_MATURE_AT,
+      madura,
+      criterios: view.criterios, // spec §10: supervisor vê D por critério.
     };
   });
 
@@ -7398,14 +7551,18 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
   // Rating aprendido de cada população anônima — é o número que mostra o
   // sistema funcionando: se os candidatos são mais fracos, isto fica < 50 e a
   // dificuldade deixa de ser inflada por eles.
+  // O peso vem da configuração do admin (Acessos), não mais de uma constante:
+  // este painel precisa mostrar o valor que está de fato valendo.
+  const pesosTri = lerAcessos().pesosTri;
   const populacoes = TRI_POOLS.map((p) => {
     const st = mmr.anonPlayers && mmr.anonPlayers[p];
+    const view = mmrEngine.playerView(st);
     return {
       pool: p,
-      rating: st ? Math.round(st.P) : mmrEngine.P0,
-      n: st ? st.n : 0,
-      calibrando: !st || st.n < mmrEngine.CALIBRATION_MATCHES,
-      peso: TRI_PESOS[p],
+      rating: view.mmrTotal == null ? mmrEngine.P0 : view.mmrTotal,
+      n: view.nEntradas,
+      calibrando: view.calibrating,
+      peso: pesosTri[p],
     };
   });
 
@@ -7419,7 +7576,7 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
     populacoes,
     characters,
   });
-});
+}));
 
 // ============================================================================
 // AVALIAÇÃO INDEPENDENTE — a aba "Avaliar Sessão" do supervisor
@@ -7535,9 +7692,9 @@ function buildAvalResponse(entry, result) {
 }
 
 // Raciocínio das runs de pipeline com captura (v28): um .txt por avaliação, em
-// arquivo próprio no volume. Fora do avaliacao-v25.json de propósito — aquele
-// store é lido INTEIRO a cada gravação, e somar dezenas de KB de resumo por run
-// o faria crescer rápido sem que ninguém leia isso no caminho normal.
+// arquivo próprio no volume. Fora do histórico de resultados (jobs
+// 'avaliacao-resultados') de propósito — são dezenas de KB de resumo por run que
+// ninguém lê no caminho normal.
 const AVAL_REASONING_DIR = path.join(DATA_DIR, 'avaliacao-reasoning');
 
 // Nome de arquivo a partir do id da entry. O id é gerado por nós ('av25-' +
@@ -7548,7 +7705,7 @@ function reasoningPathFor(entryId) {
   return path.join(AVAL_REASONING_DIR, entryId + '.txt');
 }
 
-// Persiste o resultado em avaliacao-v25.json (store de todos os avaliadores).
+// Persiste o resultado no histórico da Avaliação Independente (antes, avaliacao-v25.json).
 async function persistAvaliacaoResult({ user, casoId, casoNome, alunoNome, evaluator, model, effort, batch, result }) {
   const entry = {
     id: 'av25-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
@@ -7584,11 +7741,7 @@ async function persistAvaliacaoResult({ user, casoId, casoNome, alunoNome, evalu
     }
   }
 
-  await withFileLock('avaliacao-v25.json', async () => {
-    const store = readJSON('avaliacao-v25.json', []);
-    store.push(entry);
-    writeJSON('avaliacao-v25.json', store);
-  });
+  await resultadosAvaliacao.criar(entry);
   return entry;
 }
 
@@ -7624,8 +7777,8 @@ async function submeterJobAvaliacao(job, client) {
   // seria esperar para sempre. Vai assim mesmo, e a recusa da OpenAI vira um
   // erro visível com o motivo — melhor que um job preso na fila em silêncio.
   const cabeAlgumDia = tokens <= batchFila.espacoLivre(job.model, 0);
-  if (cabeAlgumDia && !cabeNaFilaDaOpenAI(job.model, tokens)) {
-    const livre = batchFila.espacoLivre(job.model, tokensEmVoo(job.model));
+  if (cabeAlgumDia && !(await cabeNaFilaDaOpenAI(job.model, tokens))) {
+    const livre = batchFila.espacoLivre(job.model, await tokensEmVoo(job.model));
     console.log(`[aval-batch] job ${job.id} espera vaga: precisa de ${tokens.toLocaleString('pt-BR')} tokens, livre ${livre.toLocaleString('pt-BR')}`);
     await markAvalJob(job.id, { status: 'aguardando', espera: 'Aguardando vaga na fila de tokens da OpenAI.' });
     return 'sem-vaga';
@@ -7668,26 +7821,18 @@ async function enqueueAvaliacaoBatch({ openai, user, evaluator, model, modelKey,
     tentativas: 0, espera: null,
     result: null, error: null,
   };
-  await withFileLock('avaliacao-fila.json', async () => {
-    const arr = readJSON('avaliacao-fila.json');
-    arr.push(job);
-    writeJSON('avaliacao-fila.json', arr);
-  });
+  await filaAvaliacao.criar(job);
   await submeterJobAvaliacao(job, openai);
-  return readJSON('avaliacao-fila.json').find((j) => j && j.id === jobId) || job;
+  return (await filaAvaliacao.porId(jobId)) || job;
 }
 
 async function markAvalJob(jobId, patch) {
-  await withFileLock('avaliacao-fila.json', async () => {
-    const arr = readJSON('avaliacao-fila.json');
-    const i = arr.findIndex((j) => j && j.id === jobId);
-    if (i === -1) return;
-    arr[i] = { ...arr[i], ...patch };
+  await filaAvaliacao.atualizar(jobId, (job) => {
+    Object.assign(job, patch);
     // Libera o material grande só quando o job acabou de verdade: enquanto ele
     // pode voltar para a fila, log e bloco1 são o que permite remontar as
     // requisições na próxima tentativa.
-    if (patch.status === 'completed' || patch.status === 'error') { delete arr[i].log; delete arr[i].bloco1; }
-    writeJSON('avaliacao-fila.json', arr);
+    if (patch.status === 'completed' || patch.status === 'error') { delete job.log; delete job.bloco1; }
   });
 }
 
@@ -7708,11 +7853,7 @@ async function enqueueAvaliacaoLocal({ client, provider, user, evaluator, model,
     casoId, casoNome, alunoNome: alunoNome || '', evaluator, model, modelKey, effort, provider, batch: false, local: true,
     status: 'processing', result: null, error: null,
   };
-  await withFileLock('avaliacao-fila.json', async () => {
-    const arr = readJSON('avaliacao-fila.json');
-    arr.push(job);
-    writeJSON('avaliacao-fila.json', arr);
-  });
+  await filaAvaliacao.criar(job);
   runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log })
     .then(async (result) => {
       const entry = await persistAvaliacaoResult({ user, casoId, casoNome, alunoNome, evaluator, model, effort, batch: false, result });
@@ -7737,7 +7878,7 @@ async function sweepAvaliacaoBatches() {
   if (!openai) return;
   avalSweepRunning = true;
   try {
-    const jobs = readJSON('avaliacao-fila.json').filter((j) => j && j.status === 'processing' && j.batchId);
+    const jobs = await filaAvaliacao.listar({ status: 'processing', comBatch: true });
     // (os 'aguardando' são tratados na segunda passada, depois de liberar vagas)
     for (const job of jobs) {
       const client = getClientForProvider(job.provider || 'openai');
@@ -7804,9 +7945,7 @@ async function sweepAvaliacaoBatches() {
     // Segunda passada: a fila local. Os jobs que ainda não entraram na Batch API
     // (novos sem vaga, ou devolvidos por uma recusa) tentam agora, mais velhos
     // primeiro — as vagas que a passada acima liberou já contam aqui.
-    const esperando = readJSON('avaliacao-fila.json')
-      .filter((j) => j && j.status === 'aguardando')
-      .sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+    const esperando = await filaAvaliacao.listar({ status: 'aguardando' }); // mais velhos primeiro
     for (const job of esperando) {
       const client = getClientForProvider(job.provider || 'openai');
       if (!client) continue;
@@ -7864,7 +8003,7 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
       return res.status(503).json({ error: `Avaliação independente indisponível: ${which} não configurada.` });
     }
 
-    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(casoId));
     const casoNome = freeChar ? freeChar.name : '';
 
     if (batch) {
@@ -7886,8 +8025,8 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
 // Baixa o .txt com o resumo do raciocínio de uma avaliação (v28). Mesma regra de
 // acesso da fila: supervisor vê o que rodou, admin vê tudo. Devolve texto puro —
 // o cliente transforma em arquivo.
-app.get('/api/avaliacao-independente/:id/reasoning', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const entry = readJSON('avaliacao-v25.json', []).find((e) => e && e.id === req.params.id);
+app.get('/api/avaliacao-independente/:id/reasoning', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const entry = await resultadosAvaliacao.porId(req.params.id);
   if (!entry) return res.status(404).json({ error: 'Avaliação não encontrada.' });
   if (req.user.role !== 'admin' && entry.userId !== req.user.id) {
     return res.status(403).json({ error: 'Esta avaliação é de outro usuário.' });
@@ -7897,14 +8036,15 @@ app.get('/api/avaliacao-independente/:id/reasoning', requireAuth, requireRole('s
     return res.status(404).json({ error: 'Esta avaliação não guardou raciocínio (só o v28 em modo síncrono guarda).' });
   }
   res.type('text/plain; charset=utf-8').send(fs.readFileSync(file, 'utf-8'));
-});
+}));
 
 // Fila de avaliações (jobs em batch). Supervisor vê os próprios; admin vê todos.
-app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const jobs = readJSON('avaliacao-fila.json')
-    .filter((j) => j && (req.user.role === 'admin' || j.userId === req.user.id))
-    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, 50)
+app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const jobs = (await filaAvaliacao.listar({
+    userId: req.user.role === 'admin' ? undefined : req.user.id,
+    recentesPrimeiro: true,
+    limite: 50,
+  }))
     .map((j) => ({
       id: j.id, createdAt: j.createdAt, completedAt: j.completedAt || null,
       casoNome: j.casoNome, alunoNome: j.alunoNome || '', evaluator: j.evaluator, model: j.model, modelKey: j.modelKey,
@@ -7915,7 +8055,7 @@ app.get('/api/avaliacao-independente/fila', requireAuth, requireRole('supervisor
       result: j.result || null, // já é o buildAvalResponse quando completo
     }));
   res.json(jobs);
-});
+}));
 
 // ============================================================================
 // SIMULAÇÃO INDEPENDENTE — laboratório de pricing do PACIENTE (supervisor/admin)
@@ -8068,13 +8208,7 @@ function writeBenchRun(run) {
 const benchCancelados = new Set();
 
 async function markBenchJob(id, patch) {
-  await withFileLock('benchmark-fila.json', async () => {
-    const arr = readJSON('benchmark-fila.json');
-    const i = arr.findIndex((j) => j && j.id === id);
-    if (i === -1) return;
-    arr[i] = { ...arr[i], ...patch };
-    writeJSON('benchmark-fila.json', arr);
-  });
+  await filaBenchmark.atualizar(id, patch);
 }
 
 // Esta pessoa já tem run ou lote em voo? Um benchmark são 2×N chamadas
@@ -8082,8 +8216,8 @@ async function markBenchJob(id, patch) {
 // duplo clique não pode virar dois lotes de 70 interações. 'aguardando' conta —
 // é run de lote que ainda não começou, mas vai.
 async function benchOcupado(userId) {
-  return readJSON('benchmark-fila.json')
-    .some((j) => j && j.userId === userId && (j.status === 'processing' || j.status === 'aguardando' || j.status === 'cancelando'));
+  const emVoo = await filaBenchmark.listar({ userId, statusEm: ['processing', 'aguardando', 'cancelando'], limite: 1 });
+  return emVoo.length > 0;
 }
 
 // Uma fala. Dois transportes:
@@ -8279,20 +8413,12 @@ async function runBenchmarkRun({ run, log, pacienteSystemPrompt, clientPaciente,
 // Uma run que falha NÃO derruba o lote: o erro fica registrado nela e as outras
 // seguem. É o oposto do desejável num pipeline, e o certo aqui — o dinheiro já
 // gasto nas outras runs não pode ir embora porque a z.ai deu 429.
-const BENCH_LOTES_FILE = 'benchmark-lotes.json';
-
-function readBenchLote(id) {
+async function readBenchLote(id) {
   if (!/^blote-[0-9]+-[0-9a-f]{8}$/.test(String(id || ''))) return null;
-  return readJSON(BENCH_LOTES_FILE).find((l) => l && l.id === id) || null;
+  return lotesBenchmark.porId(id);
 }
 async function markLote(id, patch) {
-  await withFileLock(BENCH_LOTES_FILE, async () => {
-    const arr = readJSON(BENCH_LOTES_FILE);
-    const i = arr.findIndex((l) => l && l.id === id);
-    if (i === -1) return;
-    arr[i] = { ...arr[i], ...patch };
-    writeJSON(BENCH_LOTES_FILE, arr);
-  });
+  await lotesBenchmark.atualizar(id, patch);
 }
 
 // Cancelamento vale para a run e para o lote dela (a tela cancela o lote inteiro).
@@ -8418,7 +8544,7 @@ app.post('/api/benchmark-simulacao/lote', requireAuth, requireRole('supervisor',
       return res.status(409).json({ error: 'Você já tem um benchmark rodando. Espere terminar (ou cancele) antes de começar outro.' });
     }
 
-    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(casoId));
     const casoNome = freeChar ? freeChar.name : '';
     const loteId = 'blote-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
     const criadoEm = new Date().toISOString();
@@ -8467,28 +8593,20 @@ app.post('/api/benchmark-simulacao/lote', requireAuth, requireRole('supervisor',
       personaTurno: null,
       resumo: null,
     };
-    await withFileLock(BENCH_LOTES_FILE, async () => {
-      const arr = readJSON(BENCH_LOTES_FILE);
-      arr.push(lote);
-      writeJSON(BENCH_LOTES_FILE, arr);
-    });
-    await withFileLock('benchmark-fila.json', async () => {
-      const arr = readJSON('benchmark-fila.json');
-      for (const run of runs) {
-        arr.push({
-          id: run.id, createdAt: criadoEm, completedAt: null, loteId,
-          userId: req.user.id, userName: run.userName,
-          casoId, casoNome, alunoNome,
-          pacienteKey: run.paciente.key, pacienteLabel: run.paciente.label,
-          alunoLabel: aluno.label,
-          interacoesPedidas: interacoes,
-          status: 'aguardando',
-          progresso: { feitas: 0, total: interacoes },
-          resumo: null, error: null,
-        });
-      }
-      writeJSON('benchmark-fila.json', arr);
-    });
+    await lotesBenchmark.criar(lote);
+    for (const run of runs) {
+      await filaBenchmark.criar({
+        id: run.id, createdAt: criadoEm, completedAt: null, loteId,
+        userId: req.user.id, userName: run.userName,
+        casoId, casoNome, alunoNome,
+        pacienteKey: run.paciente.key, pacienteLabel: run.paciente.label,
+        alunoLabel: aluno.label,
+        interacoesPedidas: interacoes,
+        status: 'aguardando',
+        progresso: { feitas: 0, total: interacoes },
+        resumo: null, error: null,
+      });
+    }
 
     runLote({ lote, runs, log, pacienteSystemPrompt: resolved.systemPrompt, clientAluno, clientePara: getClientForSimProvider })
       .catch(async (e) => {
@@ -8517,18 +8635,19 @@ app.post('/api/benchmark-simulacao/lote', requireAuth, requireRole('supervisor',
 });
 
 // Histórico de lotes. Supervisor vê os próprios; admin vê todos.
-app.get('/api/benchmark-simulacao/lotes', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const lotes = readJSON(BENCH_LOTES_FILE)
-    .filter((l) => l && (req.user.role === 'admin' || l.userId === req.user.id))
-    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, 30)
+app.get('/api/benchmark-simulacao/lotes', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const lotes = (await lotesBenchmark.listar({
+    userId: req.user.role === 'admin' ? undefined : req.user.id,
+    recentesPrimeiro: true,
+    limite: 30,
+  }))
     .map((l) => ({ ...l, personaTurno: l.personaTurno ? { ...l.personaTurno, reasoning: undefined } : null }));
   res.json(lotes);
-});
+}));
 
 // Um lote + o estado de cada run dele (é o que a tela faz polling).
-app.get('/api/benchmark-simulacao/lote/:id', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const lote = readBenchLote(req.params.id);
+app.get('/api/benchmark-simulacao/lote/:id', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const lote = await readBenchLote(req.params.id);
   if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
   if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
     return res.status(403).json({ error: 'Este lote é de outro usuário.' });
@@ -8547,23 +8666,23 @@ app.get('/api/benchmark-simulacao/lote/:id', requireAuth, requireRole('superviso
       reasoningDisponivel: benchmark.temReasoning(r),
     })),
   });
-});
+}));
 
 // Relatório comparativo do lote (.txt). Só números — nada aqui julga qualidade.
-app.get('/api/benchmark-simulacao/lote/:id/relatorio', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const lote = readBenchLote(req.params.id);
+app.get('/api/benchmark-simulacao/lote/:id/relatorio', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const lote = await readBenchLote(req.params.id);
   if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
   if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
     return res.status(403).json({ error: 'Este lote é de outro usuário.' });
   }
   const runs = (lote.runIds || []).map((id) => readBenchRun(id)).filter(Boolean);
   res.type('text/plain; charset=utf-8').send(benchmark.buildLoteRelatorioTxt({ lote, runs }));
-});
+}));
 
 // Cancela o lote: a run em andamento para na próxima interação e as que ainda não
 // começaram nem começam. Tudo que já rodou fica gravado e baixável.
-app.post('/api/benchmark-simulacao/lote/:id/cancelar', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
-  const lote = readBenchLote(req.params.id);
+app.post('/api/benchmark-simulacao/lote/:id/cancelar', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const lote = await readBenchLote(req.params.id);
   if (!lote) return res.status(404).json({ error: 'Lote não encontrado.' });
   if (req.user.role !== 'admin' && lote.userId !== req.user.id) {
     return res.status(403).json({ error: 'Este lote é de outro usuário.' });
@@ -8572,17 +8691,17 @@ app.post('/api/benchmark-simulacao/lote/:id/cancelar', requireAuth, requireRole(
   benchCancelados.add(lote.id);
   await markLote(lote.id, { status: 'cancelando' });
   res.json({ ok: true, status: 'cancelando' });
-});
+}));
 
 // Catálogo da tela: pacientes em teste, opções de interações, quem é o aluno e a
 // lista de alunos cadastrados (pra rotular a run e nomear a persona).
-app.get('/api/benchmark-simulacao/opcoes', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const alunos = readJSON('users.json')
+app.get('/api/benchmark-simulacao/opcoes', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  const alunos = (await contasRepo.listar())
     .filter((u) => u && isAluno(u.role))
     .map((u) => ({ id: u.id, name: u.name || u.username }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
   res.json({ ...benchmark.benchCatalogo(), alunos });
-});
+}));
 
 // Dispara uma run. Devolve o id na hora; o trabalho segue em background.
 app.post('/api/benchmark-simulacao', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
@@ -8624,7 +8743,7 @@ app.post('/api/benchmark-simulacao', requireAuth, requireRole('supervisor', 'adm
       return res.status(409).json({ error: 'Você já tem um benchmark rodando. Espere terminar (ou cancele) antes de começar outro.' });
     }
 
-    const freeChar = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(casoId));
+    const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(casoId));
     const casoNome = freeChar ? freeChar.name : '';
     const id = 'bench-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
 
@@ -8662,11 +8781,7 @@ app.post('/api/benchmark-simulacao', requireAuth, requireRole('supervisor', 'adm
       progresso: { feitas: 0, total: interacoesPedidas },
       resumo: null, error: null,
     };
-    await withFileLock('benchmark-fila.json', async () => {
-      const arr = readJSON('benchmark-fila.json');
-      arr.push(job);
-      writeJSON('benchmark-fila.json', arr);
-    });
+    await filaBenchmark.criar(job);
 
     runBenchmarkRun({ run, log, pacienteSystemPrompt: resolved.systemPrompt, clientPaciente, clientAluno })
       .then((r) => {
@@ -8698,13 +8813,13 @@ app.post('/api/benchmark-simulacao', requireAuth, requireRole('supervisor', 'adm
 
 // Fila/histórico de runs. Supervisor vê as próprias; admin vê todas. Registrada
 // ANTES de /:id — senão 'fila' cairia no parâmetro.
-app.get('/api/benchmark-simulacao/fila', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const jobs = readJSON('benchmark-fila.json')
-    .filter((j) => j && (req.user.role === 'admin' || j.userId === req.user.id))
-    .sort((a, c) => new Date(c.createdAt || 0) - new Date(a.createdAt || 0))
-    .slice(0, 50);
-  res.json(jobs);
-});
+app.get('/api/benchmark-simulacao/fila', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
+  res.json(await filaBenchmark.listar({
+    userId: req.user.role === 'admin' ? undefined : req.user.id,
+    recentesPrimeiro: true,
+    limite: 50,
+  }));
+}));
 
 // Uma run inteira (transcrição + custo por interação). É o que a tela faz polling
 // enquanto roda — o resumo do raciocínio NÃO vem aqui, tem endpoint próprio.
@@ -8783,45 +8898,43 @@ app.post('/api/benchmark-simulacao/:id/cancelar', requireAuth, requireRole('supe
 // Runs que ficaram 'processing' de um processo anterior: o loop vivia em memória,
 // então um restart do servidor as deixa órfãs. Marca uma vez, no boot, pra a tela
 // não ficar esperando por algo que não roda mais.
-(function marcarBenchmarksOrfaos() {
-  try {
-    const arr = readJSON('benchmark-fila.json');
-    let mudou = false;
-    for (const j of arr) {
-      if (j && (j.status === 'processing' || j.status === 'aguardando' || j.status === 'cancelando')) {
-        j.status = 'error';
-        j.error = 'Interrompido por reinício do servidor (o parcial continua baixável).';
-        j.completedAt = new Date().toISOString();
-        mudou = true;
-        const run = readBenchRun(j.id);
-        if (run && run.status === 'processing') {
-          run.status = 'error';
-          run.error = j.error;
-          run.completedAt = j.completedAt;
-          try { writeBenchRun(run); } catch {}
-        }
-      }
+//
+// Vale porque o app roda em UMA instância: com duas, o boot de uma marcaria como
+// órfã a run que a outra está rodando.
+async function marcarBenchmarksOrfaos() {
+  const orfas = await filaBenchmark.listar({ statusEm: ['processing', 'aguardando', 'cancelando'] });
+  for (const { id } of orfas) {
+    const j = await filaBenchmark.atualizar(id, (job) => {
+      if (!['processing', 'aguardando', 'cancelando'].includes(job.status)) return false;
+      job.status = 'error';
+      job.error = 'Interrompido por reinício do servidor (o parcial continua baixável).';
+      job.completedAt = new Date().toISOString();
+    });
+    const run = j && readBenchRun(j.id);
+    if (run && run.status === 'processing') {
+      run.status = 'error';
+      run.error = j.error;
+      run.completedAt = j.completedAt;
+      try { writeBenchRun(run); } catch {}
     }
-    if (mudou) writeJSON('benchmark-fila.json', arr);
-
-    const lotes = readJSON('benchmark-lotes.json');
-    let mudouLote = false;
-    for (const l of lotes) {
-      if (l && (l.status === 'processing' || l.status === 'cancelando')) {
-        l.status = 'error';
-        l.error = 'Interrompido por reinício do servidor (o que rodou continua baixável).';
-        l.completedAt = new Date().toISOString();
-        mudouLote = true;
-      }
-    }
-    if (mudouLote) writeJSON('benchmark-lotes.json', lotes);
-  } catch (e) {
-    console.error('[bench] falha ao marcar runs órfãs:', e.message);
   }
-})();
+  for (const { id } of await lotesBenchmark.listar({ statusEm: ['processing', 'cancelando'] })) {
+    await lotesBenchmark.atualizar(id, (l) => {
+      if (!['processing', 'cancelando'].includes(l.status)) return false;
+      l.status = 'error';
+      l.error = 'Interrompido por reinício do servidor (o que rodou continua baixável).';
+      l.completedAt = new Date().toISOString();
+    });
+  }
+}
+bancoPronto.then(marcarBenchmarksOrfaos).catch((e) => {
+  console.error('[bench] falha ao marcar runs órfãs:', e.message);
+});
 
 // --- Speech to Text Proxy ---
 app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
+  const limite = await limiteIaExcedido(req.user).catch(() => null);
+  if (limite) return res.status(429).json(limite);
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return res.json({ text: '[Transcrição não disponível sem API Key]' });
@@ -8845,7 +8958,7 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
       language: 'pt'
     });
     // Conta o uso do microfone (conquista "Papagaio"). Visitante não acumula.
-    if (req.user.role !== 'visitor') bumpMicUses(req.user.id);
+    if (req.user.role !== 'visitor') bumpMicUses(req.user.id).catch(() => {});
     res.json({ text: transcription.text });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'transcrição/whisper',
@@ -8866,16 +8979,12 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
 // (A1..A15 = challenger, B1..B15 = opponent), e o backend calcula as duas notas
 // (server/scoring.js) e o vencedor. Só treino por enquanto — não toca no MMR.
 
-const DUEL_TTL_MS = 30 * 24 * 60 * 60 * 1000; // mesma janela dos logs
+// Duelos são PERSISTENTES (demandas.md §24.0): o histórico social do aluno é
+// registro do que aconteceu, sem janela de expiração.
 const DUEL_MAX_MESSAGES = 500;
 const DUEL_MAX_MESSAGE_LEN = 20000;
 
-function readDuels() { return readJSON('duels.json', []); }
-function writeDuels(d) { writeJSON('duels.json', d); }
-function readNotifications() { return readJSON('notifications.json', {}); }
-function writeNotifications(n) { writeJSON('notifications.json', n); }
-function readPushSubs() { return readJSON('push-subscriptions.json', {}); }
-function writePushSubs(s) { writeJSON('push-subscriptions.json', s); }
+// Notificações e inscrições de push moram no banco (server/repos/notificacoes.js).
 
 // URL de destino ao clicar/tocar na notificação (in-app e push usam a mesma).
 function notificationUrl(n) {
@@ -8926,74 +9035,37 @@ function notificationPushPayload(n) {
 }
 
 // Envia a notificação via Web Push pra todos os dispositivos assinados do
-// usuário. Best-effort e fire-and-forget: nunca deve atrasar nem derrubar o
-// fluxo que a chamou (mesmo contrato de pushNotification). Assinatura
-// expirada/revogada (404/410) é removida do store; qualquer outro erro só loga.
-function sendWebPushToUser(userId, entry) {
+// usuário. Best-effort e fire-and-forget: quem chama não espera (nem trata erro
+// — use `.catch`), e o envio nunca atrasa nem derruba o fluxo. Assinatura
+// expirada/revogada (404/410) é removida; qualquer outro erro só loga.
+async function sendWebPushToUser(userId, entry) {
   if (!userId || String(userId).startsWith('visitor-')) return;
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
-  const all = readPushSubs();
-  const subs = all[userId];
-  if (!Array.isArray(subs) || !subs.length) return;
+  const subs = await notificacoesRepo.inscricoes(userId);
+  if (!subs.length) return;
   const payload = JSON.stringify(notificationPushPayload(entry));
-  let changed = false;
-  Promise.all(subs.map((s) =>
+  const mortas = [];
+  await Promise.all(subs.map((s) =>
     webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload).catch((err) => {
       if (err && (err.statusCode === 404 || err.statusCode === 410)) {
-        const idx = subs.indexOf(s);
-        if (idx >= 0) { subs.splice(idx, 1); changed = true; }
+        mortas.push(s.endpoint);
       } else {
         console.warn('[push] falha ao enviar:', err && err.message);
       }
     })
-  )).then(() => {
-    if (changed) { all[userId] = subs; writePushSubs(all); }
-  }).catch(() => {});
-}
-
-function pruneExpiredDuels() {
-  let duels;
-  try { duels = readDuels(); } catch { return 0; }
-  if (!Array.isArray(duels) || duels.length === 0) return 0;
-  const cutoff = Date.now() - DUEL_TTL_MS;
-  const kept = duels.filter((d) => {
-    const t = new Date(d.createdAt || 0).getTime();
-    if (!Number.isFinite(t) || t === 0) return true;
-    return t >= cutoff;
-  });
-  if (kept.length === duels.length) return 0;
-  // O detalhe por critério do duelo é um arquivo no volume, e a chave para ele
-  // some junto com o duelo — sem isto o arquivo ficaria lá para sempre, sem
-  // ninguém que o alcance. (A poda de órfãos do avaliacao-oficial não o pega:
-  // ele nasce com `logId`, que é justamente o que a marca como "pertence a
-  // alguma coisa".)
-  const kill = new Set(kept.map((d) => d.id));
-  for (const d of duels) {
-    if (kill.has(d.id)) continue;
-    const id = d.result && d.result.evalPartsId;
-    if (id) oficial.apagarDetalhe(id);
-  }
-  writeDuels(kept);
-  return duels.length - kept.length;
+  ));
+  if (mortas.length) await notificacoesRepo.desinscrever(userId, mortas);
 }
 
 // Cria uma notificação para um usuário real (visitantes não recebem). Também
 // dispara Web Push pros dispositivos assinados dele (mesmo sistema, best-effort).
-function pushNotification(userId, notif) {
+// Quem chama espera a GRAVAÇÃO (a tela pode abrir o sino logo em seguida), mas
+// não o push. O sino guarda as 50 mais recentes por pessoa.
+async function pushNotification(userId, notif) {
   if (!userId || String(userId).startsWith('visitor-')) return;
-  const all = readNotifications();
-  if (!all[userId]) all[userId] = [];
-  const entry = {
-    id: 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
-    createdAt: new Date().toISOString(),
-    read: false,
-    ...notif,
-  };
-  all[userId].unshift(entry);
-  // Cap de 50 notificações por usuário pra não inchar o arquivo.
-  if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
-  writeNotifications(all);
-  sendWebPushToUser(userId, entry);
+  const id = 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
+  const entry = await notificacoesRepo.criar(userId, id, notif);
+  if (entry) sendWebPushToUser(userId, entry).catch(() => {});
 }
 
 // Cria OU ATUALIZA (por refId) uma notificação — usado pro ciclo de vida de uma
@@ -9002,55 +9074,34 @@ function pushNotification(userId, notif) {
 // a notificação do SO e alertar de novo. `read` sempre volta a false e
 // `createdAt` é atualizado: é informação NOVA (a fila virou resultado),
 // reordena pro topo do sino e conta de novo no polling (ver NotificationBell).
-function upsertEvaluationNotification(userId, refId, notif) {
+async function upsertEvaluationNotification(userId, refId, notif) {
   if (!userId || String(userId).startsWith('visitor-')) return;
-  const all = readNotifications();
-  if (!all[userId]) all[userId] = [];
-  const idx = all[userId].findIndex((n) => n.refId === refId);
-  let entry;
-  if (idx >= 0) {
-    entry = { ...all[userId][idx], ...notif, refId, read: false, createdAt: new Date().toISOString() };
-    all[userId].splice(idx, 1);
-  } else {
-    entry = {
-      id: 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
-      createdAt: new Date().toISOString(),
-      read: false,
-      refId,
-      ...notif,
-    };
-  }
-  all[userId].unshift(entry);
-  if (all[userId].length > 50) all[userId] = all[userId].slice(0, 50);
-  writeNotifications(all);
-  sendWebPushToUser(userId, entry);
+  const id = 'ntf-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
+  const entry = await notificacoesRepo.criarOuAtualizar(userId, refId, id, notif);
+  if (entry) sendWebPushToUser(userId, entry).catch(() => {});
 }
 
 const EVAL_QUEUED_MESSAGE = 'Sua avaliação está na fila. Em até 24 horas, você receberá uma nova notificação quando sua avaliação for concluída.';
 
 // Detecta conquistas recém-desbloqueadas (ainda não notificadas) e dispara uma
-// notificação in-app para cada uma. Mantém em achievement-unlocks.json o
-// registro das já notificadas (por usuário). Na PRIMEIRA vez que vê um usuário,
-// só grava a baseline SEM notificar — evita uma enxurrada retroativa de tudo que
-// ele já tinha desbloqueado. Idempotente: chamar duas vezes não duplica avisos.
-function notifyNewAchievements(userId, unlockedSet, claimedMap = {}) {
+// notificação in-app para cada uma. Mantém em conquistas_vistas o registro das
+// já notificadas (por usuário). Na PRIMEIRA vez que vê um usuário, só grava a
+// baseline SEM notificar — evita uma enxurrada retroativa de tudo que ele já
+// tinha desbloqueado. Idempotente: chamar duas vezes não duplica avisos.
+async function notifyNewAchievements(userId, unlockedSet, claimedMap = {}) {
   if (!userId || String(userId).startsWith('visitor-')) return;
-  const store = readJSON('achievement-unlocks.json', {});
   const current = [...unlockedSet];
-  const prev = store[userId];
-  if (!Array.isArray(prev)) {
-    store[userId] = current; // baseline silenciosa na 1ª vez
-    writeJSON('achievement-unlocks.json', store);
-    return;
-  }
+  // Devolve as já vistas antes e, havendo desbloqueada nova, grava o conjunto
+  // atual como "visto" (na mesma transação).
+  const prev = await gamificacaoRepo.trocarVistas(userId, current);
+  if (!Array.isArray(prev)) return; // baseline silenciosa na 1ª vez
   const seen = new Set(prev);
   const fresh = current.filter((id) => !seen.has(id));
-  if (!fresh.length) return;
   for (const id of fresh) {
     if (claimedMap[id]) continue; // já resgatada — não há o que avisar
     const def = ACHIEVEMENT_DEFS.find((d) => d.id === id);
     if (!def) continue;
-    pushNotification(userId, {
+    await pushNotification(userId, {
       type: 'achievement_unlocked',
       achievementId: id,
       title: def.title,
@@ -9058,8 +9109,6 @@ function notifyNewAchievements(userId, unlockedSet, claimedMap = {}) {
       icon: def.icon,
     });
   }
-  store[userId] = current; // tudo que está desbloqueado agora vira "visto"
-  writeJSON('achievement-unlocks.json', store);
 }
 
 // Sanitiza mensagens enviadas pelo cliente ao submeter uma sessão de duelo.
@@ -9130,16 +9179,14 @@ function readDuelClaim(token) {
 // um duelo já reivindicado por outro cadastro) não mexe em nada.
 async function applyDuelClaim(claim, user) {
   if (!claim) return null;
-  return withFileLock('duels.json', () => {
-    const duels = readDuels();
-    const d = duels.find((x) => x.id === claim.duelId);
-    const s = d && d[claim.side];
-    if (!s || !s.isVisitor || s.userId !== claim.visitorId) return null;
+  const r = await duelosRepo.travar({ id: claim.duelId }, (d) => {
+    const s = d[claim.side];
+    if (!s || !s.isVisitor || s.userId !== claim.visitorId) return { valor: null };
     Object.assign(s, duelIdentity(user));
     d.updatedAt = new Date().toISOString();
-    writeDuels(duels);
-    return d.id;
+    return { gravar: true, valor: d.id };
   });
+  return r.encontrado ? r.valor : null;
 }
 
 // Resolve qual lado do duelo é o usuário (challenger | opponent | null).
@@ -9214,13 +9261,10 @@ function sanitizeDuelForUser(duel, user) {
 // Roda o avaliador comparativo nos dois logs e devolve as notas + texto limpo.
 // Busca o último log (por timestamp) do usuário com um character específico.
 // Retorna o log completo ou null se não encontrado.
+// Atendimento mais recente do aluno com o paciente, entre os que têm conversa.
+// Devolve uma Promise.
 function getLastLogForCharacter(userId, characterId) {
-  const logs = readJSON('logs.json');
-  const relevant = logs.filter(
-    (log) => log.userId === userId && log.itemId === characterId && log.messages && log.messages.length > 0
-  );
-  if (relevant.length === 0) return null;
-  return relevant.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
+  return logsRepo.ultimoDoPaciente(userId, characterId);
 }
 
 // Avaliação do atendimento anterior do aluno com aquele paciente, para o
@@ -9234,8 +9278,8 @@ function getLastLogForCharacter(userId, characterId) {
 // seção, só pra não perder o destaque em quem já tem histórico.
 const PREV_FEEDBACK_MAX = 8000;
 
-function getPreviousFeedback(userId, characterId) {
-  const lastLog = getLastLogForCharacter(userId, characterId);
+async function getPreviousFeedback(userId, characterId) {
+  const lastLog = await getLastLogForCharacter(userId, characterId);
   if (!lastLog) return { criteria: null, feedback: '', pointsToReview: '' };
 
   const text = lastLog.evaluation || '';
@@ -9375,11 +9419,11 @@ async function runComparativeEvaluation(duel) {
 // individuais. Mesmo desenho de GET /api/logs/:id/criterios: o gate é de ROLE, e
 // não de participação, porque a análise foi escrita por nós que estavam lendo o
 // Bloco 1 — nem quem duelou pode vê-la.
-app.get('/api/duel/:id/criterios', requireAuth, (req, res) => {
+app.get('/api/duel/:id/criterios', requireAuth, rota(async (req, res) => {
   if (!oficial.podeVerCriterios(req.user.role)) {
     return res.status(403).json({ error: 'Nota e feedback por critério são visíveis apenas a supervisor e administrador.' });
   }
-  const duel = readDuels().find((d) => String(d.id) === String(req.params.id));
+  const duel = await duelosRepo.porId(req.params.id);
   if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
   const id = duel.result && duel.result.evalPartsId;
   if (!id) {
@@ -9388,31 +9432,31 @@ app.get('/api/duel/:id/criterios', requireAuth, (req, res) => {
   const detalhe = oficial.lerDetalhe(id);
   if (!detalhe) return res.json({ disponivel: false, motivo: 'O detalhe desta avaliação não está mais no volume.' });
   res.json({ disponivel: true, ...oficial.detalheParaSupervisor(detalhe) });
-});
+}));
 
 // Lista de oponentes possíveis: terapeutas do sistema (exceto você).
-app.get('/api/duel/opponents', requireAuth, (req, res) => {
+app.get('/api/duel/opponents', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não pode iniciar duelos.' });
   }
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   const list = users
     .filter((u) => isAluno(u.role) && u.id !== req.user.id)
     .map((u) => ({ userId: u.id, name: u.name || u.username, profilePhoto: fotoExibida(u.id, u.profilePhoto) }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'pt-BR'));
   res.json(list);
-});
+}));
 
 // Cria um duelo. body: { characterId, opponentUserId?, inviteMethod }.
 // - opponentUserId presente → convida um usuário específico.
 //   inviteMethod 'system' dispara notificação in-app; 'whatsapp' gera só o link.
 // - opponentUserId ausente → duelo aberto (link p/ visitante ou qualquer um).
-app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
+app.post('/api/duel', requireAuth, writeLimiter, requireFeature('duelo'), rota(async (req, res) => {
   if (req.user.role === 'visitor') {
     return res.status(403).json({ error: 'Visitante não pode iniciar duelos.' });
   }
   const body = req.body || {};
-  const character = readJSON('freeplay-characters.json').find((c) => String(c.id) === String(body.characterId));
+  const character = catalogos.ler('freeplay').find((c) => String(c.id) === String(body.characterId));
   if (!character) return res.status(404).json({ error: 'Personagem não encontrado.' });
 
   const inviteMethod = body.inviteMethod === 'system' ? 'system' : 'whatsapp';
@@ -9426,7 +9470,7 @@ app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
   if (inviteMethod === 'system') {
     const opponentUserId = body.opponentUserId || null;
     if (!opponentUserId) return res.status(400).json({ error: 'Convite pelo sistema exige um oponente.' });
-    const target = readJSON('users.json').find((u) => u.id === opponentUserId);
+    const target = await contasRepo.porId(opponentUserId);
     if (!target || target.role === 'visitor') return res.status(404).json({ error: 'Oponente inválido.' });
     if (target.id === req.user.id) return res.status(400).json({ error: 'Você não pode duelar consigo mesmo.' });
     opponent = { ...duelIdentity(target), kind: 'user', state: 'invited', accepted: false, messages: [], durationSeconds: 0, submittedAt: null };
@@ -9459,13 +9503,11 @@ app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
     result: null,
   };
 
-  const duels = readDuels();
-  duels.push(duel);
-  writeDuels(duels);
+  await duelosRepo.criar(duel);
 
   // Convite in-app: notifica o oponente.
   if (notifyUserId) {
-    pushNotification(notifyUserId, {
+    await pushNotification(notifyUserId, {
       type: 'duel_invite',
       duelId: duel.id,
       fromName: duel.challenger.name,
@@ -9475,43 +9517,44 @@ app.post('/api/duel', requireAuth, writeLimiter, (req, res) => {
   }
 
   res.json(sanitizeDuelForUser(duel, req.user));
-});
+}));
 
 // Detalhe de um duelo (participante ou admin).
-app.get('/api/duel/:id', requireAuth, (req, res) => {
-  const duel = readDuels().find((d) => d.id === req.params.id);
+app.get('/api/duel/:id', requireAuth, rota(async (req, res) => {
+  const duel = await duelosRepo.porId(req.params.id);
   if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
   if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
   res.json(sanitizeDuelForUser(duel, req.user));
-});
+}));
 
 // Cancela (exclui) um duelo que ainda NÃO foi aceito pelo oponente. Só um
 // participante (o desafiante, ou o oponente convidado por convite in-app) ou um
 // admin pode cancelar, e apenas enquanto o duelo está pendente e sem aceite.
 // Duelos em andamento (aceitos) ou concluídos NÃO podem ser excluídos por aqui —
 // ficam disponíveis para download e somem sozinhos 30 dias após a criação.
-app.delete('/api/duel/:id', requireAuth, (req, res) => {
-  const duels = readDuels();
-  const idx = duels.findIndex((d) => d.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Duelo não encontrado.' });
-  const duel = duels[idx];
-  if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
-  if (duel.opponent.accepted || duel.status !== 'pending') {
-    return res.status(409).json({ error: 'Só é possível cancelar um duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.' });
-  }
-  duels.splice(idx, 1);
-  writeDuels(duels);
+app.delete('/api/duel/:id', requireAuth, rota(async (req, res) => {
+  // Travado: um aceite chegando junto não deixa cancelar um duelo que acabou de
+  // ser aceito.
+  const r = await duelosRepo.travar({ id: req.params.id }, (duel) => {
+    if (!isDuelParticipant(duel, req.user)) return { valor: { status: 403, error: 'Acesso negado.' } };
+    if (duel.opponent.accepted || duel.status !== 'pending') {
+      return { valor: { status: 409, error: 'Só é possível cancelar um duelo que ainda não foi aceito. Duelos em andamento ou concluídos não podem ser excluídos.' } };
+    }
+    return { excluir: true, valor: { duel } };
+  });
+  if (!r.encontrado) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  if (r.valor.error) return res.status(r.valor.status).json({ error: r.valor.error });
+  const { duel } = r.valor;
   // Remove a notificação de convite pendente do oponente (o duelo deixou de existir).
-  if (duel.opponent && duel.opponent.userId) removeDuelInviteNotification(duel.opponent.userId, duel.id);
+  if (duel.opponent && duel.opponent.userId) await removeDuelInviteNotification(duel.opponent.userId, duel.id);
   res.json({ ok: true });
-});
+}));
 
 // Download do log de um duelo (avaliação cruzada + notas + as duas sessões),
 // em texto. Só participantes (ou admin) baixam — cada um só acessa os seus
-// duelos. O conteúdo é apagado automaticamente 30 dias após a criação do duelo.
-app.get('/api/duel/:id/export', requireAuth, (req, res) => {
-  pruneExpiredDuels();
-  const duel = readDuels().find((d) => d.id === req.params.id);
+// duelos.
+app.get('/api/duel/:id/export', requireAuth, rota(async (req, res) => {
+  const duel = await duelosRepo.porId(req.params.id);
   if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
   if (!isDuelParticipant(duel, req.user)) return res.status(403).json({ error: 'Acesso negado.' });
   const doc = buildDuelExport(duel, req.user);
@@ -9522,11 +9565,11 @@ app.get('/api/duel/:id/export', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="duelo-${slug}-${stamp}.txt"`);
   res.send(doc);
-});
+}));
 
 // Resumo de um duelo por token (pra tela de aceitar via link, inclusive visitante).
-app.get('/api/duel/by-token/:token', requireAuth, (req, res) => {
-  const duel = readDuels().find((d) => d.token === req.params.token);
+app.get('/api/duel/by-token/:token', requireAuth, rota(async (req, res) => {
+  const duel = await duelosRepo.porToken(req.params.token);
   if (!duel) return res.status(404).json({ error: 'Convite inválido ou expirado.' });
   res.json({
     id: duel.id,
@@ -9537,31 +9580,36 @@ app.get('/api/duel/by-token/:token', requireAuth, (req, res) => {
     opponentTaken: !!duel.opponent.userId,
     youAre: duelSideFor(duel, req.user),
   });
-});
+}));
+
+// Aceite travado no duelo: dois aceites simultâneos do mesmo link aberto não
+// ficam os dois com o lado do oponente.
+async function aceitarDueloTravado(chave, user) {
+  const r = await duelosRepo.travar(chave, (duel) => {
+    const out = acceptDuel(duel, user);
+    if (out.error) return { valor: out };
+    return { gravar: true, valor: { duel } };
+  });
+  return r.encontrado ? r.valor : null;
+}
 
 // Aceita um duelo enviado por link (token) — usuário logado OU visitante.
-app.post('/api/duel/by-token/:token/accept', requireAuth, (req, res) => {
-  const duels = readDuels();
-  const duel = duels.find((d) => d.token === req.params.token);
-  if (!duel) return res.status(404).json({ error: 'Convite inválido ou expirado.' });
-  const out = acceptDuel(duel, req.user);
+app.post('/api/duel/by-token/:token/accept', requireAuth, requireFeature('duelo'), rota(async (req, res) => {
+  const out = await aceitarDueloTravado({ token: req.params.token }, req.user);
+  if (!out) return res.status(404).json({ error: 'Convite inválido ou expirado.' });
   if (out.error) return res.status(out.status).json({ error: out.error });
-  writeDuels(duels);
-  res.json(sanitizeDuelForUser(duel, req.user));
-});
+  res.json(sanitizeDuelForUser(out.duel, req.user));
+}));
 
 // Aceita um duelo recebido por notificação (convite in-app, usuário específico).
-app.post('/api/duel/:id/accept', requireAuth, (req, res) => {
-  const duels = readDuels();
-  const duel = duels.find((d) => d.id === req.params.id);
-  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
-  const out = acceptDuel(duel, req.user);
+app.post('/api/duel/:id/accept', requireAuth, requireFeature('duelo'), rota(async (req, res) => {
+  const out = await aceitarDueloTravado({ id: req.params.id }, req.user);
+  if (!out) return res.status(404).json({ error: 'Duelo não encontrado.' });
   if (out.error) return res.status(out.status).json({ error: out.error });
   // Marca a notificação de convite como lida.
-  markDuelInviteRead(req.user.id, duel.id);
-  writeDuels(duels);
-  res.json(sanitizeDuelForUser(duel, req.user));
-});
+  await markDuelInviteRead(req.user.id, out.duel.id);
+  res.json(sanitizeDuelForUser(out.duel, req.user));
+}));
 
 // Lógica compartilhada de aceite (muta o objeto duel; o caller persiste).
 function acceptDuel(duel, user) {
@@ -9597,26 +9645,15 @@ function acceptDuel(duel, user) {
   return {};
 }
 
-function markDuelInviteRead(userId, duelId) {
+async function markDuelInviteRead(userId, duelId) {
   if (!userId || String(userId).startsWith('visitor-')) return;
-  const all = readNotifications();
-  const list = all[userId];
-  if (!list) return;
-  let dirty = false;
-  for (const n of list) {
-    if (n.type === 'duel_invite' && n.duelId === duelId && !n.read) { n.read = true; dirty = true; }
-  }
-  if (dirty) writeNotifications(all);
+  await notificacoesRepo.marcarConviteDeDueloLido(userId, duelId);
 }
 
 // Remove de vez a(s) notificação(ões) de convite de um duelo (usado no cancelamento).
-function removeDuelInviteNotification(userId, duelId) {
+async function removeDuelInviteNotification(userId, duelId) {
   if (!userId || String(userId).startsWith('visitor-')) return;
-  const all = readNotifications();
-  const list = all[userId];
-  if (!list) return;
-  const next = list.filter((n) => !(n.type === 'duel_invite' && n.duelId === duelId));
-  if (next.length !== list.length) { all[userId] = next; writeNotifications(all); }
+  await notificacoesRepo.removerConviteDeDuelo(userId, duelId);
 }
 
 // Monta o log de um duelo em texto (avaliação cruzada + notas + as duas sessões),
@@ -9696,33 +9733,33 @@ function buildDuelExport(duel, user) {
 
 // Submete a sessão de um lado. Quando os DOIS submeteram, roda o avaliador
 // comparativo (no request do segundo a submeter) e grava o resultado.
-app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
-  const duels = readDuels();
-  const duel = duels.find((d) => d.id === req.params.id);
-  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
-  const side = duelSideFor(duel, req.user);
-  if (!side) return res.status(403).json({ error: 'Você não participa deste duelo.' });
-  if (duel.status === 'completed') return res.json(sanitizeDuelForUser(duel, req.user));
-
+app.post('/api/duel/:id/submit', requireAuth, aiLimiter, rota(async (req, res) => {
   const messages = cleanDuelMessages(req.body && req.body.messages);
   const duration = Number.isFinite(req.body && req.body.durationSeconds)
     ? Math.max(0, Math.floor(req.body.durationSeconds)) : 0;
 
-  duel[side].messages = messages;
-  duel[side].durationSeconds = duration;
-  duel[side].state = 'submitted';
-  duel[side].submittedAt = new Date().toISOString();
-  duel.updatedAt = new Date().toISOString();
+  // Grava o envio deste lado com o duelo travado: os dois lados enviando ao
+  // mesmo tempo não apagam a sessão um do outro.
+  const envio = await duelosRepo.travar({ id: req.params.id }, (duel) => {
+    const side = duelSideFor(duel, req.user);
+    if (!side) return { valor: { proibido: true } };
+    if (duel.status === 'completed') return { valor: { duel, pronto: true } };
 
-  const bothSubmitted = duel.challenger.state === 'submitted' && duel.opponent.state === 'submitted';
-  if (!bothSubmitted) {
-    writeDuels(duels);
-    return res.json(sanitizeDuelForUser(duel, req.user));
-  }
+    duel[side].messages = messages;
+    duel[side].durationSeconds = duration;
+    duel[side].state = 'submitted';
+    duel[side].submittedAt = new Date().toISOString();
+    duel.updatedAt = new Date().toISOString();
 
-  // Os dois enviaram → roda a avaliação comparativa agora.
-  duel.status = 'evaluating';
-  writeDuels(duels);
+    const bothSubmitted = duel.challenger.state === 'submitted' && duel.opponent.state === 'submitted';
+    // Os dois enviaram → a avaliação comparativa roda agora, neste request.
+    if (bothSubmitted) duel.status = 'evaluating';
+    return { gravar: true, valor: { duel, pronto: !bothSubmitted } };
+  });
+  if (!envio.encontrado) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  if (envio.valor.proibido) return res.status(403).json({ error: 'Você não participa deste duelo.' });
+  const { duel } = envio.valor;
+  if (envio.valor.pronto) return res.json(sanitizeDuelForUser(duel, req.user));
 
   try {
     const { evaluationClean, comp, result } = await runComparativeEvaluation(duel);
@@ -9744,11 +9781,9 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
         console.error('[duelo] falha ao gravar o detalhe por critério:', e.message);
       }
     }
-    // Relê e remapeia sob lock (o arquivo pode ter mudado durante a chamada à
-    // IA). A IA ficou FORA do lock; aqui só o trecho rápido re-lê→aplica→grava.
-    const target = await withFileLock('duels.json', () => {
-      const fresh = readDuels();
-      const t = fresh.find((d) => d.id === duel.id) || duel;
+    // Relê com o duelo travado (ele pode ter mudado durante a chamada à IA). A IA
+    // ficou FORA da trava; aqui só o trecho rápido re-lê→aplica→grava.
+    const fechamento = await duelosRepo.travar({ id: duel.id }, async (t) => {
       if (comp) {
         t.result = {
           winner: comp.winner === 'A' ? 'challenger' : comp.winner === 'B' ? 'opponent' : 'draw',
@@ -9761,36 +9796,45 @@ app.post('/api/duel/:id/submit', requireAuth, aiLimiter, async (req, res) => {
         };
         t.status = 'completed';
         // MMR PvP (só duelo competitivo entre dois usuários cadastrados).
-        applyDuelMmr(t, comp);
+        await applyDuelMmr(t, comp);
       } else {
         t.result = { winner: null, scoreChallenger: null, scoreOpponent: null, evaluation: evaluationClean, evaluatedAt: new Date().toISOString(), error: 'Não foi possível extrair as notas da avaliação.' };
         t.status = 'completed';
       }
       t.updatedAt = new Date().toISOString();
-      writeDuels(fresh);
-      return t;
+      return { gravar: true, valor: t };
     });
+    // Duelo excluído durante a avaliação (só acontece por poda): devolve o que se tem.
+    const target = fechamento.encontrado ? fechamento.valor : duel;
 
     // Notifica os dois lados reais com o resultado (visitantes ficam de fora).
-    notifyDuelResult(target);
+    await notifyDuelResult(target);
     return res.json(sanitizeDuelForUser(target, req.user));
   } catch (err) {
     const corpo = falhou(req, err, 'duelo/avaliação', { extra: { dueloId: duel.id } });
-    await withFileLock('duels.json', () => {
-      const fresh = readDuels();
-      const t = fresh.find((d) => d.id === duel.id) || duel;
-      t.status = 'pending'; // volta a pendente pra permitir retry
-      writeDuels(fresh);
-    });
+    try {
+      await duelosRepo.travar({ id: duel.id }, (t) => {
+        t.status = 'pending'; // volta a pendente pra permitir retry
+        return { gravar: true };
+      });
+    } catch (e) {
+      console.error('[duelo] falha ao devolver o duelo para pendente:', e && e.message);
+    }
     return res.status(500).json(corpo);
   }
-});
+}));
 
-// Aplica o MMR PvP a um duelo competitivo já avaliado (muta duel.result.mmr e
-// persiste mmr.json se rankeado). comp = { scoreA, scoreB, winner } do
-// runComparativeEvaluation (scoreA = challenger, scoreB = opponent). Para treino, ou quando algum lado
-// não é usuário cadastrado, marca não-rankeado (sem mexer no MMR).
-function applyDuelMmr(duel, comp) {
+// Aplica o MMR PvP a um duelo competitivo já avaliado. Reforma por critério
+// (spec §7): a conta acontece POR CRITÉRIO, com soma-zero dentro de cada um.
+//
+//   comp = {
+//     scoreA, scoreB, winner,      // totais brutos 0..100 (challenger = A, opponent = B)
+//     criteriosA, criteriosB,      // { [criterios.id]: 0..100 } de cada lado
+//   }
+//
+// Se algum lado for visitante/admin, calibrando, ou tiver total < 25, o duelo
+// não rankeia (mesma trava de hoje, agora avaliada sobre o total).
+async function applyDuelMmr(duel, comp) {
   if (duel.mode !== 'competitive' || !comp) return;
   const ch = duel.challenger;
   const op = duel.opponent;
@@ -9799,32 +9843,50 @@ function applyDuelMmr(duel, comp) {
     duel.result.mmr = { ranked: false, reason: 'visitor' };
     return;
   }
-  const mmr = readMMR();
-  const out = mmrEngine.processDuel(
-    mmr.players[ch.userId],
-    mmr.players[op.userId],
-    mmr.characters[duel.character.id],
-    comp.scoreA,
-    comp.scoreB,
+  const chId = String(ch.userId);
+  const opId = String(op.userId);
+  const out = await mmrRepo.aplicar(
+    { characterId: duel.character.id, userIds: [chId, opId] },
+    ({ players, character, fontes }) => {
+      const r = mmrEngine.processDuel(players[chId], players[opId], character, fontes, {
+        criteriosA: comp.criteriosA || {},
+        criteriosB: comp.criteriosB || {},
+        notaTotalA: comp.scoreA,
+        notaTotalB: comp.scoreB,
+      });
+      if (!r.ranked) return r;
+      return { ...r, players: { [chId]: r.playerA, [opId]: r.playerB }, character: r.character, fontes: r.fontes };
+    },
   );
   if (!out.ranked) {
     duel.result.mmr = { ranked: false, reason: out.reason };
     return;
   }
-  mmr.players[ch.userId] = out.playerA;
-  mmr.players[op.userId] = out.playerB;
-  mmr.characters[duel.character.id] = out.character;
-  writeMMR(mmr);
-  const round1 = (x) => Math.round(x * 10) / 10;
+  // Totais derivados a partir dos MMRs por critério (spec §5).
+  const totalA_before = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.resultA.criterios).map(([id, r]) => [id, r.P_before])));
+  const totalA_after = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.playerA.criterios).map(([id, c]) => [id, c.P])));
+  const totalB_before = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.resultB.criterios).map(([id, r]) => [id, r.P_before])));
+  const totalB_after = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(out.playerB.criterios).map(([id, c]) => [id, c.P])));
+  const round1 = (x) => x == null ? null : Math.round(x * 10) / 10;
+  const dTotal = mmrEngine.characterView(out.character).dTotal;
   duel.result.mmr = {
     ranked: true,
-    challenger: { before: Math.round(out.resultA.P_before), after: Math.round(out.playerA.P), delta: round1(out.resultA.delta), pvpDelta: round1(out.pvp.deltaA) },
-    opponent: { before: Math.round(out.resultB.P_before), after: Math.round(out.playerB.P), delta: round1(out.resultB.delta), pvpDelta: round1(out.pvp.deltaB) },
-    characterDifficulty: mmrEngine.characterDifficulty(out.character),
+    challenger: { before: round1(totalA_before), after: round1(totalA_after),
+                  delta: round1((totalA_after || 0) - (totalA_before || 0)),
+                  porCriterio: out.resultA.criterios, pvp: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.deltaA])) },
+    opponent:  { before: round1(totalB_before), after: round1(totalB_after),
+                  delta: round1((totalB_after || 0) - (totalB_before || 0)),
+                  porCriterio: out.resultB.criterios, pvp: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.deltaB])) },
+    characterDifficulty: dTotal,
+    venceuCriterio: Object.fromEntries(Object.entries(out.pvp).map(([id, p]) => [id, p.winner])),
   };
 }
 
-function notifyDuelResult(duel) {
+async function notifyDuelResult(duel) {
   if (!duel.result) return;
   const r = duel.result;
   const rankedMmr = r.mmr && r.mmr.ranked ? r.mmr : null;
@@ -9834,7 +9896,7 @@ function notifyDuelResult(duel) {
   ];
   for (const side of sides) {
     if (!side.s.userId || side.s.isVisitor) continue;
-    pushNotification(side.s.userId, {
+    await pushNotification(side.s.userId, {
       type: 'duel_result',
       duelId: duel.id,
       characterName: duel.character.name,
@@ -9849,10 +9911,12 @@ function notifyDuelResult(duel) {
 
 // Logs sociais: duelos do usuário agrupados por oponente, ordenados por número
 // de partidas (desc) e depois por nome do oponente (asc).
-app.get('/api/duels/social', requireAuth, (req, res) => {
+app.get('/api/duels/social', requireAuth, requireFeature('logsSociais'), rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json([]);
-  pruneExpiredDuels();
-  const duels = readDuels().filter((d) => isDuelParticipant(d, req.user));
+  // Admin é participante de todos os duelos (isDuelParticipant).
+  const duels = isAdmin(req.user)
+    ? await duelosRepo.listarTodos()
+    : await duelosRepo.listarDoParticipante(req.user.id);
   const groups = {};
   for (const d of duels) {
     const side = duelSideFor(d, req.user);
@@ -9896,46 +9960,33 @@ app.get('/api/duels/social', requireAuth, (req, res) => {
     .map((g) => ({ ...g, duels: g.duels.sort((a, b) => new Date(b.date) - new Date(a.date)) }))
     .sort((a, b) => (b.count - a.count) || (a.opponent.name || '').localeCompare(b.opponent.name || '', 'pt-BR'));
   res.json(list);
-});
+}));
 
 // --- Avaliação de Progressão ---
 // Lista pacientes (characters) com os quais o usuário já interagiu,
 // permitindo seleção para avaliação de progressão.
-app.get('/api/progression/available-patients', requireAuth, (req, res) => {
-  const logs = readJSON('logs.json');
-  const userLogs = logs.filter((log) => log.userId === req.user.id && log.itemId && log.messages && log.messages.length > 0);
-
-  // Agrupa por character (itemId) e pega o mais recente de cada um
-  const patients = {};
-  for (const log of userLogs) {
-    if (!patients[log.itemId] || new Date(log.timestamp) > new Date(patients[log.itemId].timestamp)) {
-      patients[log.itemId] = log;
-    }
-  }
-
-  const list = Object.values(patients)
-    .map((log) => ({
-      characterId: log.itemId,
-      characterName: log.itemTitle || 'Paciente',
-      lastInteraction: log.timestamp,
+app.get('/api/progression/available-patients', requireAuth, requireFeature('progressao'), rota(async (req, res) => {
+  // Um por paciente (itemId), com o atendimento mais recente — só os que têm conversa.
+  const list = (await logsRepo.pacientesAtendidos(req.user.id))
+    .map((p) => ({
+      characterId: p.itemId,
+      characterName: p.itemTitle || 'Paciente',
+      lastInteraction: p.timestamp,
     }))
     .sort((a, b) => new Date(b.lastInteraction) - new Date(a.lastInteraction));
 
   res.json(list);
-});
+}));
 
 // --- Sidequests (missões clínicas do Treinamento) ---
 // Banco de definições reutilizáveis + atribuição ativa por aluno (máx. 1) +
 // histórico de concluídas com o título de recompensa. Funções declaradas aqui
 // são hoisted, então publicUser/ranking/gamification (acima) já as enxergam.
+// { bank, active, completed }, da cópia em memória (server/repos/sidequests.js).
+// SOMENTE LEITURA: toda alteração passa pelo sidequestsRepo.
 function readSidequests() {
-  const data = readJSON('sidequests.json', { bank: [], active: {}, completed: {} });
-  if (!Array.isArray(data.bank)) data.bank = [];
-  if (!data.active || typeof data.active !== 'object') data.active = {};
-  if (!data.completed || typeof data.completed !== 'object') data.completed = {};
-  return data;
+  return sidequestsRepo.ler();
 }
-function writeSidequests(data) { writeJSON('sidequests.json', data); }
 
 function getActiveSidequest(userId) {
   return readSidequests().active[userId] || null;
@@ -9965,12 +10016,10 @@ function publicSidequest(sq) {
 
 // Marca a sidequest ativa de um aluno como concluída: move pra completed,
 // concede o título de recompensa e limpa a ativa. Idempotente (no-op sem ativa).
-// Retorna o registro de conclusão ou null.
-function completeSidequest(userId, justification, ctx = {}) {
-  const data = readSidequests();
-  const active = data.active[userId];
-  if (!active) return null;
-  const record = {
+// Retorna o registro de conclusão ou null. A atribuição fica travada: duas
+// submissões simultâneas não concedem o título duas vezes.
+async function completeSidequest(userId, justification, ctx = {}) {
+  return sidequestsRepo.concluirAtiva(userId, (active) => ({
     sidequestId: active.sidequestId,
     title: active.title,
     description: active.description,
@@ -9981,12 +10030,7 @@ function completeSidequest(userId, justification, ctx = {}) {
     completedAt: new Date().toISOString(),
     characterId: ctx.characterId || null,
     characterName: ctx.characterName || null,
-  };
-  if (!Array.isArray(data.completed[userId])) data.completed[userId] = [];
-  data.completed[userId].push(record);
-  delete data.active[userId];
-  writeSidequests(data);
-  return record;
+  }));
 }
 
 // --- Missão diária: rotação GLOBAL e determinística do banco de sidequests ---
@@ -10035,33 +10079,28 @@ function getActiveDailyMission(userId) {
 // desligar um e receber o outro no lugar não faria sentido nenhum.
 //
 // Ausente = ligado: contas criadas antes deste campo continuam como estavam.
-function exerciciosLigados(userId) {
-  if (!userId || String(userId).startsWith('visitor-')) return true;
-  try {
-    const u = readJSON('users.json').find((x) => x.id === userId);
-    return !u || u.sidequestsEnabled !== false;
-  } catch {
-    return true; // na dúvida, comporta-se como antes do interruptor existir
-  }
+// `user` é a conta de quem está na sessão (req.user), que já traz o campo — não
+// há o que buscar. Visitante não tem o interruptor e segue ligado.
+function exerciciosLigados(user) {
+  return !user || user.sidequestsEnabled !== false;
 }
 
 // Missão do Treinamento: UMA ou OUTRA, nunca as duas. Fonte única de verdade —
 // prompt do avaliador, conclusão pós-sessão e /api/me/daily-mission passam aqui.
 // Devolve { sidequest, daily } com no máximo um dos dois preenchido.
-function resolveTrainingMission(userId) {
-  if (!exerciciosLigados(userId)) return { sidequest: null, daily: null };
+function resolveTrainingMission(user) {
+  if (!exerciciosLigados(user)) return { sidequest: null, daily: null };
+  const userId = user.id;
   const sidequest = getActiveSidequest(userId);
   if (sidequest) return { sidequest, daily: null };
   return { sidequest: null, daily: getActiveDailyMission(userId) };
 }
 // Conclui a missão diária do dia: grava na lista de concluídas (concede o título
 // de recompensa, igual à sidequest) — dedup por recompensa (não dá pra farmar).
-function completeDailyMission(userId, justification, ctx = {}) {
+async function completeDailyMission(userId, justification, ctx = {}) {
   const data = readSidequests();
   if (!data.bank.length) return null;
   const dm = data.bank[dailyMissionIndex() % data.bank.length];
-  if (!Array.isArray(data.completed[userId])) data.completed[userId] = [];
-  if (data.completed[userId].some((c) => c.rewardTitleId === dm.rewardTitleId)) return null;
   const record = {
     sidequestId: dm.id,
     title: dm.title,
@@ -10075,9 +10114,8 @@ function completeDailyMission(userId, justification, ctx = {}) {
     characterName: ctx.characterName || null,
     daily: true,
   };
-  data.completed[userId].push(record);
-  writeSidequests(data);
-  return record;
+  // Null quando a recompensa já era dele — conferido no banco, com o aluno travado.
+  return sidequestsRepo.concluirDiaria(userId, record);
 }
 function publicDailyMission(dm) {
   if (!dm) return null;
@@ -10097,7 +10135,7 @@ app.get('/api/sidequests/bank', requireAuth, (req, res) => {
   res.json(readSidequests().bank);
 });
 
-app.post('/api/sidequests/bank', requireAuth, (req, res) => {
+app.post('/api/sidequests/bank', requireAuth, rota(async (req, res) => {
   if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
   const title = clampStr(req.body && req.body.title, SQ_MAX_TITLE).trim();
   const description = clampStr(req.body && req.body.description, SQ_MAX_DESC).trim();
@@ -10108,7 +10146,6 @@ app.post('/api/sidequests/bank', requireAuth, (req, res) => {
   if (!rewardTitle) {
     return res.status(400).json({ error: 'Título de recompensa é obrigatório.' });
   }
-  const data = readSidequests();
   const id = 'sq-' + Date.now() + '-' + crypto.randomBytes(3).toString('hex');
   const entry = {
     id,
@@ -10121,25 +10158,22 @@ app.post('/api/sidequests/bank', requireAuth, (req, res) => {
     createdByName: req.user.name || req.user.username,
     createdAt: new Date().toISOString(),
   };
-  data.bank.push(entry);
-  writeSidequests(data);
+  await sidequestsRepo.adicionarAoBanco(entry);
   res.json(entry);
-});
+}));
 
-app.delete('/api/sidequests/bank/:id', requireAuth, (req, res) => {
+app.delete('/api/sidequests/bank/:id', requireAuth, rota(async (req, res) => {
   if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
-  const data = readSidequests();
-  const before = data.bank.length;
-  data.bank = data.bank.filter((s) => s.id !== req.params.id);
-  if (data.bank.length === before) return res.status(404).json({ error: 'Sidequest não encontrada.' });
-  writeSidequests(data);
+  if (!(await sidequestsRepo.removerDoBanco(req.params.id))) {
+    return res.status(404).json({ error: 'Sidequest não encontrada.' });
+  }
   res.json({ ok: true });
-});
+}));
 
 // Sidequests de um aluno (ativa + concluídas). Supervisor (só seus alunos),
 // admin (todos) ou o próprio aluno.
-app.get('/api/sidequests/student/:userId', requireAuth, (req, res) => {
-  if (!canAccessUserResource(req.user, req.params.userId)) {
+app.get('/api/sidequests/student/:userId', requireAuth, rota(async (req, res) => {
+  if (!(await canAccessUserResource(req.user, req.params.userId))) {
     return res.status(403).json({ error: 'Acesso negado' });
   }
   const data = readSidequests();
@@ -10147,27 +10181,25 @@ app.get('/api/sidequests/student/:userId', requireAuth, (req, res) => {
     active: publicSidequest(data.active[req.params.userId] || null),
     completed: data.completed[req.params.userId] || [],
   });
-});
+}));
 
 // Atribui (ou substitui) a sidequest ativa de um aluno. Máx. 1 por aluno.
-app.post('/api/sidequests/assign', requireAuth, (req, res) => {
+app.post('/api/sidequests/assign', requireAuth, rota(async (req, res) => {
   if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
   const { userId, sidequestId } = req.body || {};
   if (!userId || !sidequestId) {
     return res.status(400).json({ error: 'userId e sidequestId são obrigatórios.' });
   }
-  if (!canAccessUserResource(req.user, userId)) {
+  if (!(await canAccessUserResource(req.user, userId))) {
     return res.status(403).json({ error: 'Você não supervisiona este aluno.' });
   }
-  const users = readJSON('users.json');
-  const target = users.find((u) => u.id === userId);
+  const target = await contasRepo.porId(userId);
   if (!target || !isAluno(target.role)) {
     return res.status(400).json({ error: 'Sidequests só podem ser atribuídas a alunos.' });
   }
-  const data = readSidequests();
-  const def = data.bank.find((s) => s.id === sidequestId);
+  const def = readSidequests().bank.find((s) => s.id === sidequestId);
   if (!def) return res.status(404).json({ error: 'Sidequest não encontrada no banco.' });
-  data.active[userId] = {
+  const ativa = await sidequestsRepo.atribuir(userId, {
     sidequestId: def.id,
     title: def.title,
     description: def.description,
@@ -10177,32 +10209,30 @@ app.post('/api/sidequests/assign', requireAuth, (req, res) => {
     assignedBy: req.user.id,
     assignedByName: req.user.name || req.user.username,
     assignedAt: new Date().toISOString(),
-  };
-  writeSidequests(data);
+  });
   // Avisa o aluno no sino (com som) que recebeu uma nova sidequest. A missão
   // diária NÃO passa por aqui (é rotação global), então só a atribuída notifica.
-  pushNotification(userId, {
+  await pushNotification(userId, {
     type: 'sidequest_assigned',
     sidequestId: def.id,
     title: def.title,
     rewardTitleLabel: def.rewardTitleLabel,
     assignedByName: req.user.name || req.user.username,
   });
-  res.json({ active: publicSidequest(data.active[userId]) });
-});
+  res.json({ active: publicSidequest(ativa) });
+}));
 
 // Remove a sidequest ativa de um aluno (sem concluí-la).
-app.post('/api/sidequests/unassign', requireAuth, (req, res) => {
+app.post('/api/sidequests/unassign', requireAuth, rota(async (req, res) => {
   if (!canManageSidequests(req.user)) return res.status(403).json({ error: 'Acesso negado' });
   const { userId } = req.body || {};
   if (!userId) return res.status(400).json({ error: 'userId é obrigatório.' });
-  if (!canAccessUserResource(req.user, userId)) {
+  if (!(await canAccessUserResource(req.user, userId))) {
     return res.status(403).json({ error: 'Você não supervisiona este aluno.' });
   }
-  const data = readSidequests();
-  if (data.active[userId]) { delete data.active[userId]; writeSidequests(data); }
+  if (readSidequests().active[String(userId)]) await sidequestsRepo.desatribuir(userId);
   res.json({ ok: true });
-});
+}));
 
 // Sidequest do próprio usuário (Treinamento mostra a ativa; perfil mostra as
 // concluídas). Visitante nunca tem sidequest.
@@ -10238,31 +10268,23 @@ app.get('/api/me/daily-mission', requireAuth, (req, res) => {
 
 
 // --- Notificações in-app ---
-app.get('/api/notifications', requireAuth, (req, res) => {
+app.get('/api/notifications', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json({ items: [], unread: 0 });
-  const all = readNotifications();
-  const items = all[req.user.id] || [];
+  const items = await notificacoesRepo.doUsuario(req.user.id);
   res.json({ items, unread: items.filter((n) => !n.read).length });
-});
+}));
 
-app.post('/api/notifications/:id/read', requireAuth, (req, res) => {
+app.post('/api/notifications/:id/read', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json({ ok: true });
-  const all = readNotifications();
-  const items = all[req.user.id] || [];
-  const n = items.find((x) => x.id === req.params.id);
-  if (n) { n.read = true; writeNotifications(all); }
+  await notificacoesRepo.marcarLida(req.user.id, req.params.id);
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/notifications/read-all', requireAuth, (req, res) => {
+app.post('/api/notifications/read-all', requireAuth, rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json({ ok: true });
-  const all = readNotifications();
-  const items = all[req.user.id] || [];
-  let dirty = false;
-  for (const n of items) if (!n.read) { n.read = true; dirty = true; }
-  if (dirty) writeNotifications(all);
+  await notificacoesRepo.marcarTodasLidas(req.user.id);
   res.json({ ok: true });
-});
+}));
 
 // --- Web Push (assinatura do navegador para notificação do SO, com som) ---
 // Chave pública: sem auth (é pública por definição — precisa dela ANTES de
@@ -10272,28 +10294,21 @@ app.get('/api/push/vapid-public-key', (req, res) => {
   res.json({ key: VAPID_PUBLIC_KEY || null });
 });
 
-app.post('/api/push/subscribe', requireAuth, writeLimiter, (req, res) => {
+app.post('/api/push/subscribe', requireAuth, writeLimiter, rota(async (req, res) => {
   if (req.user.role === 'visitor') return res.json({ ok: true }); // visitante não recebe notificação — no-op
   const sub = req.body && req.body.subscription;
   if (!sub || typeof sub.endpoint !== 'string' || !sub.keys || !sub.keys.p256dh || !sub.keys.auth) {
     return res.status(400).json({ error: 'Assinatura de push inválida.' });
   }
-  const all = readPushSubs();
-  if (!all[req.user.id]) all[req.user.id] = [];
-  const list = all[req.user.id];
-  const entry = {
+  // Mesmo endpoint renova no lugar; o repositório guarda até 10 dispositivos por
+  // pessoa — celular + PC + eventual reinstalação não deve crescer sem limite.
+  await notificacoesRepo.inscrever(req.user.id, {
     endpoint: sub.endpoint,
     keys: { p256dh: clampStr(sub.keys.p256dh, 300), auth: clampStr(sub.keys.auth, 100) },
     ua: clampStr(req.get('user-agent'), 300),
-    createdAt: new Date().toISOString(),
-  };
-  const idx = list.findIndex((s) => s.endpoint === entry.endpoint);
-  if (idx >= 0) list[idx] = entry; else list.push(entry);
-  // Cap por usuário — celular + PC + eventual reinstalação não deve crescer sem limite.
-  if (list.length > 10) all[req.user.id] = list.slice(-10);
-  writePushSubs(all);
+  });
   res.json({ ok: true });
-});
+}));
 
 // Push de TESTE pra si mesmo. Existe porque o push falha em silêncio por
 // natureza: sem VAPID, sem assinatura ou com chave trocada, o servidor
@@ -10306,8 +10321,8 @@ app.post('/api/push/test', requireAuth, writeLimiter, async (req, res) => {
       error: 'O servidor está sem as chaves VAPID (VAPID_PUBLIC_KEY e VAPID_PRIVATE_KEY). Nenhum push sai enquanto isso.',
     });
   }
-  const subs = readPushSubs()[req.user.id];
-  if (!Array.isArray(subs) || !subs.length) {
+  const subs = await notificacoesRepo.inscricoes(req.user.id);
+  if (!subs.length) {
     return res.status(409).json({
       error: 'Nenhum dispositivo assinado nesta conta. Abra o sino e ative as notificações neste aparelho.',
     });
@@ -10343,17 +10358,13 @@ app.post('/api/push/test', requireAuth, writeLimiter, async (req, res) => {
   });
 });
 
-app.post('/api/push/unsubscribe', requireAuth, writeLimiter, (req, res) => {
+app.post('/api/push/unsubscribe', requireAuth, writeLimiter, rota(async (req, res) => {
   const endpoint = req.body && req.body.endpoint;
   if (typeof endpoint === 'string' && endpoint) {
-    const all = readPushSubs();
-    if (Array.isArray(all[req.user.id])) {
-      all[req.user.id] = all[req.user.id].filter((s) => s.endpoint !== endpoint);
-      writePushSubs(all);
-    }
+    await notificacoesRepo.desinscrever(req.user.id, [endpoint]);
   }
   res.json({ ok: true });
-});
+}));
 
 
 // Digital Asset Links — vincula o app Android (TWA) a esta origem pra que o
@@ -10388,7 +10399,7 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 // --- Antessala (pré-supervisão) ---
 // O aluno (therapist) monta, antes da supervisão, um "mapa de caso": título,
 // objetivo, fatos hierarquizados, saídas clínicas, armadilhas, conceitos e
-// direções. Um registro por mapa em antessala.json. O supervisor lê os mapas
+// direções. Um registro por mapa (tabela antessala_mapas). O supervisor lê os mapas
 // ENTREGUES dos alunos que supervisiona (leitura longitudinal do raciocínio).
 //
 // Princípio da ferramenta: a IA (endpoint /reflect) age sobre a FORMA do
@@ -10397,7 +10408,6 @@ app.get('/.well-known/assetlinks.json', (req, res) => {
 // do cliente. Ver briefing-mapa-pre-supervisao.md.
 // ============================================================
 
-const ANTESSALA_FILE = 'antessala.json';
 // Aviso de política de dados: o mapa fala de um paciente REAL (sem campo de
 // identificação). O front orienta a não escrever nome/dado identificável; aqui
 // só limitamos tamanho, não conteúdo.
@@ -10426,13 +10436,14 @@ function antClampInt(v, min, max, dflt) {
 //
 // Leitura de um mapa: o dono (qualquer status), o admin, ou o supervisor do dono
 // (só quando o mapa foi entregue). Espelha o escopo por teacherId de /api/logs.
-function canReadAntessalaCase(user, c) {
+// ASYNC: sempre com `await` — sem ele a Promise é truthy e o mapa abriria para
+// qualquer um (mesmo cuidado de canAccessUserResource).
+async function canReadAntessalaCase(user, c) {
   if (!user || !c) return false;
   if (user.role === 'admin') return true;
   if (c.ownerId === user.id) return true;
   if (user.role === 'supervisor' && c.status === 'delivered') {
-    const users = readJSON('users.json');
-    const owner = users.find((u) => u.id === c.ownerId);
+    const owner = await contasRepo.porId(c.ownerId);
     return !!(owner && owner.teacherId === user.id);
   }
   return false;
@@ -10535,36 +10546,31 @@ async function callAntessalaReflection(system, userText) {
 }
 
 // GET /api/antessala — mapas do próprio aluno (resumos, mais recentes primeiro).
-app.get('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), (req, res) => {
-  const all = readJSON(ANTESSALA_FILE, []);
-  const mine = all
-    .filter((c) => c.ownerId === req.user.id)
-    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+app.get('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), rota(async (req, res) => {
+  const mine = await antessalaRepo.doDono(req.user.id); // mais recentes primeiro
   res.json(mine.map(antessalaSummary));
-});
+}));
 
 // GET /api/antessala/supervisor — mapas ENTREGUES dos alunos supervisionados
 // (admin vê todos). Congelados; agrupáveis por aluno no front pra leitura
 // longitudinal. Registrado ANTES de /:id.
-app.get('/api/antessala/supervisor', requireAuth, requireRole('supervisor', 'admin'), (req, res) => {
-  const all = readJSON(ANTESSALA_FILE, []);
-  const users = readJSON('users.json');
+app.get('/api/antessala/supervisor', requireAuth, requireRole('supervisor', 'admin'), rota(async (req, res) => {
   let visible;
   if (req.user.role === 'admin') {
-    visible = all.filter((c) => c.status === 'delivered');
+    visible = await antessalaRepo.entregues();
   } else {
-    const myStudents = new Set(
-      users.filter((u) => isAluno(u.role) && u.teacherId === req.user.id).map((u) => u.id),
-    );
-    visible = all.filter((c) => c.status === 'delivered' && myStudents.has(c.ownerId));
+    const myStudents = (await contasRepo.alunosDoProfessor(req.user.id)).map((u) => u.id);
+    visible = await antessalaRepo.entregues(myStudents);
   }
   visible.sort((a, b) => new Date(b.deliveredAt || b.updatedAt || 0) - new Date(a.deliveredAt || a.updatedAt || 0));
   res.json(visible.map(antessalaSummary));
-});
+}));
 
 // POST /api/antessala/reflect — camada maiêutica. { step, doc } → perguntas.
 // O system prompt é montado no servidor (papel travado). Registrado ANTES de /:id.
-app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'external', 'admin'), aiLimiter, async (req, res) => {
+app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), aiLimiter, async (req, res) => {
+  const limite = await limiteIaExcedido(req.user).catch(() => null);
+  if (limite) return res.status(429).json(limite);
   const step = Number(req.body && req.body.step);
   if (!Number.isInteger(step) || step < 1 || step > 7) {
     return res.status(400).json({ error: 'step inválido (1 a 7)' });
@@ -10590,7 +10596,7 @@ app.post('/api/antessala/reflect', requireAuth, requireRole('therapist', 'extern
 });
 
 // POST /api/antessala — cria um mapa novo (rascunho).
-app.post('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
+app.post('/api/antessala', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), writeLimiter, rota(async (req, res) => {
   const doc = sanitizeAntessalaDoc(req.body);
   const now = new Date().toISOString();
   const record = {
@@ -10603,83 +10609,63 @@ app.post('/api/antessala', requireAuth, requireRole('therapist', 'external', 'ad
     updatedAt: now,
     deliveredAt: null,
   };
-  await withFileLock(ANTESSALA_FILE, async () => {
-    const all = readJSON(ANTESSALA_FILE, []);
-    all.push(record);
-    writeJSON(ANTESSALA_FILE, all);
-  });
+  await antessalaRepo.criar(record);
   res.status(201).json(record);
-});
+}));
 
 // GET /api/antessala/:id — mapa completo. Dono (qualquer status), supervisor do
 // dono (só entregue) ou admin.
-app.get('/api/antessala/:id', requireAuth, (req, res) => {
-  const all = readJSON(ANTESSALA_FILE, []);
-  const c = all.find((x) => x.id === req.params.id);
+app.get('/api/antessala/:id', requireAuth, rota(async (req, res) => {
+  const c = await antessalaRepo.porId(req.params.id);
   if (!c) return res.status(404).json({ error: 'Mapa não encontrado' });
-  if (!canReadAntessalaCase(req.user, c)) return res.status(403).json({ error: 'Acesso negado' });
+  if (!(await canReadAntessalaCase(req.user, c))) return res.status(403).json({ error: 'Acesso negado' });
   res.json(c);
-});
+}));
 
 // PUT /api/antessala/:id — atualiza o mapa. Só o dono, e só enquanto rascunho
 // (depois de entregue, não é mais editável).
-app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
+// Cada alteração trava só aquele mapa: uma edição que chega junto da entrega não
+// passa depois dela.
+const MAPA_NAO_ENCONTRADO = { status: 404, corpo: { error: 'Mapa não encontrado' } };
+
+app.put('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), writeLimiter, rota(async (req, res) => {
   const doc = sanitizeAntessalaDoc(req.body);
-  let out = null;
-  let status = 200;
-  await withFileLock(ANTESSALA_FILE, async () => {
-    const all = readJSON(ANTESSALA_FILE, []);
-    const idx = all.findIndex((x) => x.id === req.params.id);
-    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
-    const c = all[idx];
-    if (c.ownerId !== req.user.id && req.user.role !== 'admin') { status = 403; out = { error: 'Acesso negado' }; return; }
-    if (c.status === 'delivered') { status = 409; out = { error: 'Mapa já entregue — não pode mais ser editado.' }; return; }
-    all[idx] = { ...c, ...doc, updatedAt: new Date().toISOString() };
-    writeJSON(ANTESSALA_FILE, all);
-    out = all[idx];
+  const r = await antessalaRepo.travar(req.params.id, (c) => {
+    if (c.ownerId !== req.user.id && req.user.role !== 'admin') return { valor: { status: 403, corpo: { error: 'Acesso negado' } } };
+    if (c.status === 'delivered') return { valor: { status: 409, corpo: { error: 'Mapa já entregue — não pode mais ser editado.' } } };
+    const novo = { ...c, ...doc, updatedAt: new Date().toISOString() };
+    return { gravar: novo, valor: { status: 200, corpo: novo } };
   });
-  res.status(status).json(out);
-});
+  const { status, corpo } = r.encontrado ? r.valor : MAPA_NAO_ENCONTRADO;
+  res.status(status).json(corpo);
+}));
 
 // POST /api/antessala/:id/deliver — entrega para a supervisão (torna o mapa
 // não editável).
-app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
-  let out = null;
-  let status = 200;
-  await withFileLock(ANTESSALA_FILE, async () => {
-    const all = readJSON(ANTESSALA_FILE, []);
-    const idx = all.findIndex((x) => x.id === req.params.id);
-    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
-    const c = all[idx];
-    if (c.ownerId !== req.user.id && req.user.role !== 'admin') { status = 403; out = { error: 'Acesso negado' }; return; }
-    if (c.status === 'delivered') { out = c; return; } // idempotente
+app.post('/api/antessala/:id/deliver', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), writeLimiter, rota(async (req, res) => {
+  const r = await antessalaRepo.travar(req.params.id, (c) => {
+    if (c.ownerId !== req.user.id && req.user.role !== 'admin') return { valor: { status: 403, corpo: { error: 'Acesso negado' } } };
+    if (c.status === 'delivered') return { valor: { status: 200, corpo: c } }; // idempotente
     const now = new Date().toISOString();
-    all[idx] = { ...c, status: 'delivered', deliveredAt: now, updatedAt: now };
-    writeJSON(ANTESSALA_FILE, all);
-    out = all[idx];
+    const novo = { ...c, status: 'delivered', deliveredAt: now, updatedAt: now };
+    return { gravar: novo, valor: { status: 200, corpo: novo } };
   });
-  res.status(status).json(out);
-});
+  const { status, corpo } = r.encontrado ? r.valor : MAPA_NAO_ENCONTRADO;
+  res.status(status).json(corpo);
+}));
 
 // DELETE /api/antessala/:id — dono (só rascunho) ou admin (qualquer).
-app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), writeLimiter, async (req, res) => {
-  let out = null;
-  let status = 200;
-  await withFileLock(ANTESSALA_FILE, async () => {
-    const all = readJSON(ANTESSALA_FILE, []);
-    const idx = all.findIndex((x) => x.id === req.params.id);
-    if (idx === -1) { status = 404; out = { error: 'Mapa não encontrado' }; return; }
-    const c = all[idx];
+app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external', 'admin'), requireFeature('antessala'), writeLimiter, rota(async (req, res) => {
+  const r = await antessalaRepo.travar(req.params.id, (c) => {
     const isOwner = c.ownerId === req.user.id;
     const isAdminUser = req.user.role === 'admin';
-    if (!isOwner && !isAdminUser) { status = 403; out = { error: 'Acesso negado' }; return; }
-    if (c.status === 'delivered' && !isAdminUser) { status = 409; out = { error: 'Mapa já entregue — não pode ser excluído.' }; return; }
-    all.splice(idx, 1);
-    writeJSON(ANTESSALA_FILE, all);
-    out = { ok: true };
+    if (!isOwner && !isAdminUser) return { valor: { status: 403, corpo: { error: 'Acesso negado' } } };
+    if (c.status === 'delivered' && !isAdminUser) return { valor: { status: 409, corpo: { error: 'Mapa já entregue — não pode ser excluído.' } } };
+    return { excluir: true, valor: { status: 200, corpo: { ok: true } } };
   });
-  res.status(status).json(out);
-});
+  const { status, corpo } = r.encontrado ? r.valor : MAPA_NAO_ENCONTRADO;
+  res.status(status).json(corpo);
+}));
 
 // ----------------------------------------------------------------------------
 // COMUNIDADE — discussões, comentários, votos e enquetes
@@ -10696,16 +10682,16 @@ app.delete('/api/antessala/:id', requireAuth, requireRole('therapist', 'external
 // req.user quando há token válido). Escrever exige conta real: visitante lê
 // tudo e não escreve nada.
 //
-// Dois arquivos no DATA_DIR:
-//   comunidade.json        → { nextId, discussions: [...] }
-//   comunidade-config.json → { institutionAvatar, bans{} }
+// Dois lugares no banco:
+//   comunidade_discussoes           → uma discussão por linha (com comentários e votos)
+//   configuracoes 'comunidade-config' → { institutionAvatar, bans{} }
 // A separação é proposital: a config é escrita só pelo admin e lida em toda
-// requisição; misturá-la ao feed faria cada comentário reescrever a lista de
-// banimentos junto.
+// requisição (por isso fica na cópia em memória das configurações); as
+// discussões recebem escrita de todo mundo, e cada uma trava só a si mesma.
 const comunidade = require('./comunidade');
 
-const COMUNIDADE_FILE = 'comunidade.json';
-const COMUNIDADE_CONFIG_FILE = 'comunidade-config.json';
+const COMUNIDADE_CONFIG_CHAVE = 'comunidade-config';
+const COMUNIDADE_CONFIG_PADRAO = { institutionAvatar: null, bans: {} };
 
 // Avatares da Comunidade (logo da Associação + pool do visitante) vivem no
 // volume, como as fotos de paciente — sobrevivem a redeploy do Railway.
@@ -10713,61 +10699,33 @@ const COMUNIDADE_AVATARS_DIR = path.join(DATA_DIR, 'comunidade-avatars');
 if (!fs.existsSync(COMUNIDADE_AVATARS_DIR)) fs.mkdirSync(COMUNIDADE_AVATARS_DIR, { recursive: true });
 app.use('/comunidade-avatars', express.static(COMUNIDADE_AVATARS_DIR, { maxAge: '7d' }));
 
-function readComunidade() {
-  const d = readJSON(COMUNIDADE_FILE, { nextId: 1, discussions: [] });
-  if (!Array.isArray(d.discussions)) d.discussions = [];
-  if (!Number.isFinite(d.nextId)) d.nextId = 1;
-  return d;
-}
-function writeComunidade(d) { writeJSON(COMUNIDADE_FILE, d); }
-function readComunidadeConfig() {
-  const c = readJSON(COMUNIDADE_CONFIG_FILE, {});
+function normalizarConfigComunidade(c) {
+  const v = c || {};
   return {
-    institutionAvatar: c.institutionAvatar || null,
-    bans: (c.bans && typeof c.bans === 'object') ? c.bans : {},
+    institutionAvatar: v.institutionAvatar || null,
+    bans: (v.bans && typeof v.bans === 'object') ? v.bans : {},
   };
 }
-function writeComunidadeConfig(c) { writeJSON(COMUNIDADE_CONFIG_FILE, c); }
-
-// Migração one-shot: a "pool de avatares de visitante" nasceu dentro da
-// Comunidade (comunidade-config.json + comunidade-avatars/) como groundwork e
-// nunca foi usada. Agora é a pool de fotos padrão do app inteiro, mora em
-// avatar-pool.json e é gerenciada em Administração → Contas. Isto adota o que o
-// admin já tinha subido: copia os bytes pra pasta nova e limpa a chave antiga.
-(function migrarPoolDeVisitante() {
-  try {
-    const c = readJSON(COMUNIDADE_CONFIG_FILE, {});
-    const antigos = Array.isArray(c.visitorAvatars) ? c.visitorAvatars : [];
-    if (antigos.length === 0) return;
-
-    const atuais = readAvatarPool();
-    const adotadas = [...atuais];
-    for (const a of antigos) {
-      if (adotadas.length >= avatarPool.MAX_FOTOS) break;
-      if (!a || typeof a.id !== 'string' || !/^[A-Za-z0-9]+$/.test(a.id)) continue;
-      const origem = path.join(COMUNIDADE_AVATARS_DIR, `${a.id}.jpg`);
-      if (!fs.existsSync(origem)) continue;
-      fs.copyFileSync(origem, path.join(AVATAR_POOL_DIR, `${a.id}.jpg`));
-      adotadas.push({ id: a.id, url: `/avatar-pool/${a.id}.jpg` });
-    }
-    if (adotadas.length > atuais.length) writeAvatarPool(adotadas);
-
-    delete c.visitorAvatars;
-    writeJSON(COMUNIDADE_CONFIG_FILE, c);
-    console.log(`[migration] pool de fotos padrão adotou ${adotadas.length - atuais.length} imagem(ns) da Comunidade.`);
-  } catch (err) {
-    // Falhar aqui não pode impedir o boot: sem a migração o admin só precisa
-    // subir as imagens de novo em Contas.
-    console.warn('[migration] pool de fotos padrão:', err.message);
-  }
-})();
+// Cópia da config, da memória. Síncrona: é lida em toda requisição de escrita.
+function readComunidadeConfig() {
+  return normalizarConfigComunidade(operacaoRepo.lerConfig(COMUNIDADE_CONFIG_CHAVE, COMUNIDADE_CONFIG_PADRAO));
+}
+// Altera a config com ela travada: `fn(config)` muda no lugar e devolve false
+// para não gravar. Devolve a config final.
+async function atualizarConfigComunidade(fn) {
+  const valor = await operacaoRepo.atualizarConfig(COMUNIDADE_CONFIG_CHAVE, COMUNIDADE_CONFIG_PADRAO, (atual) => {
+    const config = normalizarConfigComunidade(atual);
+    return fn(config) === false ? false : config;
+  });
+  return normalizarConfigComunidade(valor);
+}
 
 // Auth OPCIONAL: popula req.user quando há um token válido e segue em frente
 // quando não há. É o que permite a mesma rota servir o membro logado (com o
 // voto dele marcado) e quem abriu o link compartilhado sem conta nenhuma.
 // Token inválido ou expirado é tratado como ausência de sessão — nunca 401:
 // aqui um 401 derrubaria a leitura pública, que é justamente o ponto da rota.
-function optionalAuth(req, res, next) {
+async function optionalAuth(req, res, next) {
   const token = getTokenFromReq(req);
   if (!token) return next();
   try {
@@ -10783,8 +10741,7 @@ function optionalAuth(req, res, next) {
       };
       return next();
     }
-    const users = readJSON('users.json');
-    const user = users.find((u) => u.id === payload.sub);
+    const user = await contasRepo.porId(payload.sub);
     if (user && (payload.tv || 0) === (user.tokenVersion || 0)) req.user = user;
   } catch { /* segue como leitor anônimo */ }
   next();
@@ -10810,23 +10767,36 @@ function autorSnapshot(user) {
   return { role: user.role };
 }
 
-function acharDiscussao(store, id) {
-  return store.discussions.find((d) => String(d.id) === String(id)) || null;
+// Trava UMA discussão e roda `fn(d)`. A resposta de `fn` decide:
+//   { status, error }   → recusa, nada é gravado;
+//   { excluir: true }   → apaga a discussão;
+//   { semGravar: true } → devolve sem gravar;
+//   qualquer outra      → grava a discussão alterada e devolve a resposta.
+// Discussão inexistente vira { status: 404 }.
+async function comDiscussaoTravada(id, fn) {
+  const r = await comunidadeRepo.travar(id, (d) => {
+    const out = fn(d) || {};
+    if (out.error) return { valor: out };
+    if (out.excluir) return { excluir: true, valor: out };
+    if (out.semGravar) return { valor: out };
+    return { gravar: true, valor: out };
+  });
+  return r.encontrado ? r.valor : { status: 404, error: 'Discussão não encontrada.' };
 }
 
 // --- Leitura ---
 
 // Feed. Exige sessão (inclusive a de visitante, que o app cria sozinho) porque
 // é a porta de entrada dentro do app; o link público é o da discussão avulsa.
-app.get('/api/comunidade', requireAuth, (req, res) => {
-  const store = readComunidade();
+app.get('/api/comunidade', requireAuth, requireFeature('comunidade'), rota(async (req, res) => {
+  const discussions = await comunidadeRepo.listar();
   const config = readComunidadeConfig();
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   const sort = req.query.sort === 'top' ? 'top' : 'recent';
   const podeVotar = podeEscrever(req.user, config);
   const ctx = { users, config, viewerId: req.user.id, resolverFoto: fotoExibida };
   res.json({
-    discussions: comunidade.ordenarFeed(store.discussions, sort)
+    discussions: comunidade.ordenarFeed(discussions, sort)
       .map((d) => comunidade.discussaoResumo(d, ctx)),
     canPost: podeVotar.ok,
     // A tela precisa distinguir "não pode porque é visitante" de "não pode
@@ -10835,15 +10805,14 @@ app.get('/api/comunidade', requireAuth, (req, res) => {
     // Governa o botão de fixar no card (a discussão avulsa já mandava isto).
     canModerate: req.user.role === 'admin',
   });
-});
+}));
 
 // Discussão avulsa — PÚBLICA de propósito (ver o comentário do topo do bloco).
-app.get('/api/comunidade/:id', comunidadePublicaLimiter, optionalAuth, (req, res) => {
-  const store = readComunidade();
-  const d = acharDiscussao(store, req.params.id);
+app.get('/api/comunidade/:id', comunidadePublicaLimiter, optionalAuth, rota(async (req, res) => {
+  const d = await comunidadeRepo.porId(req.params.id);
   if (!d) return res.status(404).json({ error: 'Discussão não encontrada.' });
   const config = readComunidadeConfig();
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   const permissao = podeEscrever(req.user, config);
   res.json({
     discussion: comunidade.discussaoCompleta(d, {
@@ -10857,11 +10826,11 @@ app.get('/api/comunidade/:id', comunidadePublicaLimiter, optionalAuth, (req, res
     // Só o admin vê os botões de excluir de todo mundo.
     canModerate: !!(req.user && req.user.role === 'admin'),
   });
-});
+}));
 
 // --- Escrita ---
 
-app.post('/api/comunidade', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/comunidade', requireAuth, writeLimiter, requireFeature('comunidade'), rota(async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
   if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
@@ -10874,47 +10843,37 @@ app.post('/api/comunidade', requireAuth, writeLimiter, async (req, res) => {
   // editorial daquele texto, não um atributo da conta.
   const asInstitution = !!(req.body && req.body.asInstitution) && req.user.role === 'admin';
 
-  const criada = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = {
-      id: String(store.nextId),
-      title: valor.title,
-      body: valor.body,
-      poll: valor.poll,
-      authorId: req.user.id,
-      author: autorSnapshot(req.user),
-      asInstitution,
-      createdAt: new Date().toISOString(),
-      votes: {},
-      comments: [],
-    };
-    store.nextId += 1;
-    store.discussions.push(d);
-    writeComunidade(store);
-    return d;
-  });
+  // O id é o próximo da sequência do banco: duas publicações simultâneas nunca
+  // ganham o mesmo número.
+  const criada = await comunidadeRepo.criar((id) => ({
+    id,
+    title: valor.title,
+    body: valor.body,
+    poll: valor.poll,
+    authorId: req.user.id,
+    author: autorSnapshot(req.user),
+    asInstitution,
+    createdAt: new Date().toISOString(),
+    votes: {},
+    comments: [],
+  }));
 
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   res.json(comunidade.discussaoResumo(criada, { users, config, viewerId: req.user.id, resolverFoto: fotoExibida }));
-});
+}));
 
 // Excluir discussão: o autor tira a própria, o admin tira qualquer uma
 // (moderação mora nos próprios posts, não numa tela separada).
-app.delete('/api/comunidade/:id', requireAuth, async (req, res) => {
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+app.delete('/api/comunidade/:id', requireAuth, rota(async (req, res) => {
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     if (req.user.role !== 'admin' && d.authorId !== req.user.id) {
       return { status: 403, error: 'Você só pode excluir as suas discussões.' };
     }
-    store.discussions = store.discussions.filter((x) => String(x.id) !== String(d.id));
-    writeComunidade(store);
-    return { ok: true };
+    return { excluir: true };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json({ ok: true });
-});
+}));
 
 // Editar discussão — admin apenas, e vale para a de qualquer pessoa (é o uso:
 // corrigir um título confuso, arrumar um texto). A ENQUETE não é tocada: mexer
@@ -10924,33 +10883,28 @@ app.delete('/api/comunidade/:id', requireAuth, async (req, res) => {
 // `editedAt` é gravado e aparece na tela como "(editado)". Isso não é opcional:
 // o admin altera texto que outra pessoa assinou, e mudança sem rastro na
 // assinatura de alguém é o tipo de coisa que corrói a confiança no espaço.
-app.put('/api/comunidade/:id', requireAuth, requireRole('admin'), writeLimiter, async (req, res) => {
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
-
+app.put('/api/comunidade/:id', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     const { erro, valor } = comunidade.validarEdicao(req.body, d);
     if (erro) return { status: 400, error: erro };
 
     // Sem mudança nenhuma, não suja a discussão com uma marca de edição.
     if (valor.title === d.title && valor.body === (d.body || '')) {
-      return { discussao: d, semMudanca: true };
+      return { discussao: d, semGravar: true };
     }
     d.title = valor.title;
     d.body = valor.body;
     d.editedAt = new Date().toISOString();
-    writeComunidade(store);
     return { discussao: d };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
 
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   const config = readComunidadeConfig();
   res.json(comunidade.discussaoCompleta(resultado.discussao, {
     users, config, viewerId: req.user.id, podeVotar: true, resolverFoto: fotoExibida,
   }));
-});
+}));
 
 // Fixar/desfixar discussão — admin apenas. A discussão fixada sobe ao topo da
 // aba "Recentes" e NÃO mexe em "Em alta" (ver comunidade.ordenarFeed): aquela
@@ -10959,12 +10913,9 @@ app.put('/api/comunidade/:id', requireAuth, requireRole('admin'), writeLimiter, 
 //
 // `pinnedAt` existe para ordenar entre várias fixadas — fixar de novo promove
 // ao topo, que é como o admin reordena sem precisar de um campo de posição.
-app.post('/api/comunidade/:id/pin', requireAuth, requireRole('admin'), writeLimiter, async (req, res) => {
+app.post('/api/comunidade/:id/pin', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
   const fixar = !!(req.body && req.body.pinned);
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     if (fixar) {
       d.pinned = true;
       d.pinnedAt = new Date().toISOString();
@@ -10972,14 +10923,13 @@ app.post('/api/comunidade/:id/pin', requireAuth, requireRole('admin'), writeLimi
       delete d.pinned;
       delete d.pinnedAt;
     }
-    writeComunidade(store);
     return { pinned: fixar };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json(resultado);
-});
+}));
 
-app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, requireFeature('comunidade'), rota(async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
   if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
@@ -10987,47 +10937,39 @@ app.post('/api/comunidade/:id/vote', requireAuth, writeLimiter, async (req, res)
   const valor = comunidade.normalizarVoto(req.body && req.body.value);
   if (valor === null) return res.status(400).json({ error: 'Voto inválido.' });
 
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     d.votes = comunidade.aplicarVoto(d.votes, req.user.id, valor);
-    writeComunidade(store);
     return { score: comunidade.score(d.votes), myVote: comunidade.meuVoto(d.votes, req.user.id) };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json(resultado);
-});
+}));
 
 // Voto na enquete. O corpo é sempre { optionId } — um clique numa opção — e o
 // significado depende do tipo escolhido por quem criou: na opção única o voto é
 // trocável (revotar substitui), na múltipla escolha o clique alterna a opção.
 // Toda essa regra vive em comunidade.aplicarVotoEnquete.
-app.post('/api/comunidade/:id/poll', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/comunidade/:id/poll', requireAuth, writeLimiter, requireFeature('comunidade'), rota(async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
   if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
 
   const optionId = String((req.body && req.body.optionId) || '');
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     if (!d.poll) return { status: 400, error: 'Esta discussão não tem enquete.' };
     if (!comunidade.aplicarVotoEnquete(d.poll, req.user.id, optionId)) {
       return { status: 400, error: 'Opção inválida.' };
     }
-    writeComunidade(store);
     return { poll: comunidade.enquetePublica(d.poll, req.user.id, true) };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json(resultado);
-});
+}));
 
 // Comentar. `parentId` responde a um comentário — e só a UM nível: responder a
 // uma resposta reancora na raiz dela. Sem isso a indentação cresce sem fim e a
 // leitura no celular quebra.
-app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, requireFeature('comunidade'), rota(async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
   if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
@@ -11036,10 +10978,7 @@ app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (re
   if (erro) return res.status(400).json({ error: erro });
   const asInstitution = !!(req.body && req.body.asInstitution) && req.user.role === 'admin';
 
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     if (!Array.isArray(d.comments)) d.comments = [];
     if (d.comments.length >= comunidade.MAX_COMMENTS_POR_DISCUSSAO) {
       return { status: 400, error: 'Esta discussão atingiu o limite de comentários.' };
@@ -11064,7 +11003,6 @@ app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (re
       votes: {},
     };
     d.comments.push(c);
-    writeComunidade(store);
     return { discussao: d };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
@@ -11080,7 +11018,7 @@ app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (re
     if (pai && pai.authorId && pai.authorId !== req.user.id) alvos.add(pai.authorId);
   }
   for (const uid of alvos) {
-    pushNotification(uid, {
+    await pushNotification(uid, {
       type: 'comunidade_reply',
       discussionId: d.id,
       title: d.title,
@@ -11088,13 +11026,13 @@ app.post('/api/comunidade/:id/comentarios', requireAuth, writeLimiter, async (re
     });
   }
 
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   res.json(comunidade.discussaoCompleta(d, {
     users, config, viewerId: req.user.id, podeVotar: true, resolverFoto: fotoExibida,
   }));
-});
+}));
 
-app.post('/api/comunidade/:id/comentarios/:cid/vote', requireAuth, writeLimiter, async (req, res) => {
+app.post('/api/comunidade/:id/comentarios/:cid/vote', requireAuth, writeLimiter, requireFeature('comunidade'), rota(async (req, res) => {
   const config = readComunidadeConfig();
   const permissao = podeEscrever(req.user, config);
   if (!permissao.ok) return res.status(permissao.status).json({ error: permissao.error });
@@ -11102,28 +11040,21 @@ app.post('/api/comunidade/:id/comentarios/:cid/vote', requireAuth, writeLimiter,
   const valor = comunidade.normalizarVoto(req.body && req.body.value);
   if (valor === null) return res.status(400).json({ error: 'Voto inválido.' });
 
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     const c = (d.comments || []).find((x) => x.id === req.params.cid);
     if (!c) return { status: 404, error: 'Comentário não encontrado.' };
     c.votes = comunidade.aplicarVoto(c.votes, req.user.id, valor);
-    writeComunidade(store);
     return { score: comunidade.score(c.votes), myVote: comunidade.meuVoto(c.votes, req.user.id) };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json(resultado);
-});
+}));
 
 // Excluir comentário. Vira lápide (deleted) em vez de sumir: se ele tinha
 // respostas, apagá-lo de vez deixaria as respostas órfãs e sem contexto. A
 // projeção esconde a lápide quando não sobrou nenhuma resposta pendurada.
-app.delete('/api/comunidade/:id/comentarios/:cid', requireAuth, async (req, res) => {
-  const resultado = await withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    const d = acharDiscussao(store, req.params.id);
-    if (!d) return { status: 404, error: 'Discussão não encontrada.' };
+app.delete('/api/comunidade/:id/comentarios/:cid', requireAuth, rota(async (req, res) => {
+  const resultado = await comDiscussaoTravada(req.params.id, (d) => {
     const c = (d.comments || []).find((x) => x.id === req.params.cid);
     if (!c) return { status: 404, error: 'Comentário não encontrado.' };
     if (req.user.role !== 'admin' && c.authorId !== req.user.id) {
@@ -11132,22 +11063,21 @@ app.delete('/api/comunidade/:id/comentarios/:cid', requireAuth, async (req, res)
     c.deleted = true;
     c.body = '';
     delete c.author;
-    writeComunidade(store);
     return { ok: true };
   });
   if (resultado.error) return res.status(resultado.status).json({ error: resultado.error });
   res.json({ ok: true });
-});
+}));
 
 // --- Administração da Comunidade (admin apenas) ---
 
 // Painel: config de avatares + banimentos vigentes + quem já publicou algo
 // (é essa lista que alimenta o seletor de "banir usuário" — banir quem nunca
 // escreveu não tem uso, e listar a base inteira aqui seria vazamento à toa).
-app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), (req, res) => {
-  const store = readComunidade();
+app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const discussions = await comunidadeRepo.listar();
   const config = readComunidadeConfig();
-  const users = readJSON('users.json');
+  const users = await contasRepo.listar();
   const agora = Date.now();
 
   const contagem = new Map(); // userId -> { discussions, comments }
@@ -11156,7 +11086,7 @@ app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), (req, res) =
     if (!contagem.has(id)) contagem.set(id, { discussions: 0, comments: 0 });
     contagem.get(id)[campo] += 1;
   };
-  for (const d of store.discussions) {
+  for (const d of discussions) {
     bump(d.authorId, 'discussions');
     for (const c of (d.comments || [])) if (!c.deleted) bump(c.authorId, 'comments');
   }
@@ -11185,19 +11115,17 @@ app.get('/api/admin/comunidade', requireAuth, requireRole('admin'), (req, res) =
         return { userId: id, name: u ? u.name : 'Conta removida', until: b.until, reason: b.reason || '' };
       }),
   });
-});
+}));
 
 // Avatar da Associação Allos (o que aparece nas publicações institucionais).
 // Mesmo contrato da foto de paciente: o cliente manda o JPEG já recortado como
 // data URL, o servidor só grava os bytes. `clear:true` remove.
-app.put('/api/admin/comunidade/avatar-instituicao', requireAuth, requireRole('admin'), writeLimiter, (req, res) => {
-  const config = readComunidadeConfig();
+app.put('/api/admin/comunidade/avatar-instituicao', requireAuth, requireRole('admin'), writeLimiter, rota(async (req, res) => {
   const arquivo = path.join(COMUNIDADE_AVATARS_DIR, 'instituicao.jpg');
 
   if (req.body && req.body.clear) {
     try { if (fs.existsSync(arquivo)) fs.unlinkSync(arquivo); } catch { /* ignora */ }
-    config.institutionAvatar = null;
-    writeComunidadeConfig(config);
+    await atualizarConfigComunidade((config) => { config.institutionAvatar = null; });
     return res.json({ institutionAvatar: null });
   }
 
@@ -11209,16 +11137,17 @@ app.put('/api/admin/comunidade/avatar-instituicao', requireAuth, requireRole('ad
   } catch (err) {
     return res.status(500).json(falhou(req, err, 'admin/comunidade-avatar-instituicao'));
   }
-  config.institutionAvatar = `/comunidade-avatars/instituicao.jpg?v=${Date.now()}`;
-  writeComunidadeConfig(config);
+  const config = await atualizarConfigComunidade((c) => {
+    c.institutionAvatar = `/comunidade-avatars/instituicao.jpg?v=${Date.now()}`;
+  });
   res.json({ institutionAvatar: config.institutionAvatar });
-});
+}));
 
 const BAN_MAX_DIAS = 3650; // 10 anos: na prática "permanente", mas com data
 
 // Banir por N dias. `purge:true` apaga junto TUDO que a pessoa publicou —
 // é o caso de spam, em que deixar o conteúdo no ar esvazia o banimento.
-app.post('/api/admin/comunidade/ban', requireAuth, requireRole('admin'), async (req, res) => {
+app.post('/api/admin/comunidade/ban', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const body = req.body || {};
   const userId = String(body.userId || '');
   const dias = Math.round(Number(body.days));
@@ -11226,63 +11155,46 @@ app.post('/api/admin/comunidade/ban', requireAuth, requireRole('admin'), async (
   if (!Number.isFinite(dias) || dias < 1 || dias > BAN_MAX_DIAS) {
     return res.status(400).json({ error: `Informe a duração em dias (1 a ${BAN_MAX_DIAS}).` });
   }
-  const users = readJSON('users.json');
-  const alvo = users.find((u) => u.id === userId);
+  const alvo = await contasRepo.porId(userId);
   if (!alvo) return res.status(404).json({ error: 'Usuário não encontrado.' });
   if (alvo.role === 'admin') return res.status(400).json({ error: 'Não dá para banir um administrador.' });
 
-  const config = readComunidadeConfig();
-  config.bans[userId] = {
-    until: new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toISOString(),
-    reason: clampStr(body.reason, 300).trim(),
-    by: req.user.id,
-    at: new Date().toISOString(),
-  };
-  writeComunidadeConfig(config);
+  const config = await atualizarConfigComunidade((c) => {
+    c.bans[userId] = {
+      until: new Date(Date.now() + dias * 24 * 60 * 60 * 1000).toISOString(),
+      reason: clampStr(body.reason, 300).trim(),
+      by: req.user.id,
+      at: new Date().toISOString(),
+    };
+  });
 
   let removidos = 0;
   if (body.purge) removidos = await purgarConteudo(userId);
   res.json({ ok: true, until: config.bans[userId].until, removidos });
-});
+}));
 
-app.delete('/api/admin/comunidade/ban/:userId', requireAuth, requireRole('admin'), (req, res) => {
-  const config = readComunidadeConfig();
-  if (!config.bans[req.params.userId]) return res.status(404).json({ error: 'Este usuário não está banido.' });
-  delete config.bans[req.params.userId];
-  writeComunidadeConfig(config);
+app.delete('/api/admin/comunidade/ban/:userId', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  let estavaBanido = false;
+  await atualizarConfigComunidade((config) => {
+    if (!config.bans[req.params.userId]) return false;
+    estavaBanido = true;
+    delete config.bans[req.params.userId];
+  });
+  if (!estavaBanido) return res.status(404).json({ error: 'Este usuário não está banido.' });
   res.json({ ok: true });
-});
+}));
 
 // Apaga conteúdo de um usuário: tudo (`ids` ausente) ou só as discussões
 // listadas em `ids`. Comentários viram lápide pelo mesmo motivo do DELETE
 // avulso — as respostas pendentes deles precisam continuar legíveis.
 async function purgarConteudo(userId, ids = null) {
-  const alvo = ids ? new Set(ids.map(String)) : null;
-  return withFileLock(COMUNIDADE_FILE, () => {
-    const store = readComunidade();
-    let n = 0;
-    store.discussions = store.discussions.filter((d) => {
-      if (d.authorId === userId && (!alvo || alvo.has(String(d.id)))) { n += 1; return false; }
-      return true;
-    });
-    if (!alvo) {
-      for (const d of store.discussions) {
-        for (const c of (d.comments || [])) {
-          if (c.authorId === userId && !c.deleted) {
-            c.deleted = true; c.body = ''; delete c.author; n += 1;
-          }
-        }
-      }
-    }
-    writeComunidade(store);
-    return n;
-  });
+  return comunidadeRepo.purgar(userId, ids);
 }
 
 // Lista o que um usuário publicou, para o admin escolher o que apagar.
-app.get('/api/admin/comunidade/usuario/:userId', requireAuth, requireRole('admin'), (req, res) => {
-  const store = readComunidade();
-  const minhas = store.discussions
+app.get('/api/admin/comunidade/usuario/:userId', requireAuth, requireRole('admin'), rota(async (req, res) => {
+  const discussions = await comunidadeRepo.listar();
+  const minhas = discussions
     .filter((d) => d.authorId === req.params.userId)
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .map((d) => ({
@@ -11293,7 +11205,7 @@ app.get('/api/admin/comunidade/usuario/:userId', requireAuth, requireRole('admin
       commentCount: (d.comments || []).filter((c) => !c.deleted).length,
     }));
   const comentarios = [];
-  for (const d of store.discussions) {
+  for (const d of discussions) {
     for (const c of (d.comments || [])) {
       if (c.authorId === req.params.userId && !c.deleted) {
         comentarios.push({
@@ -11305,16 +11217,16 @@ app.get('/api/admin/comunidade/usuario/:userId', requireAuth, requireRole('admin
   }
   comentarios.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   res.json({ discussions: minhas, comments: comentarios });
-});
+}));
 
-app.post('/api/admin/comunidade/purgar', requireAuth, requireRole('admin'), async (req, res) => {
+app.post('/api/admin/comunidade/purgar', requireAuth, requireRole('admin'), rota(async (req, res) => {
   const body = req.body || {};
   const userId = String(body.userId || '');
   if (!userId) return res.status(400).json({ error: 'Informe o usuário.' });
   const ids = Array.isArray(body.discussionIds) ? body.discussionIds : null;
   const removidos = await purgarConteudo(userId, ids);
   res.json({ ok: true, removidos });
-});
+}));
 
 
 // ============================================================================
@@ -11574,12 +11486,12 @@ if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
 
   // ANTES do catch-all, senão o index.html estático responde primeiro.
-  app.get('/comunidade/discussao/:id', comunidadePublicaLimiter, (req, res, next) => {
+  app.get('/comunidade/discussao/:id', comunidadePublicaLimiter, rota(async (req, res, next) => {
     const html = lerIndexHtml();
     if (!html) return next();
     let d = null;
     try {
-      d = acharDiscussao(readComunidade(), req.params.id);
+      d = await comunidadeRepo.porId(req.params.id);
     } catch {
       d = null;
     }
@@ -11591,27 +11503,29 @@ if (fs.existsSync(clientDist)) {
       descricao: PREVIEW_DESCRICAO,
       url: `${req.protocol}://${req.get('host')}/comunidade/discussao/${encodeURIComponent(d.id)}`,
     }));
-  });
+  }));
 
   app.get('*', (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 }
+
+// Tratador final de erro: recebe o que rota() encaminhou (banco fora do ar, bug) e
+// responde no padrão do app — código curto, sem err.message para o usuário. Erro
+// de cliente (JSON malformado, corpo grande demais) segue com o status que já tem.
+app.use((err, req, res, next) => {
+  if (res.headersSent || (err && err.status && err.status < 500)) return next(err);
+  res.status(500).json(falhou(req, err, `${req.method} ${req.path}`));
+});
 
 // Só faz listen quando executado diretamente (`node server/index.js`).
 // Quando importado por testes (`require('./server/index.js')`), o supertest
 // cria seu próprio server interno em porta aleatória — sem precisar de listen.
 if (require.main === module) {
-  // Limpeza de logs expirados no boot + a cada 6h. unref() pra não segurar o
-  // processo vivo só por causa do timer.
-  const removed = pruneExpiredLogs();
-  if (removed > 0) console.log(`[logs] ${removed} log(s) expirado(s) (>${LOG_TTL_DAYS} dias) removido(s) no boot.`);
-  const removedSel = pruneExpiredSelectionLogs();
-  if (removedSel > 0) console.log(`[selecao] ${removedSel} log(s) de seleção expirado(s) (>${SELECTION_LOG_TTL_DAYS} dias) removido(s) no boot.`);
-  setInterval(() => {
-    const n = pruneExpiredLogs();
-    if (n > 0) console.log(`[logs] ${n} log(s) expirado(s) removido(s).`);
-    const ns = pruneExpiredSelectionLogs();
-    if (ns > 0) console.log(`[selecao] ${ns} log(s) de seleção expirado(s) removido(s).`);
-  }, 6 * 60 * 60 * 1000).unref();
+  // Uso de IA: o limite olha 7 dias; 30 dá folga para o admin conferir.
+  // (Único TTL restante em dado operacional; logs, duelos e seletivo são
+  // persistentes desde a demandas.md §24.0.)
+  bancoPronto
+    .then(() => usoIaRepo.podar(30 * 24 * 60 * 60 * 1000))
+    .catch((err) => console.error('[uso-ia] poda no boot falhou:', err.message));
 
   // AVALIADOR OFICIAL: qual modelo cada modo está de fato usando agora. Vale a
   // pena no boot porque a resolução tem três camadas (escolha da categoria em
@@ -11641,7 +11555,7 @@ if (require.main === module) {
   setInterval(() => { sweepSelectionBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   // Competitivo (Batch API GPT 5.5): submete os logs pendentes e coleta os prontos.
-  sweepCompetitiveBatches().catch(() => {});
+  bancoPronto.then(() => sweepCompetitiveBatches()).catch(() => {});
   setInterval(() => { sweepCompetitiveBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   // Avaliação Independente (Batch API): coleta os jobs da fila que ficaram prontos.
@@ -11653,10 +11567,33 @@ if (require.main === module) {
   setInterval(() => { sweepTrilhaEvalBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
   const PORT = process.env.PORT || 3001;
-  app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
+  // Só abre a porta com o schema do banco em dia. Falhar aqui derruba o processo:
+  // o Railway reinicia, e um app no ar sem banco só responderia erro.
+  bancoPronto
+    .then((aplicadas) => {
+      if (aplicadas.length) console.log(`[db] migrações aplicadas: ${aplicadas.join(', ')}`);
+      app.listen(PORT, () => console.log(`Servidor Allos rodando na porta ${PORT}`));
+    })
+    .catch((err) => {
+      console.error('[FATAL] banco indisponível ou migração falhou:', err.message);
+      process.exit(1);
+    });
 }
 
 // Só nos testes: fechar uma avaliação do seletivo sem batch real da OpenAI.
-if (process.env.VITEST) app.__test = { finalizeSelectionEvals };
+// E o boot do banco: os testes semeiam as contas depois que ele termina.
+if (process.env.VITEST) {
+  app.__test = {
+    finalizeSelectionEvals,
+    bancoPronto,
+    // Troca um catálogo inteiro (banco + cópia em memória).
+    definirCatalogo: (tipo, lista) => catalogos.definir(tipo, lista),
+    // Refaz as cópias em memória a partir do banco (depois do TRUNCATE do resetData).
+    recarregarConfig: async () => {
+      await operacaoRepo.carregarConfig();
+      await sidequestsRepo.carregar();
+    },
+  };
+}
 
 module.exports = app;
