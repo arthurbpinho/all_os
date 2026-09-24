@@ -94,7 +94,7 @@ function buildFullCsv(list) {
     'Paciente (caso)', 'Sessões', 'Duração (s)',
     'Status', 'Nota final (0-100)',
     ...Object.values(CRITERIA_LABELS).map((l) => `Critério: ${l}`),
-    'Avaliação (texto)', 'Data/hora (ISO)', 'Expira em (ISO)',
+    'Avaliação (texto)', 'Data/hora (ISO)',
   ];
   const rows = list.map((l) => {
     const c = l.candidate || {};
@@ -104,7 +104,7 @@ function buildFullCsv(list) {
       l.characterName || '', l.sessionCount || 1, Math.round(Number(l.durationSeconds) || 0),
       STATUS_LABEL[l.status] || l.status || '', l.score == null ? '' : l.score,
       ...Object.keys(CRITERIA_LABELS).map((k) => (crit[k] == null ? '' : crit[k])),
-      l.evaluation || '', l.timestamp || '', l.expiresAt || '',
+      l.evaluation || '', l.timestamp || '',
     ].map(csvField).join(',');
   });
   return '\uFEFF' + [header.map(csvField).join(','), ...rows].join('\r\n');
@@ -120,12 +120,6 @@ function fmtDuration(secs) {
   const m = Math.floor(s / 60);
   return m >= 1 ? `${m} min` : `${s}s`;
 }
-function daysUntil(iso) {
-  const d = new Date(iso).getTime();
-  if (!Number.isFinite(d)) return null;
-  return Math.max(0, Math.ceil((d - Date.now()) / (24 * 60 * 60 * 1000)));
-}
-
 const STATUS_LABEL = { ativo: 'Ativo', rejeitado: 'Rejeitado', pending: 'Em avaliação (lote)', erro: 'Erro' };
 
 function transcriptText(log) {
@@ -231,7 +225,7 @@ export default function SelecaoLogs() {
             <Typewriter text="Logs de " />
             <span className="accent"><Typewriter text="Avaliações" delayStart={360} /></span>
           </h2>
-          <p>Cada avaliação de candidato, com dados, transcrição, nota e feedback. Os logs completos expiram em 15 dias.</p>
+          <p>Cada avaliação de candidato, com dados, transcrição, nota e feedback.</p>
         </div>
         <button className="btn btn-outline" onClick={load} disabled={loading}>Atualizar</button>
       </div>
@@ -311,7 +305,6 @@ export default function SelecaoLogs() {
             getBoth: hasEval ? () => `${logStr}${evalSection(evalBody)}` : null,
           });
           const isOpen = openId === log.id;
-          const expDays = daysUntil(log.expiresAt);
           return (
             <div className="selecao-log-card" key={log.id}>
               <div className="selecao-log-head">
@@ -329,7 +322,6 @@ export default function SelecaoLogs() {
                 <span>🗓 {log.sessionCount || 1} {(log.sessionCount || 1) === 1 ? 'sessão' : 'sessões'}</span>
                 <span>🕓 {fmtDate(log.timestamp)}</span>
                 <span>⏱ {fmtDuration(log.durationSeconds)}</span>
-                {expDays != null && <span>expira em {expDays} {expDays === 1 ? 'dia' : 'dias'}</span>}
               </div>
 
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>

@@ -1,12 +1,10 @@
 // Exclusão da PRÓPRIA conta (DELETE /api/me) — distinta da exclusão de DADOS,
 // que continua sendo só por e-mail a suporte@allos.org.br (ver política de
 // privacidade). Este endpoint só derruba o login.
-const { app, request, resetData, loginAs, authHeader, loginVisitor, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const { app, request, resetData, loginAs, authHeader, loginVisitor, lerUsuarios } = require('./helpers');
 
-function lerUsers() {
-  return JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'users.json'), 'utf-8'));
+async function existe(id) {
+  return (await lerUsuarios()).some((u) => u.id === id);
 }
 
 describe('DELETE /api/me — exclusão da própria conta', () => {
@@ -16,7 +14,7 @@ describe('DELETE /api/me — exclusão da própria conta', () => {
     const token = await loginAs('aluno');
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({});
     expect(res.status).toBe(400);
-    expect(lerUsers().some((u) => u.id === '3')).toBe(true);
+    expect(await existe('3')).toBe(true);
   });
 
   // 400, não 401: o cliente trata TODO 401 como sessão expirada e desloga na
@@ -25,14 +23,14 @@ describe('DELETE /api/me — exclusão da própria conta', () => {
     const token = await loginAs('aluno');
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({ password: 'senhaerrada' });
     expect(res.status).toBe(400);
-    expect(lerUsers().some((u) => u.id === '3')).toBe(true);
+    expect(await existe('3')).toBe(true);
   });
 
   it('exclui a conta do aluno com a senha certa, e o token para de funcionar', async () => {
     const token = await loginAs('aluno');
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({ password: 'testpass1234' });
     expect(res.status).toBe(200);
-    expect(lerUsers().some((u) => u.id === '3')).toBe(false);
+    expect(await existe('3')).toBe(false);
 
     const me = await request(app).get('/api/me').set(authHeader(token));
     expect(me.status).toBe(401);
@@ -42,7 +40,7 @@ describe('DELETE /api/me — exclusão da própria conta', () => {
     const token = await loginAs('admin');
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({ password: 'testpass1234' });
     expect(res.status).toBe(400);
-    expect(lerUsers().some((u) => u.id === '1')).toBe(true);
+    expect(await existe('1')).toBe(true);
   });
 
   it('bloqueia supervisor com alunos vinculados', async () => {
@@ -50,7 +48,7 @@ describe('DELETE /api/me — exclusão da própria conta', () => {
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({ password: 'testpass1234' });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/vinculado/);
-    expect(lerUsers().some((u) => u.id === '2')).toBe(true);
+    expect(await existe('2')).toBe(true);
   });
 
   it('supervisor sem aluno vinculado consegue excluir', async () => {
@@ -61,7 +59,7 @@ describe('DELETE /api/me — exclusão da própria conta', () => {
     const token = await loginAs('prof2');
     const res = await request(app).delete('/api/me').set(authHeader(token)).send({ password: 'testpass1234' });
     expect(res.status).toBe(200);
-    expect(lerUsers().some((u) => u.id === '4')).toBe(false);
+    expect(await existe('4')).toBe(false);
   });
 
   it('visitante não tem conta para excluir', async () => {

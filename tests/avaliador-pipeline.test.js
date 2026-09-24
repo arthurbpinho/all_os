@@ -1016,14 +1016,16 @@ describe('Avaliar Sessão (aba do supervisor) — endpoint', () => {
   // visível, não um erro nem um job sumido.
   it('fila: job aguardando vaga chega à tela com o motivo, sem vazar o caso', async () => {
     const admin = await loginAs('admin');
-    fs.writeFileSync(path.join(DATA_DIR, 'avaliacao-fila.json'), JSON.stringify([{
+    const { db } = require('./helpers');
+    const { criarRepoJobs } = require('../server/repos/jobs');
+    await criarRepoJobs(db.getPool()).fila('avaliacao-fila').criar({
       id: 'avjob-espera', createdAt: new Date().toISOString(),
       userId: 'x', userName: 'Supervisor', casoNome: 'Pedro',
       evaluator: 'v34', model: 'gpt-5.6-luna', modelKey: 'gpt-5.6-luna', effort: 'high',
       status: 'aguardando', batchId: null, tentativas: 0,
       espera: 'Aguardando vaga na fila da OpenAI.',
       log: 'T: oi', bloco1: 'segredo',
-    }]));
+    });
     const res = await request(app).get('/api/avaliacao-independente/fila').set(authHeader(admin));
     expect(res.status).toBe(200);
     const job = res.body.find((j) => j.id === 'avjob-espera');

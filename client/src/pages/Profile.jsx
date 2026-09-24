@@ -5,6 +5,7 @@ import Typewriter from '../components/Typewriter';
 import PhotoCropper from '../components/PhotoCropper';
 import RichText from '../components/RichText';
 import DevTooltip from '../components/DevTooltip';
+import RadarCriterios from '../components/RadarCriterios';
 
 // Balões das partes do Perfil que ainda estão em construção. Mesmo vocabulário
 // do menu lateral (ver NavEmDesenvolvimento em App.jsx): cinza + explicação.
@@ -46,6 +47,24 @@ export default function Profile({ user, onUpdate, onLogout }) {
   const [abordagem, setAbordagem] = useState(user.abordagem || '');
   // MMR competitivo, mostrado aqui em vez de só no Ranking.
   const [mmr, setMmr] = useState(null);
+  // Média por critério das sessões avaliadas. null = não carregou ou bloqueado
+  // em Acessos (o servidor responde 403), e a seção não aparece.
+  const [criterios, setCriterios] = useState(null);
+
+  useEffect(() => {
+    if (user.role === 'visitor') return;
+    api.getMeusCriterios().then(setCriterios).catch(() => setCriterios(null));
+  }, [user.id, user.role]);
+
+  // Uso de IA na janela de 7 dias. Só quem tem limite (Terapeuta externo, com o
+  // teto configurado em Acessos) recebe { temLimite: true } — para os outros o
+  // servidor responde false e a seção não aparece.
+  const [usoIa, setUsoIa] = useState(null);
+
+  useEffect(() => {
+    if (user.role === 'visitor') return;
+    api.getMeuUsoIa().then(setUsoIa).catch(() => setUsoIa(null));
+  }, [user.id, user.role]);
 
   // Troca de senha
   const [pwdCurrent, setPwdCurrent] = useState('');
@@ -376,6 +395,98 @@ export default function Profile({ user, onUpdate, onLogout }) {
                 )}
               </div>
             </div>
+            {/* MMR por critério (spec §10): 0..10 com uma casa decimal, sem
+                teto. Oculto durante a calibração (o próprio motor devolve mmr
+                como null para cada critério enquanto nEntradas < 3). */}
+            {!mmr.calibrating && mmr.criterios && Object.keys(mmr.criterios).length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div className="section-title" style={{ fontSize: 13, marginBottom: 8 }}>Por critério</div>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 8 }}>
+                  {Object.entries(mmr.criterios)
+                    .filter(([, c]) => c.mmr != null)
+                    .map(([id, c]) => (
+                      <li key={id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--sand-2)', borderRadius: 4, fontSize: 13 }}>
+                        <span style={{ color: 'var(--ink-soft)' }}>Crit. {id}</span>
+                        <strong>{(c.mmr / 10).toFixed(1)}</strong>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Uso de IA: mostrar ANTES de a pessoa ser barrada é o ponto — sem isto
+            ela só descobre o limite quando o atendimento é recusado. */}
+        {usoIa && usoIa.temLimite && (
+          <section className="profile-section">
+            <h3 className="section-title">Uso de IA</h3>
+            <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 10 }}>
+              O seu perfil tem um limite de uso de IA a cada <strong>7 dias corridos</strong>. O que você usou há
+              mais de 7 dias sai da conta sozinho.
+            </p>
+            {[
+              usoIa.limiteUsd != null && { rotulo: 'Custo', usado: usoIa.usd, limite: usoIa.limiteUsd, fmt: (v) => `US$ ${Number(v).toFixed(2)}` },
+              usoIa.limiteTokens != null && { rotulo: 'Tokens', usado: usoIa.tokens, limite: usoIa.limiteTokens, fmt: (v) => Number(v).toLocaleString('pt-BR') },
+            ].filter(Boolean).map((l) => {
+              const pct = Math.min(100, Math.round((l.usado / l.limite) * 100));
+              return (
+                <div key={l.rotulo} style={{ marginBottom: 10 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5 }}>
+                    <span>{l.rotulo}</span>
+                    <span style={{ fontWeight: 600 }}>
+                      {l.fmt(l.usado)} <span style={{ color: 'var(--muted)', fontWeight: 400 }}>de {l.fmt(l.limite)}</span>
+                    </span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 999, background: 'var(--sand, #eee)', overflow: 'hidden', marginTop: 4 }}>
+                    <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? 'var(--terra)' : 'var(--marrs-deep)' }} />
+                  </div>
+                </div>
+              );
+            })}
+            {usoIa.excedido && (
+              <div className="alert error" style={{ marginTop: 6 }}>
+                Você chegou ao limite. Atendimentos e avaliações voltam conforme os usos mais antigos saem da
+                janela{usoIa.renovaEm ? ` (a partir de ${new Date(usoIa.renovaEm).toLocaleString('pt-BR')})` : ''}.
+                Se precisar de mais, fale com o suporte da Allos.
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* Notas por critério: a média de cada critério nas sessões avaliadas, nos
+            modos que o admin escolheu em Acessos. Critério novo aparece quando
+            ganha a primeira nota. */}
+        {criterios && (
+          <section className="profile-section">
+            <h3 className="section-title">Notas por critério</h3>
+            {criterios.sessoes === 0 ? (
+              <p style={{ color: 'var(--ink-soft)', fontSize: 13.5 }}>
+                Ainda não há sessões avaliadas para montar o gráfico.
+              </p>
+            ) : (
+              <>
+                <p style={{ color: 'var(--ink-soft)', fontSize: 13.5, marginBottom: 10 }}>
+                  Média de {criterios.sessoes} {criterios.sessoes === 1 ? 'sessão avaliada' : 'sessões avaliadas'}
+                  {criterios.modos && criterios.modos.length ? ` (${criterios.modos.map((m) => m.label).join(', ')})` : ''}.
+                  Os logs expiram em 30 dias, então a média acompanha as sessões recentes.
+                </p>
+                <RadarCriterios itens={criterios.criterios.map((c) => ({ nome: c.nome, valor: c.media }))} />
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13.5, marginTop: 8 }}>
+                  <tbody>
+                    {criterios.criterios.map((c) => (
+                      <tr key={c.nome} style={{ borderBottom: '1px solid var(--sand, #eee)' }}>
+                        <td style={{ padding: '5px 8px', color: 'var(--ink-soft)' }}>{c.nome}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                          {c.media}<span style={{ color: 'var(--muted)', fontWeight: 400 }}>/10</span>
+                          <span style={{ color: 'var(--muted)', fontWeight: 400, fontSize: 12 }}> · {c.n}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
           </section>
         )}
 
