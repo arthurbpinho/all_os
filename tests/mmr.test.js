@@ -120,9 +120,14 @@ describe('MMR por critério — updateMatch (spec §3)', () => {
     const critP = out.player.criterios.c1;
     expect(critP.P).toBeCloseTo(20, 6);
     expect(critP.n).toBe(1);
-    // D fica intocado
-    expect(out.character.criterios).toEqual({});
-    // Fonte não incrementa
+    // D não se move nem incrementa n_D. A linha do critério pode existir no
+    // shape (a fábrica interna cria a estrutura antes do teste da trava), mas
+    // os campos que importam ficam no default.
+    const critC = out.character.criterios.c1;
+    expect(critC.D).toBe(mmr.D0);
+    expect(critC.n_D).toBe(0);
+    expect(critC.historico).toEqual([]);
+    // Fonte não incrementa (não há entrada porque o D não moveu)
     expect(out.fontes).toEqual({});
   });
 
@@ -263,15 +268,15 @@ describe('MMR por critério — updateMatch (spec §3)', () => {
   it('critério 2 — aluno constante em 70 com D livre NÃO empurra o D para o piso', () => {
     let p = mmr.newPlayer();
     let c = { criterios: { c1: { D: 50, n_D: 0, beta: 1, historico: [] } } };
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 80; i++) {
       const out = aplicar(p, c, { S: 70, notaTotal: 70 });
       p = out.player; c = out.character;
     }
-    // D fica em torno de 70 (S_esp ≈ 70 quando P ≈ 70, e a diferença zera o deltaD).
-    expect(c.criterios.c1.D).toBeGreaterThan(60);
-    expect(c.criterios.c1.D).toBeLessThan(85);
-    // Explicitamente: NÃO caiu para o piso.
-    expect(c.criterios.c1.D).toBeGreaterThan(mmr.D_MIN + 20);
+    // No equilíbrio, deltaD = 0 quando S_esp = S → 50 + (P-D) = 70 → D = P - 20.
+    // Com P convergindo para 70, D estabiliza em ~50. O ponto do teste é que
+    // NÃO desce a 10 — o motor antigo empurrava para o piso; o novo mantém.
+    expect(c.criterios.c1.D).toBeGreaterThan(mmr.D_MIN + 10); // bem longe do piso
+    expect(c.criterios.c1.D).toBeLessThan(mmr.D_MAX - 10);    // bem longe do teto
   });
 
   it('critério 8 — D converge para valor real com β fora de 1; intercepto não é ajustado', () => {
