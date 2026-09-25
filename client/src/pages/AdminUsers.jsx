@@ -64,6 +64,13 @@ export default function AdminUsers({ user: currentUser }) {
   const [noticeSending, setNoticeSending] = useState(false);
   const [noticeResult, setNoticeResult] = useState('');
   const [noticeError, setNoticeError] = useState('');
+  // Tags de terapeutas: as que existem e as marcadas na conta em edição.
+  const [tags, setTags] = useState([]);
+  const [formTags, setFormTags] = useState([]);
+
+  function loadTags() {
+    return api.adminGetTags().then((l) => setTags(Array.isArray(l) ? l : [])).catch(() => {});
+  }
 
   useEffect(() => {
     api.getAdminFeedback()
@@ -127,7 +134,7 @@ export default function AdminUsers({ user: currentUser }) {
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); loadTags(); }, []);
 
   const teachers = useMemo(() => users.filter((u) => u.role === 'supervisor'), [users]);
   const teacherById = useMemo(() => {
@@ -143,6 +150,7 @@ export default function AdminUsers({ user: currentUser }) {
 
   function openCreate() {
     setForm(EMPTY_FORM);
+    setFormTags([]);
     setEditingId(null);
     setFormError('');
     setShowModal(true);
@@ -157,6 +165,7 @@ export default function AdminUsers({ user: currentUser }) {
       teacherId: u.teacherId || '',
       email: u.email || '',
     });
+    setFormTags((u.tags || []).map((t) => t.id));
     setEditingId(u.id);
     setFormError('');
     setShowModal(true);
@@ -205,10 +214,14 @@ export default function AdminUsers({ user: currentUser }) {
       };
       if (form.password) payload.password = form.password;
 
-      if (editingId) await api.adminUpdateUser(editingId, payload);
-      else await api.adminCreateUser(payload);
+      const salvo = editingId
+        ? await api.adminUpdateUser(editingId, payload)
+        : await api.adminCreateUser(payload);
+      const idDaConta = editingId || (salvo && (salvo.id || (salvo.user && salvo.user.id)));
+      if (idDaConta) await api.adminSetUserTags(idDaConta, formTags);
       closeModal();
       load();
+      loadTags();
     } catch (err) {
       setFormError(err.message || 'Erro ao salvar');
     } finally {
@@ -361,6 +374,8 @@ export default function AdminUsers({ user: currentUser }) {
 
       <FotosPadrao />
 
+      <TagsCard tags={tags} onChange={() => { loadTags(); load(); }} />
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         {[
           { v: 'all',        label: `Todos (${users.length})` },
@@ -397,6 +412,7 @@ export default function AdminUsers({ user: currentUser }) {
                 <th>Usuário</th>
                 <th>Função</th>
                 <th>Vínculo</th>
+                <th>Tags</th>
                 <th>Ações</th>
               </tr>
             </thead>
@@ -426,6 +442,11 @@ export default function AdminUsers({ user: currentUser }) {
                         : u.role === 'supervisor'
                           ? `${users.filter(s => s.teacherId === u.id).length} aluno(s)`
                           : '—'}
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {(u.tags || []).map((t) => <TagChip key={t.id} nome={t.nome} />)}
+                      </div>
                     </td>
                     <td>
                       <div className="actions">
@@ -532,6 +553,25 @@ export default function AdminUsers({ user: currentUser }) {
                 </div>
               )}
 
+              {tags.length > 0 && (
+                <div>
+                  <label>Tags</label>
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    {tags.map((t) => (
+                      <label key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 400, margin: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={formTags.includes(t.id)}
+                          onChange={() => setFormTags((prev) => (prev.includes(t.id) ? prev.filter((x) => x !== t.id) : [...prev, t.id]))}
+                          style={{ width: 'auto' }}
+                        />
+                        {t.nome}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label htmlFor="password">
                   {editingId ? 'Nova senha' : 'Senha'}
@@ -593,6 +633,78 @@ export default function AdminUsers({ user: currentUser }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function TagChip({ nome }) {
+  return (
+    <span style={{ fontSize: 11.5, fontWeight: 600, padding: '2px 8px', borderRadius: 999, background: 'var(--sand)', color: 'var(--ink-soft)', whiteSpace: 'nowrap' }}>
+      {nome}
+    </span>
+  );
+}
+
+// Tags de terapeutas: rótulos livres ("psicanalista", "neuropsicólogo") que o
+// admin aplica às contas no formulário de edição, e que filtram o Ranking e os
+// Logs de supervisão.
+function TagsCard({ tags, onChange }) {
+  const [nome, setNome] = useState('');
+  const [erro, setErro] = useState('');
+  const [ocupado, setOcupado] = useState(false);
+
+  async function executar(acao) {
+    setErro(''); setOcupado(true);
+    try {
+      await acao();
+      onChange();
+    } catch (e) {
+      setErro(e.message || 'Não foi possível salvar a tag.');
+    } finally {
+      setOcupado(false);
+    }
+  }
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>Tags de terapeutas</div>
+      <p style={{ margin: '0 0 12px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
+        Grupos livres, como "psicanalista" ou "neuropsicólogo". Marque as tags de cada pessoa em Editar.
+        O Ranking e os Logs de supervisão podem ser filtrados por elas.
+      </p>
+      <form
+        onSubmit={(e) => { e.preventDefault(); if (nome.trim()) executar(async () => { await api.adminCreateTag(nome.trim()); setNome(''); }); }}
+        style={{ display: 'flex', gap: 8, marginBottom: 12, maxWidth: 420 }}
+      >
+        <input value={nome} onChange={(e) => setNome(e.target.value)} placeholder="Nova tag" maxLength={40} />
+        <button type="submit" className="btn btn-primary btn-sm" disabled={ocupado || !nome.trim()}>Criar</button>
+      </form>
+      {tags.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>Nenhuma tag criada ainda.</div>
+      ) : (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {tags.map((t) => (
+            <span key={t.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999, background: 'var(--cream-2)', fontSize: 13 }}>
+              <strong style={{ fontWeight: 600 }}>{t.nome}</strong>
+              <span style={{ color: 'var(--muted)' }}>{t.total}</span>
+              <button
+                type="button" disabled={ocupado} title="Renomear"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 0 }}
+                onClick={() => {
+                  const novo = window.prompt('Novo nome da tag', t.nome);
+                  if (novo && novo.trim() && novo.trim() !== t.nome) executar(() => api.adminRenameTag(t.id, novo.trim()));
+                }}
+              >✎</button>
+              <button
+                type="button" disabled={ocupado} title="Excluir"
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 0 }}
+                onClick={() => { if (window.confirm(`Excluir a tag "${t.nome}"? Ela sai de todas as contas.`)) executar(() => api.adminDeleteTag(t.id)); }}
+              >✕</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {erro && <div className="alert error" style={{ marginTop: 12 }}>{erro}</div>}
     </div>
   );
 }

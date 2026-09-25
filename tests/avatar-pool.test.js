@@ -55,6 +55,9 @@ describe('CRUD da pool', () => {
 
   test('id da URL é sanitizado (não dá unlink fora da pasta)', async () => {
     const admin = await loginAs('admin');
+    // Contas e catálogos saíram do DATA_DIR para o banco: a sentinela faz o papel
+    // do arquivo de dados que a travessia não pode alcançar.
+    fs.writeFileSync(path.join(DATA_DIR, 'users.json'), '[]');
     const travessia = await request(app).delete('/api/admin/avatar-pool/..%2F..%2Fusers').set(authHeader(admin));
     expect(travessia.status).toBe(400);
     expect(fs.existsSync(path.join(DATA_DIR, 'users.json'))).toBe(true);

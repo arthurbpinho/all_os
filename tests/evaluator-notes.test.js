@@ -36,13 +36,14 @@ Vale revisar o manejo do afeto difícil.
     expect(res.body.criteriaScores).toEqual({ '1': 4.33, '2': 5.25, '3': 5.5, '4': 4.75, '5': 5, '6': 5.5 });
   });
 
-  it('aluno NÃO recebe criteriaScores no GET /api/logs (e o texto vem limpo)', async () => {
+  it('aluno recebe as próprias notas por critério no GET /api/logs (e o texto vem limpo)', async () => {
     const aluno = await loginAs('aluno');
     await postEval(aluno, evalJson);
     const res = await request(app).get('/api/logs').set(authHeader(aluno));
     const log = res.body[0];
     expect(log).toBeTruthy();
-    expect(log.criteriaScores).toBeUndefined();          // escondido do aluno
+    // Decisão de 2026-09 (demandas.md §18): o aluno vê os números por critério.
+    expect(log.criteriaScores).toEqual({ '1': 4.33, '2': 5.25, '3': 5.5, '4': 4.75, '5': 5, '6': 5.5 });
     expect(log.evaluation).not.toMatch(/notas-supervisor/i);
     expect(log.evaluation).toContain('Boa condução');
   });

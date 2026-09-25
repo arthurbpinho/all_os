@@ -15,6 +15,9 @@ import AdminFreeplay from './pages/AdminFreeplay';
 import AdminNeuro from './pages/AdminNeuro';
 import AdminEntrevistador from './pages/AdminEntrevistador';
 import AdminModelos from './pages/AdminModelos';
+import AdminAcessos from './pages/AdminAcessos';
+import { useAcessos } from './acessos';
+import { ModalCadeado, NavFuncionalidade, TelaBloqueada } from './components/Cadeado';
 import AdminPrompts from './pages/AdminPrompts';
 import AdminErrorLogs from './pages/AdminErrorLogs';
 import Avaliacao from './pages/Avaliacao'
@@ -134,6 +137,13 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(!getToken());
   const location = useLocation();
   const navigate = useNavigate();
+
+  // Funcionalidades bloqueadas para quem está logado (Administração → Acessos).
+  const acessosUi = useAcessos(user);
+  const [cadeado, setCadeado] = useState(null);
+  const protegida = (chave, elemento) => (
+    acessosUi.bloqueada(chave) ? <TelaBloqueada mensagem={acessosUi.mensagem} /> : elemento
+  );
 
   const [streak, setStreak] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -317,7 +327,7 @@ export default function App() {
             <span className="visitor-banner-text">você está duelando sem conta — crie a sua para guardar seus atendimentos</span>
           </div>
           <Routes>
-            <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
+            <Route path="/duelo/convite/:token" element={protegida('duelo', <DuelAccept user={user} />)} />
             <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
           </Routes>
         </main>
@@ -402,12 +412,14 @@ export default function App() {
           {(isTherapist || isAdmin) && (
             <>
               <div className="nav-section">Página inicial</div>
-              <Link to="/inicio" className={isActive('/inicio') ? 'active' : ''} title="Simulação">
-                {ICONS.home}<span>Simulação</span>
-              </Link>
-              <Link to="/duelo" className={isActive('/duelo') ? 'active' : ''} title="Desafie um amigo">
-                {ICONS.duel}<span>Desafie um amigo</span>
-              </Link>
+              <NavFuncionalidade
+                to="/inicio" icon={ICONS.home} label="Simulação" ativo={isActive('/inicio')}
+                bloqueada={acessosUi.bloqueada('simulacao')} onBloqueada={() => setCadeado(acessosUi.mensagem)}
+              />
+              <NavFuncionalidade
+                to="/duelo" icon={ICONS.duel} label="Desafie um amigo" ativo={isActive('/duelo')}
+                bloqueada={acessosUi.bloqueada('duelo')} onBloqueada={() => setCadeado(acessosUi.mensagem)}
+              />
               {/* Progressão e Antessala são ADMIN ONLY: não aparecem para aluno
                   nem em cinza — some da barra inteira para quem não é admin.
                   (A Antessala do supervisor é outra tela, a de ler os mapas
@@ -444,14 +456,16 @@ export default function App() {
           {!isEvaluator && (
             <>
               <div className="nav-section">Comunidade</div>
-              <Link to="/comunidade" className={isActive('/comunidade') ? 'active' : ''} title="Comunidade">
-                {ICONS.comunidade}<span>Comunidade</span>
-              </Link>
+              <NavFuncionalidade
+                to="/comunidade" icon={ICONS.comunidade} label="Comunidade" ativo={isActive('/comunidade')}
+                bloqueada={acessosUi.bloqueada('comunidade')} onBloqueada={() => setCadeado(acessosUi.mensagem)}
+              />
               {/* O Ranking não aparece na nova estrutura, mas também não foi
                   pedida a remoção dele — segue aqui, que é onde já estava. */}
-              <Link to="/ranking" className={isActive('/ranking') ? 'active' : ''} title="Ranking">
-                {ICONS.supervisor}<span>Ranking</span>
-              </Link>
+              <NavFuncionalidade
+                to="/ranking" icon={ICONS.supervisor} label="Ranking" ativo={isActive('/ranking')}
+                bloqueada={acessosUi.bloqueada('ranking')} onBloqueada={() => setCadeado(acessosUi.mensagem)}
+              />
             </>
           )}
 
@@ -592,6 +606,10 @@ export default function App() {
               <Link to="/admin/modelos" className={isActive('/admin/modelos') ? 'active' : ''} title="Modelos de IA">
                 {ICONS.evaluate}<span>Modelos de IA</span>
               </Link>
+              {/* Quem pode usar o quê: Terapeuta da Allos, externo e visitante. */}
+              <Link to="/admin/acessos" className={isActive('/admin/acessos') ? 'active' : ''} title="Acessos">
+                {ICONS.admin}<span>Acessos</span>
+              </Link>
               {/* Os .md do avaliador/entrevistador vivem no volume, fora do
                   git — este é o único caminho de edição pela interface. */}
               <Link to="/admin/prompts" className={isActive('/admin/prompts') ? 'active' : ''} title="Prompts">
@@ -645,32 +663,32 @@ export default function App() {
 
       <main className="main-content">
         <Routes>
-          <Route path="/skills" element={<SkillMap user={user} />} />
-          <Route path="/chat/exercise/:id" element={<ChatSession user={user} />} />
-          <Route path="/chat/freeplay/:id" element={<EchoSession user={user} sessionType="freeplay" />} />
-          <Route path="/chat/neuro/:id" element={<EchoSession user={user} sessionType="neuro" />} />
+          <Route path="/skills" element={protegida('trilha', <SkillMap user={user} />)} />
+          <Route path="/chat/exercise/:id" element={protegida('trilha', <ChatSession user={user} />)} />
+          <Route path="/chat/freeplay/:id" element={protegida('simulacao', <EchoSession user={user} sessionType="freeplay" />)} />
+          <Route path="/chat/neuro/:id" element={protegida('neuro', <EchoSession user={user} sessionType="neuro" />)} />
           {/* Nomes visíveis mudaram (Competitivo → Simulação → Página Inicial,
               Treinamento → Progressão) e as rotas acompanharam. As antigas
               seguem respondendo porque estão em links compartilhados,
               notificações antigas e no histórico do navegador de quem já usa o
               app. A Página Inicial é a antiga Simulação: mesma tela, agora em
               /inicio — a tela de "portas" que ficava aí foi removida. */}
-          <Route path="/inicio" element={<Competitive user={user} />} />
+          <Route path="/inicio" element={protegida('simulacao', <Competitive user={user} />)} />
           <Route path="/simulacao" element={<Navigate to="/inicio" replace />} />
           <Route path="/competitivo" element={<Navigate to="/inicio" replace />} />
-          <Route path="/progressao" element={<FreePlay user={user} />} />
+          <Route path="/progressao" element={protegida('progressao', <FreePlay user={user} />)} />
           <Route path="/freeplay" element={<Navigate to="/progressao" replace />} />
-          <Route path="/duelo" element={<Duelo user={user} />} />
-          <Route path="/duelo/logs" element={<LogsSociais user={user} />} />
+          <Route path="/duelo" element={protegida('duelo', <Duelo user={user} />)} />
+          <Route path="/duelo/logs" element={protegida('logsSociais', <LogsSociais user={user} />)} />
           <Route path="/duelo/sessao/:id" element={<DuelSession user={user} />} />
-          <Route path="/duelo/aceitar/:id" element={<DuelAccept user={user} />} />
-          <Route path="/duelo/convite/:token" element={<DuelAccept user={user} />} />
+          <Route path="/duelo/aceitar/:id" element={protegida('duelo', <DuelAccept user={user} />)} />
+          <Route path="/duelo/convite/:token" element={protegida('duelo', <DuelAccept user={user} />)} />
           {/* Aba de progressão separada morreu há tempos — hoje a progressão é o
               próprio modo (reatender o mesmo paciente). */}
           <Route path="/progression" element={<Navigate to="/progressao" replace />} />
           <Route path="/terapeutas" element={<Terapeutas user={user} />} />
-          <Route path="/antessala" element={<Antessala user={user} />} />
-          <Route path="/neuro" element={<NeuroEval user={user} />} />
+          <Route path="/antessala" element={protegida('antessala', <Antessala user={user} />)} />
+          <Route path="/neuro" element={protegida('neuro', <NeuroEval user={user} />)} />
           <Route path="/logs" element={<Logs user={user} userId={user.id} />} />
           <Route path="/supervisor" element={<Logs user={user} />} />
           <Route path="/avaliacao" element={<Avaliacao user={user} />} />
@@ -678,9 +696,9 @@ export default function App() {
           <Route path="/benchmark-simulacao" element={<BenchmarkSimulacao />} />
           <Route path="/suporte" element={<Suporte user={user} />} />
           <Route path="/profile" element={<Profile user={user} onUpdate={handleUpdateUser} onLogout={handleLogout} />} />
-          <Route path="/missoes" element={<Missoes user={user} />} />
-          <Route path="/ranking" element={<Ranking user={user} />} />
-          <Route path="/comunidade" element={<Comunidade user={user} />} />
+          <Route path="/missoes" element={protegida('objetivos', <Missoes user={user} />)} />
+          <Route path="/ranking" element={protegida('ranking', <Ranking user={user} />)} />
+          <Route path="/comunidade" element={protegida('comunidade', <Comunidade user={user} />)} />
           <Route path="/comunidade/discussao/:id" element={<ComunidadeDiscussao user={user} />} />
           <Route path="/selecao/dashboard" element={<SelecaoDashboard user={user} />} />
           <Route path="/selecao/logs" element={<SelecaoLogs user={user} />} />
@@ -691,12 +709,14 @@ export default function App() {
           <Route path="/admin/neuro" element={<AdminNeuro />} />
           <Route path="/admin/entrevistador" element={<AdminEntrevistador user={user} />} />
           <Route path="/admin/modelos" element={<AdminModelos />} />
+          <Route path="/admin/acessos" element={<AdminAcessos />} />
           <Route path="/admin/prompts" element={<AdminPrompts />} />
           <Route path="/admin/erros" element={<AdminErrorLogs />} />
           <Route path="/admin/comunidade" element={<AdminComunidade />} />
           <Route path="*" element={<Navigate to={defaultRoute(user)} />} />
         </Routes>
       </main>
+      <ModalCadeado mensagem={cadeado} onClose={() => setCadeado(null)} />
     </div>
   );
 }

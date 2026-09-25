@@ -1,0 +1,31 @@
+# Postgres SÓ para desenvolvimento e para a suíte de testes. Produção usa o Neon,
+# via DATABASE_URL no painel do Railway — nada aqui sobe para o deploy.
+#
+# Porta 5433 no host, e não 5432: é comum a máquina de dev já ter um Postgres
+# nativo na porta padrão, e colidir com ele faria os testes baterem no banco
+# errado sem erro nenhum.
+services:
+  postgres:
+    # Mesma versão major do projeto no Neon. Trocar uma sem a outra deixa passar
+    # em dev um SQL que produção recusa (ou o contrário).
+    image: postgres:17
+    # A suíte roda um fork por núcleo, cada um com o seu pool de conexões; o
+    # padrão de 100 conexões fica apertado numa máquina de 8 núcleos.
+    command: ["postgres", "-c", "max_connections=200"]
+    container_name: allos-pg
+    environment:
+      POSTGRES_USER: allos
+      POSTGRES_PASSWORD: allos_dev
+      POSTGRES_DB: allos
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - allos-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U allos -d allos"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  allos-pg-data:

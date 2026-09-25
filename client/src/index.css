@@ -3130,22 +3130,6 @@ select option { background: var(--cream); color: var(--ink); }
   border-color: var(--marrs, #008f8f);
 }
 
-/* ──── Aviso de expiração de logs ──── */
-.log-expiry-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 11px 15px;
-  margin-bottom: 18px;
-  border-radius: 10px;
-  font-size: 13px;
-  line-height: 1.5;
-  background: rgba(200, 160, 78, 0.1);
-  border: 1px solid rgba(200, 160, 78, 0.45);
-  color: var(--ink, #3a342c);
-}
-.log-expiry-banner svg { color: #97781f; margin-top: 1px; }
-
 /* ──── Streak badge — temporário no perfil ──── */
 .streak-badge {
   display: inline-flex;

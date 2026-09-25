@@ -125,8 +125,8 @@ async function dispararRun(token, body) {
 }
 
 describe('Benchmarking de Simulação — run completa', () => {
-  beforeEach(() => {
-    resetData();
+  beforeEach(async () => {
+    await resetData();
     chamadas.responses = [];
     chamadas.chat = [];
     roteiro.textoResponses = () => 'FALA_VIA_RESPONSES';
@@ -323,8 +323,8 @@ function extracoesDePersona() {
 }
 
 describe('Benchmarking de Simulação — LOTE', () => {
-  beforeEach(() => {
-    resetData();
+  beforeEach(async () => {
+    await resetData();
     chamadas.responses = [];
     chamadas.chat = [];
     roteiro.textoResponses = (args) => (String(args.instructions || '').startsWith('Você é um analista') ? 'FICHA_UNICA_DO_LOTE' : 'SOU_O_ALUNO');

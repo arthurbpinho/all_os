@@ -51,7 +51,7 @@ async function duelAbertoAceitoPorVisitante() {
 }
 
 describe('duelo de visitante levado para a conta nova', () => {
-  beforeEach(() => { resetData(); mailer.limparCapturados(); });
+  beforeEach(async () => { await resetData(); mailer.limparCapturados(); });
 
   it('vale só depois do envio; confirmar o cadastro transfere o duelo', async () => {
     const { aluno, visitor, duelId } = await duelAbertoAceitoPorVisitante();

@@ -8,8 +8,13 @@ etapas que você seguirá quando estiver pronto pra colocar no ar.
 - Frontend (React/Vite) é compilado para `client/dist/` durante o build.
 - Servidor Express serve a API **e** os arquivos estáticos do build na mesma origem.
   Isso elimina configuração de CORS em produção.
-- Dados ficam em arquivos JSON em `DATA_DIR` (default: `server/data/`).
-  Em produção, este diretório precisa apontar para o **volume persistente** do Railway.
+- **O estado fica no PostgreSQL** (Neon em produção), via `DATABASE_URL`. Sem ela o
+  servidor **não sobe** — é fail-closed de propósito, para nunca rodar sem onde persistir.
+- **O volume continua obrigatório.** `DATA_DIR` (default `server/data/`, em produção `/data`)
+  guarda o que é arquivo e não linha: fotos, o detalhe por critério de cada avaliação, o
+  raciocínio da Avaliação Independente e as transcrições do benchmark. É também de onde os
+  **prompts** são semeados no primeiro boot.
+- Passo a passo da migração de JSON para banco: `VIRADA.md`. Mapa dos dados: `CLAUDE.md`.
 
 ## 1. Subir para o GitHub
 
@@ -26,15 +31,21 @@ etapas que você seguirá quando estiver pronto pra colocar no ar.
 
 ## 3. Variáveis de ambiente (Railway → Variables)
 
-Use `.env.example` como referência. As essenciais:
+Não há `.env.example` no repositório (os prompts e as chaves ficam fora do git). A lista
+abaixo é a referência. As essenciais:
 
 | Variável                 | Valor                                                 |
 |--------------------------|-------------------------------------------------------|
+| `DATABASE_URL`           | **obrigatória.** Connection string do Postgres (Neon), com `?sslmode=require`. **Use o endpoint DIRETO, não o `-pooler`** — o runner de migrações segura um advisory lock de sessão, que o PgBouncer em modo transação invalida em silêncio (`VIRADA.md` §2) |
 | `OPENAI_API_KEY`         | sua chave da OpenAI                                   |
+| `ANTHROPIC_API_KEY`      | pacientes simulados                                    |
+| `GLM_API_KEY` + `GLM_BASE_URL` | GLM/z.ai — Treinamento, Seletivo, Avaliação Independente e reflexão da Antessala |
 | `JWT_SECRET`             | string longa aleatória (ver comando abaixo)           |
 | `ADMIN_INITIAL_PASSWORD` | senha para o primeiro login do admin                  |
 | `DATA_DIR`               | `/data` (após montar o volume — passo 4)              |
-| `OPENAI_CHAT_MODEL`      | opcional, default `gpt-5.4-mini`                      |
+| `SELECAO_PASSWORD`       | senha do Processo Seletivo. **Troque**: o default do código é público (repo aberto) |
+| `BENCHMARK_PASSWORD`     | idem, para a ferramenta de benchmark                   |
+| `CONFIAR_CF_CONNECTING_IP` | `sempre` quando o Cloudflare estiver na frente e o diagnóstico de IP acusar o proxy — ver §5 do `VIRADA.md` |
 | `VAPID_PUBLIC_KEY`       | opcional — sem ela, notificação push fica desligada (só o sino in-app funciona) |
 | `VAPID_PRIVATE_KEY`      | opcional — par da chave acima                          |
 | `VAPID_SUBJECT`          | opcional, default `mailto:ti@allos.org.br`             |
@@ -463,8 +474,16 @@ não conta). Os contadores vivem em memória — um redeploy zera todos.
 
 Como os dados ficam em JSON num volume Railway, considere periodicamente:
 
-1. Acessar o serviço via Railway CLI: `railway run bash`.
-2. `tar czf /tmp/backup.tar.gz /data && cat /tmp/backup.tar.gz | base64` (e copiar localmente).
+1. No painel do Railway, serviço → aba **Console** (ou `railway ssh`).
+2. `tar czf /app/data-backup.tar.gz -C / data && ls -lh /app/data-backup.tar.gz`
+3. Baixar pelo painel **Files** (rodapé do Console) e depois `rm /app/data-backup.tar.gz` —
+   o pacote tem hashes de senha, PII e transcrições.
 
-Quando migrar para Postgres/SQLite, ponto único de mudança são as funções
-`readJSON`/`writeJSON` em `server/index.js`.
+> **Não use `railway run bash`** (era o que este guia mandava). O `railway run` executa na
+> SUA máquina com as variáveis do Railway injetadas: ele não enxerga o `/data`, que está
+> dentro do container.
+
+O backup do **banco** é outro: no Neon, pelo próprio painel (point-in-time restore).
+
+A migração para o PostgreSQL já aconteceu: o estado mora em `server/repos/`, com as
+migrações em `server/db/migrations/`. O que resta no volume está listado na Visão geral.

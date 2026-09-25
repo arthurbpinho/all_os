@@ -185,6 +185,17 @@ function notasPorCriterio(result) {
   return Object.keys(out).length ? out : null;
 }
 
+// Nome de cada critério no momento da avaliação (`criteriaNames`): { '1': 'Manejo do vínculo', ... }.
+// O gráfico do perfil junta sessões pelo NOME, não pelo número: quando o admin
+// acrescenta ou reordena critérios, o "3" de hoje não é o "3" de ontem.
+function nomesPorCriterio(result) {
+  const out = {};
+  for (const p of (result && result.partes) || []) {
+    if (p && p.num != null && typeof p.nome === 'string' && p.nome.trim()) out[String(p.num)] = p.nome.trim();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // --- Detalhe por critério (arquivo por avaliação, fora do logs.json) -------
 //
 // Por que arquivo próprio e não um campo no log: são oito análises por
@@ -298,6 +309,7 @@ function camposDoLog({ result, logId, dono, version = VERSAO, model, effort, pro
   return {
     score: result ? result.notaFinal : null,
     criteriaScores: notasPorCriterio(result),
+    criteriaNames: nomesPorCriterio(result),
     evaluation: textoParaAluno
       ? textoDoAluno(result, version)
       : ((result && result.corpoSintetizador) || '').trim(),
@@ -395,6 +407,7 @@ module.exports = {
   avaliar,
   textoDoAluno,
   notasPorCriterio,
+  nomesPorCriterio,
   DETALHES_DIR,
   salvarDetalhe,
   lerDetalhe,

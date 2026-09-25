@@ -5,9 +5,9 @@
 //   2. nenhuma conta nasce sem o e-mail confirmado por link;
 //   3. `Admin` não é uma conta livre só por causa da maiúscula;
 //   4. trocar a senha derruba os tokens antigos.
-const { app, request, resetData, loginAs, authHeader, TEST_PASSWORD, DATA_DIR } = require('./helpers');
-const fs = require('fs');
-const path = require('path');
+const {
+  app, request, resetData, loginAs, authHeader, TEST_PASSWORD, db, lerUsuarios, lerCadastrosPendentes,
+} = require('./helpers');
 const contas = require('../server/cadastro');
 const mailer = require('../server/email');
 
@@ -24,10 +24,6 @@ function tokenDoUltimoEmail(assuntoContem) {
 }
 function assuntosEnviados() {
   return mailer.emailsCapturados().map((e) => e.subject);
-}
-function lerJSON(file, fallback) {
-  const p = path.join(DATA_DIR, file);
-  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf-8')) : fallback;
 }
 
 // Domínio .invalid é RESERVADO pela RFC 6761: nunca resolve e nunca aceita
@@ -47,8 +43,8 @@ const CADASTRO_OK = {
   newsletterAllos: false,
 };
 
-function limpar() {
-  resetData();
+async function limpar() {
+  await resetData();
   mailer.limparCapturados();
 }
 
@@ -161,10 +157,10 @@ describe('cadastro de Aluno Externo', () => {
     expect(res.status).toBe(200);
 
     // Nada em users.json ainda — só uma pendência descartável.
-    expect(lerJSON('users.json', []).some((u) => u.username === 'ana.externa')).toBe(false);
-    expect(lerJSON('pending-registrations.json', []).length).toBe(1);
+    expect((await lerUsuarios()).some((u) => u.username === 'ana.externa')).toBe(false);
+    expect((await lerCadastrosPendentes()).length).toBe(1);
     // Em disco fica só o hash do token, nunca o token.
-    const pend = lerJSON('pending-registrations.json', [])[0];
+    const pend = (await lerCadastrosPendentes())[0];
     expect(pend.tokenHash).toMatch(/^[0-9a-f]{64}$/);
     expect(pend.passwordHash).toMatch(/^\$2[aby]\$/);
     expect(JSON.stringify(pend)).not.toContain(CADASTRO_OK.password);
@@ -176,7 +172,7 @@ describe('cadastro de Aluno Externo', () => {
     // Entra logado — acabou de provar que é dono do e-mail.
     expect(conf.body.token).toBeTypeOf('string');
 
-    const criado = lerJSON('users.json', []).find((u) => u.username === 'ana.externa');
+    const criado = (await lerUsuarios()).find((u) => u.username === 'ana.externa');
     expect(criado.role).toBe('external');
     expect(criado.teacherId).toBeNull();
     expect(criado.emailVerified).toBe(true);
@@ -195,7 +191,7 @@ describe('cadastro de Aluno Externo', () => {
     expect(me.body.user.passwordHash).toBeUndefined();
 
     // A pendência foi consumida — o link não vale duas vezes.
-    expect(lerJSON('pending-registrations.json', []).length).toBe(0);
+    expect((await lerCadastrosPendentes()).length).toBe(0);
     expect((await request(app).post('/api/confirmar-email').send({ token })).status).toBe(400);
   });
 
@@ -209,13 +205,13 @@ describe('cadastro de Aluno Externo', () => {
     const token = tokenDoUltimoEmail('Confirme seu cadastro');
     await request(app).post('/api/confirmar-email').send({ token });
 
-    const criado = lerJSON('users.json', []).find((u) => u.username === 'ana.externa');
+    const criado = (await lerUsuarios()).find((u) => u.username === 'ana.externa');
     expect(criado.role).toBe('external');
     expect(criado.teacherId).toBeNull();
     expect(criado.id).not.toBe('1');
     expect(criado.tokenVersion).toBe(0);
     // E a conta admin original continua intacta.
-    expect(lerJSON('users.json', []).find((u) => u.id === '1').role).toBe('admin');
+    expect((await lerUsuarios()).find((u) => u.id === '1').role).toBe('admin');
   });
 
   it('recusa nome reservado, nome em uso, senha fraca e falta de aceite dos termos', async () => {
@@ -235,7 +231,7 @@ describe('cadastro de Aluno Externo', () => {
       expect(res.status, JSON.stringify(patch)).toBe(400);
       expect(res.body.error, JSON.stringify(patch)).toMatch(esperado);
     }
-    expect(lerJSON('pending-registrations.json', []).length).toBe(0);
+    expect((await lerCadastrosPendentes()).length).toBe(0);
   });
 
   // Anti-enumeração: quem preenche o formulário não pode descobrir que aquele
@@ -250,7 +246,7 @@ describe('cadastro de Aluno Externo', () => {
     expect(res.status).toBe(200);
     expect(res.body.error).toBeUndefined();
     // Nenhuma pendência criada, e o aviso foi pro dono do endereço.
-    expect(lerJSON('pending-registrations.json', []).length).toBe(0);
+    expect((await lerCadastrosPendentes()).length).toBe(0);
     expect(assuntosEnviados().join('|')).toMatch(/Tentativa de cadastro/);
   });
 
@@ -278,7 +274,7 @@ describe('cadastro de Aluno Externo', () => {
       const res = await request(app).post('/api/confirmar-email').send(body);
       expect(res.status).toBe(400);
     }
-    expect(lerJSON('users.json', []).length).toBe(5);
+    expect((await lerUsuarios()).length).toBe(5);
   });
 });
 
@@ -385,14 +381,14 @@ describe('troca de e-mail do próprio usuário', () => {
       .send({ novoEmail: 'novo@exemplo.invalid', senhaAtual: TEST_PASSWORD });
     expect(ok.status).toBe(200);
     // Ainda NÃO trocou — só depois de confirmar.
-    expect(lerJSON('users.json', []).find((u) => u.id === '3').emailLower || '').not.toBe('novo@exemplo.invalid');
+    expect((await lerUsuarios()).find((u) => u.id === '3').emailLower || '').not.toBe('novo@exemplo.invalid');
 
     const linkToken = tokenDoUltimoEmail('Confirme seu novo e-mail');
     const conf = await request(app).post('/api/confirmar-email').send({ token: linkToken });
     expect(conf.status).toBe(200);
     expect(conf.body.tipo).toBe('troca-email');
 
-    const atualizado = lerJSON('users.json', []).find((u) => u.id === '3');
+    const atualizado = (await lerUsuarios()).find((u) => u.id === '3');
     expect(atualizado.emailLower).toBe('novo@exemplo.invalid');
     expect(atualizado.emailVerified).toBe(true);
   });
@@ -401,12 +397,7 @@ describe('troca de e-mail do próprio usuário', () => {
   // e-mail malformado. Validar em toda edição travaria o admin fora dessas
   // contas até ele arrumar um campo que não é o assunto dele naquele momento.
   it('admin edita conta com e-mail legado malformado sem ser barrado', async () => {
-    const fs = require('fs');
-    const path = require('path');
-    const arquivo = path.join(DATA_DIR, 'users.json');
-    const users = JSON.parse(fs.readFileSync(arquivo, 'utf-8'));
-    users.find((u) => u.id === '3').email = 'isso nao e um email';
-    fs.writeFileSync(arquivo, JSON.stringify(users, null, 2));
+    await db.query("UPDATE users SET email = 'isso nao e um email' WHERE id = 3");
 
     const admin = await loginAs('admin');
     const res = await request(app).put('/api/admin/users/3').set(authHeader(admin))
@@ -452,11 +443,11 @@ describe('permissões do Aluno Externo', () => {
     expect((await request(app).get('/api/admin/export').set(authHeader(token))).status).toBe(403);
   });
 
-  it('recebe log só o próprio e sem as notas por critério', async () => {
+  it('recebe log só o próprio e sem a chave das análises por critério', async () => {
     const token = await criarExterno();
     const res = await request(app).get('/api/logs').set(authHeader(token));
     expect(res.status).toBe(200);
-    expect(res.body.every((l) => !('criteriaScores' in l))).toBe(true);
+    expect(res.body.every((l) => !('evalPartsId' in l))).toBe(true);
   });
 
   // Nasce sem supervisor, mas o vínculo continua sendo possível — foi a opção
@@ -464,7 +455,7 @@ describe('permissões do Aluno Externo', () => {
   it('admin pode vincular o aluno externo a um supervisor depois', async () => {
     await criarExterno();
     const admin = await loginAs('admin');
-    const externo = lerJSON('users.json', []).find((u) => u.username === 'ana.externa');
+    const externo = (await lerUsuarios()).find((u) => u.username === 'ana.externa');
 
     const res = await request(app).put(`/api/admin/users/${externo.id}`).set(authHeader(admin))
       .send({ teacherId: '2' });

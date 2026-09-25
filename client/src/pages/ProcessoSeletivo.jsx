@@ -41,8 +41,10 @@ const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos pa
 const PS_KEY = 'allos_ps_session';
 // Tempo máximo da avaliação: 2 horas de relógio, contadas a partir do início.
 // É tempo de RELÓGIO (não de uso), derivado do `startedAt` guardado na sessão —
-// quem já está no meio da prova só passa a valer a régua nova quando recarregar
-// a página (o bundle antigo segue em memória com o limite antigo).
+// então mexer neste número devolve (ou tira) tempo de quem já está no meio da
+// prova, sem tocar no que a pessoa já escreveu. Quem estiver com a aba aberta só
+// passa a valer a régua nova quando recarregar a página (o bundle antigo segue
+// em memória com o limite antigo).
 const SESSION_LIMIT_MS = 2 * 60 * 60 * 1000;
 const SESSION_WARN_MS = 5 * 60 * 1000; // fica em alerta nos últimos 5 min
 

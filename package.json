@@ -5,12 +5,15 @@
   "scripts": {
     "server": "node server/index.js",
     "client": "cd client && npx vite --host",
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev": "npm run db:up && concurrently \"npm run server\" \"npm run client\"",
     "build": "cd client && npm install && npx vite build",
     "start": "node server/index.js",
     "postinstall": "cd client && npm install",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:up": "docker compose up -d --wait postgres",
+    "db:down": "docker compose down",
+    "db:migrate": "node server/db/migrate.js"
   },
   "engines": {
     "node": ">=18"
@@ -25,6 +28,7 @@
     "helmet": "8.3.0",
     "jsonwebtoken": "9.0.3",
     "openai": "6.38.0",
+    "pg": "8.23.0",
     "web-push": "3.6.7"
   },
   "devDependencies": {

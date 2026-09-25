@@ -100,15 +100,17 @@ describe('segurança — política de senha', () => {
 describe('segurança — erro genérico + Logs de Erro', () => {
   const fs = require('fs');
   const path = require('path');
-  const { DATA_DIR } = require('./helpers');
-  const { userFacingError, buildErrorEntry, ERROR_LOG_FILE } = require('../server/error-log');
+  const { db } = require('./helpers');
+  const { userFacingError, buildErrorEntry } = require('../server/error-log');
+  const { criarRepoOperacao } = require('../server/repos/operacao');
 
   beforeEach(() => resetData());
 
-  // Semeia o painel direto no DATA_DIR. A suite roda em modo demo (sem chaves
-  // de IA), onde os handlers respondem 200 com conteúdo simulado em vez de
-  // estourar — então não dá pra provocar uma falha real de provedor aqui.
-  function semearErro(extra = {}) {
+  // Semeia o painel direto no banco, com ele vazio antes. A suite roda em modo
+  // demo (sem chaves de IA), onde os handlers respondem 200 com conteúdo
+  // simulado em vez de estourar — então não dá pra provocar uma falha real de
+  // provedor aqui.
+  async function semearErro(extra = {}) {
     const entry = {
       ...buildErrorEntry({
         err: Object.assign(new Error('OpenAI 429: quota exceeded for org-abc'), { name: 'RateLimitError' }),
@@ -117,7 +119,8 @@ describe('segurança — erro genérico + Logs de Erro', () => {
       }),
       ...extra,
     };
-    fs.writeFileSync(path.join(DATA_DIR, ERROR_LOG_FILE), JSON.stringify([entry], null, 2));
+    await db.query('DELETE FROM erros');
+    await criarRepoOperacao(db.getPool()).registrarErro(entry, { maximo: 500, ttlMs: 30 * 86400000 });
     return entry;
   }
 
@@ -141,7 +144,7 @@ describe('segurança — erro genérico + Logs de Erro', () => {
   });
 
   it('admin vê a entrada completa: mensagem real, quem, onde e quando', async () => {
-    const semeado = semearErro();
+    const semeado = await semearErro();
     const admin = await loginAs('admin');
     const painel = await request(app).get('/api/admin/error-logs').set(authHeader(admin));
     expect(painel.status).toBe(200);
@@ -173,7 +176,7 @@ describe('segurança — erro genérico + Logs de Erro', () => {
   });
 
   it('admin consegue limpar o painel', async () => {
-    semearErro();
+    await semearErro();
     const admin = await loginAs('admin');
     const limpo = await request(app).delete('/api/admin/error-logs').set(authHeader(admin));
     expect(limpo.status).toBe(200);

@@ -177,19 +177,19 @@ describe('Processo Seletivo', () => {
     expect(hl.comment).toBe('abertura acolhedora');
   });
 
-  it('dedup: mesmo WhatsApp em <15 dias é bloqueado com "faltam X dias"; outro número passa', async () => {
+  it('sem dedupe automático por WhatsApp (§24.0): o mesmo número pode se inscrever de novo', async () => {
     // 1ª avaliação completa (gera o log com o WhatsApp).
     const s1 = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
     await request(app).post('/api/selecao/finish').set(authHeader(s1.body.token))
       .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
 
-    // Mesmo número (formatado diferente) → bloqueado.
+    // Mesmo número (formatado diferente): SEM trava — o controle de acesso
+    // agora é feito pela troca da SELECAO_PASSWORD entre aberturas.
     const again = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '11912345678' });
-    expect(again.status).toBe(403);
-    expect(again.body.daysLeft).toBeGreaterThan(0);
-    expect(again.body.error).toMatch(/faltam .* dias/i);
+    expect(again.status).toBe(200);
+    expect(again.body.token).toBeTruthy();
 
-    // Número diferente → permitido.
+    // Número diferente também passa (contexto: qualquer WhatsApp válido entra).
     const other = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '(21) 99999-0000' });
     expect(other.status).toBe(200);
   });
@@ -215,6 +215,20 @@ describe('Processo Seletivo', () => {
     expect(item.content).toMatch(/Tudo bem\?/);
     // Sem avaliação ainda (modo demo/pending) — não deve aparecer a seção de avaliação.
     expect(item.content).not.toMatch(/AVALIAÇÃO DA IA/);
+  });
+
+  // O token tem de sobreviver à prova inteira: ele nasce no /iniciar, mas o
+  // cronômetro de 2 horas (client/src/pages/ProcessoSeletivo.jsx) só começa no
+  // "Começar simulação", e a pessoa ainda pode pausar com a aba fechada. Se o TTL
+  // encostar nas 2 horas, o finish volta "Sessão expirada" e o atendimento
+  // inteiro se perde — por isso o número é testado, e não só comentado.
+  it('token do candidato dura mais que o cronômetro da prova (2 horas)', async () => {
+    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(start.status).toBe(200);
+    const { exp, iat } = require('jsonwebtoken').decode(start.body.token);
+    const duracaoHoras = (exp - iat) / 3600;
+    expect(duracaoHoras).toBe(4);
+    expect(duracaoHoras).toBeGreaterThan(2);
   });
 
   it('requireCandidate: token de usuário normal não acessa o chat do candidato', async () => {

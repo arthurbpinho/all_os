@@ -69,13 +69,15 @@
 // que varia). Os nós seguintes leem A+B do cache. Roda 1 nó primeiro pra semear
 // o cache, depois os outros em paralelo (igual à versão anterior).
 //
-// Os prompts (nó + sintetizador) e os critérios vêm dos .md no PROMPTS_DIR —
-// fonte única da verdade; editar o .md muda o comportamento. Instrumentação de
+// Os prompts (nó + sintetizador) e os critérios vêm dos .md guardados no banco
+// (lidos da cópia em memória, server/prompt-store.js) — fonte única da verdade;
+// editar o .md pelo painel muda o comportamento. Instrumentação de
 // tokens/custo embutida para o teste de pricing.
 
 const fs = require('fs');
 const path = require('path');
 const { PROMPTS_DIR } = require('./paths');
+const promptStore = require('./prompt-store');
 
 // Saudação colada por código no topo do feedback do aluno (o modelo não a gera
 // nem a varia). É só o enquadramento do feedback: a nota aparece como selo na
@@ -99,7 +101,6 @@ const PIPELINE_VERSIONS = {
     montado: 'prompt-no-v34-montado.md',
     criterios: 'criterios-no-v34.md',
     sintetizador: 'sintetizador-v34.md',
-    nCriterios: 8,
     capturaReasoning: true,
   },
   // Reatendimento. O que esta versão tem de próprio são os cinco slots do caso,
@@ -114,7 +115,6 @@ const PIPELINE_VERSIONS = {
     slotsSintetizador: ['{{ATENDIMENTO_1}}', '{{MISSAO}}', '{{MISSAO_VEREDITO}}'],
     missao: 'missao-v34-progressao.md',
     slotsCaso: ['{{BLOCO_1}}', '{{ATENDIMENTO_1}}', '{{AVALIACAO_1}}', '{{MISSAO}}', '{{LOG}}'],
-    nCriterios: 8,
     capturaReasoning: true,
   },
   // Duelo. A única entrada COMPARATIVA: o nó lê os dois logs e responde as cinco
@@ -132,7 +132,6 @@ const PIPELINE_VERSIONS = {
     criterios: 'criterios-no-v34.md',
     criteriosDe: 'v34',
     sintetizador: 'sintetizador-v34-duelo.md',
-    nCriterios: 8,
     capturaReasoning: true,
     lados: ['A', 'B'],
     slotsCaso: ['{{BLOCO_1}}', '{{ALUNO_A}}', '{{LOG_A}}', '{{ALUNO_B}}', '{{LOG_B}}'],
@@ -156,6 +155,25 @@ function ehComparativa(cfg) {
 
 // Slot do sintetizador que recebe o material dos nós.
 const SLOT_MATERIAL = '{{ANALISES}}';
+
+// Slots da RÉGUA (demandas.md §16.6 e §20): quantos critérios existem e quais
+// são. O código os preenche ao carregar a versão, em qualquer bloco. Existem
+// porque o número de critérios deixou de ser fixo: um prompt que escrevesse
+// "os oito critérios" à mão ficaria errado no primeiro "Adicionar critério" do
+// painel, e o modelo leria a contagem velha. Opcionais: nenhum prompt é obrigado
+// a usá-los, mas nenhum parser os recusa.
+const SLOTS_REGUA = ['{{N_CRITERIOS}}', '{{N_CRITERIOS_EXTENSO}}', '{{LISTA_CRITERIOS}}'];
+const NUMEROS_EXTENSO = 'zero um dois três quatro cinco seis sete oito nove dez onze doze treze catorze quinze dezesseis'.split(' ');
+
+function preencherSlotsDaRegua(texto, criteria) {
+  if (typeof texto !== 'string' || !texto.includes('{{')) return texto;
+  const n = (criteria || []).length;
+  const lista = (criteria || []).map((c) => `${c.num}. ${c.nome}: ${c.linhaCurta}`).join('\n');
+  return texto
+    .split('{{N_CRITERIOS_EXTENSO}}').join(NUMEROS_EXTENSO[n] || String(n))
+    .split('{{N_CRITERIOS}}').join(String(n))
+    .split('{{LISTA_CRITERIOS}}').join(lista);
+}
 
 // Slots do bloco do caso (bloco B do prompt do nó) de uma versão. O padrão são
 // os dois de sempre; progressão e duelo declaram os seus em `slotsCaso`.
@@ -193,6 +211,12 @@ function versionConfig(version) {
 // cópia do repo; com aquela versão fora, cada versão tem um nome só.
 function versionDir(cfg) {
   return path.join(PROMPTS_DIR, 'avaliacao', cfg.dir);
+}
+
+// Um .md da versão. Os prompts moram no banco e são lidos da cópia em memória
+// (server/prompt-store.js), pelo mesmo caminho que tinham na pasta.
+function lerDaVersao(cfg, arquivo) {
+  return promptStore.lerObrigatorio(`avaliacao/${cfg.dir}/${arquivo}`);
 }
 
 // Modelo dos nós e do sintetizador (GPT-5.x). Var própria do v25 — independente
@@ -348,7 +372,7 @@ function parseSintetizador(sint, arquivo = 'O sintetizador', slotsExtra = [], sl
   }
   // Slot que o .md usa mas a versão não conhece seria enviado ao modelo como
   // texto cru `{{ASSIM}}`. Barra aqui, na gravação do prompt, e não em produção.
-  const conhecidos = [...slotsLog, SLOT_MATERIAL, ...(slotsExtra || [])];
+  const conhecidos = [...slotsLog, SLOT_MATERIAL, ...(slotsExtra || []), ...SLOTS_REGUA];
   for (const usado of synthVariable.match(/\{\{[A-Z\u00c0-\u00da_0-9]+\}\}/g) || []) {
     if (!conhecidos.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
   }
@@ -377,7 +401,7 @@ function parseMissao(raw, arquivo = 'O prompt da missão', slotsCaso = SLOTS_CAS
   // Slot que o prompt usa mas a versão não declara = erro de digitação num
   // nome de slot, que passaria batido e chegaria ao modelo como texto cru.
   for (const usado of missaoVariable.match(/\{\{[A-ZÇÃÉÍÓÚ_0-9]+\}\}/g) || []) {
-    if (!slotsCaso.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
+    if (!slotsCaso.includes(usado) && !SLOTS_REGUA.includes(usado)) throw new Error(`${arquivo} usa o slot ${usado}, que não existe nesta versão.`);
   }
   return { missaoStatic, missaoVariable };
 }
@@ -397,23 +421,24 @@ function loadAssets(version = DEFAULT_VERSION) {
   const cfg = versionConfig(version);
   if (_assetsCache.has(version)) return _assetsCache.get(version);
 
-  const dir = versionDir(cfg);
   const slotsCaso = slotsCasoDe(cfg);
   const { blockA, blockB, blockC } = parseMontado(
-    fs.readFileSync(path.join(dir, cfg.montado), 'utf8'), cfg.montado, slotsCaso,
+    lerDaVersao(cfg, cfg.montado), cfg.montado, slotsCaso,
   );
 
   // Critérios: da pasta da própria versão, ou da versão apontada por
   // `criteriosDe` (progressão e duelo usam a MESMA grade do v34 — duplicar o .md
   // faria as cópias divergirem na primeira edição do painel).
-  const dirCriterios = cfg.criteriosDe ? versionDir(versionConfig(cfg.criteriosDe)) : dir;
-  const criteria = parseCriteria(fs.readFileSync(path.join(dirCriterios, cfg.criterios), 'utf8'));
-  if (criteria.length !== cfg.nCriterios) {
-    throw new Error(`Esperava ${cfg.nCriterios} critérios em ${cfg.criterios}, encontrei ${criteria.length}.`);
+  const cfgCriterios = cfg.criteriosDe ? versionConfig(cfg.criteriosDe) : cfg;
+  const criteria = parseCriteria(lerDaVersao(cfgCriterios, cfg.criterios));
+  // Quantos critérios é decisão do admin ("Adicionar critério"), dentro da faixa.
+  const limites = require('./limites-criterios');
+  if (criteria.length < limites.min || criteria.length > limites.max) {
+    throw new Error(`Esperava de ${limites.min} a ${limites.max} critérios em ${cfg.criterios}, encontrei ${criteria.length}.`);
   }
 
   const { synthStatic, synthVariable } = parseSintetizador(
-    fs.readFileSync(path.join(dir, cfg.sintetizador), 'utf8'), cfg.sintetizador, slotsSintetizadorDe(cfg), slotsLogDe(cfg),
+    lerDaVersao(cfg, cfg.sintetizador), cfg.sintetizador, slotsSintetizadorDe(cfg), slotsLogDe(cfg),
   );
 
   // Nó da MISSÃO (só o modo progressão tem): uma chamada à parte que responde se
@@ -421,10 +446,18 @@ function loadAssets(version = DEFAULT_VERSION) {
   // (estático cacheável + parte variável).
   let missao = null;
   if (cfg.missao) {
-    missao = parseMissao(fs.readFileSync(path.join(dir, cfg.missao), 'utf8'), cfg.missao, slotsCaso);
+    missao = parseMissao(lerDaVersao(cfg, cfg.missao), cfg.missao, slotsCaso);
   }
 
-  const assets = { version, cfg, blockA, blockB, blockC, criteria, synthStatic, synthVariable, missao, slotsCaso };
+  // Slots da régua: preenchidos uma vez, aqui. O texto resultante é estável
+  // enquanto os critérios não mudarem, então o cache de prompt dos provedores
+  // continua valendo entre avaliações.
+  const regua = (t) => preencherSlotsDaRegua(t, criteria);
+  if (missao) missao = { ...missao, missaoStatic: regua(missao.missaoStatic), missaoVariable: regua(missao.missaoVariable) };
+  const assets = {
+    version, cfg, blockA: regua(blockA), blockB: regua(blockB), blockC: regua(blockC), criteria,
+    synthStatic: regua(synthStatic), synthVariable: regua(synthVariable), missao, slotsCaso,
+  };
   _assetsCache.set(version, assets);
   return assets;
 }
@@ -1717,6 +1750,9 @@ module.exports = {
   parseSintetizador,
   parseMissao,
   clearAssetsCache,
+  // Slots da régua (quantidade e lista de critérios), preenchidos no loadAssets.
+  SLOTS_REGUA,
+  preencherSlotsDaRegua,
   // Exportados para teste
   loadAssets,
   parseCriteria,

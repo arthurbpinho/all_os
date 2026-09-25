@@ -395,16 +395,43 @@ export default function DuelSession({ user }) {
             {r.mmr && r.mmr.ranked ? (() => {
               const m = youAre === 'opponent' ? r.mmr.opponent : r.mmr.challenger;
               const up = m.delta >= 0;
+              // Venceu-cada-critério: mapeamento id → 'A'|'B'|'draw' devolvido
+              // pelo motor por critério (spec §7 "Tela"). No mapa, 'A' = challenger.
+              const meuLado = youAre === 'opponent' ? 'B' : 'A';
+              const nomesCriterios = r.criteriaNames || {};
+              const venceuCriterio = r.mmr.venceuCriterio || {};
+              const criteriosOrdenados = Object.keys(venceuCriterio);
               return (
                 <>
                   <span className="post-stat-label">Seu MMR</span>
                   <div className="mmr-result-value">
-                    {m.after}
-                    <span className={`mmr-delta ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {Math.abs(m.delta).toFixed(1)}</span>
+                    {m.after == null ? '—' : m.after}
+                    {m.delta != null && (
+                      <span className={`mmr-delta ${up ? 'up' : 'down'}`}>{up ? '▲' : '▼'} {Math.abs(m.delta).toFixed(1)}</span>
+                    )}
                   </div>
                   <p className="mmr-result-note">
-                    Dificuldade de {character?.name} agora: <strong>{r.mmr.characterDifficulty}</strong>
+                    Dificuldade de {character?.name} agora: <strong>{r.mmr.characterDifficulty ?? '—'}</strong>
                   </p>
+                  {criteriosOrdenados.length > 0 && (
+                    <div style={{ marginTop: 12 }}>
+                      <div className="post-stat-label" style={{ marginBottom: 6 }}>Por critério</div>
+                      <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: 13, lineHeight: 1.6 }}>
+                        {criteriosOrdenados.map((id) => {
+                          const venc = venceuCriterio[id];
+                          const label = nomesCriterios[id] || `Critério ${id}`;
+                          const marca = venc === 'draw' ? '=' : (venc === meuLado ? '✓' : '✗');
+                          const cor = venc === 'draw' ? 'var(--muted)' : (venc === meuLado ? 'var(--marrs)' : 'var(--terra)');
+                          return (
+                            <li key={id} style={{ display: 'flex', gap: 8 }}>
+                              <span style={{ color: cor, fontWeight: 700, width: 14 }}>{marca}</span>
+                              <span>{label}</span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
                 </>
               );
             })() : (

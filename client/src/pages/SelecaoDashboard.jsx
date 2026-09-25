@@ -242,6 +242,31 @@ function TriPanel({ tri }) {
                       {c.n} atend. · média {c.avgScore == null ? '—' : c.avgScore}
                     </span>
                   </div>
+                  {/* D por critério (spec §10) — só o supervisor vê. Mostra os
+                      critérios com pelo menos 1 movimento do D, ordenados do
+                      mais difícil para o mais fácil. Ajuda a enxergar em quais
+                      dimensões o caso está de fato pegando pesado. */}
+                  {c.criterios && Object.keys(c.criterios).length > 0 && (
+                    <details className="tri-criterios" style={{ gridColumn: '1 / -1', marginTop: 4 }}>
+                      <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--muted)' }}>
+                        Ver D por critério
+                      </summary>
+                      <ul style={{ listStyle: 'none', padding: '8px 0 0', margin: 0, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 4 }}>
+                        {Object.entries(c.criterios)
+                          .filter(([, cc]) => cc.n_D > 0)
+                          .sort(([, a], [, b]) => b.D - a.D)
+                          .map(([id, cc]) => (
+                            <li key={id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 6px' }}>
+                              <span style={{ color: 'var(--ink-soft)' }}>Crit. {id}</span>
+                              <span>
+                                <strong>{Math.round(cc.D)}</strong>
+                                <span style={{ color: 'var(--muted)', marginLeft: 4 }}>({cc.n_D})</span>
+                              </span>
+                            </li>
+                          ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
               );
             })}

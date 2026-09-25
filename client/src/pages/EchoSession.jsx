@@ -4,6 +4,7 @@ import { api } from '../api';
 import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStore';
 import { buildDirectEvaluationPrompt, cleanEvaluationForStudent } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
+import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
 import { PatientAvatarButton } from '../components/PatientAvatar';
 import LogActions from '../components/LogActions';
 import NeuroTestSelector from '../components/NeuroTestSelector';
@@ -119,6 +120,9 @@ export default function EchoSession({ user, sessionType }) {
   const [evalProgress, setEvalProgress] = useState(0);
   const [evalError, setEvalError] = useState('');
   const [evaluationText, setEvaluationText] = useState('');
+  // Notas por critério DESTA sessão (o gráfico da sessão). Só chegam se o perfil
+  // puder vê-las: quem decide é o servidor, ao responder o salvamento do log.
+  const [criterios, setCriterios] = useState(null);
   const [evalScore, setEvalScore] = useState(null);
   const [mmrResult, setMmrResult] = useState(null); // resultado MMR pós-partida competitiva
   const [sidequest, setSidequest] = useState(null); // sidequest ativa (objetivo principal do Treinamento)
@@ -797,6 +801,7 @@ export default function EchoSession({ user, sessionType }) {
       // A nota exibida é a calculada em código no backend (saved.score), não a
       // parseada do texto. Só faz override se o backend devolveu nota numérica.
       if (saved && Number.isFinite(saved.score)) setEvalScore(saved.score);
+      if (saved && saved.criteriaScores) setCriterios({ scores: saved.criteriaScores, names: saved.criteriaNames || null });
       if (saved && saved.mmr) setMmrResult(saved.mmr);
       // Neuro: comparação da bateria (nota dos testes + resultados) devolvida
       // pela correção — só aparece agora, no fim.
@@ -985,6 +990,18 @@ export default function EchoSession({ user, sessionType }) {
               </div>
             )}
           </div>
+
+          {criterios && (
+            <div className="card tight" style={{ marginBottom: 16 }}>
+              <CriteriaTable
+                criteriaScores={criterios.scores}
+                labels={labelsForCriteria(criterios.scores, sessionType, criterios.names)}
+              />
+              <p style={{ margin: 0, fontSize: 12.5, color: 'var(--ink-soft)' }}>
+                Notas desta sessão. A média de todas as suas sessões fica no Perfil.
+              </p>
+            </div>
+          )}
 
           {sidequestOutcome && (
             <div className={`sidequest-result ${sidequestOutcome.completed ? 'completed' : 'incomplete'}`}>

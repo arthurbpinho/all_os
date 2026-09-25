@@ -4,7 +4,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR, db } = require('./helpers');
 
 describe('regressão — bugs do pentest e da rodada de QA', () => {
   beforeEach(() => resetData());
@@ -337,35 +337,15 @@ describe('regressão — bugs do pentest e da rodada de QA', () => {
 
   // === Expiração de logs (30 dias) ===
   describe('expiração de logs', () => {
-    it('GET /api/logs anexa expiresAt ~30 dias após o timestamp', async () => {
+    it('logs são persistentes: mesmo com criado_em de 40 dias atrás continuam listados', async () => {
+      // demandas.md §24.0: logs de atendimento não expiram mais.
       const aluno = await loginAs('aluno');
       await request(app).post('/api/logs').set(authHeader(aluno))
-        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'x' });
+        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'antigo' });
+      await db.query("UPDATE logs SET criado_em = now() - interval '40 days'");
       const res = await request(app).get('/api/logs').set(authHeader(aluno));
-      const log = res.body[0];
-      expect(log.expiresAt).toBeTruthy();
-      const delta = new Date(log.expiresAt) - new Date(log.timestamp);
-      expect(Math.round(delta / 86400000)).toBe(30);
-    });
-
-    it('logs com mais de 30 dias são removidos no GET', async () => {
-      const aluno = await loginAs('aluno');
-      await request(app).post('/api/logs').set(authHeader(aluno))
-        .send({ type: 'exercise', itemId: 'ex-test-1', itemTitle: 'velho' });
-      // envelhece o log direto no JSON (40 dias atrás)
-      const file = path.join(DATA_DIR, 'logs.json');
-      const logs = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      logs[0].timestamp = new Date(Date.now() - 40 * 86400000).toISOString();
-      fs.writeFileSync(file, JSON.stringify(logs));
-      const res = await request(app).get('/api/logs').set(authHeader(aluno));
-      expect(res.body.length).toBe(0);
-    });
-
-    it('GET /api/logs/policy expõe ttlDays', async () => {
-      const aluno = await loginAs('aluno');
-      const res = await request(app).get('/api/logs/policy').set(authHeader(aluno));
-      expect(res.status).toBe(200);
-      expect(res.body.ttlDays).toBe(30);
+      expect(res.body.length).toBe(1);
+      expect(res.body[0]).not.toHaveProperty('expiresAt');
     });
   });
 

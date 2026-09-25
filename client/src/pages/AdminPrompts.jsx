@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
+import AdminCriterios from '../components/AdminCriterios';
 
 // Administração → Prompts. Edita os .md que vivem no volume persistente
 // (avaliador, critérios, sintetizador, entrevistador) direto pelo navegador.
@@ -275,6 +276,10 @@ export default function AdminPrompts() {
         Conteúdo sensível: estes arquivos trazem critérios de nota e referências de correção. Evite abrir esta tela em
         apresentações ou compartilhamento de tela.
       </div>
+
+      {/* Adicionar/editar critério grava o .md de critérios: se ele estiver
+          aberto no editor, reabre para não salvar por cima com o texto velho. */}
+      <AdminCriterios onGravado={() => { if (sel && sel.includes('criterios-no-')) abrir(sel); }} />
 
       {erro && <div className="alert error">{erro}</div>}
       {aviso && <div className="alert success">{aviso}</div>}

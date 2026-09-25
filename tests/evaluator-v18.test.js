@@ -56,11 +56,12 @@ describe('avaliador v18.25 — bloco [notas] + [feedback]', () => {
     expect(res2.body.score).toBe(Math.round(((13 * 6 + 10) / 140) * 100));
   });
 
-  it('aluno não recebe criteriaScores no GET; supervisor recebe', async () => {
+  it('aluno recebe as próprias notas por critério no GET; supervisor também', async () => {
     const aluno = await loginAs('aluno');
     await postEval(aluno, `[notas]\n${notas()}\n[feedback]\n${corpo}`);
     const meus = await request(app).get('/api/logs').set(authHeader(aluno));
-    expect(meus.body[0].criteriaScores).toBeUndefined();
+    // Decisão de 2026-09 (demandas.md §18): o aluno vê os números por critério.
+    expect(meus.body[0].criteriaScores['1']).toBe(6);
     expect(meus.body[0].evaluation).toContain(corpo);
 
     const admin = await loginAs('admin');
