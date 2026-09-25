@@ -6028,7 +6028,7 @@ const SELECTION_LOG_TTL_MS = SELECTION_LOG_TTL_DAYS * 24 * 60 * 60 * 1000;
 // Muda só a etiqueta ativo/rejeitado e a contagem da dashboard; a nota em si não
 // se move, e logs já avaliados conservam o status que receberam na época.
 const SELECTION_ACTIVE_THRESHOLD = 55;
-const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
+const SELECAO_TOKEN_TTL = '4h'; // JWT efêmero do candidato (prova 2h + 2h de folga p/ ler instruções, pausar/refresh e enviar no /finish)
 // Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
 // Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
 // efetivo fica ~metade do preço de tabela desse modelo.
