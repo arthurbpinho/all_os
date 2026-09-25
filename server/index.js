@@ -6224,7 +6224,13 @@ function selecaoExportSlug(nome) {
 // Muda só a etiqueta ativo/rejeitado e a contagem da dashboard; a nota em si não
 // se move, e logs já avaliados conservam o status que receberam na época.
 const SELECTION_ACTIVE_THRESHOLD = 55;
-const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
+// JWT efêmero do candidato. Precisa COBRIR o cronômetro da prova (2 horas, em
+// client/src/pages/ProcessoSeletivo.jsx) mais o tempo de ler as instruções e
+// qualquer pausa com a aba fechada — o token é emitido no /iniciar, e o relógio
+// da prova só começa no "Começar simulação". Com 3h a folga era de ~1h e um
+// candidato que pausasse perdia o atendimento inteiro no finish ("Sessão
+// expirada"); 4h devolvem a folga que existia quando a prova durava 1h.
+const SELECAO_TOKEN_TTL = '4h';
 // Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
 // Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
 // efetivo fica ~metade do preço de tabela desse modelo.

@@ -217,6 +217,20 @@ describe('Processo Seletivo', () => {
     expect(item.content).not.toMatch(/AVALIAÇÃO DA IA/);
   });
 
+  // O token tem de sobreviver à prova inteira: ele nasce no /iniciar, mas o
+  // cronômetro de 2 horas (client/src/pages/ProcessoSeletivo.jsx) só começa no
+  // "Começar simulação", e a pessoa ainda pode pausar com a aba fechada. Se o TTL
+  // encostar nas 2 horas, o finish volta "Sessão expirada" e o atendimento
+  // inteiro se perde — por isso o número é testado, e não só comentado.
+  it('token do candidato dura mais que o cronômetro da prova (2 horas)', async () => {
+    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(start.status).toBe(200);
+    const { exp, iat } = require('jsonwebtoken').decode(start.body.token);
+    const duracaoHoras = (exp - iat) / 3600;
+    expect(duracaoHoras).toBe(4);
+    expect(duracaoHoras).toBeGreaterThan(2);
+  });
+
   it('requireCandidate: token de usuário normal não acessa o chat do candidato', async () => {
     const adminToken = await loginAs('admin');
     const chat = await request(app).post('/api/selecao/chat').set(authHeader(adminToken)).send({ messages: [] });
