@@ -204,6 +204,7 @@ export const api = {
   selecaoDashboard: (range) => request(`/selecao/dashboard?range=${encodeURIComponent(range || 'month')}`),
   selecaoSenhaConfig: () => request('/selecao/senha-config'),
   selecaoTrocarSenha: (password) => request('/selecao/senha-config', { method: 'PUT', body: { password } }),
+  selecaoNovaChance: (id) => request(`/selecao/logs/${encodeURIComponent(id)}/nova-chance`, { method: 'POST' }),
 
   // Exercises
   getExercises: () => request('/exercises'),

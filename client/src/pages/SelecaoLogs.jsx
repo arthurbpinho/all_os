@@ -195,6 +195,11 @@ export default function SelecaoLogs() {
   const [sortBy, setSortBy] = useState('recent');
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
+  // "Dar mais uma chance": id do log aguardando confirmação, e o id em gravação.
+  // Confirmação existe porque a ação é visível para o candidato (ele destrava o
+  // formulário) e não tem desfazer nesta tela.
+  const [confirmChance, setConfirmChance] = useState(null); // { id, nome }
+  const [chanceSaving, setChanceSaving] = useState('');
 
   const visibleLogs = useMemo(
     () => sortLogs(filterLogs(logs, statusFilter, search), sortBy),
@@ -220,6 +225,23 @@ export default function SelecaoLogs() {
     const csv = buildFullCsv(visibleLogs);
     const date = new Date().toISOString().slice(0, 10);
     downloadText(`processo-seletivo-completo-${date}.csv`, csv, 'text/csv;charset=utf-8');
+  }
+
+  // Libera o candidato para refazer UMA vez. Atualiza o log em memória com o que
+  // o servidor devolveu (em vez de recarregar a lista inteira): a tela costuma
+  // estar filtrada e ordenada, e um reload jogaria o avaliador para o topo.
+  async function darNovaChance(id) {
+    setChanceSaving(id);
+    setError('');
+    try {
+      const res = await api.selecaoNovaChance(id);
+      setLogs((prev) => prev.map((l) => (l.id === id ? { ...l, novaChance: res.novaChance } : l)));
+      setConfirmChance(null);
+    } catch (err) {
+      setError(err.message || 'Não foi possível liberar uma nova chance.');
+    } finally {
+      setChanceSaving('');
+    }
   }
 
   return (
@@ -340,6 +362,21 @@ export default function SelecaoLogs() {
                   {isOpen ? 'Ocultar' : 'Ver'}
                 </button>
                 <LogActions items={items} inline size="sm" />
+                {log.novaChance ? (
+                  <span className="selecao-nova-chance-ok" title={`Liberado por ${log.novaChance.por || '—'}`}>
+                    ✓ Nova chance concedida{log.novaChance.em ? ` em ${fmtDate(log.novaChance.em)}` : ''}
+                    {log.novaChance.por ? ` por ${log.novaChance.por}` : ''}
+                  </span>
+                ) : (
+                  <button
+                    className="btn btn-danger btn-sm"
+                    onClick={() => setConfirmChance({ id: log.id, nome: c.nome || 'este candidato' })}
+                    disabled={chanceSaving === log.id}
+                    title="Libera esta pessoa para refazer a avaliação uma vez, sem esperar os 15 dias"
+                  >
+                    {chanceSaving === log.id ? 'Liberando…' : 'Dar mais uma chance'}
+                  </button>
+                )}
               </div>
 
               {isOpen && (
@@ -396,6 +433,27 @@ export default function SelecaoLogs() {
             </div>
           );
         })
+      )}
+
+      {confirmChance && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setConfirmChance(null); }}>
+          <div className="modal" style={{ maxWidth: 460 }}>
+            <h3>Dar mais uma chance?</h3>
+            <p style={{ color: 'var(--ink-soft)', marginTop: -6, marginBottom: 16 }}>
+              <strong>{confirmChance.nome}</strong> poderá refazer a avaliação <strong>uma vez</strong>, usando o
+              mesmo WhatsApp, sem esperar os 15 dias. Esta avaliação continua aqui, com a nota e o feedback —
+              ela só deixa de bloquear uma nova tentativa.
+            </p>
+            <div className="modal-actions">
+              <button className="btn btn-outline" onClick={() => setConfirmChance(null)} disabled={!!chanceSaving}>
+                Cancelar
+              </button>
+              <button className="btn btn-danger" onClick={() => darNovaChance(confirmChance.id)} disabled={!!chanceSaving}>
+                {chanceSaving ? 'Liberando…' : 'Dar mais uma chance'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

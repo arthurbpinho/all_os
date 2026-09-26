@@ -7126,10 +7126,18 @@ app.post('/api/selecao/iniciar', selecaoLimiter, (req, res) => {
 
   // Dedup: 1 avaliação por WhatsApp a cada 15 dias. Baseado nos logs de seleção
   // (que duram 15 dias) + checagem explícita de tempo, pra não depender do prune.
+  //
+  // O log com `novaChance` sai da conta: é a tentativa que o avaliador perdoou
+  // (ver POST /api/selecao/logs/:id/nova-chance). Perdoar é marcar o log, e não
+  // apagá-lo, porque o atendimento e a avaliação continuam valendo para o
+  // recrutador — o que se libera é só o bloqueio do WhatsApp. Como a tentativa
+  // seguinte nasce SEM a marca, ela volta a bloquear: é uma chance a mais, não
+  // um passe livre.
   pruneExpiredSelectionLogs();
   const logs = readJSON('selection-logs.json');
   const lastTs = logs
     .filter((l) => l && normalizeWhatsapp(l.candidate && l.candidate.whatsapp) === wa)
+    .filter((l) => !l.novaChance)
     .map((l) => new Date(l.timestamp || 0).getTime())
     .filter((t) => Number.isFinite(t) && t > 0)
     .sort((a, c) => c - a)[0];
@@ -7310,6 +7318,38 @@ app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), (re
     ...l,
     expiresAt: l.timestamp ? new Date(new Date(l.timestamp).getTime() + SELECTION_LOG_TTL_MS).toISOString() : null,
   })));
+});
+
+// 5a) "Dar mais uma chance" — avaliador/admin libera UM candidato para refazer.
+//
+// Existe para o caso que o produto não consegue distinguir sozinho: a pessoa
+// travou no meio, o navegador fechou, a conexão caiu, ou ela finalizou sem
+// querer. O dedup por WhatsApp (15 dias) não sabe a diferença entre isso e uma
+// segunda tentativa oportunista, então quem decide é gente — e fica registrado
+// QUEM decidiu e QUANDO.
+//
+// Idempotente de propósito: clicar duas vezes devolve a concessão que já
+// existe, em vez de 409. O botão é de emergência, costuma ser clicado com
+// pressa, e um erro na tela nesse momento só confundiria.
+app.post('/api/selecao/logs/:id/nova-chance', requireAuth, requireRole('evaluator', 'admin'), async (req, res) => {
+  const id = String(req.params.id || '');
+  let alvo = null;
+  await withFileLock('selection-logs.json', async () => {
+    const arr = readJSON('selection-logs.json');
+    const log = arr.find((l) => l && String(l.id) === id);
+    if (!log) return;
+    if (!log.novaChance) {
+      log.novaChance = {
+        em: new Date().toISOString(),
+        por: req.user.name || req.user.username || 'Avaliador',
+      };
+      writeJSON('selection-logs.json', arr);
+    }
+    alvo = log;
+  });
+  if (!alvo) return res.status(404).json({ error: 'Avaliação não encontrada.' });
+  console.log(`[selecao] nova chance para ${alvo.candidate && alvo.candidate.nome} (${alvo.id}) por ${alvo.novaChance.por}`);
+  res.json({ ok: true, id: alvo.id, novaChance: alvo.novaChance });
 });
 
 // 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +
