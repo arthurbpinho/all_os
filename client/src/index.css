@@ -4730,6 +4730,14 @@ select option { background: var(--cream); color: var(--ink); }
 .selecao-badge.ativo { background: var(--marrs-tint); color: var(--success); }
 .selecao-badge.rejeitado { background: var(--terra-tint); color: var(--terra); }
 .selecao-badge.pending, .selecao-badge.erro { background: var(--sand); color: var(--ink-soft); }
+/* Selo de "nova chance concedida": ocupa o lugar do botão vermelho depois que
+   o avaliador libera o candidato, para a barra de ações não mudar de tamanho e
+   para o registro de quem liberou ficar à vista. */
+.selecao-nova-chance-ok {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12.5px; font-weight: 600; color: var(--success);
+  background: var(--marrs-tint); border-radius: 999px; padding: 4px 12px;
+}
 .selecao-transcript { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; white-space: pre-wrap; font-size: 13.5px; line-height: 1.6; color: var(--ink); max-height: 460px; overflow-y: auto; }
 .selecao-transcript .role-user { color: var(--marrs-deep); font-weight: 700; }
 .selecao-transcript .role-assistant { color: var(--terra); font-weight: 700; }
