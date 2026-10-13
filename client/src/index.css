@@ -1531,6 +1531,18 @@ select option { background: var(--cream); color: var(--ink); }
 .faixa-ini.plena { background: var(--success, #1A7A6D); color: var(--on-accent, #fff); }
 .faixa-ini.parcial { background: var(--sand-2, var(--sand)); color: var(--ink-soft); }
 .faixa-ini.ausente { background: transparent; color: var(--muted); text-decoration: line-through; }
+
+/* Lista dos critérios embaixo do radar (CriteriaTable): nome, faixas e nota na
+   mesma linha; a descrição embaixo; a análise só para a equipe. */
+.crit-lista { margin-top: 4px; }
+.crit-linha { padding: 8px 2px; border-top: 1px solid var(--line); }
+.crit-linha-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.crit-nome { flex: 1 1 160px; font-size: 13.5px; font-weight: 600; color: var(--ink-soft); }
+.crit-nota { font-size: 13.5px; font-weight: 700; color: var(--marrs-deep); white-space: nowrap; min-width: 44px; text-align: right; }
+.crit-nota-max { color: var(--muted); font-weight: 400; }
+.crit-desc { font-size: 12px; line-height: 1.45; color: var(--muted); margin-top: 3px; }
+.crit-faixa-antiga { font-size: 11.5px; color: var(--muted); }
+.crit-linha .criteria-parte-analise { margin-top: 6px; }
 .criteria-parte-lado-nome { font-size: 11px; font-weight: 700; color: var(--marrs-deep); min-width: 58px; }
 
 /* ──── Resultado da avaliação ──── */

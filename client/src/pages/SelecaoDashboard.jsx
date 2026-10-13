@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { useNomesCriterios, nomeDoCriterio } from '../criteriosNomes';
 import Typewriter from '../components/Typewriter';
 
 const RANGES = [
@@ -186,6 +187,7 @@ const FONTE_LABEL = { competitivo: 'competitivo', selecao: 'seletivo', visitante
 // sistema ser justo: cada respondente é pesado pelo próprio nível, então quem
 // joga bem e quem joga mal convergem para a mesma estimativa de dificuldade.
 function TriPanel({ tri }) {
+  const nomesCriterios = useNomesCriterios();
   const comDado = tri.characters.filter((c) => c.n > 0);
   const semDado = tri.characters.filter((c) => c.n === 0);
   const escala = tri.max - tri.min;
@@ -257,7 +259,7 @@ function TriPanel({ tri }) {
                           .sort(([, a], [, b]) => b.D - a.D)
                           .map(([id, cc]) => (
                             <li key={id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '2px 6px' }}>
-                              <span style={{ color: 'var(--ink-soft)' }}>Crit. {id}</span>
+                              <span style={{ color: 'var(--ink-soft)' }}>{nomeDoCriterio(nomesCriterios, id)}</span>
                               <span>
                                 <strong>{Math.round(cc.D)}</strong>
                                 <span style={{ color: 'var(--muted)', marginLeft: 4 }}>({cc.n_D})</span>

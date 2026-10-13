@@ -143,3 +143,96 @@ describe('POST /api/logs — notas da sessão que acabou de terminar', () => {
     expect(r.body.criteriaScores).toEqual({ 1: 6, 2: 8 });
   });
 });
+
+// O gráfico da AVALIAÇÃO mostra sempre os critérios da régua atual (demandas.md
+// §27): renomeou em "Critérios da régua", muda no gráfico de toda sessão.
+describe('criteriosDoLog (puro)', () => {
+  const regua = [
+    { id: '10', nome: 'Comunicação', ordem: 1, linhaCurta: 'clareza do que se diz' },
+    { id: '11', nome: 'Intensidade', ordem: 2, linhaCurta: 'dose da intervenção' },
+    { id: '12', nome: 'Priorização', ordem: 3, linhaCurta: 'o que vem primeiro' },
+  ];
+
+  it('log sem nomes gravados: posição da régua, com nome e descrição atuais', () => {
+    expect(cp.criteriosDoLog({ criteriaScores: { 2: 5, 1: 7 } }, { regua })).toEqual([
+      { num: '1', id: '10', nome: 'Comunicação', linhaCurta: 'clareza do que se diz', nota: 7 },
+      { num: '2', id: '11', nome: 'Intensidade', linhaCurta: 'dose da intervenção', nota: 5 },
+    ]);
+  });
+
+  it('log com nomes: o nome identifica o critério, mesmo noutra posição, e sai na ordem da régua', () => {
+    const r = cp.criteriosDoLog({ criteriaScores: { 1: 9, 2: 4 }, criteriaNames: { 1: 'priorização', 2: 'Comunicação' } }, { regua });
+    expect(r.map((c) => [c.num, c.nome, c.nota])).toEqual([['2', 'Comunicação', 4], ['1', 'Priorização', 9]]);
+  });
+
+  it('renomeado com "manter histórico" chega pelo apelido; o que saiu da régua não aparece', () => {
+    const log = { criteriaScores: { 1: 8, 2: 6 }, criteriaNames: { 1: 'Precisão lexical', 2: 'Removido' } };
+    const r = cp.criteriosDoLog(log, { regua, apelidos: { 'precisão lexical': 'Comunicação' } });
+    expect(r).toEqual([{ num: '1', id: '10', nome: 'Comunicação', linhaCurta: 'clareza do que se diz', nota: 8 }]);
+  });
+
+  it('sem régua no banco (neuro, avaliador antigo) ou sem notas: null', () => {
+    expect(cp.criteriosDoLog({ criteriaScores: { 1: 5 } }, { regua: [] })).toBeNull();
+    expect(cp.criteriosDoLog({}, { regua })).toBeNull();
+  });
+});
+
+describe('GET /api/logs — critérios pela régua atual', () => {
+  async function regua() {
+    // resetData não limpa a tabela de critérios: a régua de teste recomeça aqui.
+    await db.query(`DELETE FROM criterios WHERE regua = 'teste-regua'`);
+    const { rows } = await db.query(
+      `INSERT INTO criterios (regua, nome, ordem, linha_curta) VALUES
+         ('teste-regua', 'Comunicação', 1, 'clareza do que se diz'),
+         ('teste-regua', 'Intensidade', 2, 'dose da intervenção')
+       RETURNING id::text, nome`,
+    );
+    return Object.fromEntries(rows.map((r) => [r.nome, r.id]));
+  }
+  async function log(id, nomes) {
+    await db.query(
+      `INSERT INTO logs (id, user_id, type, mode, item_id, eval_version, criteria_scores, criteria_names)
+       VALUES ($1, 3, 'freeplay', 'training', 'fp-test-1', 'teste-regua', '{"1": 7, "2": 5}', $2)`,
+      [id, nomes ? JSON.stringify(nomes) : null],
+    );
+  }
+
+  it('o aluno recebe os nomes atuais; renomear com "manter histórico" ou desativar muda o gráfico', async () => {
+    const ids = await regua();
+    await log('log-sem-nomes', null);
+    await log('log-com-nomes', { 1: 'Comunicação', 2: 'Intensidade' });
+    const aluno = await loginAs('aluno');
+    const ver = async () => Object.fromEntries((await request(app).get('/api/logs').set(authHeader(aluno))).body
+      .map((l) => [l.id, (l.criterios || []).map((c) => `${c.nome}=${c.nota}`)]));
+
+    expect(await ver()).toEqual({
+      'log-sem-nomes': ['Comunicação=7', 'Intensidade=5'],
+      'log-com-nomes': ['Comunicação=7', 'Intensidade=5'],
+    });
+
+    await db.query(`UPDATE criterios SET nome = 'Clareza', nomes_anteriores = '{Comunicação}' WHERE id = $1`, [ids['Comunicação']]);
+    await db.query(`UPDATE criterios SET ativo = false WHERE id = $1`, [ids['Intensidade']]);
+    expect(await ver()).toEqual({
+      'log-sem-nomes': ['Clareza=7'],
+      'log-com-nomes': ['Clareza=7'],
+    });
+
+    const nomes = (await request(app).get('/api/criterios/nomes').set(authHeader(aluno))).body.nomes;
+    expect(nomes[ids['Comunicação']]).toBe('Clareza');
+    expect(nomes[ids['Intensidade']]).toBe('Intensidade');
+  });
+
+  it('com "Notas por critério e gráfico" bloqueado, o aluno não recebe os critérios', async () => {
+    await regua();
+    await log('log-a', null);
+    const admin = await loginAs('admin');
+    const matriz = acessos.matrizPadrao();
+    matriz.graficoCriterios.therapist = false;
+    await request(app).put('/api/admin/acessos').set(authHeader(admin)).send({ matriz });
+    const aluno = await loginAs('aluno');
+    expect((await request(app).get('/api/logs').set(authHeader(aluno))).body[0]).not.toHaveProperty('criterios');
+    // A equipe continua recebendo.
+    const prof = await loginAs('prof');
+    expect((await request(app).get('/api/logs?userId=3').set(authHeader(prof))).body[0].criterios).toHaveLength(2);
+  });
+});

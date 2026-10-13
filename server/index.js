@@ -22,7 +22,7 @@ const avatarPool = require('./avatar-pool');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
 const {
   runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody,
-  clearAssetsCache, estimarTokens, extractChatReasoning, PIPELINE_VERSIONS_IDS,
+  clearAssetsCache, estimarTokens, extractChatReasoning, PIPELINE_VERSIONS_IDS, PIPELINE_VERSIONS,
 } = require('./avaliador-pipeline');
 const batchFila = require('./batch-fila');
 // Avaliador OFICIAL da produção (pipeline v34). Quem decide quais modos usam o
@@ -3585,6 +3585,40 @@ app.get('/api/trilha/:userId', requireAuth, rota(async (req, res) => {
 // treino dele e do que o supervisor precisa consultar, sem janela de expiração
 // (demandas.md §24.0).
 
+// Anexa a cada log com notas a lista `criterios` resolvida pela régua ATUAL
+// (criteriosPerfil.criteriosDoLog): é ela que o gráfico e a lista da avaliação
+// desenham. Carrega cada régua e os apelidos uma vez por chamada.
+function reguaDaVersao(versao) {
+  const cfg = PIPELINE_VERSIONS[versao];
+  return (cfg && cfg.criteriosDe) || versao;
+}
+async function anexarCriteriosAtuais(logs) {
+  const comNotas = (logs || []).filter((l) => l && l.criteriaScores && l.evalVersion);
+  if (!comNotas.length) return logs;
+  const reguas = new Map();
+  for (const r of new Set(comNotas.map((l) => reguaDaVersao(l.evalVersion)))) {
+    const ativos = (await promptsRepo.criteriosDa(r)).filter((c) => c.ativo);
+    reguas.set(r, ativos);
+  }
+  const apelidos = {};
+  for (const c of await promptsRepo.identidadesDeCriterios()) {
+    for (const antigo of c.nomesAnteriores) apelidos[criteriosPerfil.chaveDoNome(antigo)] = c.nome;
+  }
+  for (const l of comNotas) {
+    const criterios = criteriosPerfil.criteriosDoLog(l, { regua: reguas.get(reguaDaVersao(l.evalVersion)), apelidos });
+    if (criterios) l.criterios = criterios;
+  }
+  return logs;
+}
+
+// Nomes de todos os critérios por id ({ id: nome }), ativos ou não — o MMR por
+// critério e o D do seletivo são guardados pelo id. Não é sigiloso: são os
+// mesmos nomes que o aluno vê no gráfico da avaliação.
+app.get('/api/criterios/nomes', requireAuth, rota(async (req, res) => {
+  const { rows } = await db.query('SELECT id::text, nome, ativo FROM criterios ORDER BY regua, ordem, id');
+  res.json({ nomes: Object.fromEntries(rows.map((r) => [r.id, r.nome])) });
+}));
+
 app.get('/api/logs', requireAuth, rota(async (req, res) => {
   // Aluno (interno ou externo) e visitante recebem o log SEM o evalPartsId, que
   // é a chave do arquivo com as ANÁLISES por critério (escritas com o gabarito
@@ -3596,19 +3630,20 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
   // Filtro por tag (?tag=<id>) na visão de supervisor e admin: só os logs das
   // contas com aquela tag.
   const comTag = !isStudent && req.query.tag ? await tagsRepo.contasComTag(req.query.tag) : null;
-  const serve = (lista) => {
+  const serve = async (lista) => {
     const arr = comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista;
+    if (veNotas) await anexarCriteriosAtuais(arr);
     if (!isStudent) return arr;
     // `temCriterios` só diz que há níveis por critério para buscar em
     // /api/logs/:id/criterios; a chave do arquivo (evalPartsId) não sai.
-    return arr.map(({ criteriaScores, criteriaNames, evalPartsId, ...rest }) => (
-      veNotas ? { ...rest, criteriaScores, criteriaNames, temCriterios: !!evalPartsId } : rest
+    return arr.map(({ criteriaScores, criteriaNames, criterios, evalPartsId, ...rest }) => (
+      veNotas ? { ...rest, criteriaScores, criteriaNames, criterios, temCriterios: !!evalPartsId } : rest
     ));
   };
 
   // Aluno e visitante: só os próprios.
   if (isAluno(req.user.role) || req.user.role === 'visitor') {
-    return res.json(serve(await logsRepo.listarDoDono(req.user.id)));
+    return res.json(await serve(await logsRepo.listarDoDono(req.user.id)));
   }
 
   // Filtro por userId específico
@@ -3616,17 +3651,17 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
     if (!(await canAccessUserResource(req.user, req.query.userId))) {
       return res.status(403).json({ error: 'Acesso negado' });
     }
-    return res.json(serve(await logsRepo.listarDoDono(req.query.userId)));
+    return res.json(await serve(await logsRepo.listarDoDono(req.query.userId)));
   }
 
   // Professor: apenas logs de seus alunos
   if (req.user.role === 'supervisor') {
     const myStudents = (await contasRepo.alunosDoProfessor(req.user.id)).map(u => u.id);
-    return res.json(serve(await logsRepo.listarDeContas(myStudents)));
+    return res.json(await serve(await logsRepo.listarDeContas(myStudents)));
   }
 
   // Admin: tudo
-  res.json(serve(await logsRepo.listarTodos()));
+  res.json(await serve(await logsRepo.listarTodos()));
 }));
 
 // NOTA E FEEDBACK POR CRITÉRIO de um log — SÓ supervisor e admin.
@@ -4200,6 +4235,7 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
   // A chave das ANÁLISES (evalPartsId) não vai junto: ela abre o texto escrito
   // com o gabarito à vista, que continua só de supervisor e admin.
   const resposta = { ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome };
+  await anexarCriteriosAtuais([resposta]);
   if (isAluno(req.user.role) || req.user.role === 'visitor') {
     const bloqueado = funcionalidadeBloqueada(req.user, 'graficoCriterios');
     resposta.temCriterios = !bloqueado && !!log.evalPartsId;
@@ -4207,6 +4243,7 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
     if (bloqueado) {
       resposta.criteriaScores = undefined;
       resposta.criteriaNames = undefined;
+      resposta.criterios = undefined;
     }
   }
   res.json(resposta);

@@ -3,9 +3,7 @@ import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
-import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
-import CriteriaAnalyses from '../components/CriteriaAnalyses';
-import CriteriaFaixasAluno from '../components/CriteriaFaixasAluno';
+import CriteriaTable, { linhasDeCriterios } from '../components/CriteriaTable';
 import RadarCriterios from '../components/RadarCriterios';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
@@ -81,11 +79,8 @@ function buildLogStrings(log) {
   // o aluno com "Notas por critério e gráfico" liberado em Acessos).
   let criteriaPart = '';
   if (log.criteriaScores && typeof log.criteriaScores === 'object') {
-    const critLabels = labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames);
-    const rows = Object.entries(log.criteriaScores)
-      .filter(([, v]) => Number.isFinite(Number(v)))
-      .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([k, v]) => `${critLabels[k] || `Critério ${k}`}: ${Number(v)}/10`);
+    // Os mesmos nomes da tela: os da régua atual, quando o servidor os resolveu.
+    const rows = linhasDeCriterios(log).map((l) => `${l.nome}: ${l.nota}/10`);
     if (rows.length) {
       criteriaPart = `\n\n===========================\nNOTAS POR CRITÉRIO\n===========================\n\n${rows.join('\n')}`;
     }
@@ -234,9 +229,7 @@ function LogCard({ log, showDownload }) {
           {tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
               <div>
-                <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
-                <CriteriaAnalyses log={log} />
-                {log.temCriterios && <CriteriaFaixasAluno logId={log.id} />}
+                <CriteriaTable log={log} />
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                     <RichText text={evaluation} />
@@ -670,9 +663,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         <div className="card tight">
           {evaluation || log.criteriaScores ? (
             <div>
-              <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
-              <CriteriaAnalyses log={log} />
-              {log.temCriterios && <CriteriaFaixasAluno logId={log.id} />}
+              <CriteriaTable log={log} />
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                   <RichText text={evaluation} />

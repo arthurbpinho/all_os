@@ -6,6 +6,7 @@ import PhotoCropper from '../components/PhotoCropper';
 import RichText from '../components/RichText';
 import DevTooltip from '../components/DevTooltip';
 import RadarCriterios from '../components/RadarCriterios';
+import { useNomesCriterios, nomeDoCriterio } from '../criteriosNomes';
 
 // Balões das partes do Perfil que ainda estão em construção. Mesmo vocabulário
 // do menu lateral (ver NavEmDesenvolvimento em App.jsx): cinza + explicação.
@@ -15,6 +16,7 @@ const DESC_ABORDAGEM =
   'Conduziremos pesquisas em psicologia comparada a partir dos dados gerados pelos usuários.';
 
 export default function Profile({ user, onUpdate, onLogout }) {
+  const nomesCriterios = useNomesCriterios();
   const navigate = useNavigate();
   const [name, setName] = useState(user.name || '');
   // Troca de e-mail (fluxo próprio, ver mais abaixo). O campo do formulário
@@ -406,7 +408,7 @@ export default function Profile({ user, onUpdate, onLogout }) {
                     .filter(([, c]) => c.mmr != null)
                     .map(([id, c]) => (
                       <li key={id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--sand-2)', borderRadius: 4, fontSize: 13 }}>
-                        <span style={{ color: 'var(--ink-soft)' }}>Crit. {id}</span>
+                        <span style={{ color: 'var(--ink-soft)' }}>{nomeDoCriterio(nomesCriterios, id)}</span>
                         <strong>{(c.mmr / 10).toFixed(1)}</strong>
                       </li>
                     ))}

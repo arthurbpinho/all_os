@@ -202,6 +202,7 @@ export const api = {
   // Processo Seletivo — avaliador/admin (auth global normal)
   selecaoLogs: () => request('/selecao/logs'),
   selecaoDashboard: (range) => request(`/selecao/dashboard?range=${encodeURIComponent(range || 'month')}`),
+  criteriosNomes: () => request('/criterios/nomes'),
   selecaoSenhaConfig: () => request('/selecao/senha-config'),
   selecaoTrocarSenha: (password) => request('/selecao/senha-config', { method: 'PUT', body: { password } }),
   selecaoNovaChance: (id) => request(`/selecao/logs/${encodeURIComponent(id)}/nova-chance`, { method: 'POST' }),
