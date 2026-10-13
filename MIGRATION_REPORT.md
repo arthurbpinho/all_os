@@ -349,4 +349,9 @@ funcionou (o script de verificação, com tentativas erradas de propósito, levo
 | H. Carga final (volume congelado) | nada novo; conferência 0 divergências; integridade 20/20; sequência em 175 |
 | I. Pelo domínio | bundle `index-CUwxZwuE.js` (o testado); rotas só do sistema novo respondem; fotos novas e trocadas e pool de avatares servidos do volume; seletivo e login recusam senha errada |
 
-Falta (dono, como admin): `/api/admin/diagnostico-ip` pelo domínio (VIRADA.md §5).
+Diagnóstico de IP (VIRADA.md §5), feito pelo dono como admin pelo domínio:
+`conexaoEhCloudflare: false` — a conexão chega por um proxy da Railway, e os limites
+de tentativa estavam contando todo mundo como um IP só. O serviço só tem o domínio
+próprio (nenhum `*.up.railway.app`), e `CONFIAR_CF_CONNECTING_IP=sempre` foi
+definido. Os avisos de CSP no console (o beacon de estatísticas do Cloudflare
+bloqueado) já existiam no sistema antigo — a política é a mesma.

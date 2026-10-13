@@ -168,11 +168,19 @@ Administração → Prompts.
 
 1. Domínio próprio atrás do Cloudflare (proxy laranja ligado).
 2. **Não divulgar o domínio `*.up.railway.app`.**
-3. Logado como admin, abrir `/api/admin/diagnostico-ip` **pelo domínio próprio**:
+3. Logado como admin **no domínio próprio**, consultar `/api/admin/diagnostico-ip`.
+   Abrir o endereço direto na barra responde "Não autenticado": a sessão mora no
+   `localStorage` e só vai no cabeçalho `Authorization`. Pelo console do navegador
+   (F12 → Console):
+   ```js
+   fetch('/api/admin/diagnostico-ip', { headers: { Authorization: 'Bearer ' + localStorage.getItem('allos_token') } }).then(r => r.json()).then(console.log)
+   ```
    - `conexaoEhCloudflare: true` → tudo certo, os limites de tentativa usam o IP real.
    - `false` → o Railway está escondendo o IP do Cloudflare. Os limites estariam
      contando todo mundo como um IP só. Definir `CONFIAR_CF_CONNECTING_IP=sempre`
      e, nesse caso, **desativar o domínio do Railway** (por ele o cabeçalho é forjável).
+   - Em 2026-10-13 deu `false` (a conexão chega por um proxy da Railway, `46.151.x`);
+     o serviço só tem o domínio próprio, e a variável foi definida como `sempre`.
 
 ## 6. Conferência depois do boot
 
