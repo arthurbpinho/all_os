@@ -15,6 +15,7 @@ const CAMPOS = {
   whatsapp: '(11) 91234-5678',
   faculdade: 'USP',
   periodo: '7º',
+  abordagem: 'Psicanalista',
   consent: true,
   feedbackIA: false,
 };
@@ -307,6 +308,37 @@ describe('Processo Seletivo', () => {
     const duracaoHoras = (exp - iat) / 3600;
     expect(duracaoHoras).toBe(4);
     expect(duracaoHoras).toBeGreaterThan(2);
+  });
+
+  it('abordagem da psicologia: obrigatória, só das opções, e chega ao avaliador e à exportação', async () => {
+    const { abordagem, ...semAbordagem } = CAMPOS;
+    const faltando = await request(app).post('/api/selecao/iniciar').send(semAbordagem);
+    expect(faltando.status).toBe(400);
+    expect(faltando.body.error).toBe('Escolha com qual abordagem da psicologia você mais se identifica.');
+    const inventada = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, abordagem: 'Behaviorismo radical' });
+    expect(inventada.status).toBe(400);
+
+    const s = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, abordagem: 'Não tenho ainda / prefiro não informar / outra' });
+    expect(s.status).toBe(200);
+    await request(app).post('/api/selecao/finish').set(authHeader(s.body.token))
+      .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
+    const logs = await request(app).get('/api/selecao/logs').set(authHeader(await loginAs('admin')));
+    expect(logs.body[0].candidate.abordagem).toBe('Não tenho ainda / prefiro não informar / outra');
+    const exp = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'test-export-secret');
+    expect(exp.body.logs[0].content).toContain('Abordagem: Não tenho ainda / prefiro não informar / outra');
+  });
+
+  it('a lista de abordagens do formulário é a mesma que o servidor aceita', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const lista = (arquivo, nome) => {
+      const src = fs.readFileSync(path.join(__dirname, '..', arquivo), 'utf8');
+      const ini = src.indexOf(`const ${nome} = [`);
+      return [...src.slice(ini, src.indexOf('];', ini)).matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    };
+    const servidor = lista('server/index.js', 'SELECAO_ABORDAGENS');
+    expect(servidor).toHaveLength(11);
+    expect(lista('client/src/pages/ProcessoSeletivo.jsx', 'ABORDAGENS')).toEqual(servidor);
   });
 
   it('export-all: exige o secret certo (M2M, sem JWT) e devolve log+avaliação em texto por candidato', async () => {

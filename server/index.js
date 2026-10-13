@@ -6270,6 +6270,24 @@ function selecaoExportSlug(nome) {
 const SELECAO_BLOQUEIO_DIAS = 15;
 const SELECAO_BLOQUEIO_MS = SELECAO_BLOQUEIO_DIAS * 24 * 60 * 60 * 1000;
 
+// "Com qual abordagem da psicologia você mais se identifica?" — pergunta
+// obrigatória do formulário do candidato (decisão do dono, 2026-10-13). Grava o
+// rótulo, que é o que o avaliador lê no log e no CSV. ESPELHO: ABORDAGENS em
+// client/src/pages/ProcessoSeletivo.jsx — um teste confere que são iguais.
+const SELECAO_ABORDAGENS = [
+  'Junguiano',
+  'Psicanalista',
+  'Cognitivo-comportamental',
+  'ACP',
+  'Gestalt-terapia',
+  'Abordagens contextuais',
+  'Esquizoanálise',
+  'Sistêmica',
+  'Analista do comportamento',
+  'Sócio-histórica',
+  'Não tenho ainda / prefiro não informar / outra',
+];
+
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
 // para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
 // corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
@@ -6374,6 +6392,7 @@ function buildSelectionExportText(log) {
     `WhatsApp: ${c.whatsapp || '—'}`,
     `Faculdade: ${c.faculdade || '—'}`,
     `Período: ${c.periodo || '—'}`,
+    `Abordagem: ${c.abordagem || '—'}`,
     `Feedback prévio (IA): ${rotuloFeedbackPrevio(log)}`,
     `Caso: ${log.characterName || '—'}`,
     `Data: ${log.timestamp ? new Date(log.timestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '—'}`, '',
@@ -7339,6 +7358,10 @@ app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
   if (!nome || !email || !whatsapp || !faculdade || !periodo) {
     return res.status(400).json({ error: 'Preencha todos os campos.' });
   }
+  const abordagem = clampStr(b.abordagem, 100).trim();
+  if (!SELECAO_ABORDAGENS.includes(abordagem)) {
+    return res.status(400).json({ error: 'Escolha com qual abordagem da psicologia você mais se identifica.' });
+  }
   if (b.consent !== true) {
     return res.status(400).json({ error: 'É necessário aceitar o termo de consentimento.' });
   }
@@ -7377,7 +7400,7 @@ app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
   }
   const c = chars[Math.floor(Math.random() * chars.length)];
 
-  const candidate = { nome, email, whatsapp, faculdade, periodo };
+  const candidate = { nome, email, whatsapp, faculdade, periodo, abordagem };
   const sessionId = 'sel-' + Date.now() + '-' + crypto.randomBytes(6).toString('hex');
   const token = jwt.sign(
     // feedbackIA vai assinado no token: é o /finish que o grava no log, e o
