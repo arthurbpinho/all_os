@@ -28,12 +28,39 @@ describe.skipIf(!URL_TESTE)('seletivo e comunidade no banco', () => {
       expect(await sel.listar()).toHaveLength(1);
     });
 
-    it('logs do seletivo são persistentes (demandas.md §24.0): sem poda e sem dedupe automático', async () => {
+    it('logs do seletivo são persistentes (demandas.md §24.0): sem poda', async () => {
       await sel.criar(log('a'), '11912345678');
       await db.pool.query(`UPDATE selecao_logs SET criado_em = now() - interval '16 days'`);
       expect(sel).not.toHaveProperty('podarVencidos');
-      expect(sel).not.toHaveProperty('ultimoDoWhatsapp');
       expect(await sel.listar()).toHaveLength(1);
+    });
+
+    it('bloqueio por WhatsApp (§25): só na janela, e o log com nova chance não conta', async () => {
+      const quinzeDias = 15 * 86400000;
+      await sel.criar(log('a'), '11912345678');
+      expect(await sel.ultimoBloqueioDoWhatsapp('11912345678', quinzeDias)).toBeGreaterThan(Date.now() - 60000);
+      expect(await sel.ultimoBloqueioDoWhatsapp('11900000000', quinzeDias)).toBeNull();
+
+      // Fora da janela, o log persiste mas não bloqueia.
+      await db.pool.query(`UPDATE selecao_logs SET criado_em = now() - interval '16 days'`);
+      expect(await sel.ultimoBloqueioDoWhatsapp('11912345678', quinzeDias)).toBeNull();
+
+      // Log recente com nova chance também não bloqueia; um sem a marca, sim.
+      await sel.criar(log('b'), '11912345678');
+      const concedido = await sel.concederNovaChance('b', { em: '2026-10-13T12:00:00.000Z', por: 'Admin' });
+      expect(concedido.novaChance).toEqual({ em: '2026-10-13T12:00:00.000Z', por: 'Admin' });
+      expect(await sel.ultimoBloqueioDoWhatsapp('11912345678', quinzeDias)).toBeNull();
+      await sel.criar(log('c'), '11912345678');
+      expect(await sel.ultimoBloqueioDoWhatsapp('11912345678', quinzeDias)).not.toBeNull();
+    });
+
+    it('nova chance é idempotente e devolve null para log inexistente', async () => {
+      await sel.criar(log('a'), '11912345678');
+      await sel.concederNovaChance('a', { em: '2026-10-13T12:00:00.000Z', por: 'Primeira' });
+      const segunda = await sel.concederNovaChance('a', { em: '2026-10-14T12:00:00.000Z', por: 'Segunda' });
+      expect(segunda.novaChance).toEqual({ em: '2026-10-13T12:00:00.000Z', por: 'Primeira' });
+      expect((await sel.listar())[0].novaChance.por).toBe('Primeira');
+      expect(await sel.concederNovaChance('nao-existe', { em: 'x', por: 'y' })).toBeNull();
     });
 
     it('pendentes com e sem batch, e fechar só os ainda pendentes', async () => {

@@ -2,7 +2,7 @@
 // dedup por WhatsApp (15 dias) e a invariante de segurança: nota/avaliação NUNCA
 // voltam ao candidato. Roda em modo demo (sem OPENAI_API_KEY), então a avaliação
 // server-side não gera nota — o que basta pra checar a estrutura e o não-vazamento.
-const { app, request, resetData, loginAs, authHeader } = require('./helpers');
+const { app, request, resetData, loginAs, authHeader, db } = require('./helpers');
 
 // Default de SELECAO_PASSWORD no server. Constante única: a senha é trocada de
 // tempos em tempos e antes ela estava repetida em três lugares deste arquivo.
@@ -177,21 +177,136 @@ describe('Processo Seletivo', () => {
     expect(hl.comment).toBe('abertura acolhedora');
   });
 
-  it('sem dedupe automático por WhatsApp (§24.0): o mesmo número pode se inscrever de novo', async () => {
-    // 1ª avaliação completa (gera o log com o WhatsApp).
-    const s1 = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
-    await request(app).post('/api/selecao/finish').set(authHeader(s1.body.token))
+  // Envelhece todos os logs do seletivo, na coluna e no documento (a tela lê o
+  // `timestamp` do documento; o bloqueio consulta a coluna).
+  async function envelhecerLogs(dias) {
+    const iso = new Date(Date.now() - dias * 86400000).toISOString();
+    await db.query(
+      `UPDATE selecao_logs SET criado_em = $1::timestamptz, doc = jsonb_set(doc, '{timestamp}', to_jsonb($1::text))`,
+      [iso],
+    );
+  }
+
+  async function fazerAvaliacao(campos = CAMPOS) {
+    const s = await request(app).post('/api/selecao/iniciar').send(campos);
+    expect(s.status).toBe(200);
+    await request(app).post('/api/selecao/finish').set(authHeader(s.body.token))
       .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
+  }
 
-    // Mesmo número (formatado diferente): SEM trava — o controle de acesso
-    // agora é feito pela troca da SELECAO_PASSWORD entre aberturas.
+  it('bloqueio de 15 dias por WhatsApp (§25): mesmo número, mesmo formatado diferente, é recusado', async () => {
+    await fazerAvaliacao();
+
     const again = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '11912345678' });
-    expect(again.status).toBe(200);
-    expect(again.body.token).toBeTruthy();
+    expect(again.status).toBe(403);
+    expect(again.body.daysLeft).toBe(15);
+    expect(again.body.error).toBe('Ainda faltam 15 dias para você tentar realizar a avaliação novamente');
+    expect(again.body.token).toBeUndefined();
 
-    // Número diferente também passa (contexto: qualquer WhatsApp válido entra).
+    // Número diferente passa.
     const other = await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, whatsapp: '(21) 99999-0000' });
     expect(other.status).toBe(200);
+  });
+
+  it('bloqueio vence em 15 dias: os logs são persistentes, mas o antigo não bloqueia mais', async () => {
+    await fazerAvaliacao();
+
+    await envelhecerLogs(14);
+    const umDia = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(umDia.status).toBe(403);
+    expect(umDia.body.daysLeft).toBe(1);
+    expect(umDia.body.error).toBe('Ainda falta 1 dia para você tentar realizar a avaliação novamente');
+
+    await envelhecerLogs(16);
+    const liberado = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(liberado.status).toBe(200);
+
+    // O log antigo continua na lista do avaliador, sem botão de nova chance.
+    const logs = await request(app).get('/api/selecao/logs').set(authHeader(await loginAs('admin')));
+    expect(logs.body).toHaveLength(1);
+    expect(logs.body[0].bloqueiaAte).toBeNull();
+  });
+
+  it('nova chance: avaliador libera e o mesmo WhatsApp passa a poder refazer UMA vez', async () => {
+    // 1ª avaliação → o WhatsApp fica bloqueado.
+    await fazerAvaliacao();
+    const bloqueado = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(bloqueado.status).toBe(403);
+
+    // O log que bloqueia diz até quando.
+    const avalToken = await loginAs('admin');
+    const logs = await request(app).get('/api/selecao/logs').set(authHeader(avalToken));
+    const logId = logs.body[0].id;
+    const ate = new Date(logs.body[0].bloqueiaAte).getTime() - new Date(logs.body[0].timestamp).getTime();
+    expect(Math.round(ate / 86400000)).toBe(15);
+
+    // O avaliador libera aquele log.
+    const chance = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`).set(authHeader(avalToken));
+    expect(chance.status).toBe(200);
+    expect(chance.body.novaChance.por).toBe('Admin');
+    expect(typeof chance.body.novaChance.em).toBe('string');
+
+    // Agora passa — e o log liberado continua lá, com a marca e sem bloquear.
+    const liberado = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(liberado.status).toBe(200);
+    const depois = await request(app).get('/api/selecao/logs').set(authHeader(avalToken));
+    const perdoado = depois.body.find((l) => l.id === logId);
+    expect(perdoado.novaChance).toEqual(chance.body.novaChance);
+    expect(perdoado.bloqueiaAte).toBeNull();
+
+    // É UMA chance, não um passe livre: a tentativa nova nasce sem a marca e
+    // volta a bloquear assim que for finalizada.
+    await request(app).post('/api/selecao/finish').set(authHeader(liberado.body.token))
+      .send({ messages: [{ role: 'user', content: 'de novo' }], durationSeconds: 10 });
+    const bloqueadoDeNovo = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(bloqueadoDeNovo.status).toBe(403);
+  });
+
+  it('nova chance: idempotente, 404 em log inexistente e fechada para aluno e anônimo', async () => {
+    await fazerAvaliacao();
+    const adminToken = await loginAs('admin');
+    const logId = (await request(app).get('/api/selecao/logs').set(authHeader(adminToken))).body[0].id;
+
+    const primeira = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`).set(authHeader(adminToken));
+    const segunda = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`).set(authHeader(adminToken));
+    expect(segunda.status).toBe(200);
+    // Clicar duas vezes não reescreve quem liberou nem quando.
+    expect(segunda.body.novaChance).toEqual(primeira.body.novaChance);
+
+    const inexistente = await request(app).post('/api/selecao/logs/sellog-nao-existe/nova-chance').set(authHeader(adminToken));
+    expect(inexistente.status).toBe(404);
+
+    const aluno = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`).set(authHeader(await loginAs('aluno')));
+    expect(aluno.status).toBe(403);
+    const anonimo = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`);
+    expect(anonimo.status).toBe(401);
+  });
+
+  it('avaliador (papel evaluator) também concede a nova chance', async () => {
+    const adminToken = await loginAs('admin');
+    await request(app).post('/api/admin/users').set(authHeader(adminToken))
+      .send({ username: 'aval1', name: 'Avaliador Um', role: 'evaluator', password: 'Aval@pass123' });
+    await fazerAvaliacao();
+    const avalToken = await loginAs('aval1', 'Aval@pass123');
+    const logId = (await request(app).get('/api/selecao/logs').set(authHeader(avalToken))).body[0].id;
+
+    const chance = await request(app).post(`/api/selecao/logs/${logId}/nova-chance`).set(authHeader(avalToken));
+    expect(chance.status).toBe(200);
+    expect(chance.body.novaChance.por).toBe('Avaliador Um');
+  });
+
+  // O token tem de sobreviver à prova inteira: ele nasce no /iniciar, mas o
+  // cronômetro de 2 horas (client/src/pages/ProcessoSeletivo.jsx) só começa no
+  // "Começar simulação", e a pessoa ainda pode pausar com a aba fechada. Se o TTL
+  // encostar nas 2 horas, o finish volta "Sessão expirada" e o atendimento
+  // inteiro se perde — por isso o número é testado, e não só comentado.
+  it('token do candidato dura mais que o cronômetro da prova (2 horas)', async () => {
+    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    expect(start.status).toBe(200);
+    const { exp, iat } = require('jsonwebtoken').decode(start.body.token);
+    const duracaoHoras = (exp - iat) / 3600;
+    expect(duracaoHoras).toBe(4);
+    expect(duracaoHoras).toBeGreaterThan(2);
   });
 
   it('export-all: exige o secret certo (M2M, sem JWT) e devolve log+avaliação em texto por candidato', async () => {

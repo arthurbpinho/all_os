@@ -1801,3 +1801,42 @@ Antes de fechar a análise, os pontos que a spec pediu para conferir:
 - **Onde o nome do candidato do seletivo está registrado.** `selecao_logs.doc.candidate.nome`
   (a rota do seletivo grava o formulário lá). É o valor a copiar para
   `character_records.user_name` quando o recorde é batido.
+
+## 25. Seletivo: bloqueio de 15 dias volta, com "dar mais uma chance" (2026-10-13)
+
+Decisão do dono (Arthur): o Processo Seletivo (`/processo-seletivo`) **tem**
+bloqueio de 15 dias por WhatsApp, e o avaliador pode liberar uma pessoa antes
+do prazo pelo botão **"Dar mais uma chance"** nos Logs de Avaliações. Isso
+desfaz a parte do commit `5d31e8d` que tirou o dedupe — a própria §24.0 já
+dizia que a janela de dedup "fica (é regra de negócio)"; só a exclusão do
+registro devia sair. Vale **só** para o seletivo.
+
+Também entra o cronômetro da prova em **2 horas** (era 1h), com o token do
+candidato em **4h** (prova + 2h de folga para ler instruções, pausar e enviar).
+As duas mudanças já rodavam no sistema antigo (`0ef4c81` e `e4ba033` do
+`arthurbpinho/all_os`) e foram portadas para cá.
+
+Como ficou, com os logs agora persistentes:
+
+- **A janela é explícita.** O bloqueio consulta só os logs dos últimos 15 dias
+  (`selecaoRepo.ultimoBloqueioDoWhatsapp`, índice `selecao_logs_whatsapp_idx`).
+  No sistema antigo a poda é que tirava o log velho da conta; sem poda, um
+  atendimento antigo bloquearia para sempre.
+- **Marca, não apaga.** A nova chance grava `novaChance: { em, por }` no `doc`
+  do log (sem mudança de schema). O atendimento e a nota continuam valendo
+  para o recrutador; o log só deixa de bloquear.
+- **É uma chance, não um passe livre.** A tentativa seguinte nasce sem a marca
+  e volta a bloquear.
+- **Idempotente.** Clicar duas vezes devolve a concessão que já existe, sem
+  trocar quem liberou nem quando.
+- **O botão só aparece onde há o que liberar.** `GET /api/selecao/logs` devolve
+  `bloqueiaAte` (calculado na leitura, não gravado): `null` para log com nova
+  chance ou com mais de 15 dias.
+
+Os 15 dias são **só** a janela do bloqueio. As avaliações em si não somem mais:
+a poda de 15 dias existia para contornar os travamentos do JSON, e com o banco
+todo dado é persistente (§24.0).
+
+Consequência aceita pelo dono: os logs do seletivo do sistema antigo **não** vão
+para o banco (§22.1, reafirmado em 2026-10-13). Então, na virada, quem fez a
+prova no sistema antigo nos últimos 15 dias não fica bloqueado no novo.

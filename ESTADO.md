@@ -241,7 +241,7 @@ npm run build          # cliente
 | **Dados de aluno são persistentes** — sem poda de `logs`/`duels`/`selecao_logs` | §24.0 |
 | **MMR por critério com reset one-shot** no deploy da §24; recordes 👑 ficam | §24.1–§24.4 |
 | **Alan avisa os alunos presencialmente** — sem aviso in-app do reset | §24 grilling |
-| **Sem dedupe automático por WhatsApp** no seletivo — admin controla via troca de senha | §24.0 |
+| **Bloqueio de 15 dias por WhatsApp** só no seletivo, com botão "Dar mais uma chance" para o avaliador; prova de 2h (substitui a linha "sem dedupe" da §24.0) | §25 |
 | **Deploy pela `main` do fork** — não vamos mandar para o `arthurbpinho/all_os` | 2026-09-24 |
 | **`.env` fica como está** — não vamos migrar variáveis para o admin nesta rodada | 2026-09-24 |
 

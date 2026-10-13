@@ -39,8 +39,11 @@ const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos pa
 
 // Persistência da sessão em andamento (sobrevive a refresh/saída da página).
 const PS_KEY = 'allos_ps_session';
-// Tempo máximo da avaliação: 60 min de relógio, contados a partir do início.
-const SESSION_LIMIT_MS = 60 * 60 * 1000;
+// Tempo máximo da avaliação: 2 horas de relógio, contadas a partir do início.
+// É tempo de RELÓGIO (não de uso), derivado do `startedAt` guardado na sessão —
+// quem já está no meio da prova só passa a valer a régua nova quando recarregar
+// a página (o bundle antigo segue em memória com o limite antigo).
+const SESSION_LIMIT_MS = 2 * 60 * 60 * 1000;
 const SESSION_WARN_MS = 5 * 60 * 1000; // fica em alerta nos últimos 5 min
 
 function fmtRemaining(ms) {
@@ -113,7 +116,7 @@ export default function ProcessoSeletivo() {
   const [sessionLimit, setSessionLimit] = useState(false);
   const [highlightTarget, setHighlightTarget] = useState(null); // { idx }
   const [highlightDraft, setHighlightDraft] = useState('');
-  // Cronômetro (60 min) — tempo restante em ms, derivado de startedAt.
+  // Cronômetro (2 horas) — tempo restante em ms, derivado de startedAt.
   const [remainingMs, setRemainingMs] = useState(null);
 
   const endRef = useRef(null);
@@ -160,7 +163,7 @@ export default function ProcessoSeletivo() {
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Cronômetro de 60 min a partir de startedAt (relógio real — conta mesmo se a
+  // Cronômetro de 2 horas a partir de startedAt (relógio real — conta mesmo se a
   // pessoa sair e voltar). Ao zerar, envia a avaliação automaticamente.
   useEffect(() => {
     if (step !== 'chat' || !startedAt) { setRemainingMs(null); return; }
@@ -230,7 +233,7 @@ export default function ProcessoSeletivo() {
       setToken(data.token);
       setCharacter(data.character);
       // Não entra direto no chat: mostra as instruções primeiro. O cronômetro de
-      // 60 min só começa quando o candidato clica em "Começar" (em beginChat).
+      // as 2 horas só começam quando o candidato clica em "Começar" (em beginChat).
       setStep('instrucoes');
       setStarting(false);
     } catch (err) {
@@ -501,7 +504,7 @@ export default function ProcessoSeletivo() {
             </li>
             <li>
               <span className="selecao-instrucoes-ico">⏱</span>
-              <div>Você tem <strong>60 minutos</strong> no total. Ao esgotar o tempo, a avaliação é enviada automaticamente.</div>
+              <div>Você tem <strong>2 horas</strong> no total. Ao esgotar o tempo, a avaliação é enviada automaticamente.</div>
             </li>
           </ul>
 
@@ -556,7 +559,7 @@ export default function ProcessoSeletivo() {
             {remainingMs != null && (
               <div
                 className={`timer-chip ${remainingMs <= SESSION_WARN_MS ? 'limit' : ''}`}
-                title="Tempo restante da avaliação (60 min). Ao zerar, é enviada automaticamente."
+                title="Tempo restante da avaliação (2 horas). Ao zerar, é enviada automaticamente."
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
                 <span>{fmtRemaining(remainingMs)}</span>
@@ -584,7 +587,7 @@ export default function ProcessoSeletivo() {
 
         {timeUp && (
           <div className="alert" style={{ background: 'var(--terra-tint)', color: 'var(--terra)' }}>
-            Tempo esgotado (60 min). Sua avaliação está sendo enviada automaticamente…
+            Tempo esgotado (2 horas). Sua avaliação está sendo enviada automaticamente…
           </div>
         )}
 
