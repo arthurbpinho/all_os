@@ -1513,6 +1513,24 @@ select option { background: var(--cream); color: var(--ink); }
 /* Duelo: o rótulo do aluno antes do conjunto dele. A letra é o que liga as
    qualidades à nota da coluna, então ela precisa ficar colada nelas. */
 .criteria-parte-lado { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+
+/* Faixas por critério na visão do ALUNO (CriteriaFaixasAluno): só a inicial de
+   cada qualidade — verde preenchido (plena), cinza (parcial), riscada (ausente).
+   Sem legenda, de propósito. */
+.faixas-aluno { margin-bottom: 16px; }
+.faixas-aluno-titulo { font-size: 12px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6px; }
+.faixas-aluno-crit { padding: 8px 0; border-top: 1px solid var(--line); }
+.faixas-aluno-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.faixas-aluno-nome { font-size: 13.5px; font-weight: 600; color: var(--marrs-deep); }
+.faixas-aluno-linha { font-size: 12px; line-height: 1.45; color: var(--ink-soft); margin-top: 3px; }
+.faixas-aluno-iniciais { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.faixa-ini {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 6px; font-size: 12px; font-weight: 700; line-height: 1;
+}
+.faixa-ini.plena { background: var(--success, #1A7A6D); color: var(--on-accent, #fff); }
+.faixa-ini.parcial { background: var(--sand-2, var(--sand)); color: var(--ink-soft); }
+.faixa-ini.ausente { background: transparent; color: var(--muted); text-decoration: line-through; }
 .criteria-parte-lado-nome { font-size: 11px; font-weight: 700; color: var(--marrs-deep); min-width: 58px; }
 
 /* ──── Resultado da avaliação ──── */

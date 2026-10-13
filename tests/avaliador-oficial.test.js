@@ -6,10 +6,11 @@
 //      que o código preenche são exatamente os que o prompt usa. Um slot com
 //      nome trocado não daria erro nenhum — chegaria ao modelo como `{{ASSIM}}`,
 //      e a avaliação sairia sem o material.
-//   2. O SIGILO: nota e feedback por CRITÉRIO são de supervisor e admin. Aluno
-//      (interno, externo) e visitante têm nota total + feedback qualitativo. As
-//      análises são escritas com o gabarito do caso à vista, então isto é
-//      vazamento de gabarito, não preferência de UI.
+//   2. O SIGILO: a análise escrita por CRITÉRIO é de supervisor e admin. Aluno
+//      (interno, externo) e visitante têm nota total + feedback qualitativo e,
+//      do próprio atendimento, só os NÍVEIS das cinco qualidades (decisão do
+//      dono, 2026-10-13). As análises são escritas com o gabarito do caso à
+//      vista, então isto é vazamento de gabarito, não preferência de UI.
 //   3. A INTEGRIDADE da nota: o cliente devolve só a chave (`evalId`) da
 //      avaliação, e nota/notas/texto saem do arquivo do servidor. Chave de
 //      outro aluno e chave já usada são recusadas.
@@ -22,9 +23,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR } = require('./helpers');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, DATA_DIR, db } = require('./helpers');
 const aval = require('../server/avaliador-pipeline');
 const oficial = require('../server/avaliacao-oficial');
+const acessos = require('../server/acessos');
 
 // Resultado de pipeline no formato que o finishPipeline devolve — o suficiente
 // para os pedaços que este arquivo testa (nota, partes, corpo, missão).
@@ -353,14 +355,33 @@ describe('avaliador oficial v34 — sigilo do detalhe por critério', () => {
     expect(JSON.stringify(meu)).not.toContain('GABARITO_SECRETO');
   });
 
-  it('GET /api/logs/:id/criterios: 403 para aluno e visitante, 200 para supervisor e admin', async () => {
+  it('GET /api/logs/:id/criterios: o dono (aluno) recebe só os níveis; outro aluno e visitante não veem', async () => {
     const { logId, aluno } = await logComDetalhe();
 
-    const comoAluno = await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(aluno));
-    expect(comoAluno.status).toBe(403);
+    // O log do aluno avisa que há níveis por critério, sem a chave do arquivo.
+    const meu = (await request(app).get('/api/logs').set(authHeader(aluno))).body.find((l) => l.id === logId);
+    expect(meu.temCriterios).toBe(true);
+    expect(meu).not.toHaveProperty('evalPartsId');
 
+    const comoAluno = await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(aluno));
+    expect(comoAluno.status).toBe(200);
+    expect(comoAluno.body).toMatchObject({ disponivel: true, aluno: true });
+    expect(comoAluno.body.partes).toHaveLength(8);
+    // Exatamente: critério, descrição e os cinco níveis. Nada da análise, da
+    // nota interna, da missão ou do modelo.
+    expect(comoAluno.body.partes[0]).toEqual({
+      num: 1, nome: 'Critério 1', linhaCurta: 'o que o critério 1 mede',
+      qualidades: { integridade: 'plena', autoria: 'parcial', potencia: 'parcial', calibracao: 'plena', excepcionalidade: 'ausente' },
+    });
+    expect(Object.keys(comoAluno.body).sort()).toEqual(['aluno', 'disponivel', 'partes']);
+    expect(JSON.stringify(comoAluno.body)).not.toContain('GABARITO_SECRETO');
+    expect(JSON.stringify(comoAluno.body)).not.toContain('gpt-5.6-luna');
+
+    // Log de outra pessoa é o mesmo que log inexistente.
+    const outro = await loginAs('aluno2');
+    expect((await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(outro))).status).toBe(404);
     const visitor = await loginVisitor();
-    expect((await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(visitor))).status).toBe(403);
+    expect((await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(visitor))).status).toBe(404);
 
     const prof = await loginAs('prof');
     const comoProf = await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(prof));
@@ -372,6 +393,77 @@ describe('avaliador oficial v34 — sigilo do detalhe por critério', () => {
 
     const admin = await loginAs('admin');
     expect((await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(admin))).status).toBe(200);
+  });
+
+  it('com "Notas por critério e gráfico" bloqueado, o aluno não recebe nem os níveis', async () => {
+    const { logId, aluno } = await logComDetalhe();
+    const admin = await loginAs('admin');
+    const matriz = acessos.matrizPadrao();
+    matriz.graficoCriterios.therapist = false;
+    await request(app).put('/api/admin/acessos').set(authHeader(admin)).send({ matriz });
+
+    const meu = (await request(app).get('/api/logs').set(authHeader(aluno))).body.find((l) => l.id === logId);
+    expect(meu).not.toHaveProperty('temCriterios');
+    const r = await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(aluno));
+    expect(r.status).toBe(403);
+    expect(r.body.funcionalidadeBloqueada).toBe('graficoCriterios');
+    // A equipe não é afetada pela matriz.
+    expect((await request(app).get(`/api/logs/${logId}/criterios`).set(authHeader(admin))).body.partes[0].analise).toContain('GABARITO_SECRETO_1');
+  });
+
+  it('o pós-atendimento já avisa o aluno de que há níveis por critério', async () => {
+    const aluno = await loginAs('aluno');
+    const id = oficial.salvarDetalhe({ dono: '3', version: 'v34', result: resultadoFake() });
+    const saved = await request(app).post('/api/logs').set(authHeader(aluno)).send({
+      type: 'freeplay', mode: 'training', itemId: 'fp-test-1', itemTitle: 'Sofia Test',
+      durationSeconds: 60, messages: [{ role: 'user', content: 'oi' }], evalId: id,
+    });
+    expect(saved.body.temCriterios).toBe(true);
+    expect(saved.body.evalPartsId).toBeNull();
+  });
+
+  it('GET /api/duel/:id/criterios: quem duelou vê só os níveis do próprio lado', async () => {
+    const r = resultadoFake();
+    const ladoA = { integridade: 'plena', autoria: 'plena', potencia: 'parcial', calibracao: 'parcial', excepcionalidade: 'ausente' };
+    const ladoB = { integridade: 'ausente', autoria: 'parcial', potencia: 'parcial', calibracao: 'ausente', excepcionalidade: 'ausente' };
+    r.partes = r.partes.map((p) => ({ ...p, nota: null, notas: { A: 7, B: 5 }, qualidades: { A: ladoA, B: ladoB }, incluido: { A: true, B: true } }));
+    r.comparativo = { notas: { A: 70, B: 50 }, winner: 'A' };
+    const evalId = oficial.salvarDetalhe({ dono: '3', version: 'v34-duelo', result: r });
+    const { criarRepoDuelos } = require('../server/repos/duelos');
+    await criarRepoDuelos(db.getPool()).criar({
+      id: 'duel-t1', token: 'tok-t1', status: 'completed', mode: 'training', createdAt: new Date().toISOString(),
+      character: { id: 'fp-test-1', name: 'Sofia Test' },
+      challenger: { userId: '3', name: 'Aluno A', state: 'submitted' }, opponent: { userId: '5', name: 'Aluno B', state: 'submitted' },
+      result: { winner: 'challenger', scoreChallenger: 70, scoreOpponent: 50, evaluation: 'texto comparativo', evalPartsId: evalId },
+    });
+
+    const desafiante = await loginAs('aluno'); // id 3 → lado A
+    const visto = (await request(app).get('/api/duel/duel-t1').set(authHeader(desafiante))).body;
+    expect(visto.result.temCriterios).toBe(true);
+    expect(visto.result).not.toHaveProperty('evalPartsId');
+    const a = await request(app).get('/api/duel/duel-t1/criterios').set(authHeader(desafiante));
+    expect(a.status).toBe(200);
+    expect(a.body.partes[0].qualidades).toEqual(ladoA);
+    expect(JSON.stringify(a.body)).not.toContain('GABARITO_SECRETO');
+    expect(a.body).not.toHaveProperty('comparativo');
+
+    const b = await request(app).get('/api/duel/duel-t1/criterios').set(authHeader(await loginAs('aluno2'))); // id 5 → lado B
+    expect(b.body.partes[0].qualidades).toEqual(ladoB);
+
+    const visitor = await loginVisitor();
+    expect((await request(app).get('/api/duel/duel-t1/criterios').set(authHeader(visitor))).status).toBe(404);
+    const prof = await request(app).get('/api/duel/duel-t1/criterios').set(authHeader(await loginAs('prof')));
+    expect(prof.body.partes[0].analise).toContain('GABARITO_SECRETO_1');
+  });
+
+  it('detalheParaAluno: no duelo, só o lado pedido; nível desconhecido não passa', () => {
+    const r = resultadoFake();
+    r.partes[0].qualidades = { A: { integridade: 'plena', autoria: 'ausente' }, B: { integridade: 'ausente', autoria: 'plena' } };
+    r.partes[1].qualidades = { integridade: 'talvez', autoria: 'plena' };
+    const doLadoB = oficial.detalheParaAluno({ partes: [r.partes[0]] }, 'B');
+    expect(doLadoB.partes[0].qualidades).toEqual({ integridade: 'ausente', autoria: 'plena' });
+    const individual = oficial.detalheParaAluno({ partes: [r.partes[1]] });
+    expect(individual.partes[0].qualidades).toEqual({ autoria: 'plena' });
   });
 
   it('log sem avaliador oficial responde "indisponível", não erro', async () => {

@@ -358,8 +358,35 @@ function detalheParaSupervisor(detalhe) {
   };
 }
 
+// O que o ALUNO vê do detalhe por critério (decisão do dono, 2026-10-13): o
+// critério, a descrição curta e o NÍVEL de cada uma das cinco qualidades. Não
+// vai a análise em prosa (escrita com o Bloco 1, o gabarito, à vista), nem a
+// nota interna, a missão, o comparativo ou dados do modelo. No duelo, `lado`
+// ('A' desafiante, 'B' oponente) escolhe só o conjunto do próprio aluno.
+const QUALIDADES_DO_ALUNO = ['integridade', 'autoria', 'potencia', 'calibracao', 'excepcionalidade'];
+const NIVEIS_DO_ALUNO = new Set(['plena', 'parcial', 'ausente']);
+
+function detalheParaAluno(detalhe, lado = null) {
+  if (!detalhe) return null;
+  const niveis = (q) => {
+    if (!q || typeof q !== 'object') return null;
+    const out = {};
+    for (const k of QUALIDADES_DO_ALUNO) if (NIVEIS_DO_ALUNO.has(q[k])) out[k] = q[k];
+    return Object.keys(out).length ? out : null;
+  };
+  return {
+    partes: (detalhe.partes || []).map((p) => ({
+      num: p.num,
+      nome: p.nome,
+      linhaCurta: p.linhaCurta || '',
+      qualidades: niveis(lado ? (p.qualidades || {})[lado] : p.qualidades),
+    })),
+  };
+}
+
 // Papéis que podem ver nota e feedback POR CRITÉRIO. Aluno interno, aluno
-// externo e visitante veem nota total + feedback qualitativo, e nada além.
+// externo e visitante veem nota total + feedback qualitativo e, do próprio
+// atendimento, só os níveis das qualidades (detalheParaAluno).
 function podeVerCriterios(role) {
   return role === 'supervisor' || role === 'admin';
 }
@@ -414,6 +441,7 @@ module.exports = {
   anexar,
   apagarDetalhe,
   detalheParaSupervisor,
+  detalheParaAluno,
   podeVerCriterios,
   podarOrfaos,
 };

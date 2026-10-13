@@ -5,6 +5,7 @@ import { loadActiveSession, saveLocal, clearActiveSession } from '../sessionStor
 import { buildDirectEvaluationPrompt, cleanEvaluationForStudent } from '../prompts';
 import ScoreBadge from '../components/ScoreBadge';
 import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
+import CriteriaFaixasAluno from '../components/CriteriaFaixasAluno';
 import { PatientAvatarButton } from '../components/PatientAvatar';
 import LogActions from '../components/LogActions';
 import NeuroTestSelector from '../components/NeuroTestSelector';
@@ -801,7 +802,7 @@ export default function EchoSession({ user, sessionType }) {
       // A nota exibida é a calculada em código no backend (saved.score), não a
       // parseada do texto. Só faz override se o backend devolveu nota numérica.
       if (saved && Number.isFinite(saved.score)) setEvalScore(saved.score);
-      if (saved && saved.criteriaScores) setCriterios({ scores: saved.criteriaScores, names: saved.criteriaNames || null });
+      if (saved && saved.criteriaScores) setCriterios({ scores: saved.criteriaScores, names: saved.criteriaNames || null, logId: saved.id, temCriterios: !!saved.temCriterios });
       if (saved && saved.mmr) setMmrResult(saved.mmr);
       // Neuro: comparação da bateria (nota dos testes + resultados) devolvida
       // pela correção — só aparece agora, no fim.
@@ -997,6 +998,7 @@ export default function EchoSession({ user, sessionType }) {
                 criteriaScores={criterios.scores}
                 labels={labelsForCriteria(criterios.scores, sessionType, criterios.names)}
               />
+              {criterios.temCriterios && <CriteriaFaixasAluno logId={criterios.logId} />}
               <p style={{ margin: 0, fontSize: 12.5, color: 'var(--ink-soft)' }}>
                 Notas desta sessão. A média de todas as suas sessões fica no Perfil.
               </p>
