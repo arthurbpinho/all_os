@@ -1897,3 +1897,28 @@ de ids de conta avançada em 50, para um cadastro no sistema novo nunca pegar o
 id de um cadastro feito no antigo durante a virada (a migração também recusa
 juntar duas pessoas no mesmo id). O serviço de teste (`stellar-enjoyment`) passa
 a publicar o branch de backup, sem `DATABASE_URL`: um app só fala com o banco.
+
+## 27. Critérios da avaliação pela régua atual; faixas na própria lista (2026-10-13)
+
+Decisão do dono. **O gráfico e a lista de critérios da avaliação mostram sempre
+os critérios de "Critérios da régua"**: renomeou lá, muda em toda sessão.
+
+- O servidor anexa a cada log com notas a lista `criterios` resolvida pela régua
+  atual (`criteriosPerfil.criteriosDoLog`), com a mesma identidade do gráfico do
+  perfil: o nome gravado na avaliação (renomeado com "manter histórico" chega
+  pelo apelido); log sem nome gravado cai na posição da régua. Critério que saiu
+  da régua — ou zerado com outro nome — não aparece. As tabelas de nomes fixas
+  do front (`V18_CRITERIA`, `V15_CRITERIA`) ficam só para avaliadores antigos,
+  que não têm régua no banco (neuro, v15/v16, v18.25).
+- Os 91 logs migrados do sistema antigo não tinham `criteria_names`; foram
+  preenchidos com os nomes da época (iguais à régua v34 atual, posição por
+  posição — conferido nos arquivos de detalhe). Ponto de volta no Neon:
+  `antes-nomes-criterios-2026-10-13T2012Z`.
+- **Uma lista só embaixo do radar**: nome, faixas (iniciais) e nota na mesma
+  linha, a descrição embaixo. Sai o botão "Ver análise por critério" e a lista
+  separada de faixas. A equipe vê, na mesma linha, a análise em prosa (e a meta
+  do avaliador e a missão acima da lista); o aluno, só as iniciais e a descrição
+  (§26 do sigilo: nada da análise sai para ele). O duelo, que não tem gráfico,
+  segue com os blocos próprios.
+- `GET /api/criterios/nomes` (`{ id: nome }`): o "MMR por critério" do perfil e
+  o "D por critério" do seletivo passam a mostrar o nome no lugar de "Crit. N".

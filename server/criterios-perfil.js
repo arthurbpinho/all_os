@@ -83,4 +83,43 @@ function mediasPorCriterio(logs, { modos = MODOS_PADRAO, nomesDaRegua, apelidos 
   return { criterios, sessoes };
 }
 
-module.exports = { MODOS, MODO_KEYS, MODOS_PADRAO, normalizarModos, modoDoLog, chaveDoNome, mediasPorCriterio };
+// Critérios de UM atendimento com os nomes ATUAIS da régua (demandas.md §27): o
+// gráfico da avaliação mostra sempre o que está em "Critérios da régua" — mudou
+// lá, muda aqui. A identidade é a mesma do gráfico do perfil: o nome gravado na
+// avaliação (um critério renomeado com "manter histórico" chega pelo apelido);
+// log sem nome gravado cai na posição da régua. Nota de um critério que saiu da
+// régua — ou que foi zerado com outro nome — não aparece.
+//
+// `regua`: os critérios ATIVOS da régua do log ([{ id, nome, ordem, linhaCurta }]).
+// Devolve [{ num, id, nome, linhaCurta, nota }] na ordem da régua, ou null quando
+// o log não tem notas ou a régua não está no banco (neuro, avaliadores antigos):
+// aí a tela segue com os nomes que conhece.
+function criteriosDoLog(log, { regua, apelidos = {} } = {}) {
+  const notas = log && log.criteriaScores;
+  if (!notas || typeof notas !== 'object' || !Array.isArray(regua) || !regua.length) return null;
+  const porNome = new Map(regua.map((c) => [chaveDoNome(c.nome), c]));
+  const porOrdem = new Map(regua.map((c) => [String(c.ordem), c]));
+  const nomes = log.criteriaNames && typeof log.criteriaNames === 'object' ? log.criteriaNames : null;
+  const vistos = new Set();
+  const out = [];
+  for (const num of Object.keys(notas)) {
+    const nota = Number(notas[num]);
+    if (!Number.isFinite(nota)) continue;
+    let c = null;
+    if (nomes) {
+      const gravado = nomes[num];
+      if (typeof gravado !== 'string' || !gravado.trim()) continue;
+      const atual = apelidos[chaveDoNome(gravado)] || gravado;
+      c = porNome.get(chaveDoNome(atual)) || null;
+    } else {
+      c = porOrdem.get(String(Number(num))) || null;
+    }
+    if (!c || vistos.has(c.id)) continue;
+    vistos.add(c.id);
+    out.push({ num: String(num), id: c.id, nome: c.nome, linhaCurta: c.linhaCurta || '', nota, ordem: c.ordem });
+  }
+  out.sort((a, b) => a.ordem - b.ordem);
+  return out.length ? out.map(({ ordem, ...resto }) => resto) : null;
+}
+
+module.exports = { MODOS, MODO_KEYS, MODOS_PADRAO, normalizarModos, modoDoLog, chaveDoNome, mediasPorCriterio, criteriosDoLog };

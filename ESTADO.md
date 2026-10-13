@@ -331,8 +331,8 @@ blocos colados, e como o dotenv faz a **última** chave vencer, o dev rodava com
   caminho está escrito e testado, e liga com `VISITOR_TRI=1`.
 - **Comunidade**: retenção (agora que é persistente por §24.0) e moderação
   seguem sem definição avançada — decidir eventualmente.
-- **Rótulo dos critérios** no perfil ainda é `Crit. <id>` — precisa de rota
-  pública que devolva os nomes ativos.
+- ~~**Rótulo dos critérios** no perfil ainda é `Crit. <id>`~~ — resolvido em
+  2026-10-13 (`GET /api/criterios/nomes`, `demandas.md` §27).
 - **`ADMIN_INITIAL_PASSWORD`** não vai para o Railway (fail-closed só ativa
   se o banco não tiver admin nenhum, o que não é o caso).
 
