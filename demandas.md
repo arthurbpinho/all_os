@@ -1885,3 +1885,15 @@ igual ao antigo.
 
 **Depois da carga, reiniciar o app**: catálogo, configurações e sidequests ficam
 em memória (VIRADA.md §0).
+
+**Virada (decisão do dono, 13/10, noite).** Sem troca de DNS: o código com banco
+entra no `main` do `arthurbpinho/all_os`, que o serviço Railway do domínio já
+publica. Antes do push: branch `sistema-antigo-json` com o `main` antigo; última
+carga; as variáveis que o código novo precisa (as 13 que só o serviço de teste
+tinha, `DATABASE_URL` inclusive) copiadas para o serviço do domínio; os prompts
+atualizados escritos no volume dele (a semeadura do boot trocaria os do banco
+pelos antigos do volume — os antigos ficam num `.tar.gz` no volume); a sequência
+de ids de conta avançada em 50, para um cadastro no sistema novo nunca pegar o
+id de um cadastro feito no antigo durante a virada (a migração também recusa
+juntar duas pessoas no mesmo id). O serviço de teste (`stellar-enjoyment`) passa
+a publicar o branch de backup, sem `DATABASE_URL`: um app só fala com o banco.

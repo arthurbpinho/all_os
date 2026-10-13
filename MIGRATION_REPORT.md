@@ -3,8 +3,10 @@
 **Data:** 2026-10-13. **Estado:** executada na produção do Neon com autorização do
 dono — contas, catálogo, recordes, conquistas, sidequests e feedback às 17:20 UTC
 (§10); logs de atendimento e duelo às 18:03 UTC (§11). App novo verificado ponta a
-ponta com contas reais (§12). **Falta a virada do domínio**, com uma última rodada
-(§8, virada). Decisões em `demandas.md` §25 e §26.
+ponta com contas reais (§12). **Falta a virada**, com uma última rodada
+(§8, virada) — sem troca de DNS: o código com banco entra no `main` do
+`arthurbpinho/all_os`, que já é o que o domínio publica. Decisões em
+`demandas.md` §25 e §26.
 
 > Os repositórios são públicos: ids de infraestrutura (projeto e endpoints do
 > Neon, projeto/serviço da Railway) **não** estão aqui. Os comandos usam as
@@ -235,34 +237,36 @@ PGOPTIONS='-c default_transaction_read_only=on' psql "$(cat ~/.neon-url)" -X -A 
 DATABASE_URL="$(cat ~/.neon-url)" node scripts/migrar-delta.js $B/volume-$T/data --alvo=$EP_PRODUCAO   # 0 novos / 0 atualizados
 ```
 
-### Virada do domínio `treinamento.allos.org.br`
+### Virada (sem troca de DNS)
 
-O DNS está no **Cloudflare** (proxy laranja). Hoje o CNAME `treinamento` aponta
-para o destino do serviço antigo na Railway; o serviço novo recebe um destino
-próprio. Ordem, com alguns minutos fora do ar entre os passos B e C:
+Decisão do dono: a produção é o `main` do `arthurbpinho/all_os`, que o serviço
+Railway do domínio (`all_os`) já publica. Ordem:
 
-- **A.** Passos 2 a 7 acima (última carga antes de tirar o domínio do antigo).
-- **B.** Railway: tirar o domínio do serviço antigo e pôr no novo, anotando o
-  destino CNAME que a Railway devolver:
-  ```bash
-  (cd $B/rw-antigo && railway domain delete treinamento.allos.org.br)
-  (cd $B/rw-novo && railway domain treinamento.allos.org.br --port 8080)
-  ```
-- **C.** Cloudflare: trocar o CNAME `treinamento` para o destino novo (proxy
-  ligado). Esperar a Railway mostrar o domínio verificado e com certificado
-  (`railway domain status treinamento.allos.org.br`).
-- **D.** Repetir os passos 2 a 7: pega o que o sistema antigo gravou entre A e B
-  (depois de B ele não recebe mais ninguém).
-- **E.** VIRADA.md §5: como admin, abrir `/api/admin/diagnostico-ip` pelo domínio.
-  Se `conexaoEhCloudflare: false`, definir `CONFIAR_CF_CONNECTING_IP=sempre` no
-  serviço novo.
-- **F.** VIRADA.md §6: conferência pelo domínio.
-
-O serviço antigo continua de pé, sem domínio, com o volume intacto, e o `main` do
-`arthurbpinho/all_os` não foi tocado. Voltar = devolver o domínio a ele.
-
-**Se precisar voltar a carga:** cada carga tem a sua branch `antes-…` no Neon (ou
-o point-in-time restore), e as fotos trocadas estão em `fotos-substituidas-…tar.gz`.
+- **A.** `git push <arthurbpinho> e4ba033:refs/heads/sistema-antigo-json` — o
+  sistema antigo vira backup.
+- **B.** Passos 2 a 4 e 7 acima: última carga, com o sistema antigo ainda no ar.
+- **C.** Volume do serviço do domínio: guardar `/data/prompts` em
+  `/data/prompts-sistema-antigo-<data>.tar.gz` e escrever nele os prompts do banco
+  (`prompt_arquivos`), conferindo o sha256 de cada um contra o `semente_hash`. Sem
+  isso, a semeadura do boot trocaria os prompts do banco pelos antigos do volume.
+  (O sistema antigo guarda os prompts em memória: trocar o arquivo não o afeta.)
+- **D.** Copiar para o serviço do domínio as variáveis que só o serviço de teste
+  tinha (`railway variable set … --stdin --skip-deploys`, valor nunca na tela).
+- **E.** Avançar a sequência de ids de conta em 50
+  (`setval(pg_get_serial_sequence('users','id'), last_value + 50)`).
+- **F.** Serviço de teste: `railway variable delete DATABASE_URL --skip-deploys` e
+  `railway service source connect --repo arthurbpinho/all_os --branch sistema-antigo-json`.
+  A partir daí só um app fala com o banco.
+- **G.** `git merge -s ours <main antigo>` no branch novo (o código novo já tem as
+  duas funções dos commits que só o `main` antigo tinha) e push para o `main` do
+  `arthurbpinho/all_os`: a Railway publica sozinha. No log do boot **não** pode
+  aparecer `[prompts] atualizado(s) pela semente` nem `[catalogo] semeado(s)`.
+- **H.** Repetir os passos 2, 4 e 7 com o volume congelado (o código antigo parou):
+  traz o que entrou no sistema antigo entre B e G. Reiniciar se catálogo,
+  configurações ou sidequests mudarem.
+- **I.** VIRADA.md §5 e §6: como admin, `/api/admin/diagnostico-ip` pelo domínio
+  (se `conexaoEhCloudflare: false`, `CONFIAR_CF_CONNECTING_IP=sempre`); login,
+  Minhas Sessões, Ranking, seletivo.
 
 ## 9. Pendências e cuidados
 
@@ -270,9 +274,8 @@ o point-in-time restore), e as fotos trocadas estão em `fotos-substituidas-…t
   é o mesmo que o sistema antigo vai dar ao próximo cadastro.
 - Quem estiver no meio de uma sessão no sistema antigo na hora da virada perde a
   conversa (sessões em andamento não migram).
-- O merge no `PauloHenriqueL/all_os` depende de quem tem permissão de escrita lá.
-  Até ele, o serviço novo roda o código do branch `feat/seletivo-bloqueio-nova-chance`
-  por `railway up`, e um push no `main` de lá redeploya por cima.
+- A produção é o `main` do `arthurbpinho/all_os`; o fork do Paulo deixa de ser o
+  que vai ao ar (o PR #2 de lá tem o mesmo código).
 - Depois da virada: remover a chave SSH `allos-migracao-arthur` da conta Railway,
   apagar as branches de teste do Neon e os `prod-*.json` / `teste-*.json` de
   `~/allos-backups/` (têm hash de senha e dados pessoais); rotacionar o

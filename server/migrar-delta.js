@@ -200,6 +200,19 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
       validos.push(u);
     }
     const idsFinais = new Set([...banco.keys(), ...idsJson]);
+    // O mesmo id com OUTRA pessoa no banco: alguém se cadastrou no app novo e o
+    // antigo deu o mesmo id a outra conta. Não se mistura: a conta do arquivo e
+    // tudo que pende dela (logs, conquistas, recordes…) vão para os rejeitados.
+    // O "-<id>" é a renomeação de colisão de caixa — a mesma pessoa.
+    const idsConflitantes = new Set();
+    for (const u of validos) {
+      const atual = banco.get(String(u.id));
+      if (!atual || atual.excluido_em) continue;
+      const nomeArq = norm(u.username);
+      if (atual.ul !== nomeArq && atual.ul !== `${nomeArq}-${u.id}`) idsConflitantes.add(String(u.id));
+    }
+    const donoValido = (id) => idsFinais.has(String(id)) && !idsConflitantes.has(String(id));
+    const semDono = (id) => (idsConflitantes.has(String(id)) ? `conta ${id} em conflito de id (é outra pessoa no banco)` : 'conta inexistente');
 
     // Unicidade sem caixa de username e e-mail no conjunto FINAL. O dono de cada
     // nome/endereço parte do banco; conta do JSON só toma o que estiver livre.
@@ -213,6 +226,10 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
     for (const u of [...validos].sort((a, b) => Number(a.id) - Number(b.id))) {
       const id = String(u.id);
       const atual = banco.get(id);
+      if (idsConflitantes.has(id)) {
+        rejeitar('contas', 'users.json', id, 'o id já pertence a OUTRA conta no banco (username diferente) — não misturado', { id });
+        continue;
+      }
       if (atual && atual.excluido_em) {
         rel.avisos.push(`Conta ${id}: excluída no sistema novo — não foi reativada nem alterada.`);
         continue;
@@ -342,7 +359,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
     const contadores = [];
     for (const [userId, c] of Object.entries(objeto(A['counters.json']))) {
       if (userId === '__meta') continue;
-      if (!ehConta(userId) || !idsFinais.has(userId)) { rejeitar('contadores', 'counters.json', userId, 'conta inexistente', { userId }); continue; }
+      if (!ehConta(userId) || !donoValido(userId)) { rejeitar('contadores', 'counters.json', userId, semDono(userId), { userId }); continue; }
       contadores.push({ user_id: userId, mic_uses: Math.max(0, Math.round(Number(objeto(c).micUses) || 0)) });
     }
     const { rows: rCont } = await q(
@@ -405,7 +422,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
       if (!Number.isFinite(score)) { rejeitar('recordes', 'character-records.json', characterId, 'nota inválida', null); continue; }
       if (!idsFreeplay.has(characterId)) { rejeitar('recordes', 'character-records.json', characterId, 'paciente fora do catálogo', null); continue; }
       const uid = ehConta(r.userId) ? String(r.userId) : null;
-      if (uid && !idsFinais.has(uid)) { rejeitar('recordes', 'character-records.json', characterId, `conta ${uid} inexistente`, null); continue; }
+      if (uid && !donoValido(uid)) { rejeitar('recordes', 'character-records.json', characterId, idsConflitantes.has(uid) ? semDono(uid) : `conta ${uid} inexistente`, null); continue; }
       recordes.push({ character_id: characterId, score, user_id: uid, user_name: String(r.userName || ''), user_photo: r.userPhoto || null, at: data(r.at) });
     }
     const { rows: recAtuais } = await q('SELECT character_id, score, user_id::text FROM character_records');
@@ -476,7 +493,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
       for (const [conquista, em] of Object.entries(objeto(mapa))) {
         const chave = `${dono}/${conquista}`;
         if (!ehConta(dono)) { rejeitar('conquistas resgatadas', 'achievements.json', chave, 'visitante não tem conta', { conquista, em }); continue; }
-        if (!idsFinais.has(dono)) { rejeitar('conquistas resgatadas', 'achievements.json', chave, 'conta inexistente', null); continue; }
+        if (!donoValido(dono)) { rejeitar('conquistas resgatadas', 'achievements.json', chave, semDono(dono), null); continue; }
         if (!CONQUISTAS.includes(conquista)) { rejeitar('conquistas resgatadas', 'achievements.json', chave, 'conquista removida (já não aparece no sistema antigo)', { conquista, em }); continue; }
         resgates.push({ user_id: dono, conquista_id: conquista, resgatada_em: data(em) });
       }
@@ -493,7 +510,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
 
     const vistas = [];
     for (const [dono, ids] of Object.entries(objeto(A['achievement-unlocks.json']))) {
-      if (!ehConta(dono) || !idsFinais.has(dono)) { rejeitar('conquistas vistas', 'achievement-unlocks.json', dono, 'conta inexistente', null); continue; }
+      if (!ehConta(dono) || !donoValido(dono)) { rejeitar('conquistas vistas', 'achievement-unlocks.json', dono, semDono(dono), null); continue; }
       vistas.push({ user_id: dono, conquistas: [...new Set(lista(ids).map(String))].sort() });
     }
     // União com o que o banco já tem: a pessoa pode ter visto conquistas no app novo.
@@ -529,7 +546,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
 
       const ativas = [];
       for (const [dono, doc] of Object.entries(objeto(objeto(sq).active))) {
-        if (!ehConta(dono) || !idsFinais.has(dono)) { rejeitar('sidequests (ativas)', 'sidequests.json', dono, 'conta inexistente', null); continue; }
+        if (!ehConta(dono) || !donoValido(dono)) { rejeitar('sidequests (ativas)', 'sidequests.json', dono, semDono(dono), null); continue; }
         ativas.push({ user_id: dono, atribuida_em: data(objeto(doc).assignedAt), doc });
       }
       const { rows: rA } = await q(
@@ -546,7 +563,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
       // mesma conclusão — é isso que impede a segunda rodada de duplicar.
       const concluidas = [];
       for (const [dono, docs] of Object.entries(objeto(objeto(sq).completed))) {
-        if (!ehConta(dono) || !idsFinais.has(dono)) { rejeitar('sidequests (concluídas)', 'sidequests.json', dono, 'conta inexistente', null); continue; }
+        if (!ehConta(dono) || !donoValido(dono)) { rejeitar('sidequests (concluídas)', 'sidequests.json', dono, semDono(dono), null); continue; }
         for (const doc of lista(docs)) concluidas.push({ user_id: dono, recompensa_id: objeto(doc).rewardTitleId || null, concluida_em: data(objeto(doc).completedAt), doc });
       }
       const { rows: rC } = await q(
@@ -596,7 +613,7 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
       const dono = String(l.userId ?? '');
       const conta = ehConta(dono);
       if (!conta && !ID_VISITANTE.test(dono)) { rejeitar('logs', 'logs.json', id, `dono inválido "${dono}"`, null); continue; }
-      if (conta && !idsFinais.has(dono)) { rejeitar('logs', 'logs.json', id, `conta ${dono} inexistente`, null); continue; }
+      if (conta && !donoValido(dono)) { rejeitar('logs', 'logs.json', id, idsConflitantes.has(dono) ? semDono(dono) : `conta ${dono} inexistente`, null); continue; }
       if (!TIPOS_LOG.includes(l.type)) { rejeitar('logs', 'logs.json', id, `tipo desconhecido "${l.type}"`, null); continue; }
       if (!MODOS_LOG.includes(l.mode || 'training')) { rejeitar('logs', 'logs.json', id, `modo desconhecido "${l.mode}"`, null); continue; }
       idsLog.add(id);
@@ -654,6 +671,8 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
     const lado = (x) => (x && x.userId ? String(x.userId) : null);
     for (const d of lista(A['duels.json'])) {
       if (!d || !d.id || !d.token) { rejeitar('duelos', 'duels.json', d && d.id, 'duelo sem id ou sem token', null); continue; }
+      const emConflito = [lado(d.challenger), lado(d.opponent)].find((x) => x && idsConflitantes.has(x));
+      if (emConflito) { rejeitar('duelos', 'duels.json', d.id, semDono(emConflito), null); continue; }
       duelos.push({
         id: String(d.id), token: String(d.token), status: String(d.status), criado_em: data(d.createdAt),
         challenger_id: lado(d.challenger), opponent_id: lado(d.opponent), doc: d,

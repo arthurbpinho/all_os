@@ -270,6 +270,19 @@ describe.skipIf(!URL_TESTE)('migração delta do volume', () => {
     ]);
   });
 
+  it('id que no banco já é de OUTRA pessoa: nada se mistura — a conta e o que pende dela vão para os rejeitados', async () => {
+    // Alguém se cadastrou no app novo e pegou o id 5, que o sistema antigo deu a outra pessoa.
+    await q(`INSERT INTO users (id, username, name, role, password_hash) VALUES (5, 'cadastro-no-app-novo', 'Outra Pessoa', 'external', 'hash-outra')`);
+    const rel = await migrarDelta({ pool: db.pool, dir });
+    const [u5] = await q('SELECT username, name, password_hash, email FROM users WHERE id = 5');
+    expect(u5).toEqual({ username: 'cadastro-no-app-novo', name: 'Outra Pessoa', password_hash: 'hash-outra', email: null });
+    expect(rel.rejeitados.filter((r) => r.chave === '5' || r.chave.startsWith('5/')).map((r) => r.passo).sort())
+      .toEqual(['conquistas resgatadas', 'conquistas vistas', 'contadores', 'contas', 'sidequests (concluídas)']);
+    // O recorde e o duelo da conta 5 do arquivo também não vão para a pessoa errada.
+    expect((await q(`SELECT user_id::text FROM character_records WHERE character_id = 'fp-1'`))[0].user_id).toBe('1');
+    expect(await q(`SELECT id FROM duels`)).toEqual([]);
+  });
+
   it('é idempotente: a segunda rodada não insere nem atualiza nada', async () => {
     await migrarDelta({ pool: db.pool, dir });
     const contagem = async () => Object.fromEntries(await Promise.all(

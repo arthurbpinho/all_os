@@ -14,21 +14,27 @@ está decidido e o que não pode ser esquecido.
 
 ---
 
-## 0. Atualização de 2026-10-13 — migração delta feita, falta a virada do domínio
+## 0. Atualização de 2026-10-13 — o sistema com banco vai para a produção
 
-- **Dados:** o que o sistema antigo acumulou depois de 22/09 foi levado ao Neon de
-  produção (125 contas com as mesmas senhas, pacientes e fotos, recordes 👑,
-  conquistas, sidequests, feedback e os 91 logs de atendimento com o detalhe por
-  critério). Relatório, validação e passo a passo em **`MIGRATION_REPORT.md`**;
-  decisões em `demandas.md` §26. A carga é incremental: na virada, roda de novo e
-  traz só o que mudou.
-- **Código:** branch `feat/seletivo-bloqueio-nova-chance` — bloqueio de 15 dias por
-  WhatsApp no seletivo com "Dar mais uma chance", prova de 2h (§25) e os scripts
-  da migração. Está no serviço novo (`stellar-enjoyment`) por `railway up`; o
-  merge no `main` do fork depende de quem tem escrita lá.
-- **Falta:** a virada do domínio `treinamento.allos.org.br` (DNS no Cloudflare) —
-  roteiro em `MIGRATION_REPORT.md` §8. As seções abaixo descrevem o estado de
-  2026-09-24 e ficam como histórico.
+**Decisão do dono (13/10):** a produção passa a ser o **`main` do
+`arthurbpinho/all_os`** — é ele que o serviço Railway `all_os` (domínio
+`treinamento.allos.org.br`) publica. O sistema com banco entra nesse `main`; o
+sistema antigo em JSON vira backup. Isso substitui a linha "Deploy pela main do
+fork" da tabela da §5.
+
+| O quê | Onde |
+|---|---|
+| Produção (com banco) | `main` do `arthurbpinho/all_os` → serviço Railway `all_os` → `treinamento.allos.org.br`, banco Neon `production`, volume `/data` do próprio serviço (fotos, detalhes por critério, prompts) |
+| Backup do sistema antigo (JSON) | branch **`sistema-antigo-json`** (= `e4ba033`). O serviço Railway `stellar-enjoyment` publica esse branch, **sem** `DATABASE_URL`. Os JSON do sistema antigo continuam no volume do `all_os` (o código novo não os lê) e em cópias `.tar.gz` |
+| Dados | migração delta feita e conferida — `MIGRATION_REPORT.md`, `demandas.md` §26 |
+| Fork do Paulo | o PR #2 trouxe o mesmo código; o `main` do fork deixa de ser o que vai ao ar |
+
+**Voltar para o sistema antigo:** apontar o `main` do `arthurbpinho/all_os` para o
+branch `sistema-antigo-json` e restaurar os prompts antigos do volume
+(`/data/prompts-sistema-antigo-2026-10-13.tar.gz`). O que for feito no sistema
+novo depois da virada não volta junto.
+
+As seções abaixo descrevem o estado de 2026-09-24 e ficam como histórico.
 
 ---
 
@@ -260,7 +266,7 @@ npm run build          # cliente
 | **MMR por critério com reset one-shot** no deploy da §24; recordes 👑 ficam | §24.1–§24.4 |
 | **Alan avisa os alunos presencialmente** — sem aviso in-app do reset | §24 grilling |
 | **Bloqueio de 15 dias por WhatsApp** só no seletivo, com botão "Dar mais uma chance" para o avaliador; prova de 2h (substitui a linha "sem dedupe" da §24.0) | §25 |
-| **Deploy pela `main` do fork** — não vamos mandar para o `arthurbpinho/all_os` | 2026-09-24 |
+| ~~Deploy pela `main` do fork~~ — **substituída em 2026-10-13**: a produção é o `main` do `arthurbpinho/all_os` (§0) | 2026-10-13 |
 | **`.env` fica como está** — não vamos migrar variáveis para o admin nesta rodada | 2026-09-24 |
 
 Dívidas técnicas anotadas mas **não** para agora (ver §7):
