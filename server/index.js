@@ -6212,10 +6212,12 @@ function selecaoExportSlug(nome) {
     .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
 }
 
-// Logs do seletivo são PERSISTENTES (demandas.md §24.0). O controle de quem
-// pode entrar é feito pelo admin trocando a SELECAO_PASSWORD entre aberturas;
-// não há mais dedupe automático por WhatsApp — a mesma pessoa pode participar
-// em aberturas diferentes.
+// Logs do seletivo são PERSISTENTES (demandas.md §24.0). Quem pode entrar é
+// controlado de dois jeitos: a SELECAO_PASSWORD, que o admin troca entre
+// aberturas, e o bloqueio de 15 dias por WhatsApp (demandas.md §25), que o
+// avaliador pode suspender com o botão "Dar mais uma chance".
+const SELECAO_BLOQUEIO_DIAS = 15;
+const SELECAO_BLOQUEIO_MS = SELECAO_BLOQUEIO_DIAS * 24 * 60 * 60 * 1000;
 
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
 // para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
@@ -6224,7 +6226,7 @@ function selecaoExportSlug(nome) {
 // Muda só a etiqueta ativo/rejeitado e a contagem da dashboard; a nota em si não
 // se move, e logs já avaliados conservam o status que receberam na época.
 const SELECTION_ACTIVE_THRESHOLD = 55;
-const SELECAO_TOKEN_TTL = '3h'; // JWT efêmero do candidato
+const SELECAO_TOKEN_TTL = '4h'; // JWT efêmero do candidato (prova 2h + 2h de folga p/ ler instruções, pausar/refresh e enviar no /finish)
 // Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
 // Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
 // efetivo fica ~metade do preço de tabela desse modelo.
@@ -7271,7 +7273,7 @@ app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
   res.json({ ok: true });
 });
 
-// 2) Iniciar — valida senha + campos + termo; dedup 15 dias por WhatsApp; sorteia
+// 2) Iniciar — valida senha + campos + termo; bloqueio de 15 dias por WhatsApp; sorteia
 // personagem do Treinamento; emite o JWT do candidato com o characterId + dados.
 app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
   const b = req.body || {};
@@ -7300,8 +7302,22 @@ app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
     return res.status(400).json({ error: 'Informe um número de WhatsApp válido, com DDD.' });
   }
 
-  // Sem dedupe automático: quem administra a abertura controla o acesso pela
-  // senha (SELECAO_PASSWORD). Trocar a senha entre aberturas fecha a antiga.
+  // Bloqueio: 1 avaliação por WhatsApp a cada 15 dias (demandas.md §25). O log
+  // com `novaChance` sai da conta: é a tentativa que o avaliador perdoou (ver
+  // POST /api/selecao/logs/:id/nova-chance). Perdoar é marcar o log, e não
+  // apagá-lo, porque o atendimento e a avaliação continuam valendo para o
+  // recrutador. Como a tentativa seguinte nasce SEM a marca, ela volta a
+  // bloquear: é uma chance a mais, não um passe livre.
+  const ultimo = await selecaoRepo.ultimoBloqueioDoWhatsapp(wa, SELECAO_BLOQUEIO_MS);
+  if (ultimo != null) {
+    const daysLeft = Math.max(1, Math.ceil((ultimo + SELECAO_BLOQUEIO_MS - Date.now()) / (24 * 60 * 60 * 1000)));
+    return res.status(403).json({
+      error: daysLeft === 1
+        ? 'Ainda falta 1 dia para você tentar realizar a avaliação novamente'
+        : `Ainda faltam ${daysLeft} dias para você tentar realizar a avaliação novamente`,
+      daysLeft,
+    });
+  }
 
   // Personagem sorteado a cada início (os mesmos do modo Treinamento).
   const chars = catalogos.ler('freeplay');
@@ -7461,7 +7477,41 @@ app.put('/api/selecao/senha-config', requireAuth, requireRole('evaluator', 'admi
 // 5) Logs de avaliações — avaliador/admin. Lista tudo (logs são persistentes).
 app.get('/api/selecao/logs', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
   const sorted = await selecaoRepo.listar('desc');
-  res.json(sorted);
+  // `bloqueiaAte`: até quando este log impede o mesmo WhatsApp de tentar de
+  // novo. Calculado na leitura (não é gravado): como os logs são persistentes,
+  // a maioria já passou da janela, e o botão "Dar mais uma chance" só aparece
+  // onde ainda há o que liberar.
+  const agora = Date.now();
+  res.json(sorted.map((log) => {
+    const t = new Date(log.timestamp || 0).getTime();
+    const fim = t + SELECAO_BLOQUEIO_MS;
+    return { ...log, bloqueiaAte: !log.novaChance && Number.isFinite(t) && t > 0 && fim > agora ? new Date(fim).toISOString() : null };
+  }));
+}));
+
+// 5a) "Dar mais uma chance" — avaliador/admin libera UM candidato para refazer
+// antes dos 15 dias.
+//
+// Existe para o caso que o produto não consegue distinguir sozinho: a pessoa
+// travou no meio, o navegador fechou, a conexão caiu, ou ela finalizou sem
+// querer. O bloqueio por WhatsApp não sabe a diferença entre isso e uma
+// segunda tentativa oportunista, então quem decide é gente — e fica registrado
+// QUEM decidiu e QUANDO.
+//
+// Idempotente de propósito: clicar duas vezes devolve a concessão que já
+// existe, em vez de 409. O botão é de emergência, costuma ser clicado com
+// pressa, e um erro na tela nesse momento só confundiria.
+app.post('/api/selecao/logs/:id/nova-chance', requireAuth, requireRole('evaluator', 'admin'), rota(async (req, res) => {
+  const concessao = {
+    em: new Date().toISOString(),
+    por: req.user.name || req.user.username || 'Avaliador',
+  };
+  const alvo = await selecaoRepo.concederNovaChance(String(req.params.id || ''), concessao);
+  if (!alvo) return res.status(404).json({ error: 'Avaliação não encontrada.' });
+  if (alvo.novaChance.em === concessao.em) {
+    console.log(`[selecao] nova chance para o log ${alvo.id} por ${alvo.novaChance.por}`);
+  }
+  res.json({ ok: true, id: alvo.id, novaChance: alvo.novaChance });
 }));
 
 // 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +

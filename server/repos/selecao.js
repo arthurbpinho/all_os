@@ -29,6 +29,36 @@ function criarRepoSelecao(pool) {
     return rows.length > 0;
   }
 
+  // Momento (ms) do atendimento mais recente deste WhatsApp que ainda bloqueia
+  // uma nova tentativa, ou null. Bloqueia o log dos últimos `janelaMs` que não
+  // recebeu "nova chance". A janela é explícita porque os logs não expiram mais
+  // (§24.0): sem ela, um atendimento antigo bloquearia para sempre.
+  async function ultimoBloqueioDoWhatsapp(whatsapp, janelaMs) {
+    const { rows } = await pool.query(
+      `SELECT (extract(epoch FROM max(criado_em)) * 1000)::float8 AS t FROM selecao_logs
+       WHERE whatsapp = $1 AND NOT (doc ? 'novaChance')
+         AND criado_em > now() - ($2::bigint * interval '1 millisecond')`,
+      [String(whatsapp), Math.floor(janelaMs)],
+    );
+    return rows[0].t == null ? null : Number(rows[0].t);
+  }
+
+  // Marca o log com a "nova chance" ({ em, por }). Idempotente: se o log já foi
+  // liberado, devolve o documento como está, sem trocar quem liberou nem quando.
+  // Devolve null se o log não existe.
+  async function concederNovaChance(id, concessao) {
+    return transacao(pool, async (client) => {
+      const { rows } = await client.query('SELECT doc FROM selecao_logs WHERE id = $1 FOR UPDATE', [String(id)]);
+      if (!rows.length) return null;
+      const doc = rows[0].doc;
+      if (!doc.novaChance) {
+        doc.novaChance = concessao;
+        await regravar(client, doc);
+      }
+      return doc;
+    });
+  }
+
   // Todos os logs, por data (`desc` = mais recentes primeiro).
   async function listar(ordem = 'asc') {
     const dir = ordem === 'desc' ? 'DESC' : 'ASC';
@@ -110,7 +140,7 @@ function criarRepoSelecao(pool) {
   }
 
   return {
-    criar, existeSessao, listar, pendentes,
+    criar, existeSessao, ultimoBloqueioDoWhatsapp, concederNovaChance, listar, pendentes,
     atualizar, atualizarVarios, atualizarDoBatch,
     registrarEstatisticas, estatisticasDesde,
   };
