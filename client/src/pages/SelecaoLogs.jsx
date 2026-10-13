@@ -44,7 +44,7 @@ function filterLogs(list, statusFilter, search) {
     if (statusFilter !== 'all' && l.status !== statusFilter) return false;
     if (!q) return true;
     const c = l.candidate || {};
-    const hay = [c.nome, c.email, c.whatsapp, c.faculdade, l.characterName].filter(Boolean).join(' ').toLowerCase();
+    const hay = [c.nome, c.email, c.whatsapp, c.faculdade, c.abordagem, l.characterName].filter(Boolean).join(' ').toLowerCase();
     return hay.includes(q);
   });
 }
@@ -90,7 +90,7 @@ const CRITERIA_LABELS = {
 // tabular — essa segue disponível por log individual via LogActions).
 function buildFullCsv(list) {
   const header = [
-    'Nome completo', 'E-mail', 'WhatsApp', 'Faculdade', 'Período',
+    'Nome completo', 'E-mail', 'WhatsApp', 'Faculdade', 'Período', 'Abordagem',
     'Paciente (caso)', 'Sessões', 'Duração (s)',
     'Status', 'Nota final (0-100)',
     ...Object.values(CRITERIA_LABELS).map((l) => `Critério: ${l}`),
@@ -100,7 +100,7 @@ function buildFullCsv(list) {
     const c = l.candidate || {};
     const crit = l.criteriaScores || {};
     return [
-      c.nome || '', c.email || '', c.whatsapp || '', c.faculdade || '', c.periodo || '',
+      c.nome || '', c.email || '', c.whatsapp || '', c.faculdade || '', c.periodo || '', c.abordagem || '',
       l.characterName || '', l.sessionCount || 1, Math.round(Number(l.durationSeconds) || 0),
       STATUS_LABEL[l.status] || l.status || '', l.score == null ? '' : l.score,
       ...Object.keys(CRITERIA_LABELS).map((k) => (crit[k] == null ? '' : crit[k])),
@@ -147,6 +147,7 @@ function buildStrings(log) {
     `WhatsApp: ${c.whatsapp || '—'}`,
     `Faculdade: ${c.faculdade || '—'}`,
     `Período: ${c.periodo || '—'}`,
+    `Abordagem: ${c.abordagem || '—'}`,
     `Feedback prévio (IA): ${rotuloFeedbackPrevio(log)}`,
     `Caso: ${log.characterName || '—'}`,
     `Data: ${fmtDate(log.timestamp)}`,
@@ -262,7 +263,7 @@ export default function SelecaoLogs() {
               <input
                 id="selecao-search"
                 type="text"
-                placeholder="Nome, e-mail, faculdade, caso…"
+                placeholder="Nome, e-mail, faculdade, abordagem, caso…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={{ width: '100%' }}
@@ -340,6 +341,7 @@ export default function SelecaoLogs() {
                 <span>✉ {c.email || '—'}</span>
                 <span>📱 {c.whatsapp || '—'}</span>
                 <span>🎓 {c.faculdade || '—'}{c.periodo ? ` · ${c.periodo}` : ''}</span>
+                {c.abordagem && <span>🧠 {c.abordagem}</span>}
                 <span>🧑 {log.characterName || '—'}</span>
                 <span>🗓 {log.sessionCount || 1} {(log.sessionCount || 1) === 1 ? 'sessão' : 'sessões'}</span>
                 <span>🕓 {fmtDate(log.timestamp)}</span>

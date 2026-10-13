@@ -37,6 +37,23 @@ const MAX_SELECAO_SESSIONS = 6;
 // Mensagem oculta que avisa o paciente que passou uma semana (mesma da Simulação).
 const SKIP_PROMPT = 'O usuário finalizou a sessão de hoje. Agora passaremos para a próxima sessão. Você (o paciente), acaba de entrar na sessão novamente, na próxima semana. Descreva o que aconteceu na sua semana, você já está na sala novamente com o terapeuta.';
 
+// "Com qual abordagem da psicologia você mais se identifica?" — obrigatória.
+// ESPELHO: SELECAO_ABORDAGENS em server/index.js, que valida a resposta — um
+// teste confere que as duas listas são iguais.
+const ABORDAGENS = [
+  'Junguiano',
+  'Psicanalista',
+  'Cognitivo-comportamental',
+  'ACP',
+  'Gestalt-terapia',
+  'Abordagens contextuais',
+  'Esquizoanálise',
+  'Sistêmica',
+  'Analista do comportamento',
+  'Sócio-histórica',
+  'Não tenho ainda / prefiro não informar / outra',
+];
+
 // Persistência da sessão em andamento (sobrevive a refresh/saída da página).
 const PS_KEY = 'allos_ps_session';
 // Tempo máximo da avaliação: 2 horas de relógio, contadas a partir do início.
@@ -91,7 +108,7 @@ export default function ProcessoSeletivo() {
   const [senhaError, setSenhaError] = useState('');
 
   // Formulário
-  const [form, setForm] = useState({ nome: '', email: '', whatsapp: '', faculdade: '', periodo: '' });
+  const [form, setForm] = useState({ nome: '', email: '', whatsapp: '', faculdade: '', periodo: '', abordagem: '' });
   const [consent, setConsent] = useState(false);
   // null = ainda não escolheu. Vai salvo na sessão para a tela final saber, mesmo
   // depois de um refresh no meio da simulação.
@@ -205,9 +222,13 @@ export default function ProcessoSeletivo() {
     e.preventDefault();
     if (starting) return;
     setFormError('');
-    const { nome, email, whatsapp, faculdade, periodo } = form;
+    const { nome, email, whatsapp, faculdade, periodo, abordagem } = form;
     if (!nome.trim() || !email.trim() || !whatsapp.trim() || !faculdade.trim() || !periodo.trim()) {
       setFormError('Preencha todos os campos.');
+      return;
+    }
+    if (!abordagem) {
+      setFormError('Escolha com qual abordagem da psicologia você mais se identifica.');
       return;
     }
     if (!consent) {
@@ -227,6 +248,7 @@ export default function ProcessoSeletivo() {
         whatsapp: whatsapp.trim(),
         faculdade: faculdade.trim(),
         periodo: periodo.trim(),
+        abordagem,
         consent: true,
         feedbackIA,
       });
@@ -436,6 +458,13 @@ export default function ProcessoSeletivo() {
                 <label htmlFor="ps-per">Período</label>
                 <input id="ps-per" name="periodo" value={form.periodo} onChange={onField} placeholder="Ex: 7º" />
               </div>
+            </div>
+            <div>
+              <label htmlFor="ps-abordagem">Com qual abordagem da psicologia você mais se identifica?</label>
+              <select id="ps-abordagem" name="abordagem" value={form.abordagem} onChange={onField} required>
+                <option value="" disabled>Selecione uma opção</option>
+                {ABORDAGENS.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
             </div>
 
             <label className="selecao-consent">
