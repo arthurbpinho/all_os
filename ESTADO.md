@@ -14,6 +14,24 @@ está decidido e o que não pode ser esquecido.
 
 ---
 
+## 0. Atualização de 2026-10-13 — migração delta feita, falta a virada do domínio
+
+- **Dados:** o que o sistema antigo acumulou depois de 22/09 foi levado ao Neon de
+  produção (125 contas com as mesmas senhas, pacientes e fotos, recordes 👑,
+  conquistas, sidequests, feedback e os 91 logs de atendimento com o detalhe por
+  critério). Relatório, validação e passo a passo em **`MIGRATION_REPORT.md`**;
+  decisões em `demandas.md` §26. A carga é incremental: na virada, roda de novo e
+  traz só o que mudou.
+- **Código:** branch `feat/seletivo-bloqueio-nova-chance` — bloqueio de 15 dias por
+  WhatsApp no seletivo com "Dar mais uma chance", prova de 2h (§25) e os scripts
+  da migração. Está no serviço novo (`stellar-enjoyment`) por `railway up`; o
+  merge no `main` do fork depende de quem tem escrita lá.
+- **Falta:** a virada do domínio `treinamento.allos.org.br` (DNS no Cloudflare) —
+  roteiro em `MIGRATION_REPORT.md` §8. As seções abaixo descrevem o estado de
+  2026-09-24 e ficam como histórico.
+
+---
+
 ## 1. Onde o projeto está
 
 **Branch de trabalho: `main` do fork `PauloHenriqueL/all_os`, no commit `729c425`

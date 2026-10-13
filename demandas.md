@@ -1840,3 +1840,48 @@ todo dado é persistente (§24.0).
 Consequência aceita pelo dono: os logs do seletivo do sistema antigo **não** vão
 para o banco (§22.1, reafirmado em 2026-10-13). Então, na virada, quem fez a
 prova no sistema antigo nos últimos 15 dias não fica bloqueado no novo.
+
+## 26. Migração delta do volume antigo (2026-10-13)
+
+O sistema antigo continuou no ar depois da importação de 22/09 (§22.1): até
+13/10 surgiram 73 contas, 2 pacientes, recordes novos, trocas de senha e de foto.
+Esta é a segunda passada, só com o que mudou. Relatório completo, validação e
+passo a passo em `MIGRATION_REPORT.md`.
+
+**Sem DDL.** As tabelas são as das migrações 001–017; a carga só insere e
+atualiza linhas (`server/migrar-delta.js`, `scripts/migrar-delta.js`). O
+`importar-volume.js` não serve: exige banco vazio.
+
+**Escopo (decisão do dono).** Entram: contas, contadores, catálogo, fotos dos
+pacientes, pool de avatares, recordes 👑, senha do seletivo, conquistas
+(resgatadas e já avisadas), sidequests e feedback de visitantes. Na mesma tarde o
+dono decidiu guardar também o **histórico de atendimentos**: entram os logs (com
+as mensagens), o detalhe por critério de cada avaliação (no volume) e o duelo —
+isso desfaz, de propósito, a parte da §22.1 que deixava as transcrições de fora.
+Só existiam os logs dos últimos 30 dias (17/09 a 12/10), porque o sistema antigo
+podava os mais velhos; a cópia de 22/09 não será usada. Ficam fora: logs e
+dashboard do seletivo, Comunidade, logs de erro, sessões em andamento, filas
+internas, Antessala, push, missões diárias, progresso da Trilha, notificações e
+o MMR dos alunos.
+
+**Quem ganha um conflito.** O sistema antigo é a verdade até a virada, com três
+exceções: senha vale a do lado com `token_version` maior (a conta 1 trocou a
+senha no sistema novo, e essa fica); username de conta que já está no banco não
+muda (`Victor.toscano-39`, §23.3); recorde só troca por nota maior.
+
+**Dificuldade de partida dos pacientes — desvio consciente da spec §11.** O dono
+pediu uma base para o MMR recomeçar. O D antigo de cada paciente que amadureceu
+no motor antigo (`n_D ≥ 20`, 8 pacientes, D entre 40,1 e 56,3) vira o D inicial
+de todos os critérios ativos, com `n_D = 0`, `beta = 1` e histórico vazio: o
+motor trata o caso como novo (ganho 0,2, sem regressão) e só parte mais perto de
+onde estava. Os 2 pacientes com uma avaliação só nascem em 50. O MMR dos alunos
+recomeça do zero, como a spec manda.
+
+**Rejeitados de propósito:** 33 conquistas de visitantes (não têm conta) e 20
+resgates de conquistas removidas há tempo (`early_bird`, `high_score`,
+`highlights_10`, `night_owl`, `speed_demon` — já não aparecem nem no sistema
+antigo). Os títulos de perfil com esses ids continuam como estão nas contas,
+igual ao antigo.
+
+**Depois da carga, reiniciar o app**: catálogo, configurações e sidequests ficam
+em memória (VIRADA.md §0).
