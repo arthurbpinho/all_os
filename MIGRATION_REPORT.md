@@ -355,3 +355,11 @@ de tentativa estavam contando todo mundo como um IP só. O serviço só tem o do
 próprio (nenhum `*.up.railway.app`), e `CONFIAR_CF_CONNECTING_IP=sempre` foi
 definido. Os avisos de CSP no console (o beacon de estatísticas do Cloudflare
 bloqueado) já existiam no sistema antigo — a política é a mesma.
+
+**Deploy automático (13/10, 19:15 UTC).** O serviço do domínio não tinha gatilho
+de deploy porque o app da Railway no GitHub não tinha acesso ao
+`arthurbpinho/all_os` (a API recusava: "no one in the project has access to it")
+— por isso nada era publicado sozinho desde 26/09. O dono liberou o repositório
+para o app, e o gatilho do `main` foi criado: push no `main` publica no
+`treinamento.allos.org.br`. A `CONFIAR_CF_CONNECTING_IP=sempre` entrou num
+redeploy às 19:13 UTC.
