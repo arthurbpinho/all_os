@@ -333,3 +333,20 @@ Graph e `APP_BASE_URL` são **iguais** aos do antigo — quem estiver logado em
 
 Uma observação do teste: o limite de 10 logins errados por 15 minutos por IP
 funcionou (o script de verificação, com tentativas erradas de propósito, levou 429).
+
+## 13. Virada — 2026-10-13, 18:35–18:56 UTC
+
+| Passo | Resultado |
+|---|---|
+| A. Backup | branch `sistema-antigo-json` = `e4ba033` no `arthurbpinho/all_os` |
+| B. Última carga com o antigo no ar | nada novo desde 18:03; nenhum conflito de id; ponto de volta `antes-virada-2026-10-13T1835Z` |
+| C. Prompts no volume do domínio | antigos em `/data/prompts-sistema-antigo-2026-10-13.tar.gz` (e cópia local); os 10 arquivos agora idênticos ao banco |
+| D. Variáveis | as 5 com valor copiadas (`DATABASE_URL` inclusive); as 8 vazias no serviço de teste não entram — vazio e ausente são iguais para o código. As 24 comuns já eram idênticas |
+| E. Sequência de ids | 125 → 175 |
+| F. Serviço de teste | sem `DATABASE_URL`, publicando `sistema-antigo-json`. O código antigo não sobe lá (volume sem contas + `ADMIN_INITIAL_PASSWORD` curta → fail-closed) — fica parado, sem acesso ao banco |
+| G. `main` | merge `dfcc283` (estratégia *ours*: conteúdo = sistema com banco), push sem force. O serviço do domínio **não tinha gatilho de deploy** desde o rollback de 26/09; a origem foi religada ao `main` (`railway service source connect`), o que publicou o `dfcc283` às 18:53:53 UTC. Daqui em diante, push no `main` publica |
+| Boot | só `Servidor Allos rodando na porta 8080`: nenhum prompt trocado pela semente, nenhum catálogo semeado, nenhum erro |
+| H. Carga final (volume congelado) | nada novo; conferência 0 divergências; integridade 20/20; sequência em 175 |
+| I. Pelo domínio | bundle `index-CUwxZwuE.js` (o testado); rotas só do sistema novo respondem; fotos novas e trocadas e pool de avatares servidos do volume; seletivo e login recusam senha errada |
+
+Falta (dono, como admin): `/api/admin/diagnostico-ip` pelo domínio (VIRADA.md §5).
