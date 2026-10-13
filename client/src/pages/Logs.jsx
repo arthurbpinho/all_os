@@ -5,6 +5,7 @@ import ScoreBadge from '../components/ScoreBadge';
 import LogActions from '../components/LogActions';
 import CriteriaTable, { labelsForCriteria } from '../components/CriteriaTable';
 import CriteriaAnalyses from '../components/CriteriaAnalyses';
+import CriteriaFaixasAluno from '../components/CriteriaFaixasAluno';
 import RadarCriterios from '../components/RadarCriterios';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
@@ -235,6 +236,7 @@ function LogCard({ log, showDownload }) {
               <div>
                 <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
                 <CriteriaAnalyses log={log} />
+                {log.temCriterios && <CriteriaFaixasAluno logId={log.id} />}
                 {evaluation && (
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                     <RichText text={evaluation} />
@@ -670,6 +672,7 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
             <div>
               <CriteriaTable criteriaScores={log.criteriaScores} labels={labelsForCriteria(log.criteriaScores, log.type, log.criteriaNames)} />
               <CriteriaAnalyses log={log} />
+              {log.temCriterios && <CriteriaFaixasAluno logId={log.id} />}
               {evaluation && (
                 <div style={{ whiteSpace: 'pre-wrap', fontSize: 14, lineHeight: 1.6 }}>
                   <RichText text={evaluation} />

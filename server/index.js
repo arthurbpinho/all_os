@@ -3599,8 +3599,10 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
   const serve = (lista) => {
     const arr = comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista;
     if (!isStudent) return arr;
+    // `temCriterios` só diz que há níveis por critério para buscar em
+    // /api/logs/:id/criterios; a chave do arquivo (evalPartsId) não sai.
     return arr.map(({ criteriaScores, criteriaNames, evalPartsId, ...rest }) => (
-      veNotas ? { ...rest, criteriaScores, criteriaNames } : rest
+      veNotas ? { ...rest, criteriaScores, criteriaNames, temCriterios: !!evalPartsId } : rest
     ));
   };
 
@@ -3634,14 +3636,23 @@ app.get('/api/logs', requireAuth, rota(async (req, res) => {
 // dono do log pode vê-las: ele tem a nota total e o feedback qualitativo, que é
 // o que o sintetizador escreveu sem nunca ver o gabarito.
 //
-// O gate é de ROLE, não de propriedade — de propósito. Um supervisor lê os
-// critérios de qualquer log; um aluno não lê nem os do log dele.
+// Supervisor e admin leem o detalhe inteiro de qualquer log. O aluno (e o
+// visitante) lê só os NÍVEIS das qualidades, e só do próprio log, quando "Notas
+// por critério e gráfico" está liberado para o perfil dele (detalheParaAluno —
+// decisão do dono, 2026-10-13). A análise em prosa continua só da equipe.
 app.get('/api/logs/:id/criterios', requireAuth, rota(async (req, res) => {
-  if (!oficial.podeVerCriterios(req.user.role)) {
+  const equipe = oficial.podeVerCriterios(req.user.role);
+  const aluno = isAluno(req.user.role) || req.user.role === 'visitor';
+  if (!equipe && !aluno) {
     return res.status(403).json({ error: 'Nota e feedback por critério são visíveis apenas a supervisor e administrador.' });
   }
+  const bloqueio = equipe ? null : funcionalidadeBloqueada(req.user, 'graficoCriterios');
+  if (bloqueio) return res.status(403).json(bloqueio);
   const log = await logsRepo.porId(req.params.id);
-  if (!log) return res.status(404).json({ error: 'Log não encontrado' });
+  // Para o aluno, log de outra pessoa é o mesmo que log inexistente.
+  if (!log || (!equipe && String(log.userId) !== String(req.user.id))) {
+    return res.status(404).json({ error: 'Log não encontrado' });
+  }
   if (!log.evalPartsId) {
     // Log antigo (avaliador de prompt único) ou sem avaliação: as notas por
     // critério que existirem estão no próprio log (criteriaScores), sem análise.
@@ -3649,6 +3660,7 @@ app.get('/api/logs/:id/criterios', requireAuth, rota(async (req, res) => {
   }
   const detalhe = oficial.lerDetalhe(log.evalPartsId);
   if (!detalhe) return res.json({ disponivel: false, motivo: 'O detalhe desta avaliação não está mais no volume.' });
+  if (!equipe) return res.json({ disponivel: true, aluno: true, ...oficial.detalheParaAluno(detalhe) });
   res.json({ disponivel: true, ...oficial.detalheParaSupervisor(detalhe) });
 }));
 
@@ -4189,8 +4201,10 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
   // com o gabarito à vista, que continua só de supervisor e admin.
   const resposta = { ...log, mmr: mmrResult, sidequest: sidequestOutcome, dailyMission: dailyMissionOutcome };
   if (isAluno(req.user.role) || req.user.role === 'visitor') {
+    const bloqueado = funcionalidadeBloqueada(req.user, 'graficoCriterios');
+    resposta.temCriterios = !bloqueado && !!log.evalPartsId;
     resposta.evalPartsId = null;
-    if (funcionalidadeBloqueada(req.user, 'graficoCriterios')) {
+    if (bloqueado) {
       resposta.criteriaScores = undefined;
       resposta.criteriaNames = undefined;
     }
@@ -9303,6 +9317,9 @@ function sanitizeDuelForUser(duel, user) {
     if (oficial.podeVerCriterios(user && user.role)) {
       out.result.evalVersion = duel.result.evalVersion || null;
       out.result.evalPartsId = duel.result.evalPartsId || null;
+    } else if (user && !funcionalidadeBloqueada(user, 'graficoCriterios')) {
+      // Para quem duelou: só o aviso de que há níveis por critério do próprio lado.
+      out.result.temCriterios = !!duel.result.evalPartsId;
     }
   }
   return out;
@@ -9485,17 +9502,28 @@ async function runComparativeEvaluation(duel) {
 // não de participação, porque a análise foi escrita por nós que estavam lendo o
 // Bloco 1 — nem quem duelou pode vê-la.
 app.get('/api/duel/:id/criterios', requireAuth, rota(async (req, res) => {
-  if (!oficial.podeVerCriterios(req.user.role)) {
+  // Mesma regra do log: a equipe lê tudo; quem duelou lê só os níveis das
+  // qualidades do PRÓPRIO lado (A = desafiante, B = oponente).
+  const equipe = oficial.podeVerCriterios(req.user.role);
+  const aluno = isAluno(req.user.role) || req.user.role === 'visitor';
+  if (!equipe && !aluno) {
     return res.status(403).json({ error: 'Nota e feedback por critério são visíveis apenas a supervisor e administrador.' });
   }
+  const bloqueio = equipe ? null : funcionalidadeBloqueada(req.user, 'graficoCriterios');
+  if (bloqueio) return res.status(403).json(bloqueio);
   const duel = await duelosRepo.porId(req.params.id);
-  if (!duel) return res.status(404).json({ error: 'Duelo não encontrado.' });
+  const lado = duel && !equipe
+    ? (String((duel.challenger || {}).userId) === String(req.user.id) ? 'A'
+      : String((duel.opponent || {}).userId) === String(req.user.id) ? 'B' : null)
+    : null;
+  if (!duel || (!equipe && !lado)) return res.status(404).json({ error: 'Duelo não encontrado.' });
   const id = duel.result && duel.result.evalPartsId;
   if (!id) {
     return res.json({ disponivel: false, motivo: 'Este duelo foi avaliado antes do avaliador oficial — só há o texto comparativo.' });
   }
   const detalhe = oficial.lerDetalhe(id);
   if (!detalhe) return res.json({ disponivel: false, motivo: 'O detalhe desta avaliação não está mais no volume.' });
+  if (!equipe) return res.json({ disponivel: true, aluno: true, ...oficial.detalheParaAluno(detalhe, lado) });
   res.json({ disponivel: true, ...oficial.detalheParaSupervisor(detalhe) });
 }));
 

@@ -6,6 +6,7 @@ import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from 
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
 import CriteriaAnalyses from '../components/CriteriaAnalyses';
+import CriteriaFaixasAluno from '../components/CriteriaFaixasAluno';
 import SessionQuotaModal from '../components/SessionQuotaModal';
 import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 import { guardarDuelClaim } from '../duelClaim';
@@ -459,6 +460,7 @@ export default function DuelSession({ user }) {
                   botão nem aparece para quem duelou: as análises por critério
                   foram escritas com o Bloco 1 à vista. */}
               <CriteriaAnalyses log={r} duelId={duel.id} />
+              {r.temCriterios && <CriteriaFaixasAluno duelId={duel.id} />}
               <div className="post-evaluation-body"><RichText text={r.evaluation} /></div>
             </div>
           </div>
