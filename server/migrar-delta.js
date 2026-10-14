@@ -751,6 +751,119 @@ async function migrarDelta({ pool, dir, dryRun = false, log = () => {} }) {
   return rel;
 }
 
+// SÓ o Processo Seletivo — avaliações dos candidatos e registros da dashboard
+// (decisão do dono, 2026-10-13, depois da virada). Separado de migrarDelta de
+// propósito: com o sistema novo no ar, a regra "o antigo vence" de migrarDelta
+// desfaria o que foi mudado no novo. Aqui é só INSERIR o que falta:
+//   · selecao_logs: pelo id (e pela sessão); um log que já está no banco nunca
+//     é sobrescrito — se o avaliador deu "nova chance" no sistema novo, fica;
+//   · selecao_estatisticas: não tem chave natural, então compara pelo conjunto
+//     (data, nota, status), contando repetições: entra só a diferença.
+// O WhatsApp é normalizado como o app normaliza (só dígitos), para o bloqueio de
+// 15 dias reconhecer os números migrados.
+async function migrarSeletivo({ pool, dir, dryRun = false, log = () => {} }) {
+  const ler = (nome) => {
+    const p = path.join(dir, nome);
+    if (!fs.existsSync(p)) return { valor: undefined, hash: null };
+    const bruto = fs.readFileSync(p);
+    try {
+      return { valor: JSON.parse(bruto.toString('utf-8')), hash: crypto.createHash('sha256').update(bruto).digest('hex') };
+    } catch (e) {
+      throw new Error(`${nome} não é um JSON válido: ${e.message}`);
+    }
+  };
+  const logsArq = ler('selection-logs.json');
+  const statsArq = ler('selection-stats.json');
+  const rel = { dryRun, hashes: {}, passos: {}, avisos: [], rejeitados: [], ausentes: [] };
+  if (logsArq.hash) rel.hashes['selection-logs.json'] = logsArq.hash; else rel.ausentes.push('selection-logs.json');
+  if (statsArq.hash) rel.hashes['selection-stats.json'] = statsArq.hash; else rel.ausentes.push('selection-stats.json');
+  const passo = (nome) => {
+    if (!rel.passos[nome]) rel.passos[nome] = { inseridos: 0, atualizados: 0, iguais: 0, rejeitados: 0, detalhes: [] };
+    return rel.passos[nome];
+  };
+  const rejeitar = (nomePasso, arquivo, chave, motivo) => {
+    passo(nomePasso).rejeitados += 1;
+    rel.rejeitados.push({ passo: nomePasso, arquivo, chave: String(chave), motivo, registro: null });
+  };
+
+  const client = await pool.connect();
+  const t0 = Date.now();
+  try {
+    await client.query('BEGIN');
+
+    log('avaliações do seletivo…');
+    const linhas = [];
+    const vistos = new Set();
+    for (const l of lista(logsArq.valor)) {
+      const id = l && l.id != null ? String(l.id) : '';
+      if (!id) { rejeitar('avaliações do seletivo', 'selection-logs.json', '(sem id)', 'log sem id'); continue; }
+      if (vistos.has(id)) { rejeitar('avaliações do seletivo', 'selection-logs.json', id, 'id repetido no arquivo'); continue; }
+      const criado = data(l.timestamp);
+      if (!criado) { rejeitar('avaliações do seletivo', 'selection-logs.json', id, 'sem data'); continue; }
+      vistos.add(id);
+      linhas.push({
+        id, session_id: String(l.sessionId || id), criado_em: criado,
+        whatsapp: String((objeto(l.candidate).whatsapp) || '').replace(/\D+/g, ''),
+        status: String(l.status || 'pending'), eval_batch_id: l.evalBatchId || null, doc: l,
+      });
+    }
+    const { rows: rLogs } = await client.query(
+      `INSERT INTO selecao_logs (id, session_id, criado_em, whatsapp, status, eval_batch_id, doc)
+       SELECT id, session_id, criado_em, whatsapp, status, eval_batch_id, doc
+       FROM jsonb_to_recordset($1::jsonb) AS x(id text, session_id text, criado_em timestamptz, whatsapp text, status text, eval_batch_id text, doc jsonb)
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [JSON.stringify(linhas)],
+    );
+    const p1 = passo('avaliações do seletivo');
+    p1.inseridos = rLogs.length;
+    p1.iguais = linhas.length - rLogs.length;
+
+    log('dashboard do seletivo…');
+    // Conjunto (data, nota, status) com as repetições contadas, dos dois lados.
+    const chaveStat = (t, s, st) => `${t}|${s == null ? '' : Number(s)}|${st}`;
+    const { rows: noBanco } = await client.query(
+      `SELECT to_char(criado_em AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS t, score, status FROM selecao_estatisticas`,
+    );
+    const contagem = new Map();
+    for (const r of noBanco) {
+      const k = chaveStat(r.t, r.score, r.status);
+      contagem.set(k, (contagem.get(k) || 0) + 1);
+    }
+    const faltam = [];
+    let iguaisStats = 0;
+    for (const sArq of lista(statsArq.valor)) {
+      const t = data(sArq && sArq.timestamp);
+      if (!t) { rejeitar('dashboard do seletivo', 'selection-stats.json', '(sem data)', 'registro sem data'); continue; }
+      const score = sArq.score == null ? null : Number(sArq.score);
+      const status = String(sArq.status || '');
+      const k = chaveStat(t, score, status);
+      const n = contagem.get(k) || 0;
+      if (n > 0) { contagem.set(k, n - 1); iguaisStats += 1; continue; }
+      faltam.push({ criado_em: t, score: Number.isFinite(score) ? score : null, status });
+    }
+    const { rows: rStats } = await client.query(
+      `INSERT INTO selecao_estatisticas (criado_em, score, status)
+       SELECT criado_em, score, status FROM jsonb_to_recordset($1::jsonb) AS x(criado_em timestamptz, score float8, status text)
+       RETURNING id`,
+      [JSON.stringify(faltam)],
+    );
+    const p2 = passo('dashboard do seletivo');
+    p2.inseridos = rStats.length;
+    p2.iguais = iguaisStats;
+    if (faltam.length) p2.detalhes.push(`registros novos de ${faltam.map((f) => f.criado_em).sort()[0].slice(0, 10)} a ${faltam.map((f) => f.criado_em).sort().slice(-1)[0].slice(0, 10)}`);
+
+    await client.query(dryRun ? 'ROLLBACK' : 'COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+  rel.duracaoMs = Date.now() - t0;
+  return rel;
+}
+
 function relatorioEmTexto(r) {
   const linhas = [r.dryRun ? 'SIMULAÇÃO (--dry-run): nada foi gravado — a transação foi desfeita.' : 'Migração gravada.', ''];
   linhas.push(`${'passo'.padEnd(28)} ${'novos'.padStart(6)} ${'atualiz.'.padStart(9)} ${'iguais'.padStart(7)} ${'rejeit.'.padStart(8)}`);
@@ -783,4 +896,4 @@ function arquivosDeDetalhe(dir) {
     .filter((f) => fs.existsSync(path.join(dir, f)));
 }
 
-module.exports = { migrarDelta, relatorioEmTexto, arquivosDeDetalhe, CONQUISTAS };
+module.exports = { migrarDelta, migrarSeletivo, relatorioEmTexto, arquivosDeDetalhe, CONQUISTAS };
