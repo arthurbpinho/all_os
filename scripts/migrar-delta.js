@@ -5,6 +5,12 @@
 //
 // Uso:
 //   DATABASE_URL="$(cat ~/.neon-url-teste)" node scripts/migrar-delta.js <pasta data> --alvo=<ep-…> [--dry-run]
+//   DATABASE_URL=… node scripts/migrar-delta.js <pasta data> --alvo=<ep-…> --so-seletivo [--dry-run]
+//
+// ⚠️ DEPOIS DA VIRADA (2026-10-13) NÃO RODE A MIGRAÇÃO INTEIRA: a regra "o
+// antigo vence" desfaria nomes, fotos, catálogo e sidequests mudados no sistema
+// novo. `--so-seletivo` é seguro: só insere avaliações e registros da dashboard
+// do Processo Seletivo que ainda não estão no banco.
 //
 // --alvo é obrigatório e precisa bater com o host do DATABASE_URL (o "ep-…" do
 // Neon, ou "local" para 127.0.0.1/localhost). Existe para ninguém gravar no
@@ -19,7 +25,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Pool } = require('pg');
-const { migrarDelta, relatorioEmTexto } = require('../server/migrar-delta');
+const { migrarDelta, migrarSeletivo, relatorioEmTexto } = require('../server/migrar-delta');
 
 function opcao(args, nome) {
   const a = args.find((x) => x.startsWith(`--${nome}=`));
@@ -30,9 +36,11 @@ async function main() {
   const args = process.argv.slice(2);
   const dir = args.find((a) => !a.startsWith('--'));
   const dryRun = args.includes('--dry-run');
+  const soSeletivo = args.includes('--so-seletivo');
   const alvo = opcao(args, 'alvo');
-  if (!dir || !fs.existsSync(path.join(dir, 'users.json'))) {
-    console.error('Uso: node scripts/migrar-delta.js <pasta com os .json do volume> --alvo=<ep-…|local> [--dry-run] [--rejeitados=<arquivo>]');
+  const exigido = soSeletivo ? 'selection-logs.json' : 'users.json';
+  if (!dir || !fs.existsSync(path.join(dir, exigido))) {
+    console.error('Uso: node scripts/migrar-delta.js <pasta com os .json do volume> --alvo=<ep-…|local> [--so-seletivo] [--dry-run] [--rejeitados=<arquivo>]');
     process.exit(1);
   }
   const url = process.env.DATABASE_URL;
@@ -57,14 +65,14 @@ async function main() {
   const rejeitados = opcao(args, 'rejeitados')
     || path.join(os.homedir(), 'allos-backups', `rejeitados-${endpoint}-${carimbo}${dryRun ? '-dry-run' : ''}.jsonl`);
 
-  console.log(`Banco: ${host}${dryRun ? '  (SIMULAÇÃO: --dry-run)' : ''}`);
+  console.log(`Banco: ${host}${dryRun ? '  (SIMULAÇÃO: --dry-run)' : ''}${soSeletivo ? '  (só o Processo Seletivo)' : ''}`);
   console.log(`Pasta: ${path.resolve(dir)} (só leitura)`);
   console.log('');
 
   const pool = new Pool({ connectionString: url, max: 1 });
   try {
     const t0 = Date.now();
-    const rel = await migrarDelta({
+    const rel = await (soSeletivo ? migrarSeletivo : migrarDelta)({
       pool, dir, dryRun,
       log: (msg) => console.log(`  [${((Date.now() - t0) / 1000).toFixed(1).padStart(5)} s] ${msg}`),
     });
@@ -78,7 +86,7 @@ async function main() {
       fs.writeFileSync(rejeitados, rel.rejeitados.map((r) => JSON.stringify(r)).join('\n') + '\n', { mode: 0o600 });
       console.log(`\nRejeitados: ${rel.rejeitados.length} → ${rejeitados}`);
     }
-    if (!dryRun) {
+    if (!dryRun && !soSeletivo) {
       console.log('\nReinicie o serviço do app: catálogo, configurações e sidequests ficam em memória e só são relidos no boot.');
     }
   } finally {

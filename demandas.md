@@ -1886,6 +1886,12 @@ igual ao antigo.
 **Depois da carga, reiniciar o app**: catálogo, configurações e sidequests ficam
 em memória (VIRADA.md §0).
 
+**Seletivo (decisão do dono, 14/10, madrugada).** Avaliações dos candidatos (139)
+e registros da dashboard (164 que faltavam) foram trazidos depois da virada, com
+`scripts/migrar-delta.js --so-seletivo` — só inserindo, sem tocar no resto. O
+bloqueio de 15 dias passa a valer para quem fez a prova no sistema antigo (é a
+regra). **Depois da virada, a migração inteira não roda mais** (MIGRATION_REPORT.md §14).
+
 **Virada (decisão do dono, 13/10, noite).** Sem troca de DNS: o código com banco
 entra no `main` do `arthurbpinho/all_os`, que o serviço Railway do domínio já
 publica. Antes do push: branch `sistema-antigo-json` com o `main` antigo; última

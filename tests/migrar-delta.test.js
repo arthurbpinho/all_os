@@ -305,3 +305,81 @@ describe.skipIf(!URL_TESTE)('migração delta do volume', () => {
     expect((await q('SELECT count(*)::int AS n FROM users'))[0].n).toBe(4);
   });
 });
+
+// Só o Processo Seletivo, depois da virada: insere o que falta e não toca em mais
+// nada (a migração inteira desfaria o que mudou no sistema novo).
+describe.skipIf(!URL_TESTE)('migração do Processo Seletivo (--so-seletivo)', () => {
+  const { migrarSeletivo } = require('../server/migrar-delta');
+  const { criarRepoSelecao } = require('../server/repos/selecao');
+
+  let db;
+  let dir;
+  const escrever = (arquivo, conteudo) => fs.writeFileSync(path.join(dir, arquivo), JSON.stringify(conteudo));
+  const q = async (sql, params) => (await db.pool.query(sql, params)).rows;
+  const recente = new Date(Date.now() - 2 * 86400000).toISOString();
+
+  beforeEach(async () => {
+    db = await criarPoolIsolado();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'allos-seletivo-'));
+    // O banco: um log que o avaliador já liberou no sistema novo, e dois registros da dashboard.
+    await q(`INSERT INTO selecao_logs (id, session_id, criado_em, whatsapp, status, doc) VALUES
+      ('sellog-a', 'sel-a', $1, '11911112222', 'ativo', $2)`,
+    [recente, JSON.stringify({ id: 'sellog-a', status: 'ativo', novaChance: { em: recente, por: 'Avaliadora' } })]);
+    await q(`INSERT INTO selecao_estatisticas (criado_em, score, status) VALUES
+      ('2026-09-01T10:00:00.000Z', 70, 'ativo'), ('2026-09-02T10:00:00.000Z', 40, 'rejeitado')`);
+
+    escrever('selection-logs.json', [
+      { id: 'sellog-a', sessionId: 'sel-a', timestamp: recente, status: 'ativo', candidate: { whatsapp: '(11) 91111-2222' } },
+      { id: 'sellog-b', sessionId: 'sel-b', timestamp: recente, status: 'rejeitado', score: 41, candidate: { nome: 'B', whatsapp: '(11) 98888-7777' }, messages: [{ role: 'user', content: 'oi' }] },
+      { sessionId: 'sem-id' },
+    ]);
+    escrever('selection-stats.json', [
+      { timestamp: '2026-09-01T10:00:00.000Z', score: 70, status: 'ativo' },
+      { timestamp: '2026-09-01T10:00:00.000Z', score: 70, status: 'ativo' }, // repetido de verdade
+      { timestamp: '2026-09-02T10:00:00.000Z', score: 40, status: 'rejeitado' },
+      { timestamp: '2026-10-01T10:00:00.000Z', score: null, status: 'erro' },
+    ]);
+  });
+
+  afterEach(async () => {
+    await db.descartar();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('insere só o que falta, não sobrescreve log existente e liga o bloqueio de 15 dias', async () => {
+    const rel = await migrarSeletivo({ pool: db.pool, dir });
+    expect(rel.passos['avaliações do seletivo']).toMatchObject({ inseridos: 1, iguais: 1, rejeitados: 1 });
+    expect(rel.passos['dashboard do seletivo']).toMatchObject({ inseridos: 2, iguais: 2 });
+
+    // O log que já estava no banco ficou como estava (com a nova chance).
+    const [a] = await q(`SELECT doc FROM selecao_logs WHERE id = 'sellog-a'`);
+    expect(a.doc.novaChance.por).toBe('Avaliadora');
+    // O migrado entra com o WhatsApp do jeito que o app procura — e bloqueia.
+    const [b] = await q(`SELECT whatsapp, status, doc FROM selecao_logs WHERE id = 'sellog-b'`);
+    expect(b).toMatchObject({ whatsapp: '11988887777', status: 'rejeitado' });
+    expect(b.doc.messages).toHaveLength(1);
+    const sel = criarRepoSelecao(db.pool);
+    expect(await sel.ultimoBloqueioDoWhatsapp('11988887777', 15 * 86400000)).not.toBeNull();
+
+    const stats = await q(`SELECT to_char(criado_em AT TIME ZONE 'UTC', 'MM-DD') AS d, score, status FROM selecao_estatisticas ORDER BY criado_em, score`);
+    expect(stats).toEqual([
+      { d: '09-01', score: 70, status: 'ativo' }, { d: '09-01', score: 70, status: 'ativo' },
+      { d: '09-02', score: 40, status: 'rejeitado' }, { d: '10-01', score: null, status: 'erro' },
+    ]);
+    // Nada fora do seletivo.
+    expect((await q('SELECT count(*)::int AS n FROM users'))[0].n).toBe(0);
+  });
+
+  it('--dry-run não grava; a segunda rodada não muda nada', async () => {
+    await migrarSeletivo({ pool: db.pool, dir, dryRun: true });
+    expect((await q('SELECT count(*)::int AS n FROM selecao_logs'))[0].n).toBe(1);
+    expect((await q('SELECT count(*)::int AS n FROM selecao_estatisticas'))[0].n).toBe(2);
+
+    await migrarSeletivo({ pool: db.pool, dir });
+    const rel = await migrarSeletivo({ pool: db.pool, dir });
+    expect(rel.passos['avaliações do seletivo'].inseridos).toBe(0);
+    expect(rel.passos['dashboard do seletivo'].inseridos).toBe(0);
+    expect((await q('SELECT count(*)::int AS n FROM selecao_logs'))[0].n).toBe(2);
+    expect((await q('SELECT count(*)::int AS n FROM selecao_estatisticas'))[0].n).toBe(4);
+  });
+});

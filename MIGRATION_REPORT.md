@@ -363,3 +363,30 @@ de deploy porque o app da Railway no GitHub não tinha acesso ao
 para o app, e o gatilho do `main` foi criado: push no `main` publica no
 `treinamento.allos.org.br`. A `CONFIAR_CF_CONNECTING_IP=sempre` entrou num
 redeploy às 19:13 UTC.
+
+## 14. Processo Seletivo — avaliações e dashboard (2026-10-14, 01:38 UTC)
+
+Decisão do dono, depois da virada: trazer as avaliações dos candidatos e os
+registros da dashboard, aceitando que o bloqueio de 15 dias passe a valer para
+quem fez a prova no sistema antigo.
+
+**Só o seletivo, só inserindo.** Com o sistema novo no ar, a migração inteira
+**não pode mais ser rodada**: a regra "o antigo vence" desfaria nomes, fotos,
+catálogo e sidequests mudados no novo. Por isso `scripts/migrar-delta.js
+--so-seletivo` (`migrarSeletivo`) insere só o que falta e não toca em mais nada:
+`selecao_logs` pelo id/sessão, sem sobrescrever (uma "nova chance" dada no novo
+fica); `selecao_estatisticas` pelo conjunto (data, nota, status), contando
+repetições. WhatsApp normalizado como o app (só dígitos).
+
+| | Sistema antigo (cópia da virada) | Produção antes | Produção depois |
+|---|---|---|---|
+| Avaliações de candidatos | 139 (28/09 → 12/10; as mais velhas o antigo já tinha podado) | 0 | **139** |
+| Registros da dashboard | 284 (03/07 → 12/10) | 120 (até 14/09) | **284** |
+
+- O detalhe por critério das 139 já estava no volume da produção (o volume
+  antigo virou o da produção), com o `logId` certo — a poda de órfãos não o toca.
+- Branch de teste da produção: 139 + 164 inseridos, 120 iguais; conferência
+  campo a campo sem divergência; nenhuma outra tabela mudou; segunda rodada 0/0.
+- Produção (ponto de volta `antes-seletivo-2026-10-14T0138Z`): os mesmos números
+  em 2,6 s; as 139 avaliações idênticas ao arquivo; a dashboard com os 284; segunda
+  rodada 0/0. 138 WhatsApps bloqueados (o último bloqueio vence em 27/10).
