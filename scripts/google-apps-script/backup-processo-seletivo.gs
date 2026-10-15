@@ -2,10 +2,10 @@
  * Backup do Processo Seletivo — Allos
  * ------------------------------------
  * Os logs do Processo Seletivo (transcrição completa + avaliação de cada
- * candidato) vivem só 15 dias no servidor (SELECTION_LOG_TTL_DAYS, em
- * server/index.js) antes de serem apagados. Este script busca todos os logs
- * ainda vivos em GET /api/selecao/export-all e salva cada um como um .txt na
- * pasta do Drive configurada abaixo — assim nada se perde quando o TTL expira.
+ * candidato) ficam guardados para sempre no banco (Postgres/Neon). Este script
+ * mantém uma CÓPIA fora do banco: busca todos os logs em
+ * GET /api/selecao/export-all e salva cada candidato novo como um .txt na pasta
+ * do Drive configurada nas propriedades do script.
  *
  * Não roda dentro do repo (Apps Script vive no navegador, em script.google.com);
  * este arquivo é só a fonte versionada. Ver README.md nesta mesma pasta para o
@@ -82,7 +82,7 @@ function runScheduledBackup() {
 
 /**
  * Rodar ESTA função uma única vez, manualmente, pelo editor (menu ▶ Executar),
- * escolhendo runScheduledBackup no seletor de função. Isso: (1) pede a
+ * escolhendo installDailyTrigger no seletor de função. Isso: (1) pede a
  * autorização OAuth (acesso ao Drive/Gmail desta conta Google) e (2) instala
  * o trigger diário. Rodar de novo é seguro — remove o trigger antigo antes de
  * criar o novo, então nunca duplica.
