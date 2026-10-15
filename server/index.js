@@ -9057,6 +9057,10 @@ bancoPronto.then(marcarBenchmarksOrfaos).catch((e) => {
 
 // --- Speech to Text Proxy ---
 app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
+  // Transcrição é exclusiva dos alunos internos (o front já mostra o microfone travado).
+  if (req.user.role === 'external' || req.user.role === 'visitor') {
+    return res.status(403).json({ error: 'Função exclusiva para alunos internos da Allos' });
+  }
   const limite = await limiteIaExcedido(req.user).catch(() => null);
   if (limite) return res.status(429).json(limite);
   const apiKey = process.env.OPENAI_API_KEY;
@@ -9081,8 +9085,8 @@ app.post('/api/transcribe', requireAuth, aiLimiter, async (req, res) => {
       model: 'whisper-1',
       language: 'pt'
     });
-    // Conta o uso do microfone (conquista "Papagaio"). Visitante não acumula.
-    if (req.user.role !== 'visitor') bumpMicUses(req.user.id).catch(() => {});
+    // Conta o uso do microfone (conquista "Papagaio").
+    bumpMicUses(req.user.id).catch(() => {});
     res.json({ text: transcription.text });
   } catch (err) {
     res.status(500).json(falhou(req, err, 'transcrição/whisper',

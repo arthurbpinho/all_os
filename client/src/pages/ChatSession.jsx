@@ -23,6 +23,10 @@ const DIFFICULTY_LABEL = {
   avancado: 'Avançado',
 };
 
+// Transcrição de áudio é exclusiva de quem é da casa: Aluno Externo e visitante veem o
+// microfone em cinza, com o aviso no tooltip (o servidor também recusa).
+const MIC_SO_INTERNOS = 'Função exclusiva para alunos internos da Allos';
+
 export default function ChatSession({ user }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -35,6 +39,7 @@ export default function ChatSession({ user }) {
   const [sessionStarted, setSessionStarted] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const micBloqueado = user?.role === 'external' || user?.role === 'visitor';
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [confirmingFinalize, setConfirmingFinalize] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
@@ -496,6 +501,7 @@ export default function ChatSession({ user }) {
 
   async function toggleRecording() {
     if (phase !== PHASE_SIMULATION || !sessionStarted || isTranscribing) return;
+    if (micBloqueado) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -934,9 +940,10 @@ export default function ChatSession({ user }) {
           />
           <button
             type="button"
-            className={`icon-btn ${isRecording ? 'recording' : ''}`}
-            onClick={toggleRecording}
-            title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
+            className={`icon-btn ${isRecording ? 'recording' : ''} ${micBloqueado ? 'locked' : ''}`}
+            onClick={micBloqueado ? undefined : toggleRecording}
+            title={micBloqueado ? MIC_SO_INTERNOS : (isRecording ? 'Parar gravação' : 'Gravar áudio')}
+            aria-disabled={micBloqueado || undefined}
             disabled={isTyping}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">

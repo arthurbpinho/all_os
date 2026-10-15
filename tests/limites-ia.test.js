@@ -1,6 +1,6 @@
 // Modelo de IA e limite semanal do Terapeuta externo (demandas.md §16.2 e §18):
 // janela deslizante de 7 dias, em dólares e/ou tokens, com aviso ao suporte.
-const { app, request, resetData, loginAs, authHeader, db } = require('./helpers');
+const { app, request, resetData, loginAs, loginVisitor, authHeader, db } = require('./helpers');
 const li = require('../server/limites-ia');
 
 beforeEach(() => resetData());
@@ -66,7 +66,7 @@ describe('limite semanal do Terapeuta externo', () => {
     expect(body.equivalencias.find((e) => e.key === 'gpt-5.4-mini').tokensSaida).toBe(666666);
   });
 
-  it('estourou na janela de 7 dias: chat, avaliação e transcrição param, e o suporte é avisado uma vez', async () => {
+  it('estourou na janela de 7 dias: chat e avaliação param, e o suporte é avisado uma vez', async () => {
     const admin = await loginAs('admin');
     await configurar(admin, { limiteUsd: 1 });
     const externo = await loginExterno();
@@ -77,7 +77,6 @@ describe('limite semanal do Terapeuta externo', () => {
     expect(r.body.limiteIa).toMatchObject({ excedido: true, motivo: 'usd' });
     expect(r.body.error).toMatch(/limite semanal/);
     expect((await chat(externo)).status).toBe(429);
-    expect((await request(app).post('/api/transcribe').set(authHeader(externo)).send({ audio: '' })).status).toBe(429);
     expect((await request(app).post('/api/evaluate').set(authHeader(externo)).send({ messages: [], context: { type: 'freeplay', mode: 'training', itemId: 'fp-test-1' } })).status).toBe(429);
 
     // Um aviso por estouro, não um por chamada recusada.
@@ -87,6 +86,23 @@ describe('limite semanal do Terapeuta externo', () => {
     expect(meu.body).toMatchObject({ temLimite: true, excedido: true, limiteUsd: 1 });
     const painel = await request(app).get('/api/admin/uso-ia').set(authHeader(admin));
     expect(painel.body.contas.find((c) => c.userId === '5')).toMatchObject({ excedido: true, usd: 1.2 });
+  });
+
+  it('transcrição de áudio é exclusiva dos alunos internos (externo e visitante não)', async () => {
+    const chave = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = ''; // sem chave o endpoint responde sem chamar a OpenAI
+    try {
+      const interno = await loginAs('aluno2');
+      expect((await request(app).post('/api/transcribe').set(authHeader(interno)).send({ audio: '' })).status).toBe(200);
+      const externo = await loginExterno();
+      const r = await request(app).post('/api/transcribe').set(authHeader(externo)).send({ audio: '' });
+      expect(r.status).toBe(403);
+      expect(r.body.error).toBe('Função exclusiva para alunos internos da Allos');
+      const visitante = await loginVisitor();
+      expect((await request(app).post('/api/transcribe').set(authHeader(visitante)).send({ audio: '' })).status).toBe(403);
+    } finally {
+      if (chave === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = chave;
+    }
   });
 
   it('uso de mais de 7 dias sai da conta (janela deslizante)', async () => {
