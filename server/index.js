@@ -4249,9 +4249,29 @@ app.post('/api/logs', requireAuth, writeLimiter, rota(async (req, res) => {
   res.json(resposta);
 }));
 
-// --- Feedback (popup ao fim da sessão, principalmente do visitante) ---
-// Coleta uma nota de 0 a 5 estrelas + mensagem livre (tabela feedback). Qualquer
-// usuário autenticado (inclusive visitante) pode enviar.
+// --- Feedback (estrelas 0–5 + mensagem livre, tabela feedback) ---
+// Pedido em dois momentos: ao visitante, no fim de cada sessão; ao Aluno
+// Externo, quando a cota diária de sessões acaba — só até ele mandar o primeiro.
+// Qualquer usuário autenticado pode enviar. Cada feedback novo avisa os admins
+// no sino (e no push).
+//
+// O do Aluno Externo é ANÔNIMO: vai sem nome e, no lugar do id da conta, com
+// uma chave HMAC que só o servidor recalcula (precisa do JWT_SECRET). Ela serve
+// só pra saber que aquela conta já respondeu; a partir do feedback não se chega
+// à conta. Trocar o JWT_SECRET faz o pedido reaparecer uma vez — aceitável.
+function chaveFeedbackAnonimo(userId) {
+  const h = crypto.createHmac('sha256', JWT_SECRET).update(`feedback-anonimo:${userId}`).digest('hex');
+  return `anon-${h.slice(0, 32)}`;
+}
+
+// O Aluno Externo ainda não deu o feedback dele? (Só ele tem esse pedido.)
+async function feedbackPendente(user) {
+  if (!user || user.role !== 'external') return false;
+  return !(await operacaoRepo.temFeedbackDe(chaveFeedbackAnonimo(user.id)));
+}
+
+const ROTULO_PAPEL_FEEDBACK = { visitor: 'Visitante', external: 'Aluno Externo (anônimo)' };
+
 app.post('/api/feedback', requireAuth, writeLimiter, rota(async (req, res) => {
   const body = req.body || {};
   const stars = Number.isFinite(body.stars)
@@ -4261,22 +4281,42 @@ app.post('/api/feedback', requireAuth, writeLimiter, rota(async (req, res) => {
   if (!stars && !message) {
     return res.status(400).json({ error: 'Envie ao menos uma nota ou uma mensagem.' });
   }
+  const anonimo = req.user.role === 'external';
+  if (anonimo && !(await feedbackPendente(req.user))) {
+    return res.status(409).json({ error: 'Você já enviou seu feedback. Obrigado!' });
+  }
   const entry = {
     id: 'fb' + Date.now() + '-' + crypto.randomBytes(3).toString('hex'),
     timestamp: new Date().toISOString(),
-    userId: req.user.id,
-    userName: req.user.name || '',
+    userId: anonimo ? chaveFeedbackAnonimo(req.user.id) : req.user.id,
+    userName: anonimo ? '' : (req.user.name || ''),
     role: req.user.role || '',
     stars,
     message,
   };
   await operacaoRepo.criarFeedback(entry);
+
+  // Aviso aos admins. Best-effort: falhar aqui não perde o feedback, já gravado.
+  const quem = ROTULO_PAPEL_FEEDBACK[entry.role] || entry.userName || 'Usuário';
+  const notas = stars ? `${'★'.repeat(stars)}${'☆'.repeat(5 - stars)} ` : '';
+  const trecho = message.length > 140 ? `${message.slice(0, 140)}…` : message;
+  try {
+    await Promise.all((await usoIaRepo.idsDosAdmins()).map((adminId) => pushNotification(adminId, {
+      type: 'feedback_received',
+      title: 'Nova avaliação da plataforma',
+      message: `${notas}${quem}${trecho ? `: ${trecho}` : ''}`,
+    }).catch(() => {})));
+  } catch (err) {
+    console.error('aviso de feedback aos admins falhou:', err.message);
+  }
   res.json({ ok: true });
 }));
 
 // Admin: lista todo o feedback coletado (mais recente primeiro).
+// A chave anônima do Aluno Externo não sai daqui: o admin vê só "Anônimo".
 app.get('/api/admin/feedback', requireAuth, requireRole('admin'), rota(async (req, res) => {
-  res.json(await operacaoRepo.feedbacks());
+  const lista = await operacaoRepo.feedbacks();
+  res.json(lista.map((f) => (String(f.userId || '').startsWith('anon-') ? { ...f, userId: null } : f)));
 }));
 
 // Admin: remove uma entrada de feedback (ex.: teste do próprio admin).
@@ -5344,8 +5384,11 @@ async function closeSessionQuota(user, key) {
 // resposta seria "bloqueado" para quem esgotou a cota mas está RETOMANDO um
 // atendimento já aberto, e a tela o impediria de terminar o que começou (o
 // /api/chat deixaria passar, porque lá a chave aberta é isenta).
+//
+// `feedbackPendente`: o Aluno Externo ainda não deu o feedback anônimo, que a
+// tela pede quando a cota acaba (ver POST /api/feedback).
 app.get('/api/session-quota', requireAuth, rota(async (req, res) => {
-  const estado = await sessionQuotaFor(req.user);
+  const estado = { ...(await sessionQuotaFor(req.user)), feedbackPendente: await feedbackPendente(req.user) };
   const chave = sessionQuota.sessionKey({ type: req.query.type, itemId: req.query.itemId });
   if (estado.blocked && chave && sessionQuota.hasOpenSession(await inicioDeSessoes(req.user), chave)) {
     return res.json({ ...estado, blocked: false });
@@ -9127,6 +9170,7 @@ function notificationUrl(n) {
     case 'evaluation_queued':
     case 'evaluation_ready': return '/logs';
     case 'comunidade_reply': return `/comunidade/discussao/${n.discussionId}`;
+    case 'feedback_received': return '/admin/users';
     default: return '/';
   }
 }
@@ -9159,6 +9203,8 @@ function notificationPushPayload(n) {
       return { ...base, title: 'Avaliação concluída', body: n.message || '' };
     case 'comunidade_reply':
       return { ...base, title: 'Nova resposta na Comunidade', body: `${n.fromName} comentou em "${n.title || 'sua discussão'}".` };
+    case 'feedback_received':
+      return { ...base, title: n.title || 'Nova avaliação da plataforma', body: n.message || '' };
     default:
       return { ...base, title: n.title || 'Notificação', body: n.message || '' };
   }

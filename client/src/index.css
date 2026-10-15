@@ -1805,6 +1805,26 @@ select option { background: var(--cream); color: var(--ink); }
 .quota-banner--esgotada { border-color: var(--warn); }
 .quota-banner--esgotada .quota-banner-contador { background: var(--warn); }
 .quota-banner--esgotada .quota-banner-text > strong { color: var(--warn); }
+.quota-banner-btn {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: var(--marrs-deep);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.quota-banner-btn:hover { background: var(--marrs-dark); }
+@media (max-width: 560px) {
+  .quota-banner { flex-wrap: wrap; }
+  .quota-banner-btn { width: 100%; }
+}
+/* Pedido de feedback anônimo dentro do aviso de cota esgotada. */
+.quota-feedback { border-top: 1px solid var(--line); padding-top: 14px; }
+.quota-feedback > strong { font-size: 15px; color: var(--marrs-deep); }
+.quota-feedback > p { margin: 4px 0 14px; font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; }
 
 .install-banner-close {
   flex-shrink: 0;

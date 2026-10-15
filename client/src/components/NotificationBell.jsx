@@ -38,6 +38,7 @@ function iconFor(n) {
     case 'evaluation_queued': return '⏳';
     case 'evaluation_ready': return '📋';
     case 'comunidade_reply': return '💬';
+    case 'feedback_received': return '⭐';
     default: return '•';
   }
 }
@@ -99,6 +100,13 @@ function bodyFor(n) {
       return (
         <>
           <strong>{n.fromName}</strong> comentou em “{n.title}”.
+        </>
+      );
+    case 'feedback_received':
+      return (
+        <>
+          <strong>{n.title || 'Nova avaliação da plataforma'}</strong>
+          {n.message ? <>{' · '}{n.message}</> : null}
         </>
       );
     default:
@@ -217,6 +225,8 @@ export default function NotificationBell({ user }) {
       navigate('/logs');
     } else if (n.type === 'comunidade_reply') {
       navigate(`/comunidade/discussao/${n.discussionId}`);
+    } else if (n.type === 'feedback_received') {
+      navigate('/admin/users');
     }
   }
 
