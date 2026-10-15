@@ -58,6 +58,13 @@ function criarRepoOperacao(pool) {
     }));
   }
 
+  // Alguém com este user_id já mandou feedback? (No Aluno Externo o user_id é a
+  // chave anônima — ver chaveFeedbackAnonimo no index.js.)
+  async function temFeedbackDe(userId) {
+    const { rows } = await pool.query('SELECT 1 FROM feedback WHERE user_id = $1 LIMIT 1', [String(userId)]);
+    return rows.length > 0;
+  }
+
   async function excluirFeedback(id) {
     const r = await pool.query('DELETE FROM feedback WHERE id = $1', [String(id)]);
     return r.rowCount > 0;
@@ -109,6 +116,7 @@ function criarRepoOperacao(pool) {
     limparErros,
     criarFeedback,
     feedbacks,
+    temFeedbackDe,
     excluirFeedback,
     carregarConfig,
     lerConfig,

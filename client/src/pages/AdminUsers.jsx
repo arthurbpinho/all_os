@@ -315,7 +315,8 @@ export default function AdminUsers({ user: currentUser }) {
           </span>
         </div>
         <p style={{ margin: '0 0 12px', fontSize: 13.5, color: 'var(--ink-soft)', lineHeight: 1.5 }}>
-          Notas (0–5) e mensagens enviadas pelos usuários e visitantes ao final das sessões.
+          Notas (0–5) e mensagens dos visitantes, ao final das sessões, e dos alunos externos, de forma
+          anônima, quando a cota diária de sessões acaba. Cada avaliação nova também chega no sino.
         </p>
         {feedbackError && <div className="alert error" style={{ marginBottom: 0 }}>{feedbackError}</div>}
         {feedbackLoading ? (

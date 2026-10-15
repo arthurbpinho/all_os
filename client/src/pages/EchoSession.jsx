@@ -14,6 +14,7 @@ import { nextActiveElapsed, SESSION_LIMIT_SECONDS, SESSION_LIMIT_MINUTES } from 
 import { useWakeLock } from '../useWakeLock';
 import RichText from '../components/RichText';
 import SessionQuotaModal from '../components/SessionQuotaModal';
+import FeedbackForm from '../components/FeedbackForm';
 import { sessionQuotaBlockMessage, sessionQuotaMessageFromError } from '../sessionQuota';
 
 // Bloco de texto (Neuroavaliação) que descreve a seleção de testes do aluno para
@@ -150,9 +151,6 @@ export default function EchoSession({ user, sessionType }) {
 
   // Feedback do visitante: popup ao encerrar a sessão (estrelas 0–5 + mensagem).
   const [showFeedback, setShowFeedback] = useState(false);
-  const [feedbackStars, setFeedbackStars] = useState(0);
-  const [feedbackMessage, setFeedbackMessage] = useState('');
-  const [feedbackSending, setFeedbackSending] = useState(false);
   const [feedbackDone, setFeedbackDone] = useState(false);
 
   // Mantém a tela ativa enquanto a IA avalia (pode levar dezenas de segundos).
@@ -163,21 +161,10 @@ export default function EchoSession({ user, sessionType }) {
     if (sessionEnded && isVisitor && !feedbackDone) setShowFeedback(true);
   }, [sessionEnded, isVisitor, feedbackDone]);
 
-  async function submitFeedback() {
-    if (feedbackSending) return;
-    setFeedbackSending(true);
-    try {
-      await api.submitFeedback({ stars: feedbackStars, message: feedbackMessage.trim() });
-      setFeedbackDone(true);
-      setShowFeedback(false);
-    } catch (err) {
-      // Não bloqueia o visitante: se falhar, apenas fecha o popup.
-      console.error('Falha ao enviar feedback:', err.message);
-      setFeedbackDone(true);
-      setShowFeedback(false);
-    } finally {
-      setFeedbackSending(false);
-    }
+  // Enviado, pulado ou falhado: o popup fecha e não volta nesta sessão.
+  function closeFeedback() {
+    setFeedbackDone(true);
+    setShowFeedback(false);
   }
 
   const messagesEndRef = useRef(null);
@@ -1125,55 +1112,14 @@ export default function EchoSession({ user, sessionType }) {
         </div>
 
         {showFeedback && (
-          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) { setFeedbackDone(true); setShowFeedback(false); } }}>
+          <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeFeedback(); }}>
             <div className="modal" style={{ maxWidth: 460 }}>
               <h3>Gostou da plataforma?</h3>
               <p style={{ color: 'var(--ink-soft)', marginTop: -8, marginBottom: 18 }}>
                 Gostou da plataforma e quer continuar tendo acesso? Deixe seu comentário!
               </p>
 
-              <div className="feedback-stars" role="group" aria-label="Avaliação de 0 a 5 estrelas">
-                {[1, 2, 3, 4, 5].map((n) => (
-                  <button
-                    key={n}
-                    type="button"
-                    className={`feedback-star ${n <= feedbackStars ? 'on' : ''}`}
-                    aria-label={`${n} ${n === 1 ? 'estrela' : 'estrelas'}`}
-                    aria-pressed={n <= feedbackStars}
-                    onClick={() => setFeedbackStars(n === feedbackStars ? 0 : n)}
-                  >
-                    {n <= feedbackStars ? '★' : '☆'}
-                  </button>
-                ))}
-              </div>
-
-              <textarea
-                className="feedback-message"
-                rows={4}
-                value={feedbackMessage}
-                onChange={(e) => setFeedbackMessage(e.target.value)}
-                placeholder="Deixe sua mensagem (opcional)…"
-                maxLength={2000}
-              />
-
-              <div className="modal-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => { setFeedbackDone(true); setShowFeedback(false); }}
-                  disabled={feedbackSending}
-                >
-                  Agora não
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={submitFeedback}
-                  disabled={feedbackSending || (!feedbackStars && !feedbackMessage.trim())}
-                >
-                  {feedbackSending ? 'Enviando…' : 'Enviar feedback'}
-                </button>
-              </div>
+              <FeedbackForm onDone={closeFeedback} onSkip={closeFeedback} />
             </div>
           </div>
         )}
