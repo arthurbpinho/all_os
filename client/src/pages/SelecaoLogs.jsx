@@ -101,7 +101,7 @@ function buildFullCsv(list) {
     const crit = l.criteriaScores || {};
     return [
       c.nome || '', c.email || '', c.whatsapp || '', c.faculdade || '', c.periodo || '', c.abordagem || '',
-      l.characterName || '', l.sessionCount || 1, Math.round(Number(l.durationSeconds) || 0),
+      l.characterName || '', l.sessionCount || 1, l.durationSeconds == null ? '' : Math.round(Number(l.durationSeconds) || 0),
       STATUS_LABEL[l.status] || l.status || '', l.score == null ? '' : l.score,
       ...Object.keys(CRITERIA_LABELS).map((k) => (crit[k] == null ? '' : crit[k])),
       l.evaluation || '', l.timestamp || '',
@@ -116,6 +116,8 @@ function fmtDate(iso) {
   return d.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 function fmtDuration(secs) {
+  // Avaliação restaurada de backup (demandas.md §26) não tem a duração.
+  if (secs == null) return '—';
   const s = Math.max(0, Math.floor(Number(secs) || 0));
   const m = Math.floor(s / 60);
   return m >= 1 ? `${m} min` : `${s}s`;
