@@ -390,3 +390,30 @@ repetições. WhatsApp normalizado como o app (só dígitos).
 - Produção (ponto de volta `antes-seletivo-2026-10-14T0138Z`): os mesmos números
   em 2,6 s; as 139 avaliações idênticas ao arquivo; a dashboard com os 284; segunda
   rodada 0/0. 138 WhatsApps bloqueados (o último bloqueio vence em 27/10).
+
+## 15. Processo Seletivo — 26 avaliações restauradas do backup do Drive (2026-10-15)
+
+O sistema antigo apagava as avaliações do seletivo com mais de 15 dias, então 26
+candidatos de 14/09 a 28/09 não estavam na cópia da virada. Eles estavam no
+backup em texto que o Apps Script salva no Drive
+(`~/Documentos/allos/backup processo seletivo`, 165 `.txt`).
+
+- **Sem duplicar:** o nome de cada `.txt` termina nos 8 últimos caracteres do id
+  da avaliação; 139 bateram com o banco, 26 não.
+- **Reconstrução:** os dados do candidato, a data, o caso e a transcrição vêm do
+  `.txt`. O leitor foi validado nos 139 que já estavam no banco: todos os campos
+  bateram, menos um `.txt` salvo antes de a avaliação terminar. A avaliação
+  (id original, nota, notas por critério, status, texto, caso) vem do arquivo de
+  detalhe por critério, que continuava no volume com o `logId` — nos 139, essas
+  seis relações valem em 100% dos casos, e nos 25 reconstruídos o `.txt` e o
+  detalhe concordam. Um dos 26 ainda estava inteiro em JSON numa cópia do volume
+  de 13/10 e entrou como era.
+- **O que não volta:** a duração do atendimento (a tela mostra "—"), o id da
+  sessão original e o raciocínio do avaliador. Cada documento restaurado leva
+  `restaurado: { em, fonte, semDado }`.
+- **Dashboard:** os 26 já estavam lá (os registros anônimos nunca eram podados) —
+  nada foi inserido nela.
+- **Carga:** `--so-seletivo` (só insere); ponto de volta
+  `antes-seletivo-backup-2026-10-15T2005Z`. 165 avaliações no banco, sem id nem
+  candidato repetido; os 139 anteriores intactos; segunda rodada 0/0; nenhum
+  bloqueio novo (todos com mais de 15 dias).
