@@ -104,8 +104,7 @@ export default function SelecaoDashboard() {
           </div>
 
           <p style={{ fontSize: 13, color: 'var(--muted)', fontStyle: 'italic', marginTop: 4 }}>
-            Os números vêm do histórico anônimo (sem dados pessoais), que permanece mesmo após os logs
-            completos expirarem em 15 dias.
+            Os números vêm do histórico anônimo (sem dados pessoais), registrado à parte dos logs completos.
           </p>
 
           {tri && <TriPanel tri={tri} />}

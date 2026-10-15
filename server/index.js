@@ -6239,9 +6239,11 @@ function senhaSelecaoConfere(entrada) {
   if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
   return crypto.timingSafeEqual(a, b);
 }
-// Secret de M2M pro backup externo (Google Apps Script) puxar os logs antes da
-// poda de 15 dias. Deliberadamente separado do JWT: quem chama é um script
-// agendado, sem sessão de usuário — não faz sentido reautenticar a cada corrida.
+// Secret de M2M pro backup externo (Google Apps Script), que copia os logs do
+// seletivo para o Drive da Allos — uma cópia fora do banco, não mais uma corrida
+// contra poda (os logs são persistentes, §24.0). Deliberadamente separado do JWT:
+// quem chama é um script agendado, sem sessão de usuário — não faz sentido
+// reautenticar a cada corrida.
 // Vazio = endpoint desligado (nenhum backup configurado ainda).
 const SELECAO_EXPORT_SECRET = process.env.SELECAO_EXPORT_SECRET || '';
 function selecaoExportSecretConfere(informado) {
@@ -6370,8 +6372,7 @@ const SELECAO_STATUS_LABEL = { ativo: 'Ativo', rejeitado: 'Rejeitado', pending: 
 
 // Texto completo (log + avaliação) de um candidato, no MESMO formato que o
 // avaliador já baixa em "Tudo" na tela de Logs (client/SelecaoLogs.jsx). Usado
-// pelo backup externo (Google Apps Script), que salva isto num .txt no Drive
-// antes do TTL de 15 dias apagar o log original.
+// pelo backup externo (Google Apps Script), que salva isto num .txt no Drive.
 // Mesma frase da tela SelecaoLogs.jsx (o export espelha o "Tudo" de lá).
 function rotuloFeedbackPrevio(log) {
   if (!log.feedbackIA) return 'não pediu';
@@ -7588,9 +7589,10 @@ app.post('/api/selecao/logs/:id/nova-chance', requireAuth, requireRole('evaluato
   res.json({ ok: true, id: alvo.id, novaChance: alvo.novaChance });
 }));
 
-// 5b) Backup externo (Google Apps Script) — puxa TODOS os logs vivos (log +
-// avaliação, já formatados como .txt) pra salvar no Drive antes da poda de 15
-// dias. M2M por secret fixo no header (X-Export-Secret), não JWT: quem chama é
+// 5b) Backup externo (Google Apps Script) — devolve TODOS os logs do banco (log +
+// avaliação, já formatados como .txt) pra uma cópia no Drive. Como os logs não
+// expiram mais, a resposta cresce com o histórico inteiro a cada corrida.
+// M2M por secret fixo no header (X-Export-Secret), não JWT: quem chama é
 // um script agendado, sem sessão de usuário. Idempotência de gravação fica a
 // cargo de quem chama (o script decide o que já salvou, pelo nome do arquivo).
 app.get('/api/selecao/export-all', requireSelecaoExportSecret, rota(async (req, res) => {
