@@ -27,3 +27,16 @@ export function sessionQuotaMessageFromError(err) {
   const corpo = err && err.body;
   return corpo && corpo.sessionQuota && corpo.sessionQuota.blocked ? corpo.error : '';
 }
+
+// Quanto falta até `resetAt` (ISO), em texto curto: "3h 42min", "42min",
+// "menos de 1 min". '' quando não há horário ou ele já passou.
+export function formatarEspera(resetAt, agora = Date.now()) {
+  const alvo = resetAt ? Date.parse(resetAt) : NaN;
+  if (!Number.isFinite(alvo) || alvo <= agora) return '';
+  const min = Math.ceil((alvo - agora) / 60000);
+  if (min <= 1) return 'menos de 1 min';
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if (!h) return `${m}min`;
+  return m ? `${h}h ${m}min` : `${h}h`;
+}

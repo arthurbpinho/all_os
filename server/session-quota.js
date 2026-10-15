@@ -1,6 +1,6 @@
 // Cota diária de sessões do Aluno Externo — lógica PURA (sem express, sem disco).
 //
-// Regra: quem entra pelo auto-cadastro ('external') pode ABRIR no máximo 3
+// Regra: quem entra pelo auto-cadastro ('external') pode ABRIR no máximo 2
 // atendimentos a cada 24h. A janela é DESLIZANTE (não zera à meia-noite): o
 // slot mais antigo volta 24h depois de ter sido usado, que é exatamente o que a
 // mensagem promete ("em 24 horas você conseguirá acessar novamente").
@@ -22,12 +22,14 @@
 // Mora fora do index.js pelo mesmo motivo de cadastro.js e scoring.js: regra
 // pequena, muito testável, e o index já passa de 9 mil linhas.
 
-const EXTERNAL_DAILY_SESSION_LIMIT = 3;
+const EXTERNAL_DAILY_SESSION_LIMIT = 2;
 const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Texto exato mostrado ao aluno quando ele tenta abrir a 4ª sessão.
+// Texto mostrado ao aluno quando ele tenta abrir uma sessão além da cota. A
+// hora em que a próxima volta não entra aqui: a janela é deslizante, então o
+// cliente mostra a contagem regressiva a partir de `resetAt`.
 const QUOTA_MESSAGE =
-  'Limitamos o uso de alunos externos para 3 sessões. Em 24 horas você conseguirá acessar novamente.';
+  `Alunos internos da Allos têm acesso ilimitado. Por questões de custo operacional, alunos externos têm direito a ${EXTERNAL_DAILY_SESSION_LIMIT} sessões a cada 24 horas.`;
 
 // Só 'external' tem cota. Aluno interno, supervisor, admin, avaliador e
 // visitante seguem sem limite diário.

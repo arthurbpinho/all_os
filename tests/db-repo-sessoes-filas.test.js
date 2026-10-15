@@ -85,10 +85,10 @@ describe.skipIf(!URL_TESTE)('sessões ativas, cota e filas no banco', () => {
       return 'abriu';
     });
 
-    it('dez aberturas simultâneas de pacientes diferentes: só três passam', async () => {
+    it('dez aberturas simultâneas de pacientes diferentes: só duas passam', async () => {
       const r = await Promise.all(Array.from({ length: 10 }, (_, i) => abrir(`freeplay:fp-${i}`)));
-      expect(r.filter((x) => x === 'abriu')).toHaveLength(3);
-      expect((await cota.inicios(conta.id, sessionQuota.QUOTA_WINDOW_MS))).toHaveLength(3);
+      expect(r.filter((x) => x === 'abriu')).toHaveLength(2);
+      expect((await cota.inicios(conta.id, sessionQuota.QUOTA_WINDOW_MS))).toHaveLength(2);
     });
 
     it('continuar sessão aberta é de graça; fechar mantém o slot gasto', async () => {

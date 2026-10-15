@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import InstallAppBanner from '../components/InstallAppBanner';
+import SessionQuotaBanner from '../components/SessionQuotaBanner';
 import { ICONS } from '../icons';
 import { PatientAvatar } from '../components/PatientAvatar';
 
@@ -150,6 +151,9 @@ export default function Competitive({ user }) {
           </a>
         </aside>
       </div>
+
+      {/* Cota diária do Aluno Externo — some sozinho nos outros papéis. */}
+      <SessionQuotaBanner />
 
       {error && <div className="alert error">{error}</div>}
 

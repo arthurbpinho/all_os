@@ -1770,6 +1770,42 @@ select option { background: var(--cream); color: var(--ink); }
   transition: background 0.15s, box-shadow 0.15s;
 }
 .install-banner-btn:hover { background: var(--marrs-dark); box-shadow: var(--shadow-marrs); }
+/* Cota diária de sessões do Aluno Externo (Página Inicial). Mesma família
+   visual do install-banner; esgotada, a borda e o número passam a --warn. */
+.quota-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  border: 1px solid var(--marrs-50);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, var(--marrs-tint), transparent);
+  box-shadow: var(--shadow);
+}
+.quota-banner-contador {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: var(--marrs-deep);
+  color: var(--on-accent);
+  line-height: 1;
+}
+.quota-banner-contador strong { font-size: 22px; font-weight: 700; }
+.quota-banner-contador span { font-size: 11px; margin-top: 3px; opacity: 0.85; }
+.quota-banner-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.quota-banner-text > strong { font-size: 14px; color: var(--marrs-deep); font-weight: 600; }
+.quota-banner-text > span { font-size: 12.5px; color: var(--ink-soft); line-height: 1.45; }
+.quota-banner-text .quota-banner-espera { color: var(--ink); font-size: 13px; }
+.quota-banner--esgotada { border-color: var(--warn); }
+.quota-banner--esgotada .quota-banner-contador { background: var(--warn); }
+.quota-banner--esgotada .quota-banner-text > strong { color: var(--warn); }
+
 .install-banner-close {
   flex-shrink: 0;
   width: 26px;

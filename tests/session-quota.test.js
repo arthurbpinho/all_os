@@ -1,8 +1,8 @@
-// Cota diária de sessões do Aluno Externo: 3 atendimentos por 24h.
+// Cota diária de sessões do Aluno Externo: 2 atendimentos por 24h.
 //
 // O que este arquivo garante:
 //   1. o slot é cobrado ao ABRIR a sessão, não ao finalizar;
-//   2. a 4ª abertura em 24h é barrada com a mensagem combinada;
+//   2. a abertura além da cota em 24h é barrada com a mensagem combinada;
 //   3. continuar (ou retomar) uma sessão já aberta nunca é barrado;
 //   4. nenhum outro papel ganhou limite junto.
 const { app, request, resetData, loginAs, authHeader, DATA_DIR } = require('./helpers');
@@ -10,6 +10,9 @@ const fs = require('fs');
 const path = require('path');
 const mailer = require('../server/email');
 const quota = require('../server/session-quota');
+
+const MENSAGEM =
+  'Alunos internos da Allos têm acesso ilimitado. Por questões de custo operacional, alunos externos têm direito a 2 sessões a cada 24 horas.';
 
 const CADASTRO_OK = {
   username: 'ana.externa',
@@ -74,27 +77,26 @@ describe('session-quota (unitário)', () => {
     }
   });
 
-  it('conta 3 aberturas e bloqueia a 4ª', () => {
+  it('conta 2 aberturas e bloqueia a 3ª', () => {
+    expect(quota.EXTERNAL_DAILY_SESSION_LIMIT).toBe(2);
     let starts = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       expect(quota.quotaState(starts, AGORA).blocked).toBe(false);
       starts = quota.registerStart(starts, `freeplay:p${i}`, AGORA);
     }
     const cheio = quota.quotaState(starts, AGORA);
-    expect(cheio.used).toBe(3);
+    expect(cheio.used).toBe(2);
     expect(cheio.remaining).toBe(0);
     expect(cheio.blocked).toBe(true);
-    expect(cheio.message).toBe(
-      'Limitamos o uso de alunos externos para 3 sessões. Em 24 horas você conseguirá acessar novamente.',
-    );
+    expect(cheio.message).toBe(MENSAGEM);
   });
 
   // Janela DESLIZANTE: o que libera o próximo slot é a abertura mais antiga
   // completar 24h, não a virada do dia.
   it('libera o slot 24h depois da abertura mais antiga', () => {
-    const starts = [AGORA - 25 * HORA, AGORA - 23 * HORA, AGORA - 1 * HORA];
+    const starts = [AGORA - 25 * HORA, AGORA - 23 * HORA];
     const st = quota.quotaState(starts, AGORA);
-    expect(st.used).toBe(2);           // a de 25h atrás saiu da janela
+    expect(st.used).toBe(1);           // a de 25h atrás saiu da janela
     expect(st.blocked).toBe(false);
     expect(st.resetAt).toBe(new Date(AGORA - 23 * HORA + 24 * HORA).toISOString());
   });
@@ -154,28 +156,26 @@ describe('cota de sessões na API', () => {
     await app.__test.definirCatalogo('freeplay', chars);
   });
 
-  it('deixa abrir 3 sessões e barra a 4ª com a mensagem combinada', async () => {
+  it('deixa abrir 2 sessões e barra a 3ª com a mensagem combinada', async () => {
     const token = await loginExterno();
 
-    for (const p of ['fp-test-1', 'fp-test-2', 'fp-test-3']) {
+    for (const p of ['fp-test-1', 'fp-test-2']) {
       const res = await abrirSessao(token, p);
       expect(res.status).toBe(200);
     }
 
-    const quarta = await abrirSessao(token, 'fp-test-4');
-    expect(quarta.status).toBe(429);
-    expect(quarta.body.error).toBe(
-      'Limitamos o uso de alunos externos para 3 sessões. Em 24 horas você conseguirá acessar novamente.',
-    );
-    expect(quarta.body.sessionQuota.blocked).toBe(true);
-    expect(quarta.body.sessionQuota.resetAt).toBeTruthy();
+    const terceira = await abrirSessao(token, 'fp-test-3');
+    expect(terceira.status).toBe(429);
+    expect(terceira.body.error).toBe(MENSAGEM);
+    expect(terceira.body.sessionQuota.blocked).toBe(true);
+    expect(terceira.body.sessionQuota.resetAt).toBeTruthy();
   });
 
   // Ninguém pode ficar preso no meio de um atendimento: o slot daquela sessão
   // já foi cobrado na abertura.
   it('não barra a continuação de uma sessão já aberta', async () => {
     const token = await loginExterno();
-    for (const p of ['fp-test-1', 'fp-test-2', 'fp-test-3']) await abrirSessao(token, p);
+    for (const p of ['fp-test-1', 'fp-test-2']) await abrirSessao(token, p);
 
     const res = await continuarSessao(token, 'fp-test-1');
     expect(res.status).toBe(200);
@@ -187,7 +187,7 @@ describe('cota de sessões na API', () => {
   // registro do servidor, e o corpo não muda nada.
   it('histórico forjado no corpo não pula a cota', async () => {
     const token = await loginExterno();
-    for (const p of ['fp-test-1', 'fp-test-2', 'fp-test-3']) await abrirSessao(token, p);
+    for (const p of ['fp-test-1', 'fp-test-2']) await abrirSessao(token, p);
 
     const forjado = await request(app).post('/api/chat').set(authHeader(token)).send({
       messages: [
@@ -207,22 +207,20 @@ describe('cota de sessões na API', () => {
     await finalizarSessao(token, 'fp-test-1');
     await abrirSessao(token, 'fp-test-1');   // 2º slot
     await finalizarSessao(token, 'fp-test-1');
-    await abrirSessao(token, 'fp-test-1');   // 3º slot
-    await finalizarSessao(token, 'fp-test-1');
 
     const st = await request(app).get('/api/session-quota').set(authHeader(token));
-    expect(st.body).toMatchObject({ used: 3, remaining: 0, blocked: true });
+    expect(st.body).toMatchObject({ used: 2, remaining: 0, blocked: true });
     expect((await abrirSessao(token, 'fp-test-1')).status).toBe(429);
   });
 
   it('GET /api/session-quota reflete o consumo do aluno externo', async () => {
     const token = await loginExterno();
     const antes = await request(app).get('/api/session-quota').set(authHeader(token));
-    expect(antes.body).toMatchObject({ enabled: true, limit: 3, used: 0, remaining: 3, blocked: false });
+    expect(antes.body).toMatchObject({ enabled: true, limit: 2, used: 0, remaining: 2, blocked: false });
 
     await abrirSessao(token);
     const depois = await request(app).get('/api/session-quota').set(authHeader(token));
-    expect(depois.body).toMatchObject({ used: 1, remaining: 2, blocked: false });
+    expect(depois.body).toMatchObject({ used: 1, remaining: 1, blocked: false });
   });
 
   // A tela consulta a cota ANTES de montar o chat. Sem o contexto da sessão, a
@@ -230,7 +228,7 @@ describe('cota de sessões na API', () => {
   // /api/chat libera. Os dois lados precisam concordar.
   it('a consulta prévia libera a retomada de uma sessão já aberta', async () => {
     const token = await loginExterno();
-    for (const p of ['fp-test-1', 'fp-test-2', 'fp-test-3']) await abrirSessao(token, p);
+    for (const p of ['fp-test-1', 'fp-test-2']) await abrirSessao(token, p);
 
     const semContexto = await request(app).get('/api/session-quota').set(authHeader(token));
     expect(semContexto.body.blocked).toBe(true);
@@ -263,7 +261,7 @@ describe('cota de sessões na API', () => {
   // A cota é por conta, não global: um externo esgotado não trava o outro.
   it('a contagem é por usuário', async () => {
     const ana = await loginExterno();
-    for (const p of ['fp-test-1', 'fp-test-2', 'fp-test-3']) await abrirSessao(ana, p);
+    for (const p of ['fp-test-1', 'fp-test-2']) await abrirSessao(ana, p);
     expect((await abrirSessao(ana, 'fp-test-4')).status).toBe(429);
 
     mailer.limparCapturados();

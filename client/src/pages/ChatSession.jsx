@@ -214,7 +214,7 @@ export default function ChatSession({ user }) {
     abrindoRef.current = true;
     setError('');
 
-    // Cota do Aluno Externo (3 sessões/24h): checa antes de montar o chat.
+    // Cota do Aluno Externo (2 sessões/24h): checa antes de montar o chat.
     const bloqueio = await sessionQuotaBlockMessage({ type: 'exercise', itemId: id });
     if (bloqueio) {
       abrindoRef.current = false;
