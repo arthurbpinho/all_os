@@ -57,6 +57,10 @@ const SKIP_MIN_DELAY_MS = 2200;
 // Aplica-se apenas à Simulação (freeplay); Neuro segue sem cap.
 const MAX_FREEPLAY_SESSIONS = 6;
 
+// Transcrição de áudio é exclusiva de quem é da casa: Aluno Externo e visitante veem o
+// microfone em cinza, com o aviso no tooltip (o servidor também recusa).
+const MIC_SO_INTERNOS = 'Função exclusiva para alunos internos da Allos';
+
 export default function EchoSession({ user, sessionType }) {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -91,6 +95,7 @@ export default function EchoSession({ user, sessionType }) {
   const [elapsed, setElapsed] = useState(0); // segundos
   const [isTyping, setIsTyping] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const micBloqueado = user?.role === 'external' || user?.role === 'visitor';
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [error, setError] = useState('');
   const [highlightTarget, setHighlightTarget] = useState(null); // { msgIndex }
@@ -829,6 +834,7 @@ export default function EchoSession({ user, sessionType }) {
 
   async function toggleRecording() {
     if (!sessionStarted || sessionEnded || isTranscribing) return;
+    if (micBloqueado) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
       return;
@@ -1494,9 +1500,10 @@ export default function EchoSession({ user, sessionType }) {
           />
           <button
             type="button"
-            className={`icon-btn ${isRecording ? 'recording' : ''}`}
-            onClick={toggleRecording}
-            title={isRecording ? 'Parar gravação' : 'Gravar áudio'}
+            className={`icon-btn ${isRecording ? 'recording' : ''} ${micBloqueado ? 'locked' : ''}`}
+            onClick={micBloqueado ? undefined : toggleRecording}
+            title={micBloqueado ? MIC_SO_INTERNOS : (isRecording ? 'Parar gravação' : 'Gravar áudio')}
+            aria-disabled={micBloqueado || undefined}
             disabled={isTyping}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill={isRecording ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8">
