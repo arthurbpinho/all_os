@@ -111,7 +111,7 @@ export default function EchoSession({ user, sessionType }) {
   const [skipping, setSkipping] = useState(false);
   const [showSessionLimit, setShowSessionLimit] = useState(false);
   // Cota diária do Aluno Externo: mensagem vinda do servidor quando ele tenta
-  // abrir a 4ª sessão em 24h. Vazio = sem aviso.
+  // abrir uma sessão além da cota de 24h. Vazio = sem aviso.
   const [quotaMessage, setQuotaMessage] = useState('');
   const abrindoRef = useRef(false); // abertura de sessão em voo (anti duplo clique)
 

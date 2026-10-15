@@ -5380,7 +5380,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     return res.status(400).json({ error: 'messages deve ser uma lista' });
   }
 
-  // Cota do Aluno Externo: 3 atendimentos por 24h. O slot é cobrado ao ABRIR uma
+  // Cota do Aluno Externo: 2 atendimentos por 24h. O slot é cobrado ao ABRIR uma
   // sessão — e quem decide o que é "abrir" é o registro do servidor (a chave
   // tipo+paciente já está aberta?), nunca o histórico que veio no corpo. Conversa
   // em andamento passa direto, pra ninguém ficar preso no meio do atendimento.

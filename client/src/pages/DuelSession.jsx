@@ -183,7 +183,7 @@ export default function DuelSession({ user }) {
     if (!character || sessionStarted || abrindoRef.current) return;
     abrindoRef.current = true;
 
-    // Cota do Aluno Externo (3 sessões/24h): duelo conta como sessão também.
+    // Cota do Aluno Externo (2 sessões/24h): duelo conta como sessão também.
     const bloqueio = await sessionQuotaBlockMessage({ type: 'freeplay', itemId: character.id });
     if (bloqueio) {
       abrindoRef.current = false;
