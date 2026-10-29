@@ -103,10 +103,10 @@ describe('sessão: só token legítimo de conta viva', () => {
     const admin = await loginAs('admin');
     // O supervisor 'prof' vira aluno; o token dele ainda diz supervisor.
     const prof = await loginAs('prof');
-    expect((await request(app).get('/api/benchmark-simulacao/fila').set(authHeader(prof))).status).toBe(200);
+    expect((await request(app).get('/api/avaliacao-independente/fila').set(authHeader(prof))).status).toBe(200);
 
     await db.query(`UPDATE users SET role = 'therapist', teacher_id = 4 WHERE id = 2`);
-    expect((await request(app).get('/api/benchmark-simulacao/fila').set(authHeader(prof))).status).toBe(403);
+    expect((await request(app).get('/api/avaliacao-independente/fila').set(authHeader(prof))).status).toBe(403);
     expect((await me(prof)).body.user.role).toBe('therapist');
     expect(admin).toBeTruthy();
   });

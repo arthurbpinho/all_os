@@ -1,5 +1,5 @@
 // Filas e resultados das ferramentas internas (Trilha em batch, Avaliação
-// Independente, benchmark de simulação) e o ledger da Batch API, no PostgreSQL.
+// Independente) e o ledger da Batch API, no PostgreSQL.
 // Ver 006_sessoes_filas.sql.
 //
 // Cada job é o mesmo documento que ficava no array do arquivo. O que muda: ler

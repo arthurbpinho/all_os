@@ -297,28 +297,6 @@ export const api = {
   // custo em USD e latência daquela chamada — é o que a tela mostra em tempo real.
   simIndependenteModelos: () => request('/simulacao-independente/modelos'),
   simIndependenteChat: (payload) => request('/simulacao-independente/chat', { method: 'POST', body: payload }),
-  // Benchmarking de Simulação (laboratório de capacidade do PACIENTE com ALUNO
-  // SIMULADO): sobe o log de um atendimento, a IA extrai a persona de quem
-  // atendeu e refaz o caso pelo nº de interações pedido. Roda em background —
-  // `benchStart` devolve { id } e a tela faz polling em `benchRun`. Sem avaliação.
-  benchOpcoes: () => request('/benchmark-simulacao/opcoes'),
-  benchStart: (payload) => request('/benchmark-simulacao', { method: 'POST', body: payload }),
-  benchFila: () => request('/benchmark-simulacao/fila'),
-  benchRun: (id) => request(`/benchmark-simulacao/${encodeURIComponent(id)}`),
-  benchCancelar: (id) => request(`/benchmark-simulacao/${encodeURIComponent(id)}/cancelar`, { method: 'POST', body: {} }),
-  // Log completo e resumo do raciocínio: TEXTO puro (dois arquivos separados, o
-  // raciocínio nunca vem junto do log), então não passam pelo `request`.
-  benchLogTxt: (id) => requestText(`/benchmark-simulacao/${encodeURIComponent(id)}/log`, 'baixar o log'),
-  benchReasoningTxt: (id) => requestText(`/benchmark-simulacao/${encodeURIComponent(id)}/reasoning`, 'baixar o raciocínio'),
-  benchPersonaTxt: (id) => requestText(`/benchmark-simulacao/${encodeURIComponent(id)}/persona`, 'baixar a ficha de persona'),
-  // LOTE: os modelos escolhidos, mesmo caso, mesma ficha de persona (extraída uma
-  // vez só — é o que torna a comparação válida). `modo`: 'fila' (um modelo por
-  // vez, sem risco de TPM) ou 'paralelo' (todos juntos).
-  benchLoteStart: (payload) => request('/benchmark-simulacao/lote', { method: 'POST', body: payload }),
-  benchLotes: () => request('/benchmark-simulacao/lotes'),
-  benchLote: (id) => request(`/benchmark-simulacao/lote/${encodeURIComponent(id)}`),
-  benchLoteCancelar: (id) => request(`/benchmark-simulacao/lote/${encodeURIComponent(id)}/cancelar`, { method: 'POST', body: {} }),
-  benchLoteRelatorioTxt: (id) => requestText(`/benchmark-simulacao/lote/${encodeURIComponent(id)}/relatorio`, 'baixar o relatório do lote'),
   // TRI dos personagens: dificuldade ÚNICA, alimentada por competitivo +
   // processo seletivo + visitante juntos. Cumulativo — sem recorte por período.
   triPersonagens: () => request('/tri/personagens'),
