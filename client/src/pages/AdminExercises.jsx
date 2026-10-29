@@ -14,31 +14,26 @@ const DIFFICULTY_OPTIONS = [
 const EVALUATOR_MODEL_OPTIONS = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão — barato, alto volume)' },
   { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
-  { value: 'glm-5.2', label: 'GLM 5.2 (high)' },
   { value: 'gpt-5.5', label: 'GPT-5.5 (high — melhor qualidade)' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
 ];
 const EVALUATOR_MODEL_DEFAULT = 'gpt-5.4-mini';
 
 // As opções fixas de modelo do EXERCÍCIO em si (a IA que interpreta o papel —
-// paciente, colega etc.). Espelha TRILHA_CHAT_MODELS no servidor. GLM, GPT-5.4
-// e Claude Sonnet 5 rodam com raciocínio ligado ("high") — personagem mais
-// lento, porém mais nuançado; mini e 5.5 respondem direto, sem "pensar".
+// paciente, colega etc.). Espelha TRILHA_CHAT_MODELS no servidor. O GPT-5.4
+// roda com raciocínio ligado ("high") — personagem mais lento, porém mais
+// nuançado; mini e 5.5 respondem direto, sem "pensar".
 const CHAT_MODEL_OPTIONS = [
   { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini (padrão)' },
   { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
-  { value: 'glm-5.2', label: 'GLM 5.2 (high)' },
   { value: 'gpt-5.5', label: 'GPT-5.5 (melhor qualidade)' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
 ];
 const CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 
-// As 2 opções de modelo do ESQUEMA VISUAL (SVG opcional ao final do
-// exercício). Espelha TRILHA_IMAGE_MODELS no servidor. Não é geração de
+// O modelo do ESQUEMA VISUAL (SVG opcional ao final do exercício). Espelha
+// TRILHA_IMAGE_MODELS no servidor — hoje uma opção só. Não é geração de
 // imagem "de pixel" — é o modelo escrevendo um SVG, que o navegador renderiza.
 const IMAGE_SCHEMA_MODEL_OPTIONS = [
   { value: 'gpt-5.4', label: 'GPT-5.4 (high)' },
-  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (high)' },
 ];
 const IMAGE_SCHEMA_MODEL_DEFAULT = 'gpt-5.4';
 

@@ -22,7 +22,7 @@ const avatarPool = require('./avatar-pool');
 const { SEED_DATA_DIR, DATA_DIR, PROMPTS_DIR } = require('./paths');
 const {
   runAvaliacaoIndependente, buildPipelineNodeRequests, finalizePipeline, buildChatBody,
-  clearAssetsCache, estimarTokens, extractChatReasoning, PIPELINE_VERSIONS_IDS, PIPELINE_VERSIONS,
+  clearAssetsCache, estimarTokens, PIPELINE_VERSIONS_IDS, PIPELINE_VERSIONS,
 } = require('./avaliador-pipeline');
 const batchFila = require('./batch-fila');
 // Avaliador OFICIAL da produção (pipeline v34). Quem decide quais modos usam o
@@ -568,7 +568,7 @@ const comunidadePublicaLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   message: { error: 'Muitas requisições. Tente novamente em alguns minutos.' },
 });
 
-// Post-auth: protege a chave Anthropic (e a OpenAI do Whisper) de abuse, e
+// Post-auth: protege a chave da OpenAI (chat, avaliação e Whisper) de abuse, e
 // segura escrita massiva em logs.
 //
 // Visitante é chaveado por IP, NÃO por user.id: o id dele é sorteado a cada
@@ -651,7 +651,7 @@ function limparFalhasLogin(username) {
 // 300 req/hora cobre ~6 sessões clínicas longas. Era 60 antes — apertado
 // demais pra uso real. Como /api/chat e /api/evaluate só aceitam context com
 // itemId válido (resolveChatSystemPrompt / resolveEvaluatorSystemPrompt),
-// o risco de abuse da chave Anthropic caiu — podemos afrouxar com segurança.
+// o risco de abuse da chave de IA caiu — podemos afrouxar com segurança.
 const aiLimiter = SKIP_RATE_LIMIT ? noopLimiter : rateLimit({
   windowMs: 60 * 60 * 1000,
   max: (req) => ((req.user && req.user.isVisitor) ? VISITOR_AI_MAX : 300),
@@ -677,9 +677,7 @@ function envDiag(name) {
   return `set (${v.length} chars)`;
 }
 console.log('[startup] JWT_SECRET       =', envDiag('JWT_SECRET'));
-console.log('[startup] ANTHROPIC_API_KEY =', envDiag('ANTHROPIC_API_KEY'));
 console.log('[startup] OPENAI_API_KEY    =', envDiag('OPENAI_API_KEY'), '(avaliadores + entrevistador GPT-5.4; e Whisper)');
-console.log('[startup] GLM_API_KEY       =', envDiag('GLM_API_KEY'), '(GLM 5.2 / z.ai — Treinamento, Seletivo, Avaliação Independente e reflexão da Antessala)');
 // As DUAS chaves precisam existir: sendWebPushToUser() exige as duas e vira
 // no-op silencioso sem uma delas. Antes só a pública era logada — com a privada
 // faltando no Railway, o boot parecia saudável, o navegador assinava normalmente
@@ -4765,35 +4763,17 @@ app.delete('/api/active-sessions/:type/:itemId', requireAuth, rota(async (req, r
 //    pensar sobre o Bloco 1/gabarito SEM vazar isso ao aluno. Num reasoning
 //    model esse raciocínio fica em reasoning tokens OCULTOS (não saem no
 //    content), o que mantém o Bloco 1 opaco por construção.
-// getAnthropic() voltou a ser chamado: Claude Sonnet 5 é uma das opções de
-// evaluatorModel da Trilha (ver TRILHA_EXERCISE_MODELS/buildAnthropicArgs).
 // Modelo dos pacientes (chat de simulação). Mini da família 5.4. O personagem
 // responde direto, SEM reasoning — effort 'none' (o gpt-5.4-mini não aceita
 // 'minimal'; suporta none/low/medium/high/xhigh). Nada de "pensar" antes de falar.
 const PATIENT_MODEL = process.env.OPENAI_PATIENT_MODEL || 'gpt-5.4-mini-2026-03-17';
 const PATIENT_EFFORT = process.env.OPENAI_PATIENT_EFFORT || 'none';
-// OPENAI_EVAL_MODEL: sobrou como default do effort/modelo de referência do
-// avaliador (ver OPENAI_EVAL_EFFORT abaixo); o avaliador oficial resolve o
-// modelo pela categoria. O entrevistador segue no full 5.4 (HEAVY) — geração de
-// prompt de paciente é menos sensível a custo.
-const OPENAI_EVAL_MODEL = process.env.OPENAI_EVAL_MODEL || 'gpt-5.5-2026-04-23';
+// O avaliador oficial resolve o modelo pela categoria (ver aiCategoryDefaults).
+// O entrevistador segue no full 5.4 (HEAVY) — geração de prompt de paciente é
+// menos sensível a custo.
 const OPENAI_HEAVY_MODEL = process.env.OPENAI_HEAVY_MODEL || 'gpt-5.4-2026-03-05';
-// reasoning_effort por caminho. Avaliador em 'medium' — o default da família
-// GPT-5.x (setado explícito p/ não depender de defaults da API e manter o
-// summary). O canal de raciocínio OCULTO mantém o cruzamento gabarito × log fora
-// da prosa que o ALUNO lê (Echo/ChatSession); NÃO zerar o canal (ir abaixo de
-// minimal), senão reabre o vazamento do Bloco 1 — causa-raiz do bug do Opus (v15).
-const OPENAI_EVAL_EFFORT = process.env.OPENAI_EVAL_EFFORT || 'medium';
+// reasoning_effort do entrevistador.
 const OPENAI_HEAVY_EFFORT = process.env.OPENAI_HEAVY_EFFORT || 'medium';
-// ÚLTIMO RECURSO do avaliador em OpenAI. Era o avaliador da Simulação Livre, na
-// época em que o Treinamento rodava num modelo mais barato que o Competitivo;
-// hoje todos os modos rodam o avaliador oficial, e isto só é usado por
-// evaluatorOpenaiFallback quando a categoria que falhou tem PADRÃO fora da
-// OpenAI. Hoje NENHUMA categoria tem (o Duelo era a última, e foi para o modelo
-// oficial junto com a régua) — só se cai aqui quando o admin escolhe GLM numa
-// categoria pela tela. A rede de segurança precisa de um modelo para apontar.
-const OPENAI_SIM_MODEL = process.env.OPENAI_SIM_MODEL || 'gpt-5.4-2026-03-05';
-const OPENAI_SIM_EFFORT = process.env.OPENAI_SIM_EFFORT || 'medium';
 // Avaliador da Trilha (exercícios). Por decisão do dono roda no mini da família
 // 5.4 — alto volume, feedback ao aluno, nota 0–100 (porcentagem). Não há Bloco 1
 // nos exercícios, então o raciocínio leve ('low') basta e não há risco de vazar
@@ -4816,9 +4796,6 @@ const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 //   - "GPT como avaliador sempre vai de Batch" virou escolha: o admin pode pôr
 //     GPT num modo síncrono (Treinamento, Visitante, Duelo, Neuro), e aí
 //     roda a preço cheio, sem os 50% do batch. A tela avisa disso.
-//   - "SELECAO_EVAL_MODEL precisa apontar pra OpenAI" não vale mais: escolher GLM
-//     no Seletivo/Competitivo desliga o batch e a avaliação vai pelo caminho
-//     síncrono em background (runSelectionEvalsWithoutBatch / o do Competitivo).
 //   - O Duelo continua SEM fallback no caminho de FALHA (isso segue valendo):
 //     se a chamada do avaliador dele estourar, o duelo volta a pendente e é
 //     retentado, em vez de cair em outro modelo. Hoje isso pesa menos, porque o
@@ -4838,62 +4815,51 @@ const OPENAI_NEURO_EFFORT = process.env.OPENAI_NEURO_EFFORT || 'low';
 //
 // É o PADRÃO das categorias, não uma trava: Administração → Modelos de IA
 // continua podendo pôr outro modelo em qualquer uma delas, e o pipeline roda no
-// que a categoria resolver (inclusive GLM). Uma env var setada também vence este
+// que a categoria resolver. Uma env var setada também vence este
 // padrão — é o que as linhas abaixo dizem, e o log de boot mostra o efetivo.
 const AVALIADOR_OFICIAL_MODEL = process.env.AVALIADOR_OFICIAL_MODEL || 'gpt-5.6-luna';
 const AVALIADOR_OFICIAL_EFFORT = process.env.AVALIADOR_OFICIAL_EFFORT || 'high';
 // TREINAMENTO, SELETIVO e COMPETITIVO: o oficial acima. Seletivo e Competitivo
 // vão de BATCH (50% off) porque ninguém espera a nota na tela; Treinamento é
-// síncrono, o aluno espera. Provider é derivado do prefixo do modelo.
+// síncrono, o aluno espera.
 const TRAINING_EVAL_MODEL = process.env.TRAINING_EVAL_MODEL || AVALIADOR_OFICIAL_MODEL;
 const TRAINING_EVAL_EFFORT = process.env.TRAINING_EVAL_EFFORT || AVALIADOR_OFICIAL_EFFORT;
 const SELECAO_EVAL_MODEL = process.env.SELECAO_EVAL_MODEL || AVALIADOR_OFICIAL_MODEL;
 const SELECAO_EVAL_EFFORT = process.env.SELECAO_EVAL_EFFORT || AVALIADOR_OFICIAL_EFFORT;
 const OPENAI_COMP_MODEL = process.env.OPENAI_COMP_MODEL || AVALIADOR_OFICIAL_MODEL;
 const OPENAI_COMP_EFFORT = process.env.OPENAI_COMP_EFFORT || AVALIADOR_OFICIAL_EFFORT;
-// DUELO: o oficial acima, como as outras cinco categorias da régua. Era GLM
-// 5.2/high enquanto o Duelo rodava um avaliador próprio (o comparativo v18.25);
-// com ele no v34-duelo, a mesma régua no mesmo modelo é o que torna a nota de um
+// DUELO: o oficial acima, como as outras cinco categorias da régua. Com o
+// Duelo no v34-duelo, a mesma régua no mesmo modelo é o que torna a nota de um
 // duelo comparável com a de um treino — e é essa comparabilidade que o MMR
 // consome. O resultado sai na hora pros dois alunos, então esta categoria nunca
 // vai de batch, qualquer que seja o modelo, e não há fallback pro GPT quando o
 // primário falha.
 const DUEL_EVAL_MODEL = process.env.DUEL_EVAL_MODEL || AVALIADOR_OFICIAL_MODEL;
 const DUEL_EVAL_EFFORT = process.env.DUEL_EVAL_EFFORT || AVALIADOR_OFICIAL_EFFORT;
-function providerForModel(m) {
-  return String(m || '').startsWith('glm') ? 'glm' : 'openai';
-}
 
 // Modelo do avaliador ESCOLHIDO POR EXERCÍCIO na Trilha (admin define ao salvar
 // o exercício, ver EXERCISE_FIELDS/evaluatorModel). Cinco opções fixas — não é
 // o laboratório livre de modelo/effort da Avaliação Independente (AVAL_MODELOS),
-// só um atalho de presets pro uso do dia a dia. GLM e Claude rodam em modo
-// buffered (sem streaming pro cliente) com FALLBACK pro mini padrão da Trilha
-// se falharem — igual ao par Treinamento/GLM (ver isExerciseAltProvider em
-// /api/evaluate).
+// só um atalho de presets pro uso do dia a dia. Valor salvo que não está mais
+// na lista (glm-5.2 e claude-sonnet-5, que saíram em 2026-10) cai no default.
 const TRILHA_EXERCISE_MODEL_DEFAULT = 'gpt-5.4-mini';
 const TRILHA_EXERCISE_MODELS = {
   'gpt-5.4-mini': { model: OPENAI_EXERCISE_MODEL, provider: 'openai', effort: OPENAI_EXERCISE_EFFORT },
   'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
-  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'high' },
-  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
 
 // Modelo do PERSONAGEM/exercício em si (o lado da CONVERSA, não da nota) —
 // também escolhido por exercício na Trilha (chatModel). Mesmas 5 opções do
 // evaluatorModel. Mini e GPT-5.5 seguem sem reasoning (igual ao PATIENT_MODEL
-// de sempre usado por freeplay/neuro — resposta direta, rápida); GLM 5.2,
-// GPT-5.4 e Claude Sonnet 5 rodam em 'high' por decisão do dono (mesmo padrão
-// do evaluatorModel) — personagem mais lento, porém mais nuançado. GLM/Claude
-// têm FALLBACK pro mini padrão se falharem, igual ao par Treinamento/GLM.
+// de sempre usado por freeplay/neuro — resposta direta, rápida); GPT-5.4 roda
+// em 'high' por decisão do dono (mesmo padrão do evaluatorModel) — personagem
+// mais lento, porém mais nuançado.
 const TRILHA_CHAT_MODEL_DEFAULT = 'gpt-5.4-mini';
 const TRILHA_CHAT_MODELS = {
   'gpt-5.4-mini': { model: PATIENT_MODEL, provider: 'openai', effort: PATIENT_EFFORT },
   'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
-  'glm-5.2': { model: 'glm-5.2', provider: 'glm', effort: 'high' },
   'gpt-5.5': { model: OPENAI_COMP_MODEL, provider: 'openai', effort: 'none' },
-  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
 
 // --- Modelos por CATEGORIA (tela Administração → Modelos de IA) -------------
@@ -4913,7 +4879,7 @@ function patientDefaultSpec() {
 // troca de env ou de padrão global valha na próxima avaliação, sem restart.
 function aiCategoryDefaults() {
   const paciente = patientDefaultSpec();
-  const ev = (model, effort) => ({ model, provider: providerForModel(model), effort });
+  const ev = (model, effort) => ({ model, provider: 'openai', effort });
   const oficial = ev(AVALIADOR_OFICIAL_MODEL, AVALIADOR_OFICIAL_EFFORT);
   return {
     treinamento: { evaluator: ev(TRAINING_EVAL_MODEL, TRAINING_EVAL_EFFORT), patient: paciente },
@@ -4932,8 +4898,7 @@ function aiCategoryDefaults() {
 
 // Spec do AVALIADOR da categoria: { preset, label, model, provider, effort,
 // batch, fonte }. `batch` só vem true onde a categoria comporta assincronia E o
-// provedor tem Batch API — então escolher GLM no Competitivo/Seletivo desliga o
-// batch em vez de bloquear a opção (aí a avaliação roda síncrona em background).
+// provedor tem Batch API.
 function evaluatorSpecFor(categoria) {
   return aiModels.resolveEvaluator(categoria, readSettings(), aiCategoryDefaults()[categoria].evaluator);
 }
@@ -4943,65 +4908,15 @@ function patientSpecFor(categoria) {
   return aiModels.resolvePatient(categoria, readSettings(), aiCategoryDefaults()[categoria].patient);
 }
 
-// Rede de segurança OpenAI pro avaliador: quando o modelo escolhido é de outro
-// provedor e a chamada falha (rate limit/instabilidade/sem key), refaz aqui pra
-// o aluno nunca ficar sem nota. Se o padrão da categoria já é OpenAI, usa ele;
-// senão cai no SIM (gpt-5.4/medium), que é o fallback histórico do Treinamento.
-function evaluatorOpenaiFallback(categoria) {
-  const padrao = aiCategoryDefaults()[categoria].evaluator;
-  if (padrao.provider === 'openai') return { model: padrao.model, effort: padrao.effort };
-  return { model: OPENAI_SIM_MODEL, effort: OPENAI_SIM_EFFORT };
-}
-
 // Esquema visual (SVG) OPCIONAL ao final do exercício — admin liga por
 // exercício (imageSchemaEnabled) e escreve a observação (imageSchemaPrompt, ver
-// buildImageSchemaPrompt) do que o esquema deve representar. Duas opções: o
-// modelo ESCREVE um SVG autocontido (texto), que o navegador renderiza como
-// imagem vetorial — não é geração de imagem "de pixel" (Claude não tem essa
-// capacidade via API), por isso funciona igual pros dois provedores.
+// buildImageSchemaPrompt) do que o esquema deve representar. O modelo ESCREVE
+// um SVG autocontido (texto), que o navegador renderiza como imagem vetorial —
+// não é geração de imagem "de pixel".
 const TRILHA_IMAGE_MODEL_DEFAULT = 'gpt-5.4';
 const TRILHA_IMAGE_MODELS = {
   'gpt-5.4': { model: OPENAI_HEAVY_MODEL, provider: 'openai', effort: 'high' },
-  'claude-sonnet-5': { model: 'claude-sonnet-5', provider: 'anthropic', effort: 'high' },
 };
-
-function getAnthropic() {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
-  const Anthropic = require('@anthropic-ai/sdk').default || require('@anthropic-ai/sdk');
-  return new Anthropic({ apiKey });
-}
-
-// Monta os args da Messages API da Anthropic pro avaliador OU pro
-// personagem/exercício da Trilha em Claude Sonnet 5 (única chamada de produção
-// que usa Anthropic — a Simulação Independente tem o helper próprio dela,
-// isolado). cache_control no system (reaproveitado entre turnos/alunos do
-// mesmo exercício) e no último turno — importante pro chat, que reenvia o
-// histórico inteiro a cada turno. max_tokens varia por chamador (avaliador
-// precisa de folga pro feedback; chat usa o teto normal de resposta).
-function buildAnthropicArgs({ model, effort, systemPrompt, turns, maxTokens }) {
-  const args = {
-    model,
-    max_tokens: maxTokens,
-    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-    messages: turns.map((t, i) => (
-      i === turns.length - 1
-        ? { role: t.role, content: [{ type: 'text', text: t.content, cache_control: { type: 'ephemeral' } }] }
-        : { role: t.role, content: t.content }
-    )),
-  };
-  if (effort === 'disabled') {
-    args.thinking = { type: 'disabled' };
-  } else {
-    args.thinking = { type: 'adaptive' };
-    args.output_config = { effort }; // 'low' | 'medium' | 'high'
-  }
-  return args;
-}
-function extractAnthropicText(resp) {
-  const blocks = (resp && resp.content) || [];
-  return blocks.filter((b) => b && b.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('').trim();
-}
 
 // Extrai o bloco <svg>...</svg> da resposta do esquema visual e sanitiza
 // defensivamente (o modelo às vezes cerca em texto/```; a transcrição do
@@ -5023,33 +4938,14 @@ function extractAndSanitizeSvg(text) {
 
 // ── Custo dos Logs da Trilha (admin) ────────────────────────────────────────
 // Normaliza o `usage` cru de qualquer chamada de IA da Trilha (chat/avaliador/
-// esquema visual, nos 3 provedores) num shape único: {input, cacheRead,
-// cacheWrite, output}. Necessário porque cada provedor/API devolve um formato
-// diferente — OpenAI ainda tem DOIS formatos (Responses API pro avaliador/
+// esquema visual) num shape único: {input, cacheRead, cacheWrite, output}.
+// Necessário porque a OpenAI tem DOIS formatos (Responses API pro avaliador/
 // esquema visual; chat.completions pro chat do personagem via openaiComplete).
 // Espelha normalizeSimUsage (simulacao-independente.js), mas isolado —
 // production não importa os módulos dos laboratórios de pricing.
 function normalizeUsage(provider, usage) {
   const zero = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
   if (!usage) return zero;
-  if (provider === 'anthropic') {
-    return {
-      input: Math.max(0, usage.input_tokens || 0),
-      cacheRead: usage.cache_read_input_tokens || 0,
-      cacheWrite: usage.cache_creation_input_tokens || 0,
-      output: usage.output_tokens || 0,
-    };
-  }
-  if (provider === 'glm') {
-    const promptTotal = usage.prompt_tokens || 0;
-    const cacheRead = (usage.prompt_tokens_details && usage.prompt_tokens_details.cached_tokens) || 0;
-    const completion = usage.completion_tokens || 0;
-    const total = usage.total_tokens || 0;
-    // GOTCHA GLM: completion_tokens sub-reporta o thinking; usa total-prompt
-    // como piso da saída.
-    const output = Math.max(completion, total > promptTotal ? total - promptTotal : 0);
-    return { input: Math.max(0, promptTotal - cacheRead), cacheRead, cacheWrite: 0, output };
-  }
   // OpenAI — Responses API (avaliador/esquema visual): input_tokens/output_tokens.
   if (usage.input_tokens != null || usage.output_tokens != null) {
     const cacheRead = (usage.input_tokens_details && usage.input_tokens_details.cached_tokens) || 0;
@@ -5069,8 +4965,6 @@ const TRILHA_COST_PRICES = {
   'gpt-5.4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, output: 4.5 },
   'gpt-5.4': { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15 },
   'gpt-5.5': { input: 5, cacheRead: 0.5, cacheWrite: 5, output: 30 },
-  'glm-5.2': { input: 1.4, cacheRead: 0.26, cacheWrite: 1.4, output: 4.4 },
-  'claude-sonnet-5': { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
 };
 function resolveTrilhaPrices(model) {
   const s = String(model || '');
@@ -5174,34 +5068,13 @@ async function openaiComplete({ openai, model, effort, systemPrompt, messages, m
   return { text: resp.choices?.[0]?.message?.content || '', usage: resp.usage || null };
 }
 
-// Anthropic exige messages alternando user/assistant, sem role 'system' no array
-// (system vai num campo separado). Normaliza: filtra system, garante alternância
-// colapsando turnos consecutivos do mesmo role.
-function normalizeMessagesForAnthropic(messages) {
-  const cleaned = [];
-  for (const m of messages || []) {
-    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
-    const content = typeof m.content === 'string' ? m.content : String(m.content || '');
-    if (!content) continue;
-    if (cleaned.length && cleaned[cleaned.length - 1].role === m.role) {
-      cleaned[cleaned.length - 1].content += '\n\n' + content;
-    } else {
-      cleaned.push({ role: m.role, content });
-    }
-  }
-  return cleaned;
-}
-
 // Um turno do PACIENTE simulado, no modelo que a categoria manda (ver
-// patientSpecFor). Concentra aqui o que difere entre provedores pra as duas
-// rotas de paciente (/api/chat e /api/selecao/chat) não duplicarem a lógica:
-//   OpenAI    → chat.completions com reasoning_effort
-//   GLM       → chat.completions com thinking/reasoning_effort (via buildChatBody)
-//   Anthropic → Messages API, com cache_control explícito (não é automático lá)
-// FALLBACK pro paciente padrão (gpt-5.4-mini) sempre que o provedor alternativo
-// falhar: numa conversa ao vivo, ficar sem resposta é pior que trocar de modelo.
-// Devolve o provedor/modelo que REALMENTE respondeu, pra o usage ser normalizado
-// e logado certo.
+// patientSpecFor). Concentra aqui a chamada pra as duas rotas de paciente
+// (/api/chat e /api/selecao/chat) não duplicarem a lógica. FALLBACK pro
+// paciente padrão (gpt-5.4-mini) quando o modelo escolhido devolve vazio: numa
+// conversa ao vivo, ficar sem resposta é pior que trocar de modelo. Devolve o
+// provedor/modelo que REALMENTE respondeu, pra o usage ser normalizado e
+// logado certo.
 async function runPatientTurn({ spec, systemPrompt, messages, maxTokens, label }) {
   const fallback = async () => {
     const openai = getOpenAI();
@@ -5236,32 +5109,10 @@ async function runPatientTurn({ spec, systemPrompt, messages, maxTokens, label }
     return fallback();
   }
 
-  try {
-    const client = getClientForProvider(spec.provider);
-    if (!client) throw new Error(`${spec.provider} indisponível`);
-    let text;
-    let usage;
-    if (spec.provider === 'anthropic') {
-      const resp = await client.messages.create(buildAnthropicArgs({
-        model: spec.model, effort: spec.effort, systemPrompt,
-        turns: normalizeMessagesForAnthropic(messages), maxTokens,
-      }));
-      text = extractAnthropicText(resp);
-      usage = resp.usage || null;
-    } else {
-      const resp = await client.chat.completions.create(buildChatBody({
-        provider: spec.provider, model: spec.model, effort: spec.effort,
-        maxTokens, messages: buildOpenAIMessages(systemPrompt, messages),
-      }));
-      text = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-      usage = resp.usage || null;
-    }
-    if (!String(text || '').trim()) throw new Error('resposta vazia');
-    return { text, usage, provider: spec.provider, model: spec.model };
-  } catch (err) {
-    console.error(`[${label}] ${spec.model} falhou → fallback ${PATIENT_MODEL}:`, err.message);
-    return fallback();
-  }
+  // Só existe OpenAI (Anthropic e GLM saíram em 2026-10). Um spec de outro
+  // provedor não deveria chegar aqui; se chegar, responde o paciente padrão.
+  console.error(`[${label}] provedor desconhecido (${spec.provider}) → ${PATIENT_MODEL}`);
+  return fallback();
 }
 
 // Resolve o system prompt server-side a partir de context/mode enviados pelo
@@ -5470,7 +5321,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
   //             rodar o paciente daquela categoria (possivelmente mais caro) nos
   //             treinos dele. Visitante e neuro são derivados AQUI: role e
   //             context.type são fatos, não dica do cliente.
-  // O personagem responde direto, SEM reasoning (menos no preset GLM). Prompt
+  // O personagem responde direto, SEM reasoning (menos Sol/Luna). Prompt
   // caching da OpenAI é automático no prefixo (>1024 tokens), então o system +
   // histórico (chat de 50-100 turnos) é cacheado sozinho a partir do 2º turno.
   const isExerciseChat = !!(context && context.type === 'exercise');
@@ -5510,8 +5361,6 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
     });
     // Custo dos Logs da Trilha: usage normalizado por provedor (ver
     // normalizeUsage) — o cliente só acumula e repassa, nunca calcula preço.
-    // O log usa o normalizado (e não logOpenAIUsage) porque aqui pode ter
-    // respondido GLM ou Anthropic, cujos campos de usage têm outros nomes.
     const uso = normalizeUsage(turno.provider, turno.usage);
     registrarUsoIa(req.user, { categoria: isExerciseChat ? 'trilha' : patientCategory, modelo: turno.model, uso });
     console.log(
@@ -5527,7 +5376,7 @@ app.post('/api/chat', requireAuth, aiLimiter, async (req, res) => {
 // Sanitiza o campo assistantId nos cadastros de personagem. Mantido por
 // compatibilidade: dados antigos têm esse campo da era OpenAI Assistants API,
 // e o admin/UI ainda exibe. A simulação inteira agora roda via /api/chat
-// (Anthropic Messages), então o campo é cosmético — não roteia nada.
+// (chat.completions), então o campo é cosmético — não roteia nada.
 function sanitizeAssistantId(input) {
   if (!input) return '';
   const s = String(input).trim();
@@ -5728,25 +5577,9 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
     : null;
   // Spec efetivo da categoria (escolha do admin ou padrão do sistema).
   const categorySpec = evalCategory ? (specDoExterno(req.user, 'evaluator') || evaluatorSpecFor(evalCategory)) : null;
-  // Provedor que não é OpenAI (GLM hoje; Claude só via Trilha) roda BUFFERED:
-  // uma chamada chat.completions, resposta escrita de uma vez no SSE — a UI já
-  // mostra a tela "avaliando", então não perde nada, e o heartbeat segura a
-  // conexão. Vale pra Trilha (escolha por exercício) e pra qualquer categoria em
-  // que o admin escolheu GLM. FALLBACK pro OpenAI se o provedor falhar.
-  // (No caminho oficial isto não se aplica: o pipeline fala com os dois
-  // provedores pelo mesmo código, e o "buffered" é o normal dele.)
-  const isExerciseAltProvider = isExercise && exerciseModelSpec.provider !== 'openai';
-  const isCategoryAltProvider = !usaOficial && !!(categorySpec && categorySpec.provider !== 'openai');
-  // evalModel/evalEffort = o caminho OpenAI. Quando o primário já é OpenAI, é o
-  // próprio primário; quando é GLM, é a rede de segurança do fallback.
-  const categoryFallback = evalCategory ? evaluatorOpenaiFallback(evalCategory) : null;
   let systemPrompt = resolved.systemPrompt;
-  let evalModel = isExercise
-    ? (isExerciseAltProvider ? OPENAI_EXERCISE_MODEL : exerciseModelSpec.model)
-    : (isCategoryAltProvider ? categoryFallback.model : categorySpec.model);
-  let evalEffort = isExercise
-    ? (isExerciseAltProvider ? OPENAI_EXERCISE_EFFORT : exerciseModelSpec.effort)
-    : (isCategoryAltProvider ? categoryFallback.effort : categorySpec.effort);
+  let evalModel = isExercise ? exerciseModelSpec.model : categorySpec.model;
+  let evalEffort = isExercise ? exerciseModelSpec.effort : categorySpec.effort;
   let inputTurns = [];
   let progressionMode = false;
   let sidequestActive = false;
@@ -5833,13 +5666,12 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
     }
   }
 
-  // Exercício da Trilha com avaliador OpenAI (mini/5.4/5.5): SEMPRE em Batch —
-  // decisão do dono (custo antes de velocidade aqui; GLM/Claude continuam
-  // síncronos, ver isExerciseAltProvider). Enfileira e devolve JSON comum (sem
+  // Exercício da Trilha (mini/5.4/5.5): SEMPRE em Batch — decisão do dono
+  // (custo antes de velocidade aqui). Enfileira e devolve JSON comum (sem
   // SSE); o cliente troca sozinho pra polling (ver api.evaluate/pollTrilhaEvalBatch
   // no client) em GET /api/trilha/evaluate-batch/:jobId. sweepTrilhaEvalBatches()
   // já dispara a submissão agora — o coletor de boot cobre o resto.
-  if (isExercise && !isExerciseAltProvider) {
+  if (isExercise) {
     const job = {
       id: 'trilha-batch-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
       userId: req.user.id,
@@ -5864,7 +5696,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
   }
 
   // "Sua avaliação está na fila" pra todo mundo que chega até aqui (Treinamento,
-  // Neuro, Trilha síncrona GLM/Claude): mesmo sendo síncrono no servidor, a
+  // Neuro): mesmo sendo síncrono no servidor, a
   // chamada ao avaliador leva 30-90s+ (ver evaluator-prompts-and-streaming), e o
   // "pronta" só sai quando o cliente salva o log em POST /api/logs — então há um
   // intervalo real em que vale avisar (ex.: aluno minimiza o app no celular).
@@ -5925,7 +5757,7 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
         // limite de TPM) e o sintetizador, que escreve o feedback do aluno sem
         // nunca ter visto o Bloco 1. No modo progressão entra uma décima,
         // a da missão. Nada disso streama token a token: o texto do aluno só
-        // existe no fim, então ele sai de uma vez, como no caminho do GLM.
+        // existe no fim, então ele sai de uma vez.
         //
         // Enquanto roda, mandamos PROGRESSO — e de propósito só uma fração
         // (`pct`), nunca "critério 7 de 15": o aluno tem acesso à nota total e
@@ -5939,37 +5771,15 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
         };
 
         const spec = categorySpec;
-        let usouModel = spec.model;
-        let usouEffort = spec.effort;
-        let usouProvider = spec.provider;
-        let result;
-        try {
-          const client = getClientForProvider(spec.provider);
-          if (!client) throw new Error(`${spec.provider} indisponível`);
-          result = await oficial.avaliar({
-            client, provider: spec.provider, model: spec.model, effort: spec.effort,
-            materiais: materiaisOficial, version: versaoOficial, onProgress,
-          });
-        } catch (err) {
-          // REDE DE SEGURANÇA (a mesma que o avaliador de uma chamada tinha):
-          // quando o admin escolheu um provedor que não é OpenAI e ele falha —
-          // sem chave, rate limit que sobreviveu às retentativas, instabilidade
-          // —, refazemos no OpenAI para o aluno nunca ficar sem nota. Custa uma
-          // avaliação inteira a mais, e é por isso que só vale nesse caso: com o
-          // primário já na OpenAI, repetir daria o mesmo erro.
-          if (spec.provider === 'openai') throw err;
-          console.error(`[aval-oficial] ${spec.model} falhou → refazendo em ${categoryFallback.model}/${categoryFallback.effort}:`, err.message);
-          const openaiClient = getClientForProvider('openai');
-          if (!openaiClient) throw err;
-          usouModel = categoryFallback.model;
-          usouEffort = categoryFallback.effort;
-          usouProvider = 'openai';
-          ultimoPct = -1;
-          result = await oficial.avaliar({
-            client: openaiClient, provider: 'openai', model: usouModel, effort: usouEffort,
-            materiais: materiaisOficial, version: versaoOficial, onProgress,
-          });
-        }
+        const usouModel = spec.model;
+        const usouEffort = spec.effort;
+        const usouProvider = spec.provider;
+        const client = getClientForProvider(spec.provider);
+        if (!client) throw new Error(`${spec.provider} indisponível`);
+        const result = await oficial.avaliar({
+          client, provider: spec.provider, model: spec.model, effort: spec.effort,
+          materiais: materiaisOficial, version: versaoOficial, onProgress,
+        });
         usageProvider = usouProvider;
         usageModel = usouModel;
 
@@ -6018,86 +5828,6 @@ app.post('/api/evaluate', requireAuth, aiLimiter, rota(async (req, res) => {
             + `${custo ? ` custo=US$ ${custo.usd.toFixed(4)}` : ''}`,
           );
         }
-      } else if (isCategoryAltProvider) {
-        // Categoria com avaliador de OUTRO provedor (GLM 5.2 — o único fora da
-        // OpenAI nas opções de avaliador). Roda BUFFERED: uma chamada
-        // chat.completions e a resposta inteira de uma vez no SSE. A UI já mostra
-        // a tela "avaliando", então não perde nada, e o heartbeat acima segura a
-        // conexão. É o padrão histórico do Treinamento, agora valendo pra
-        // qualquer categoria onde o admin escolheu GLM. FALLBACK: se falhar
-        // (rate limit/instabilidade/sem key), refaz no OpenAI de segurança
-        // (evalModel/evalEffort) — o aluno sempre recebe nota+feedback.
-        let full = '';
-        const tProvider = categorySpec.provider;
-        const tClient = getClientForProvider(tProvider);
-        try {
-          if (!tClient) throw new Error(`${tProvider} indisponível`);
-          const body = buildChatBody({
-            provider: tProvider, model: categorySpec.model, effort: categorySpec.effort,
-            maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
-          });
-          const resp = await tClient.chat.completions.create(body);
-          full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-          if (!full.trim()) throw new Error('resposta vazia');
-          usage = resp.usage || null;
-          usageProvider = tProvider;
-          usageModel = categorySpec.model;
-          console.log(`Evaluate (${categorySpec.model} · ${evalCategory}${progressionMode ? '+progressão' : ''})`);
-        } catch (glmErr) {
-          console.error(`[evaluate ${evalCategory}] ${categorySpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, glmErr.message);
-          const resp = await openai.responses.create({
-            model: evalModel, reasoning: { effort: evalEffort },
-            max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
-          });
-          full = resp.output_text || '';
-          usage = resp.usage || null;
-          usageProvider = 'openai';
-          usageModel = evalModel;
-        }
-        if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
-      } else if (isExerciseAltProvider) {
-        // Exercício da Trilha com GLM 5.2 ou Claude Sonnet 5 escolhido pelo
-        // admin: mesmo esquema buffered + fallback do Treinamento, mas o
-        // fallback aqui é o MINI padrão da própria Trilha (evalModel/evalEffort
-        // já apontam pra ele).
-        let full = '';
-        const altProvider = exerciseModelSpec.provider;
-        const altClient = getClientForProvider(altProvider);
-        try {
-          if (!altClient) throw new Error(`${altProvider} indisponível`);
-          if (altProvider === 'anthropic') {
-            const args = buildAnthropicArgs({
-              model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
-              systemPrompt, turns: inputTurns, maxTokens: 64000,
-            });
-            const resp = await altClient.messages.create(args);
-            full = extractAnthropicText(resp);
-            usage = resp.usage || null;
-          } else {
-            const body = buildChatBody({
-              provider: altProvider, model: exerciseModelSpec.model, effort: exerciseModelSpec.effort,
-              maxTokens: 64000, messages: [{ role: 'developer', content: systemPrompt }, ...inputTurns],
-            });
-            const resp = await altClient.chat.completions.create(body);
-            full = (resp.choices && resp.choices[0] && resp.choices[0].message && resp.choices[0].message.content) || '';
-            usage = resp.usage || null;
-          }
-          if (!full.trim()) throw new Error('resposta vazia');
-          usageProvider = altProvider;
-          usageModel = exerciseModelSpec.model;
-          console.log(`Evaluate (${exerciseModelSpec.model} · trilha)`);
-        } catch (altErr) {
-          console.error(`[evaluate trilha] ${exerciseModelSpec.model} falhou → fallback ${evalModel}/${evalEffort}:`, altErr.message);
-          const resp = await openai.responses.create({
-            model: evalModel, reasoning: { effort: evalEffort },
-            max_output_tokens: 64000, instructions: systemPrompt, input: inputTurns,
-          });
-          full = resp.output_text || '';
-          usage = resp.usage || null;
-          usageProvider = 'openai';
-          usageModel = evalModel;
-        }
-        if (full) res.write(`data: ${JSON.stringify({ delta: full })}\n\n`);
       } else {
         const stream = await openai.responses.create({
           model: evalModel,
@@ -6186,7 +5916,7 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, requireFeature('tri
 
   const client = getClientForProvider(spec.provider);
   if (!client) {
-    return res.status(503).json({ error: `Indisponível: ${spec.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'} não configurada.` });
+    return res.status(503).json({ error: 'Indisponível: OPENAI_API_KEY não configurada.' });
   }
 
   // SSE por causa do timeout de 100s do Cloudflare — effort 'high' com o
@@ -6204,21 +5934,12 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, requireFeature('tri
   }, 15000);
 
   try {
-    let raw = '';
-    let rawUsage = null;
-    if (spec.provider === 'anthropic') {
-      const args = buildAnthropicArgs({ model: spec.model, effort: spec.effort, systemPrompt, turns, maxTokens: 8000 });
-      const resp = await client.messages.create(args);
-      raw = extractAnthropicText(resp);
-      rawUsage = resp.usage || null;
-    } else {
-      const resp = await client.responses.create({
-        model: spec.model, reasoning: { effort: spec.effort },
-        max_output_tokens: 16000, instructions: systemPrompt, input: turns,
-      });
-      raw = resp.output_text || '';
-      rawUsage = resp.usage || null;
-    }
+    const resp = await client.responses.create({
+      model: spec.model, reasoning: { effort: spec.effort },
+      max_output_tokens: 16000, instructions: systemPrompt, input: turns,
+    });
+    const raw = resp.output_text || '';
+    const rawUsage = resp.usage || null;
     const svg = extractAndSanitizeSvg(raw);
     if (!svg) throw new Error('esquema visual sem SVG válido na resposta');
     // Custo dos Logs da Trilha: usage normalizado — o cliente só acumula/repassa.
@@ -6318,18 +6039,13 @@ const SELECAO_ABORDAGENS = [
 ];
 
 // Nota mínima p/ contar como candidato ATIVO. Subiu de 40 pra 55 na migração
-// para o avaliador de 15 critérios, que pontuava mais alto que o GLM em que o
-// corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
+// para o avaliador de 15 critérios, que pontuava mais alto que o avaliador
+// anterior, no qual o corte de 40 tinha sido calibrado. ATENÇÃO: o corte NÃO foi recalibrado para o
 // v34 — a régua nova é outra, e é isso que fica para o retrabalho do Seletivo.
 // Muda só a etiqueta ativo/rejeitado e a contagem da dashboard; a nota em si não
 // se move, e logs já avaliados conservam o status que receberam na época.
 const SELECTION_ACTIVE_THRESHOLD = 55;
 const SELECAO_TOKEN_TTL = '4h'; // JWT efêmero do candidato (prova 2h + 2h de folga p/ ler instruções, pausar/refresh e enviar no /finish)
-// Modelo/effort do avaliador do seletivo — env dedicado (desacoplado do Treinamento).
-// Default cai no SIM (gpt-5.4/medium). Roda via BATCH API (50% off), então o custo
-// efetivo fica ~metade do preço de tabela desse modelo.
-const OPENAI_SELECAO_MODEL = process.env.OPENAI_SELECAO_MODEL || OPENAI_SIM_MODEL;
-const OPENAI_SELECAO_EFFORT = process.env.OPENAI_SELECAO_EFFORT || OPENAI_SIM_EFFORT;
 const SELECAO_BATCH_POLL_MS = 3 * 60 * 1000; // frequência do coletor de batches
 const SELECAO_MAX_SESSIONS = 6; // máx. de sessões por candidato (igual à Simulação)
 
@@ -6616,9 +6332,9 @@ function toBatchFile(jsonl) {
 
 // Avaliação do Seletivo em BATCH — o candidato nunca vê nota nem raciocínio (o
 // /finish já respondeu só o agradecimento), então pode esperar as até 24h do
-// batch e ganhar os 50% de desconto. Só vale para modelo OpenAI: quando o admin
-// escolhe GLM na categoria, `spec.batch` vem false e a avaliação vai pelo
-// caminho síncrono em background (ver runPendingEvalsWithoutBatch).
+// batch e ganhar os 50% de desconto. Só vale para modelo com Batch API: sem
+// ela, `spec.batch` vem false e a avaliação vai pelo caminho síncrono em
+// background (ver runPendingEvalsWithoutBatch).
 function buildSelectionEvalBodies(log, spec) {
   return oficial.requisicoesDosNos({
     materiais: selectionMateriais(log), model: spec.model, effort: spec.effort, provider: spec.provider,
@@ -6685,14 +6401,10 @@ async function fecharPipelineDoLote({ saida, spec, materiais, version = oficial.
 }
 
 // Pipeline oficial SÍNCRONO em background, para quando o modelo escolhido não
-// tem Batch API (GLM). Mesma UX: quem finalizou já saiu sem nota, e ela entra no
-// registro quando chegar — por aqui só chega mais rápido, sem o desconto.
+// tem Batch API. Hoje todas as opções têm (só OpenAI, desde que GLM saiu em
+// 2026-10); o caminho fica para um modelo futuro sem batch. Mesma UX: quem
+// finalizou já saiu sem nota, e ela entra no registro quando chegar.
 async function runPipelineSemBatch({ spec, materiais, version = oficial.VERSAO, rotulo }) {
-  if (spec.provider === 'anthropic') {
-    // Mesma recusa explícita do runEvalWithoutBatch: a Anthropic usa a Messages
-    // API, com outra forma de corpo. Nenhum preset de avaliador é Claude hoje.
-    throw new Error('avaliação sem batch não suporta Anthropic (usaria a Messages API)');
-  }
   const client = getClientForProvider(spec.provider);
   if (!client) throw new Error(`${spec.provider} indisponível`);
   const result = await oficial.avaliar({
@@ -6708,13 +6420,13 @@ async function runPipelineSemBatch({ spec, materiais, version = oficial.VERSAO, 
 
 // Quantas vezes tentamos o caminho síncrono antes de desistir e marcar erro.
 // Batch que falha marca erro na hora; aqui a falha costuma ser transitória
-// (rate limit da z.ai, instabilidade), então vale retentar nos sweeps seguintes.
+// (rate limit, instabilidade), então vale retentar nos sweeps seguintes.
 const EVAL_SYNC_MAX_ATTEMPTS = 3;
 
 let selectionSweepRunning = false;
 
 // Submete os logs do seletivo pendentes (status 'pending' && !evalBatchId).
-// Só roda quando o avaliador da categoria tem Batch API; com GLM escolhido, quem
+// Só roda quando o avaliador da categoria tem Batch API; sem ela, quem
 // avalia é runSelectionEvalsWithoutBatch.
 async function submitSelectionBatches(openai) {
   const spec = evaluatorSpecFor('seletivo');
@@ -6838,7 +6550,7 @@ async function enviarFeedbackPrevio({ id, to, nome, feedback }) {
   });
 }
 
-// Seletivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
+// Seletivo com avaliador SEM Batch API: avalia um pendente por vez, em
 // background. Falha transitória não queima o candidato — conta a tentativa e
 // tenta de novo no próximo sweep, marcando erro só depois de EVAL_SYNC_MAX_ATTEMPTS.
 async function runSelectionEvalsWithoutBatch() {
@@ -6909,12 +6621,11 @@ async function collectSelectionBatches(openai) {
   }
 }
 
-// Um sweep cobre os dois caminhos: coleta/submete batches (quando o avaliador é
-// OpenAI) e avalia os pendentes de forma síncrona (quando é GLM). A parte de
-// batch exige a chave da OpenAI; a síncrona não — daí o `if` só em volta dela, e
-// não em volta do sweep inteiro (senão trocar pra GLM sem OPENAI_API_KEY deixaria
-// os candidatos pendentes pra sempre). Coletar SEMPRE roda quando há chave, pra
-// fechar batch antigo mesmo depois de o admin trocar o modelo pra GLM.
+// Um sweep cobre os dois caminhos: coleta/submete batches (quando o avaliador
+// tem Batch API) e avalia os pendentes de forma síncrona (quando não tem). A
+// parte de batch exige a chave da OpenAI — daí o `if` só em volta dela.
+// Coletar SEMPRE roda quando há chave, pra fechar batch antigo mesmo depois de
+// o admin trocar o modelo.
 async function sweepSelectionBatches() {
   if (selectionSweepRunning) return;
   selectionSweepRunning = true;
@@ -6962,8 +6673,8 @@ function buildCompetitiveEvalBodies(log, spec) {
 let competitiveSweepRunning = false;
 
 // Submete os logs competitivos pendentes (evaluationPending && !evalBatchId).
-// Só quando o avaliador da categoria tem Batch API — com GLM escolhido quem
-// avalia é runCompetitiveEvalsWithoutBatch.
+// Só quando o avaliador da categoria tem Batch API — sem ela, quem avalia é
+// runCompetitiveEvalsWithoutBatch.
 async function submitCompetitiveBatches(openai) {
   const spec = evaluatorSpecFor('competitivo');
   if (!spec.batch) return;
@@ -7086,7 +6797,7 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
   }
 }
 
-// Competitivo com avaliador SEM Batch API (GLM): avalia um pendente por vez, em
+// Competitivo com avaliador SEM Batch API: avalia um pendente por vez, em
 // background. O aluno já viu "nota em até 24h", então por aqui só chega antes.
 // Falha transitória retenta no próximo sweep (ver EVAL_SYNC_MAX_ATTEMPTS).
 async function runCompetitiveEvalsWithoutBatch() {
@@ -7163,7 +6874,7 @@ async function collectCompetitiveBatches(openai) {
 }
 
 // Mesma estrutura do sweep do Seletivo: batch só com chave da OpenAI, síncrono
-// sempre (senão trocar pra GLM deixaria os pendentes parados pra sempre).
+// sempre.
 async function sweepCompetitiveBatches() {
   if (competitiveSweepRunning) return;
   competitiveSweepRunning = true;
@@ -7309,7 +7020,7 @@ async function sweepTrilhaEvalBatches() {
 }
 
 // Poll do cliente enquanto o job do batch não termina (ver /api/evaluate,
-// branch isExercise && !isExerciseAltProvider). Só o dono do job (mesmo
+// branch isExercise). Só o dono do job (mesmo
 // usuário que gerou a avaliação) pode ler o resultado.
 app.get('/api/trilha/evaluate-batch/:jobId', requireAuth, rota(async (req, res) => {
   const job = await filaTrilha.porId(req.params.jobId);
@@ -7735,7 +7446,7 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 // AVALIAÇÃO INDEPENDENTE — a aba "Avaliar Sessão" do supervisor
 // ----------------------------------------------------------------------------
 // Corrige um log que já existe e mede o custo da run. Alterna MODELO (5.6
-// Sol/Terra/Luna, 5.5, 5.4, mini, GLM), EFFORT e AVALIADOR, e roda SÍNCRONO ou
+// Sol/Terra/Luna, 5.5, 5.4, mini), EFFORT e AVALIADOR, e roda SÍNCRONO ou
 // via BATCH API (50% off) com fila — é onde se compara antes de mexer em
 // Administração → Modelos de IA.
 //
@@ -7761,9 +7472,8 @@ app.get('/api/tri/personagens', requireAuth, requireRole('evaluator', 'admin'), 
 // missão) e a segunda de dois logs, e esta tela recebe um log colado.
 const AVAL_VERSOES_EM_TESTE = [];
 const AVAL_VERSOES = PIPELINE_VERSIONS_IDS.filter((v) => v === oficial.VERSAO || AVAL_VERSOES_EM_TESTE.includes(v));
-// Modelos selecionáveis: id pinado + PROVEDOR (openai | glm/z.ai) + efforts
-// válidos daquele modelo + se suporta Batch API. GLM (z.ai) só na Independente,
-// síncrono (z.ai não expõe Batch API); o caching por prefixo funciona igual.
+// Modelos selecionáveis: id pinado + PROVEDOR + efforts válidos daquele modelo
+// + se suporta Batch API. Só OpenAI desde 2026-10 (o GLM saiu do app).
 const AVAL_MODELOS = {
   // GPT-5.6 Sol (família 5.6, lançada 09/07/2026) — SÓ neste laboratório por
   // enquanto, pra medir billing × benefício junto com os outros antes de cogitar
@@ -7783,32 +7493,20 @@ const AVAL_MODELOS = {
   'gpt-5.5': { id: 'gpt-5.5-2026-04-23', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
   'gpt-5.4': { id: 'gpt-5.4-2026-03-05', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
   'gpt-5.4-mini': { id: 'gpt-5.4-mini-2026-03-17', provider: 'openai', efforts: ['low', 'medium', 'high'], batch: true },
-  'glm-5.2': { id: 'glm-5.2', provider: 'glm', efforts: ['disabled', 'high', 'max'], batch: false },
 };
 
-// Cliente do GLM (z.ai) — OpenAI-compatível. Base própria + GLM_API_KEY. Usado
-// pelos avaliadores de Treinamento/Seletivo, pela Avaliação Independente e pela
-// reflexão da Antessala; o resto do app continua no getOpenAI().
-function getGLM() {
-  const apiKey = process.env.GLM_API_KEY;
-  if (!apiKey) return null;
-  const OpenAI = require('openai').OpenAI || require('openai').default || require('openai');
-  // maxRetries: o SDK reenvia 429/5xx com backoff exponencial (respeita o
-  // Retry-After da z.ai). Conta nova tem rate limit apertado, daí a folga.
-  return new OpenAI({ apiKey, baseURL: process.env.GLM_BASE_URL || 'https://api.z.ai/api/paas/v4', maxRetries: 5 });
-}
+// Cliente do provedor do modelo. Só existe OpenAI (Anthropic e GLM saíram do
+// app em 2026-10, depois do incidente do Railway); provedor desconhecido devolve
+// null, como uma chave ausente — quem chama já trata o null como indisponível.
 function getClientForProvider(provider) {
-  if (provider === 'glm') return getGLM();
-  if (provider === 'anthropic') return getAnthropic();
-  return getOpenAI();
+  return provider === 'openai' ? getOpenAI() : null;
 }
 
 // Roda o avaliador da Avaliação Independente (o laboratório do supervisor).
 //
-// Aqui era um `if` de três caminhos: pipeline, avaliador de prompt único no GLM
-// e o mesmo no OpenAI (cada um com o seu parser e a sua instrumentação). Com os
-// avaliadores de prompt único fora, sobrou o pipeline — que já fala com os dois
-// provedores pelo mesmo código.
+// Aqui era um `if` de três caminhos (pipeline e dois avaliadores de prompt
+// único, cada um com o seu parser e a sua instrumentação). Com os avaliadores
+// de prompt único fora, sobrou o pipeline.
 async function runIndependenteSync({ client, provider, evaluator, model, effort, bloco1, log }) {
   return runAvaliacaoIndependente({
     openai: client, provider, bloco1, log, model, effort,
@@ -7834,7 +7532,7 @@ function buildAvalResponse(entry, result) {
     notasDetalhe: result.notasDetalhe || null,
     corpoSintetizador: result.corpoSintetizador || null,
     feedbackAluno: result.feedbackAluno || null,
-    reasoning: result.reasoning || null, // raciocínio do supervisor (single; GLM devolve, GPT não)
+    reasoning: result.reasoning || null, // raciocínio do supervisor (só runs antigas de prompt único)
     // Pipeline com captura (v28): o raciocínio é grande e fica em arquivo
     // próprio — aqui vai só o aviso de que há o que baixar, e a rota
     // /:id/reasoning serve o .txt. Sem `id` (resultado ainda não persistido)
@@ -7992,8 +7690,8 @@ async function markAvalJob(jobId, patch) {
 // Modo síncrono via JOB LOCAL (não é a Batch API da OpenAI): a chamada ao
 // modelo roda em background, fora do ciclo request/response, então a rota
 // devolve o jobId na hora e nunca esbarra no timeout de 100s do Cloudflare —
-// mesmo se o avaliador demorar bastante (GLM effort high/max, v18-25/pipeline com
-// prompt grande). O cliente faz polling em /fila igual ao batch real, só que
+// mesmo se o avaliador demorar bastante (effort alto, pipeline com prompt
+// grande). O cliente faz polling em /fila igual ao batch real, só que
 // aqui não há desconto de 50% nem espera de horas: termina assim que o modelo
 // responde. Bug corrigido: antes disso, batch:false fazia `await
 // runIndependenteSync` direto na resposta HTTP e o Cloudflare cortava com 524
@@ -8152,8 +7850,7 @@ app.post('/api/avaliacao-independente', requireAuth, requireRole('supervisor', '
 
     const client = getClientForProvider(provider);
     if (!client) {
-      const which = provider === 'glm' ? 'GLM_API_KEY (z.ai)' : 'OPENAI_API_KEY';
-      return res.status(503).json({ error: `Avaliação independente indisponível: ${which} não configurada.` });
+      return res.status(503).json({ error: 'Avaliação independente indisponível: OPENAI_API_KEY não configurada.' });
     }
 
     const freeChar = catalogos.ler('freeplay').find((c) => String(c.id) === String(casoId));
@@ -8226,19 +7923,6 @@ app.get('/api/simulacao-independente/modelos', requireAuth, requireRole('supervi
   res.json({ modelos: simIndependente.simCatalogo(), maxTokens: simIndependente.SIM_MAX_TOKENS });
 });
 
-// Cliente do provedor pedido. Anthropic entra SÓ aqui (o resto do app é
-// OpenAI/GLM) — é um dos candidatos do teste de custo × qualidade do paciente.
-function getClientForSimProvider(provider) {
-  if (provider === 'anthropic') return getAnthropic();
-  if (provider === 'glm') return getGLM();
-  return getOpenAI();
-}
-function simProviderKeyName(provider) {
-  if (provider === 'anthropic') return 'ANTHROPIC_API_KEY';
-  if (provider === 'glm') return 'GLM_API_KEY (z.ai)';
-  return 'OPENAI_API_KEY';
-}
-
 app.post('/api/simulacao-independente/chat', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, async (req, res) => {
   try {
     const b = req.body || {};
@@ -8262,30 +7946,19 @@ app.post('/api/simulacao-independente/chat', requireAuth, requireRole('superviso
     const resolved = resolveChatSystemPrompt({ context: { type: 'freeplay', itemId: casoId }, user: req.user });
     if (resolved.error) return res.status(resolved.status).json({ error: resolved.error });
 
-    const client = getClientForSimProvider(info.provider);
+    const client = getClientForProvider(info.provider);
     if (!client) {
-      return res.status(503).json({ error: `Indisponível: ${simProviderKeyName(info.provider)} não configurada.` });
+      return res.status(503).json({ error: 'Indisponível: OPENAI_API_KEY não configurada.' });
     }
 
     const t0 = Date.now();
-    let text = '';
-    let usage = null;
-    if (info.provider === 'anthropic') {
-      const args = simIndependente.buildSimAnthropicArgs({
-        model: info.id, effort, systemPrompt: resolved.systemPrompt, turns, thinking: info.thinking,
-      });
-      const resp = await client.messages.create(args);
-      text = simIndependente.extractSimText('anthropic', resp);
-      usage = resp.usage || null;
-    } else {
-      const body = simIndependente.buildSimChatBody({
-        provider: info.provider, model: info.id, effort,
-        systemPrompt: resolved.systemPrompt, turns, thinking: info.thinking,
-      });
-      const resp = await client.chat.completions.create(body);
-      text = simIndependente.extractSimText(info.provider, resp);
-      usage = resp.usage || null;
-    }
+    const body = simIndependente.buildSimChatBody({
+      provider: info.provider, model: info.id, effort,
+      systemPrompt: resolved.systemPrompt, turns,
+    });
+    const resp = await client.chat.completions.create(body);
+    const text = simIndependente.extractSimText(info.provider, resp);
+    const usage = resp.usage || null;
     const latenciaMs = Date.now() - t0;
 
     const totais = simIndependente.normalizeSimUsage(info.provider, usage);
@@ -9917,24 +9590,21 @@ function antessalaSummary(c) {
   };
 }
 
-// Modelo da camada de reflexão: GLM 5.2 (z.ai) em effort HIGH, por decisão do
-// dono — mesmo avaliador/effort do Treinamento e do Seletivo. Env-overridável
-// (trocar p/ 'gpt-*' reverte pro OpenAI; provider derivado do prefixo). GLM 5.2
-// aceita disabled|high|max; ficamos no 'high' (não 'max').
-const ANTESSALA_MODEL = process.env.ANTESSALA_MODEL || 'glm-5.2';
-const ANTESSALA_EFFORT = process.env.ANTESSALA_EFFORT || 'high';
+// Modelo da camada de reflexão: o avaliador oficial (modelo e effort), por
+// decisão do dono — "mesmo avaliador/effort do Treinamento e do Seletivo". Era
+// o GLM 5.2 até 2026-10, quando Anthropic e GLM saíram do app. Env-overridável.
+const ANTESSALA_MODEL = process.env.ANTESSALA_MODEL || AVALIADOR_OFICIAL_MODEL;
+const ANTESSALA_EFFORT = process.env.ANTESSALA_EFFORT || AVALIADOR_OFICIAL_EFFORT;
 
-// Chamada de reflexão: GLM 5.2. Se o GLM falhar (rate limit/instabilidade),
-// cai no mini da OpenAI pra que o aluno não fique sem as perguntas — mesmo
-// padrão de fallback do avaliador de Treinamento. Sem nenhuma chave, devolve
+// Chamada de reflexão. Se o modelo principal falhar (rate limit/instabilidade),
+// cai no mini pra que o aluno não fique sem as perguntas. Sem chave, devolve
 // null (o endpoint responde "IA indisponível" sem quebrar o resto).
 async function callAntessalaReflection(system, userText) {
-  const provider = providerForModel(ANTESSALA_MODEL);
-  const client = getClientForProvider(provider);
+  const client = getOpenAI();
   if (client) {
     try {
       const body = buildChatBody({
-        provider, model: ANTESSALA_MODEL, effort: ANTESSALA_EFFORT, maxTokens: 8000,
+        provider: 'openai', model: ANTESSALA_MODEL, effort: ANTESSALA_EFFORT, maxTokens: 16000,
         messages: [{ role: 'developer', content: system }, { role: 'user', content: userText }],
       });
       const resp = await client.chat.completions.create(body);
@@ -9942,13 +9612,10 @@ async function callAntessalaReflection(system, userText) {
       if (text) return text;
       throw new Error('resposta vazia');
     } catch (err) {
-      console.error(`[antessala/reflect] ${ANTESSALA_MODEL} falhou → fallback OpenAI mini:`, err.message);
+      console.error(`[antessala/reflect] ${ANTESSALA_MODEL} falhou → fallback mini:`, err.message);
     }
-  }
-  const openai = getOpenAI();
-  if (openai) {
     const { text } = await openaiComplete({
-      openai,
+      openai: client,
       model: OPENAI_EXERCISE_MODEL,
       effort: 'low',
       systemPrompt: system,

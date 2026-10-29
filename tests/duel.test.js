@@ -13,7 +13,7 @@ const jogadorVeterano = (P) => ({
   criterios: { c1: { P, n: 10, janela: [{ N: P, D_antes: 50, P_antes: P }] } },
 });
 
-// Duelos rodam em modo demonstração aqui (ANTHROPIC_API_KEY vazia), então a
+// Duelos rodam em modo demonstração aqui (OPENAI_API_KEY vazia), então a
 // avaliação comparativa usa o fallback neutro: notas 5 pros dois → 50 × 50 →
 // empate. O foco do teste é o fluxo (criar/convidar/aceitar/submeter/resultado),
 // não a qualidade da avaliação.

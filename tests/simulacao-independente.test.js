@@ -1,8 +1,7 @@
 // Simulação Independente — laboratório de pricing do PACIENTE.
-// Cobre o que é fácil de errar em silêncio: a normalização do `usage` (três
-// provedores, três shapes), o cálculo de custo (a Anthropic cobra ESCRITA de
-// cache mais caro que input) e a montagem da chamada por provedor (não pensar,
-// e cache_control explícito só na Anthropic). Mais o gate de acesso do endpoint.
+// Cobre o que é fácil de errar em silêncio: a normalização do `usage`, o
+// cálculo de custo e a montagem da chamada (não pensar). Mais o gate de acesso
+// do endpoint. Só OpenAI desde 2026-10 (Anthropic e GLM saíram do app).
 const { app, request, resetData, loginAs, authHeader } = require('./helpers');
 const sim = require('../server/simulacao-independente');
 
@@ -18,22 +17,12 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     expect(t).toEqual({ input: 1000, cacheRead: 4000, cacheWrite: 0, output: 300, reasoning: 120 });
   });
 
-  it('normalizeSimUsage (GLM): usa total-prompt como piso da saída (thinking sub-reportado)', () => {
-    const t = sim.normalizeSimUsage('glm', {
+  it('normalizeSimUsage: usa total-prompt como piso da saída (raciocínio sub-reportado)', () => {
+    const t = sim.normalizeSimUsage('openai', {
       prompt_tokens: 2000, completion_tokens: 50, total_tokens: 2900,
     });
     expect(t.output).toBe(900); // 2900 - 2000 vence os 50 reportados
     expect(t.input).toBe(2000);
-  });
-
-  it('normalizeSimUsage (Anthropic): separa leitura e escrita de cache', () => {
-    const t = sim.normalizeSimUsage('anthropic', {
-      input_tokens: 120,
-      cache_creation_input_tokens: 3000,
-      cache_read_input_tokens: 900,
-      output_tokens: 200,
-    });
-    expect(t).toEqual({ input: 120, cacheRead: 900, cacheWrite: 3000, output: 200, reasoning: 0 });
   });
 
   it('computeSimCost soma os 4 componentes com os preços do modelo', () => {
@@ -43,16 +32,6 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     });
     expect(c.usd).toBeCloseTo(0.75 + 0.075 + 4.5, 10);
     expect(c.componentes.cacheWrite).toBe(0);
-  });
-
-  it('computeSimCost cobra a ESCRITA de cache da Anthropic acima do input', () => {
-    const p = sim.resolveSimPrices('claude-sonnet-5');
-    expect(p.cacheWrite).toBeGreaterThan(p.input);       // 1,25× — prêmio de gravação
-    expect(p.cacheRead).toBeCloseTo(p.input * 0.1, 10);  // leitura a 0,1×
-    const c = sim.computeSimCost('claude-sonnet-5', {
-      input: 0, cacheRead: 0, cacheWrite: 1e6, output: 0, reasoning: 0,
-    });
-    expect(c.usd).toBeCloseTo(p.cacheWrite, 10);
   });
 
   it('computeSimCost devolve null para modelo sem preço (nunca um dólar errado)', () => {
@@ -102,7 +81,7 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     expect(sim.simModelInfo('gpt-5.6-sol')).toBeNull(); // flagship fora deste lab
   });
 
-  it('normalizeTurns colapsa turnos consecutivos do mesmo papel (Anthropic exige alternância)', () => {
+  it('normalizeTurns colapsa turnos consecutivos do mesmo papel', () => {
     const turns = sim.normalizeTurns([
       { role: 'user', content: 'oi' },
       { role: 'user', content: 'tudo bem?' },
@@ -125,68 +104,20 @@ describe('Simulação Independente — usage, custo e montagem', () => {
     expect(body.max_completion_tokens).toBe(sim.SIM_MAX_TOKENS);
     expect(body.messages[0]).toEqual({ role: 'developer', content: 'PERSONAGEM' });
     expect(body.thinking).toBeUndefined();
+    expect(body.max_tokens).toBeUndefined();
   });
 
-  it('buildSimChatBody: GLM usa thinking disabled/enabled + max_tokens', () => {
-    const off = sim.buildSimChatBody({
-      provider: 'glm', model: 'glm-5.2', effort: 'disabled',
+  it('buildSimChatBody: com raciocínio, o teto ganha folga', () => {
+    const body = sim.buildSimChatBody({
+      provider: 'openai', model: 'gpt-5.6-luna', effort: 'high',
       systemPrompt: 'P', turns: [{ role: 'user', content: 'Iniciar' }],
     });
-    expect(off.thinking).toEqual({ type: 'disabled' });
-    expect(off.reasoning_effort).toBeUndefined();
-    expect(off.max_tokens).toBe(sim.SIM_MAX_TOKENS);
-
-    const on = sim.buildSimChatBody({
-      provider: 'glm', model: 'glm-5.2', effort: 'high',
-      systemPrompt: 'P', turns: [{ role: 'user', content: 'Iniciar' }],
-    });
-    expect(on.thinking).toEqual({ type: 'enabled' });
-    expect(on.reasoning_effort).toBe('high');
-    expect(on.max_tokens).toBeGreaterThan(sim.SIM_MAX_TOKENS); // folga pro raciocínio
+    expect(body.reasoning_effort).toBe('high');
+    expect(body.max_completion_tokens).toBeGreaterThan(sim.SIM_MAX_TOKENS);
   });
 
-  it('buildSimAnthropicArgs: cache_control no system e no último turno; thinking disabled', () => {
-    const args = sim.buildSimAnthropicArgs({
-      model: 'claude-sonnet-5', effort: 'disabled', systemPrompt: 'P',
-      turns: [
-        { role: 'user', content: 'Iniciar' },
-        { role: 'assistant', content: 'oi' },
-        { role: 'user', content: 'como vai?' },
-      ],
-    });
-    expect(args.system[0].cache_control).toEqual({ type: 'ephemeral' });
-    expect(args.thinking).toEqual({ type: 'disabled' });
-    expect(args.output_config).toBeUndefined();
-    // só o último turno leva breakpoint (padrão multi-turno)
-    expect(typeof args.messages[0].content).toBe('string');
-    expect(args.messages[2].content[0].cache_control).toEqual({ type: 'ephemeral' });
-  });
-
-  it('buildSimAnthropicArgs: effort liga adaptive; thinking:omit não manda nada', () => {
-    const adaptativo = sim.buildSimAnthropicArgs({
-      model: 'claude-sonnet-5', effort: 'low', systemPrompt: 'P',
-      turns: [{ role: 'user', content: 'Iniciar' }],
-    });
-    expect(adaptativo.thinking).toEqual({ type: 'adaptive' });
-    expect(adaptativo.output_config).toEqual({ effort: 'low' });
-
-    // 'omit' existe para modelos Anthropic PRÉ-4.6 (não aceitam effort e já não
-    // pensam sem o campo). Nenhum do alternador usa hoje; fica pronto para quando
-    // o dono ciclar um modelo antigo pra dentro do teste.
-    const antigo = sim.buildSimAnthropicArgs({
-      model: 'claude-haiku-4-5', effort: 'disabled', systemPrompt: 'P',
-      turns: [{ role: 'user', content: 'Iniciar' }], thinking: 'omit',
-    });
-    expect(antigo.thinking).toBeUndefined();
-    expect(antigo.output_config).toBeUndefined();
-    expect(antigo.system[0].cache_control).toEqual({ type: 'ephemeral' });
-  });
-
-  it('extractSimText: junta blocos de texto (Anthropic) e tira <think> (GLM)', () => {
-    expect(sim.extractSimText('anthropic', {
-      content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: 'Oi. ' }, { type: 'text', text: 'Tudo bem?' }],
-    })).toBe('Oi. Tudo bem?');
-    expect(sim.extractSimText('glm', {
+  it('extractSimText: tira um <think> embutido do texto do personagem', () => {
+    expect(sim.extractSimText('openai', {
       choices: [{ message: { content: '<think>plano</think>Oi, doutor.' } }],
     })).toBe('Oi, doutor.');
   });
@@ -199,12 +130,10 @@ describe('Simulação Independente — usage, custo e montagem', () => {
       'gpt-5.6-terra:none,medium,high',
       'gpt-5.4:medium,high',
       'gpt-5.5:medium,high',
-      'glm-5.2:high',
-      'claude-sonnet-5:disabled',
     ]);
     for (const m of cat) {
       expect(m.precos, `preço faltando para ${m.key}`).toBeTruthy();
-      expect(['openai', 'glm', 'anthropic']).toContain(m.provider);
+      expect(m.provider).toBe('openai');
     }
   });
 });
@@ -241,9 +170,11 @@ describe('Simulação Independente — endpoint', () => {
     expect((await post({ ...base, model: 'gpt-5.6-nova', effort: 'none' })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.6-sol', effort: 'none' })).status).toBe(400);
     // effort que existe em outro modelo, mas não neste
-    expect((await post({ ...base, model: 'claude-sonnet-5', effort: 'medium' })).status).toBe(400);
+    expect((await post({ ...base, model: 'gpt-5.4-mini', effort: 'medium' })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.6-luna', effort: 'xhigh' })).status).toBe(400);
-    expect((await post({ ...base, model: 'glm-5.2', effort: 'disabled' })).status).toBe(400);
+    // GLM e Claude saíram do laboratório
+    expect((await post({ ...base, model: 'claude-sonnet-5', effort: 'disabled' })).status).toBe(400);
+    expect((await post({ ...base, model: 'glm-5.2', effort: 'high' })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.4-mini', effort: 'none', messages: [] })).status).toBe(400);
     expect((await post({ ...base, model: 'gpt-5.4-mini', effort: 'none', casoId: '' })).status).toBe(400);
     // conversa tem de começar pelo terapeuta
@@ -256,7 +187,7 @@ describe('Simulação Independente — endpoint', () => {
     const token = await loginAs('admin');
     const res = await request(app).post('/api/simulacao-independente/chat')
       .set(authHeader(token))
-      .send({ casoId: 'fp-test-1', model: 'claude-sonnet-5', effort: 'disabled', messages: [{ role: 'user', content: 'Iniciar' }] });
+      .send({ casoId: 'fp-test-1', model: 'gpt-5.4-mini', effort: 'none', messages: [{ role: 'user', content: 'Iniciar' }] });
     expect(res.status).toBe(503);
     expect(JSON.stringify(res.body)).not.toContain('FP_PROMPT_SECRETO');
   });

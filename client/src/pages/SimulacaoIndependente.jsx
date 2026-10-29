@@ -424,13 +424,6 @@ export default function SimulacaoIndependente({ user }) {
           {' '}· {fmtTok(agregado.totais.output)} output
           {agregado.totais.reasoning ? ` (${fmtTok(agregado.totais.reasoning)} reasoning)` : ''}
         </div>
-        {agregado.totais.cacheWrite > 0 && (
-          <div className="sim-hud-nota">
-            A <strong>escrita de cache</strong> (1,25× o input, cobrada só pela Anthropic) concentra-se no{' '}
-            <strong>1º turno</strong> e se paga do 2º em diante, quando o mesmo prefixo é lido a 0,1×. Compare
-            modelos pelo custo do <strong>último turno</strong>, não pelo primeiro.
-          </div>
-        )}
         {porModelo.length > 1 && (
           <div className="sim-hud-models">
             {porModelo.map((m) => (

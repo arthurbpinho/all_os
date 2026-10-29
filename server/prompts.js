@@ -65,9 +65,8 @@ onde X é um número inteiro de 0 a 100. Sem essa linha, o sistema não consegue
 // Esquema visual (opcional, por exercício da Trilha): o modelo escreve um
 // ÚNICO SVG autocontido que sintetiza a sessão, a partir da observação do
 // admin (imageSchemaPrompt) + a transcrição. NÃO é geração de imagem "de
-// pixel" (a Claude não tem essa capacidade via API) — é o modelo escrevendo
-// texto/SVG, que o navegador renderiza como imagem vetorial. Funciona igual
-// para GPT e Claude, sem precisar de nenhuma tool de imagem.
+// pixel" — é o modelo escrevendo texto/SVG, que o navegador renderiza como
+// imagem vetorial, sem precisar de nenhuma tool de imagem.
 function buildImageSchemaPrompt(observacao) {
   return `Você gera um ÚNICO esquema/diagrama visual em SVG que sintetiza o que aconteceu num exercício da Trilha de prática deliberada da Allos (formação de psicólogos), a partir da transcrição que você vai receber a seguir.
 

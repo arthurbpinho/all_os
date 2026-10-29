@@ -160,6 +160,6 @@ describe('Antessala — pré-supervisão', () => {
     expect(bad.status).toBe(400);
 
     const ok = await request(app).post('/api/antessala/reflect').set(authHeader(token)).send({ step: 4, doc: sampleDoc() });
-    expect(ok.status).toBe(503); // sem ANTHROPIC/OPENAI key no ambiente de teste
+    expect(ok.status).toBe(503); // sem OPENAI_API_KEY no ambiente de teste
   });
 });

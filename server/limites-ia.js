@@ -22,8 +22,6 @@ const PRECOS = {
   'gpt-5.5': { input: 5, cacheRead: 0.5, cacheWrite: 5, output: 30 },
   'gpt-5.4-mini': { input: 0.75, cacheRead: 0.075, cacheWrite: 0.75, output: 4.5 },
   'gpt-5.4': { input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15 },
-  'glm-5.2': { input: 1.4, cacheRead: 0.26, cacheWrite: 1.4, output: 4.4 },
-  'claude-sonnet-5': { input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10 },
 };
 
 function precoDoModelo(model) {

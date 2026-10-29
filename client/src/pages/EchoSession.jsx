@@ -44,7 +44,7 @@ function buildNeuroTestChoiceText(ids, justifications, catalog) {
 
 // Sessão livre (FreePlay e Neuroavaliação) — fluxo herdado do Echos:
 // 1. Iniciar Sessão (cronômetro começa, chat libera)
-// 2. Conversa com personagem via /api/chat (Anthropic Sonnet 4.6, stateless)
+// 2. Conversa com personagem via /api/chat (OpenAI, stateless)
 // 3. Destaque de mensagens do terapeuta (estrela + comentário)
 // 4. Finalizar → tela pós-sessão com duração e download de log
 

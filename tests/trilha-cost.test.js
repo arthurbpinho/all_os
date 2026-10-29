@@ -26,7 +26,7 @@ describe('Custo dos Logs da Trilha (/api/logs)', () => {
       // "trapaça": manda um modelo mentiroso — o servidor deve IGNORAR e
       // resolver o modelo real do exercício (que não tem chatModel setado,
       // então cai no default gpt-5.4-mini).
-      chatModel: 'claude-sonnet-5',
+      chatModel: 'gpt-5.5',
     });
     expect(res.status).toBe(200);
     const log = res.body;
@@ -57,11 +57,11 @@ describe('Custo dos Logs da Trilha (/api/logs)', () => {
     expect(cost.totalUsd).toBeCloseTo(usdMini(chatUsage) + usdMini(evaluatorUsage), 10);
   });
 
-  it('exercício com esquema visual em claude-sonnet-5: preço do Claude, não do GPT', async () => {
+  it('exercício com esquema visual: preço do gpt-5.4, não do mini do chat', async () => {
     const adminToken = await loginAs('admin');
     const created = await request(app).post('/api/exercises').set(authHeader(adminToken)).send({
       title: 'Com esquema', skillId: 1, specificInstruction: 'x',
-      imageSchemaEnabled: true, imageSchemaModel: 'claude-sonnet-5',
+      imageSchemaEnabled: true, imageSchemaModel: 'gpt-5.4',
     });
 
     const token = await loginAs('aluno');
@@ -75,10 +75,10 @@ describe('Custo dos Logs da Trilha (/api/logs)', () => {
     });
     expect(res.status).toBe(200);
     const { cost } = res.body;
-    expect(cost.imageSchema.model).toBe('claude-sonnet-5');
-    // claude-sonnet-5: {input: 2, cacheRead: 0.2, cacheWrite: 2.5, output: 10}
-    const expectedClaudeUsd = (4000 * 2 + 1000 * 10) / 1e6;
-    expect(cost.imageSchema.usd).toBeCloseTo(expectedClaudeUsd, 10);
+    expect(cost.imageSchema.model).toBe('gpt-5.4-2026-03-05');
+    // gpt-5.4: {input: 2.5, cacheRead: 0.25, cacheWrite: 2.5, output: 15}
+    const expectedUsd = (4000 * 2.5 + 1000 * 15) / 1e6;
+    expect(cost.imageSchema.usd).toBeCloseTo(expectedUsd, 10);
   });
 
   it('sanitiza usage inválido (negativo/NaN) pra zero, sem quebrar — custo vira $0, não null', async () => {

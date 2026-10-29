@@ -23,7 +23,7 @@
 // histórico — trocá-los apagaria a configuração de quem já tem essas envs
 // setadas no painel do Railway.
 //
-// Roda em GPT-5.x (OpenAI) ou GLM (z.ai). Na produção o modelo vem da categoria
+// Roda em GPT-5.x (OpenAI). Na produção o modelo vem da categoria
 // em Administração → Modelos de IA; na aba do supervisor, do seletor da tela. Os
 // avaliadores que ficaram FORA do pipeline (Neuro e Trilha) não passam aqui.
 //
@@ -52,8 +52,7 @@
 // de raciocínio em lugar nenhum — só um RESUMO, e só pela Responses API. Por
 // isso, quando a versão pede captura, os nós GPT saem do chat.completions e vão
 // para a Responses (mesmas mensagens: o prefixo cacheável vira `instructions`,
-// o critério vira `input`, então o caching continua valendo). O GLM é mais
-// simples: devolve `reasoning_content` no próprio chat.completions, de graça.
+// o critério vira `input`, então o caching continua valendo).
 //
 // Custo: os tokens de reasoning JÁ são cobrados hoje, como saída, pedindo ou não
 // o resumo — o modelo os gera de todo jeito. Pedir o resumo não cria raciocínio
@@ -271,31 +270,13 @@ const V25_PRICES = {
   'gpt-5.5': { input: 5, cached: 0.5, output: 30 },
   'gpt-5.4-mini': { input: 0.75, cached: 0.075, output: 4.5 },
   'gpt-5.4': { input: 2.5, cached: 0.25, output: 15 },
-  // GLM-5.2 (z.ai) — docs.z.ai, jul/2026. Reasoning cobrado como output (sem
-  // surcharge). Só na Avaliação Independente (teste de pricing).
-  'glm-5.2': { input: 1.4, cached: 0.26, output: 4.4 },
 };
 
-// Monta o corpo /chat/completions de acordo com o PROVEDOR. GPT (OpenAI) usa
-// `reasoning_effort` (low/medium/high) + `max_completion_tokens`. GLM (z.ai) usa
-// `thinking:{type:enabled|disabled}` (+ `reasoning_effort` high/max quando ligado)
-// e `max_tokens`. Os prompts/mensagens são os MESMOS — só os campos de controle
-// mudam. Assim o caching por prefixo continua valendo nos dois.
-function buildChatBody({ provider, model, messages, maxTokens, effort }) {
-  const body = { model, messages };
-  if (provider === 'glm') {
-    body.max_tokens = maxTokens;
-    if (effort === 'disabled') {
-      body.thinking = { type: 'disabled' };
-    } else {
-      body.thinking = { type: 'enabled' };
-      body.reasoning_effort = effort; // 'high' | 'max'
-    }
-  } else {
-    body.max_completion_tokens = maxTokens;
-    body.reasoning_effort = effort; // 'low' | 'medium' | 'high'
-  }
-  return body;
+// Monta o corpo /chat/completions: `reasoning_effort` (low/medium/high/…) +
+// `max_completion_tokens`. `provider` fica na assinatura porque os chamadores o
+// propagam; hoje só existe 'openai' (GLM saiu do app em 2026-10).
+function buildChatBody({ model, messages, maxTokens, effort }) {
+  return { model, messages, max_completion_tokens: maxTokens, reasoning_effort: effort };
 }
 
 // Resolve os preços para o modelo em uso. Env override vence a tabela (os três
@@ -509,9 +490,6 @@ function fill(str, slot, value) {
   return str.replace(slot, () => value);
 }
 
-// Concorrência do fan-out dos nós no GLM (z.ai). Conta nova tem rate limit
-// apertado; 14 requisições de uma vez estouram 429. Roda em lotes pequenos.
-const GLM_V25_CONCURRENCY = Number(process.env.GLM_V25_CONCURRENCY || 3);
 // Concorrência do fan-out no GPT (OpenAI). O limite que estoura primeiro NÃO é
 // requisições por minuto, é TOKENS por minuto: o contador de TPM da OpenAI
 // RESERVA o max_completion_tokens de cada chamada, então cada nó pesa
@@ -737,14 +715,12 @@ async function mapLimit(items, limit, fn) {
 // varia. Sem cache_control manual — não existe na OpenAI.
 async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL, effort = V25_EFFORT, provider = 'openai', rotulo = 'chamada', captura = false) {
   // A OpenAI reserva input + o TETO de saída no contador de TPM, mesmo que o
-  // modelo gere menos. Reservamos a mesma coisa, antes de chamar. (O GLM tem
-  // limite próprio, tratado pela concorrência menor do fan-out.)
-  if (provider === 'openai') {
-    await reservarTPM(estimarTokens(developer) + estimarTokens(user) + maxTokens);
-  }
-  // Captura ligada + OpenAI → Responses API, o único lugar onde o resumo do
-  // raciocínio existe. Nos demais casos segue o chat.completions de sempre.
-  if (captura && provider === 'openai') {
+  // modelo gere menos. Reservamos a mesma coisa, antes de chamar.
+  await reservarTPM(estimarTokens(developer) + estimarTokens(user) + maxTokens);
+  // Captura ligada → Responses API, o único lugar onde o resumo do raciocínio
+  // existe. Sem captura segue o chat.completions de sempre, que não devolve
+  // raciocínio nenhum (só a contagem de tokens).
+  if (captura) {
     return gptCompleteResponses(openai, developer, user, maxTokens, model, effort, rotulo);
   }
   const resp = await withRetry(rotulo, () => openai.chat.completions.create(buildChatBody({
@@ -758,12 +734,7 @@ async function gptComplete(openai, developer, user, maxTokens, model = V25_MODEL
     ],
   })));
   const message = (resp.choices && resp.choices[0] && resp.choices[0].message) || {};
-  return {
-    text: message.content || '',
-    // GLM devolve o raciocínio aqui mesmo, sem custo nem chamada extra.
-    reasoning: captura ? extractChatReasoning(message) : '',
-    usage: resp.usage || null,
-  };
+  return { text: message.content || '', reasoning: '', usage: resp.usage || null };
 }
 
 // A OpenAI só emite resumo de raciocínio nos modelos que têm sumarizador — o
@@ -803,19 +774,6 @@ async function gptCompleteResponses(openai, developer, user, maxTokens, model, e
     }
     return { text, reasoning: reasoning.trim(), usage };
   });
-}
-
-// Raciocínio que o provedor devolveu junto da resposta do chat.completions. O
-// GLM (z.ai) manda em `message.reasoning_content` quando o thinking está ligado;
-// alguns provedores embutem em <think>…</think> no próprio conteúdo. A OpenAI,
-// por este endpoint, não manda nada (só a contagem de tokens).
-function extractChatReasoning(message) {
-  const m = message || {};
-  const rc = m.reasoning_content || m.reasoning || '';
-  if (rc && String(rc).trim()) return String(rc).trim();
-  const c = typeof m.content === 'string' ? m.content : '';
-  const tag = c.match(/<think>([\s\S]*?)<\/think>/i);
-  return tag ? tag[1].trim() : '';
 }
 
 // Captura do resumo do raciocínio: a versão pede, mas dá para desligar por env
@@ -1275,7 +1233,7 @@ function sumUsages(usages) {
     const completion = u.completion_tokens != null ? u.completion_tokens : (u.output_tokens || 0);
     const total = u.total_tokens != null ? u.total_tokens
       : (u.input_tokens != null && u.output_tokens != null ? u.input_tokens + u.output_tokens : 0);
-    // GLM (z.ai): completion_tokens pode sub-reportar o thinking → usa total como piso.
+    // completion_tokens pode sub-reportar o raciocínio → usa total como piso.
     t.input += Math.max(0, promptTotal - cached);
     t.cached += cached;
     t.output += Math.max(completion, total > promptTotal ? total - promptTotal : 0);
@@ -1349,7 +1307,7 @@ function buildInstrumentacao(model, nodeResults, synthUsage, effort = V25_EFFORT
 // devolve texto — para o servidor só gravar e a rota só servir.
 //
 // Devolve '' quando não há resumo nenhum: aí não existe arquivo a guardar nem
-// botão a mostrar (batch, modelo "mini", GLM com thinking desligado).
+// botão a mostrar (batch, modelo "mini").
 function buildReasoningTxt({ evaluatorLabel, version, model, effort, batch, casoNome, notaFinal, comparativo, partes, reasoningSintetizador, criadoEm }) {
   const blocos = (partes || []).filter((p) => p.reasoning && p.reasoning.trim());
   if (!blocos.length && !(reasoningSintetizador || '').trim()) return '';
@@ -1469,7 +1427,7 @@ function buildDeveloper(assets, materiaisNormalizados) {
 
 // Executa o pipeline completo: nós → agregador → sintetizador → montagem.
 // Semeia o cache rodando 1 nó primeiro (escreve A+B no cache da OpenAI), depois
-// os demais em lotes (ver OPENAI_V25_CONCURRENCY / GLM_V25_CONCURRENCY) — assim
+// os demais em lotes (ver OPENAI_V25_CONCURRENCY) — assim
 // o prefixo A+B (com o log) é cobrado cheio uma vez e lido barato pelos outros.
 // O sintetizador roda por último.
 async function runAvaliacaoIndependente({
@@ -1509,21 +1467,16 @@ async function runAvaliacaoIndependente({
   };
 
   const first = await rodarNo(criteria[0]);
-  // Fan-out em lotes nos DOIS provedores: GLM tem rate limit apertado em conta
-  // nova, e na OpenAI o que estoura é o TPM. Lá o lote é dimensionado pelo peso
-  // REAL desta run (prompt + Bloco 1 + log + teto de saída), porque o mesmo nó
-  // pesa muito diferente com um log curto ou com uma sessão inteira colada.
+  // Fan-out em lotes: na OpenAI o que estoura é o TPM. O lote é dimensionado
+  // pelo peso REAL desta run (prompt + Bloco 1 + log + teto de saída), porque o
+  // mesmo nó pesa muito diferente com um log curto ou com uma sessão inteira
+  // colada.
   //
-  let conc;
-  if (provider === 'glm') {
-    conc = GLM_V25_CONCURRENCY;
-  } else {
-    const maiorCriterio = criteria.reduce((a, c) => Math.max(a, (c.descricao || '').length), 0);
-    const reserva = estimarTokens(developer) + estimarTokens(assets.blockC)
-      + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
-    conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
-    console.log(`[v25-fanout] ${criteria.length} nó(s) · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
-  }
+  const maiorCriterio = criteria.reduce((a, c) => Math.max(a, (c.descricao || '').length), 0);
+  const reserva = estimarTokens(developer) + estimarTokens(assets.blockC)
+    + estimarTokens('x'.repeat(maiorCriterio)) + V25_MAX_TOKENS;
+  const conc = concorrenciaPorTPM(reserva, OPENAI_V25_CONCURRENCY);
+  console.log(`[v25-fanout] ${criteria.length} nó(s) · ~${reserva} tok reservados por chamada · concorrência ${conc} (teto ${OPENAI_V25_CONCURRENCY}, TPM ${OPENAI_V25_TPM})`);
   // O nó da MISSÃO entra no mesmo fan-out dos critérios: ele não depende de
   // nenhum deles, e serializá-lo só somaria latência à espera do aluno.
   const [rest, missao] = await Promise.all([
@@ -1739,7 +1692,6 @@ module.exports = {
   // Raciocínio (laboratório) e utilidades de fila/custo
   buildReasoningTxt,
   modelEmiteResumo,
-  extractChatReasoning,
   estimarTokens,
   concorrenciaPorTPM,
   reservarTPM,

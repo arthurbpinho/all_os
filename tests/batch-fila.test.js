@@ -95,9 +95,9 @@ describe('Fila de batch — quanto cabe', () => {
     // inteiro mesmo que o nó devolva quatro linhas.
     const body = { messages: [{ role: 'user', content: 'x'.repeat(350) }], max_completion_tokens: 16000 };
     expect(fila.tokensDaRequisicao(body, estimar)).toBe(16100);
-    // GLM/outros usam max_tokens; a conta é a mesma.
-    const glm = { messages: [{ role: 'user', content: 'x'.repeat(350) }], max_tokens: 8000 };
-    expect(fila.tokensDaRequisicao(glm, estimar)).toBe(8100);
+    // Corpo com max_tokens (o campo antigo da API): a conta é a mesma.
+    const antigo = { messages: [{ role: 'user', content: 'x'.repeat(350) }], max_tokens: 8000 };
+    expect(fila.tokensDaRequisicao(antigo, estimar)).toBe(8100);
   });
 
   it('espaço livre desconta o que está em voo e guarda a margem de segurança', () => {

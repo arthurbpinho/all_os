@@ -117,23 +117,6 @@ describe('motor do avaliador — raciocínio, custo e transporte', () => {
     expect(cap.calls[0].reasoning).toEqual({ effort: 'low' }); // sem summary
   });
 
-  it('GLM: raciocínio vem do reasoning_content, no mesmo chat.completions', async () => {
-    const openai = {
-      chat: { completions: { create: async (body) => ({
-        choices: [{ message: {
-          content: body.messages[1].content.includes('[CRITÉRIO]') ? saidaQual({ v: { Integridade: 'plena', Autoria: 'plena' } }) : 'Corpo.',
-          reasoning_content: 'raciocínio do GLM',
-        } }],
-        usage: null,
-      }) } },
-    };
-    const r = await runAvaliacaoIndependente({
-      openai, bloco1: 'b', log: 'l', model: 'glm-5.2', effort: 'max', provider: 'glm', version: 'v34',
-    });
-    expect(r.reasoningTxt).toContain('raciocínio do GLM');
-    expect(r.notaFinal).toBe(70); // 2+2+1+2+0 por critério
-  });
-
   it('buildReasoningTxt: vazio sem resumo; marca os nós que não devolveram', () => {
     const base = { evaluatorLabel: 'v34', version: 'v34', model: 'gpt-5.6-luna', effort: 'high', notaFinal: 80 };
     expect(buildReasoningTxt({ ...base, partes: [{ num: 1, nome: 'X', reasoning: '' }], reasoningSintetizador: '' })).toBe('');
@@ -158,24 +141,17 @@ describe('motor do avaliador — raciocínio, custo e transporte', () => {
     // mini vence o prefixo curto do 5.4
     expect(resolvePrices('gpt-5.4-mini-2026-03-17')).toMatchObject({ input: 0.75, output: 4.5 });
     expect(resolvePrices('gpt-5.4-2026-03-05')).toMatchObject({ input: 2.5, output: 15 });
-    expect(resolvePrices('glm-5.2')).toMatchObject({ input: 1.4, output: 4.4 });
+    expect(resolvePrices('glm-5.2')).toBe(null); // GLM saiu do app em 2026-10
     expect(resolvePrices('modelo-que-nao-existe')).toBe(null);
   });
 
-  it('buildChatBody: GPT usa reasoning_effort/max_completion_tokens; GLM usa thinking/max_tokens', () => {
+  it('buildChatBody: reasoning_effort + max_completion_tokens, sem campos de outro provedor', () => {
     const msgs = [{ role: 'user', content: 'x' }];
     const gpt = buildChatBody({ provider: 'openai', model: 'gpt-5.6-luna', messages: msgs, maxTokens: 16000, effort: 'high' });
     expect(gpt.reasoning_effort).toBe('high');
     expect(gpt.max_completion_tokens).toBe(16000);
     expect(gpt.thinking).toBeUndefined();
-
-    const glm = buildChatBody({ provider: 'glm', model: 'glm-5.2', messages: msgs, maxTokens: 16000, effort: 'max' });
-    expect(glm.thinking).toEqual({ type: 'enabled' });
-    expect(glm.reasoning_effort).toBe('max');
-    expect(glm.max_tokens).toBe(16000);
-    const glmOff = buildChatBody({ provider: 'glm', model: 'glm-5.2', messages: msgs, maxTokens: 100, effort: 'disabled' });
-    expect(glmOff.thinking).toEqual({ type: 'disabled' });
-    expect(glmOff.reasoning_effort).toBeUndefined();
+    expect(gpt.max_tokens).toBeUndefined();
   });
 
   it('batch aplica 50% nos nós e cobra o sintetizador cheio', () => {
@@ -991,15 +967,12 @@ describe('Avaliar Sessão (aba do supervisor) — endpoint', () => {
     expect(inexistente.body.error).toMatch(/gpt-5\.6-luna/);
   });
 
-  it('GLM: effort medium é inválido; batch é bloqueado (z.ai não tem Batch API)', async () => {
+  it('GLM saiu do laboratório (2026-10): o modelo é recusado', async () => {
     const t = await loginAs('prof');
     const base = { log: 'x', casoId: 'fp-test-1', alunoNome: 'Aluno de Teste', evaluator: 'v34', model: 'glm-5.2' };
-    const effErr = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, effort: 'medium' });
-    expect(effErr.status).toBe(400);
-    expect(effErr.body.error).toMatch(/effort inválido/i);
-    const batchErr = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, effort: 'max', batch: true });
-    expect(batchErr.status).toBe(400);
-    expect(batchErr.body.error).toMatch(/batch/i);
+    const res = await request(app).post('/api/avaliacao-independente').set(authHeader(t)).send({ ...base, effort: 'high' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).not.toMatch(/glm/i); // a lista de modelos válidos não o cita
   });
 
   it('fila: supervisor vê (lista); aluno é barrado (403)', async () => {

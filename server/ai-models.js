@@ -18,15 +18,13 @@
 //   - Entrevistador e Antessala: não são avaliador nem paciente simulado.
 
 // --- Presets do AVALIADOR ---------------------------------------------------
-// Três opções fixas (decisão do dono), todas em effort 'high': a avaliação é a
-// parte densa do app e é onde a qualidade importa.
+// Opções fixas (decisão do dono), todas em effort 'high': a avaliação é a
+// parte densa do app e é onde a qualidade importa. Só OpenAI: Anthropic e GLM
+// saíram do app em 2026-10 (chaves revogadas depois do incidente do Railway).
 //
-// `batch` = o provedor expõe Batch API (50% de desconto, janela de até 24h). A
-// z.ai NÃO expõe, então GLM é batch:false. Isso não impede escolher GLM em
-// lugar nenhum: nas categorias que normalmente vão de batch (Competitivo,
-// Processo Seletivo) a avaliação passa a rodar SÍNCRONA em background — mesma
-// UX (quem finaliza já vê só o agradecimento; a nota entra no log quando
-// chegar), só que mais rápido e sem o desconto.
+// `batch` = o provedor expõe Batch API (50% de desconto, janela de até 24h).
+// Todas as opções têm; o campo continua porque o caminho síncrono em
+// background (Competitivo/Seletivo sem batch) segue existindo no código.
 const EVALUATOR_PRESETS = {
   // Família 5.6 (ago/2026): Sol é o topo (mesmo preço do 5.5) e Luna é o tier
   // barato — 25× abaixo do Sol por token. Ambos em high pelo mesmo motivo dos
@@ -43,26 +41,15 @@ const EVALUATOR_PRESETS = {
     label: 'GPT 5.5 high',
     model: 'gpt-5.5-2026-04-23', provider: 'openai', effort: 'high', batch: true,
   },
-  'glm-5.2': {
-    label: 'GLM 5.2 high',
-    model: 'glm-5.2', provider: 'glm', effort: 'high', batch: false,
-    nota: 'z.ai não tem Batch API — roda síncrono (sem o desconto de 50%)',
-  },
 };
 
 // --- Presets do PACIENTE SIMULADO ------------------------------------------
-// O personagem responde DIRETO, sem raciocínio, nas opções OpenAI/Anthropic —
-// paciente que "pensa" antes de falar soa artificial e atrasa o turno. Cada
-// provedor desliga o raciocínio de um jeito diferente:
-//   OpenAI    → reasoning_effort: 'none'
-//   Anthropic → thinking: { type: 'disabled' }  (effort 'disabled' aqui)
-//   GLM       → só existe na lista em 'high' (a opção pedida pelo dono), então
-//               esse é o único preset de paciente COM raciocínio: mais nuançado,
-//               porém mais lento e com o reasoning cobrado como saída.
+// O personagem responde DIRETO, sem raciocínio (reasoning_effort: 'none') —
+// paciente que "pensa" antes de falar soa artificial e atrasa o turno.
 const PATIENT_PRESETS = {
-  // Sol e Luna entram COM raciocínio (high), a pedido do dono — são, junto do
-  // GLM, as únicas opções de paciente que pensam antes de falar. Custam mais
-  // tempo de turno; a comparação de naturalidade é o ponto.
+  // Sol e Luna entram COM raciocínio (high), a pedido do dono — são as únicas
+  // opções de paciente que pensam antes de falar. Custam mais tempo de turno;
+  // a comparação de naturalidade é o ponto.
   'gpt-5.6-sol': {
     label: 'GPT 5.6 Sol high',
     model: 'gpt-5.6-sol', provider: 'openai', effort: 'high',
@@ -78,18 +65,9 @@ const PATIENT_PRESETS = {
     model: 'gpt-5.4-mini-2026-03-17', provider: 'openai', effort: 'none',
     nota: 'paciente padrão de produção — mais rápido e mais barato',
   },
-  'glm-5.2': {
-    label: 'GLM 5.2 high',
-    model: 'glm-5.2', provider: 'glm', effort: 'high',
-    nota: 'único preset de paciente com raciocínio — mais lento',
-  },
   'gpt-5.4': {
     label: 'GPT 5.4 effort none',
     model: 'gpt-5.4-2026-03-05', provider: 'openai', effort: 'none',
-  },
-  'claude-sonnet-5': {
-    label: 'Claude Sonnet 5 effort none',
-    model: 'claude-sonnet-5', provider: 'anthropic', effort: 'disabled',
   },
 };
 
@@ -275,7 +253,7 @@ function resolveSpec({ presets, choice, global, fallback, batchCapable }) {
     preset: equivalente,
     label: equivalente ? presets[equivalente].label : String(fallback.model || ''),
     model: fallback.model, provider: fallback.provider, effort: fallback.effort,
-    // Só OpenAI expõe Batch API entre os provedores em uso.
+    // OpenAI é o único provedor em uso, e expõe Batch API.
     batch: !!batchCapable && fallback.provider === 'openai',
     fonte: 'padrao',
   };

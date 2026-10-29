@@ -40,10 +40,10 @@ essa lacuna.
 
 ## Uso de Inteligência Artificial
 
-O sistema é multi-modelo por desenho — cada tarefa usa o provedor mais
-adequado ao trade-off entre custo, qualidade e latência:
+O sistema usa modelos da OpenAI, escolhidos por tarefa segundo o trade-off
+entre custo, qualidade e latência:
 
-- **Claude (Anthropic)** simula o paciente: mantém personalidade, histórico
+- **GPT (OpenAI)** simula o paciente: mantém personalidade, histórico
   e consistência narrativa ao longo da conversa.
 - **GPT com raciocínio (OpenAI)** faz a avaliação de desempenho, analisando
   a sessão inteira contra critérios clínicos estruturados.

@@ -2,7 +2,7 @@ import { Link, useNavigate } from 'react-router-dom';
 
 // Ver PoliticaPrivacidade.jsx pro raciocínio de layout/rota — os dois
 // documentos seguem o mesmo padrão e se referenciam um ao outro.
-const ATUALIZADO_EM = '27 de agosto de 2026';
+const ATUALIZADO_EM = '29 de outubro de 2026';
 
 export default function TermosDeUso() {
   const navigate = useNavigate();
@@ -51,8 +51,7 @@ export default function TermosDeUso() {
           <p>
             Todo personagem atendido no all_OS — nas simulações de Treinamento, Competitivo,
             Trilha, Neuroavaliação e Duelo — é gerado e conduzido por modelos de Inteligência
-            Artificial (fornecidos por OpenAI, Anthropic e/ou Z.AI/GLM, a depender do modo e da
-            configuração vigente). Não há, em nenhuma hipótese, uma pessoa real do outro lado da
+            Artificial (fornecidos pela OpenAI). Não há, em nenhuma hipótese, uma pessoa real do outro lado da
             conversa representando o "paciente". Diagnósticos, histórias e reações desses
             personagens são fictícios, construídos para fins didáticos, e não substituem
             treinamento clínico supervisionado com pacientes reais nem qualquer forma de

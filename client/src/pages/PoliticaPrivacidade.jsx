@@ -8,7 +8,7 @@ import { Link, useNavigate } from 'react-router-dom';
 // cadastro). Ao publicar uma revisão de conteúdo aqui, avise quem mantém o
 // servidor pra incrementar a env — datas divergentes entre o que a pessoa
 // aceitou e o texto atual são o tipo de coisa que a LGPD cobra saber responder.
-const ATUALIZADO_EM = '27 de agosto de 2026';
+const ATUALIZADO_EM = '29 de outubro de 2026';
 
 export default function PoliticaPrivacidade() {
   const navigate = useNavigate();
@@ -31,7 +31,7 @@ export default function PoliticaPrivacidade() {
               Em resumo: usamos os seus dados só para fazer o all_OS funcionar (a simulação, a
               avaliação, a comunidade) e para a pesquisa que a Associação Allos conduz a partir
               deles — nunca para vender ou repassar a terceiros fora do que está descrito aqui.
-              Partes das suas conversas passam por provedores de IA (OpenAI, Anthropic e Z.AI/GLM)
+              Partes das suas conversas passam por um provedor de IA (OpenAI)
               para gerar as respostas dos pacientes simulados e as avaliações. Você pode excluir
               sua conta a qualquer momento pelo Perfil; para pedir a exclusão dos seus dados
               (logs, avaliações, conversas), escreva para <strong>suporte@allos.org.br</strong>.
@@ -101,19 +101,17 @@ export default function PoliticaPrivacidade() {
           <p>
             Para que a simulação e a avaliação funcionem, parte do conteúdo que você envia à
             plataforma — mensagens da conversa com o paciente simulado, e o histórico do
-            atendimento no momento da correção — é processada por provedores externos de IA
-            contratados pela Associação Allos:
+            atendimento no momento da correção — é processada por um provedor externo de IA
+            contratado pela Associação Allos:
           </p>
           <ul>
-            <li><strong>OpenAI</strong> — geração de personagens/pacientes em algumas categorias, avaliação de atendimentos, transcrição de áudio e outras funções de IA da plataforma;</li>
-            <li><strong>Anthropic</strong> — geração de personagens/pacientes em algumas categorias;</li>
-            <li><strong>Z.AI / GLM</strong> — geração de personagens/pacientes e reflexão assistida em algumas funções (como a Antessala).</li>
+            <li><strong>OpenAI</strong> — geração de personagens/pacientes, avaliação de atendimentos, transcrição de áudio, reflexão assistida (como a Antessala) e outras funções de IA da plataforma.</li>
           </ul>
           <p>
-            Esses provedores processam os dados enviados sob seus próprios termos e políticas de
-            privacidade, atuando como operadores a serviço do all_OS — ou seja, não usam seu
-            conteúdo para treinar os modelos deles fora do que seus contratos comerciais com esses
-            provedores garantem. Não enviamos dados de cadastro (como senha) a esses provedores.
+            Esse provedor processa os dados enviados sob seus próprios termos e políticas de
+            privacidade, atuando como operador a serviço do all_OS — ou seja, não usa seu
+            conteúdo para treinar os modelos dele fora do que os contratos comerciais com esse
+            provedor garantem. Não enviamos dados de cadastro (como senha) a esse provedor.
           </p>
 
           <h2>5. Com quem mais compartilhamos dados</h2>

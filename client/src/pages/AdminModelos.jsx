@@ -322,17 +322,12 @@ export default function AdminModelos() {
         <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: 'var(--ink-soft)', lineHeight: 1.7 }}>
           <li>
             <strong>Caching</strong> está sempre ligado: é automático no prefixo (system + histórico),
-            em todos os provedores das opções. Não há nada para configurar.
+            em todas as opções. Não há nada para configurar.
           </li>
           <li>
             <strong>Batch</strong> entra sempre que a categoria permite — ou seja, onde ninguém está
             esperando a nota na tela (Competitivo e Processo Seletivo). Nos outros modos a nota volta
             na mesma requisição, então batch está fora por construção.
-          </li>
-          <li>
-            <strong>GLM 5.2</strong> pode ser escolhido em qualquer categoria, mas a z.ai não expõe
-            Batch API: nas categorias de batch a avaliação passa a rodar síncrona em background
-            (chega antes, sem o desconto de 50%).
           </li>
           <li>
             Categoria sem escolha usa o <strong>padrão do sistema</strong> (as variáveis de ambiente

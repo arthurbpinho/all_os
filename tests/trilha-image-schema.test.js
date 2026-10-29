@@ -1,7 +1,7 @@
 // Esquema visual (SVG) OPCIONAL ao final do exercício da Trilha — campos
 // imageSchemaEnabled/imageSchemaPrompt/imageSchemaModel no exercício, e a rota
 // /api/trilha/image-schema. A suite nunca chama IA de verdade (env sem
-// OPENAI_API_KEY/ANTHROPIC_API_KEY, ver helpers.js), então só cobrimos os
+// OPENAI_API_KEY, ver helpers.js), então só cobrimos os
 // gates que retornam ANTES de qualquer chamada de rede (validação, 404, 400,
 // 503 de provedor indisponível) — o caminho feliz (SVG de verdade) não dá
 // pra testar sem bater na rede.
@@ -20,7 +20,7 @@ describe('Exercícios — imageSchema (esquema visual opcional)', () => {
     expect(res.body.imageSchemaModel).toBe('gpt-5.4');
   });
 
-  it('aceita habilitar com observação e claude-sonnet-5; modelo inválido cai no default', async () => {
+  it('aceita habilitar com observação; modelo inválido (ou o Claude, que saiu) cai no default', async () => {
     const token = await loginAs('admin');
     const created = await request(app).post('/api/exercises').set(authHeader(token)).send({
       title: 'Com esquema', skillId: 1, specificInstruction: 'x',
@@ -28,7 +28,7 @@ describe('Exercícios — imageSchema (esquema visual opcional)', () => {
     });
     expect(created.body.imageSchemaEnabled).toBe(true);
     expect(created.body.imageSchemaPrompt).toBe('Desenhe um genograma');
-    expect(created.body.imageSchemaModel).toBe('claude-sonnet-5');
+    expect(created.body.imageSchemaModel).toBe('gpt-5.4');
 
     const badModel = await request(app).put(`/api/exercises/${created.body.id}`).set(authHeader(token)).send({
       imageSchemaModel: 'dall-e-mega',
@@ -120,15 +120,11 @@ describe('/api/trilha/image-schema', () => {
     expect(res.status).toBe(400);
   });
 
-  it('503 quando o provedor do modelo escolhido não tem API key configurada (sem bater na rede)', async () => {
+  it('503 quando a OpenAI não tem API key configurada (sem bater na rede)', async () => {
     const adminToken = await loginAs('admin');
     const gpt = await request(app).post('/api/exercises').set(authHeader(adminToken)).send({
       title: 'Esquema GPT-5.4', skillId: 1, specificInstruction: 'x',
       imageSchemaEnabled: true, imageSchemaModel: 'gpt-5.4',
-    });
-    const claude = await request(app).post('/api/exercises').set(authHeader(adminToken)).send({
-      title: 'Esquema Claude', skillId: 1, specificInstruction: 'x',
-      imageSchemaEnabled: true, imageSchemaModel: 'claude-sonnet-5',
     });
 
     const token = await loginAs('aluno');
@@ -137,11 +133,5 @@ describe('/api/trilha/image-schema', () => {
     });
     expect(resGpt.status).toBe(503);
     expect(resGpt.body.error).toMatch(/OPENAI_API_KEY/);
-
-    const resClaude = await request(app).post('/api/trilha/image-schema').set(authHeader(token)).send({
-      itemId: claude.body.id, messages: [{ role: 'user', content: 'Sessão de teste' }],
-    });
-    expect(resClaude.status).toBe(503);
-    expect(resClaude.body.error).toMatch(/ANTHROPIC_API_KEY/);
   });
 });

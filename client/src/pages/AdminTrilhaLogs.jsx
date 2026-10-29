@@ -6,7 +6,7 @@ import RichText from '../components/RichText';
 
 // Logs da Trilha (admin) — foco em CUSTO: cada exercício pode ter até 3 IAs
 // envolvidas (personagem, avaliador opcional, esquema visual opcional). O
-// objetivo é comparar o custo × qualidade das opções (mini/GLM/5.4/5.5/Claude)
+// objetivo é comparar o custo × qualidade das opções (mini/5.4/5.5)
 // com dados reais de uso, não estimativa.
 
 const SORT_OPTIONS = [
@@ -20,8 +20,8 @@ const SORT_OPTIONS = [
 
 const DIFFICULTY_LABEL = { iniciante: 'Iniciante', intermediario: 'Intermediário', avancado: 'Avançado' };
 
-// Tira a data de pin do id (ex.: 'gpt-5.4-mini-2026-03-17' → 'gpt-5.4-mini') —
-// GLM/Claude não têm sufixo de data, então o replace não altera nada neles.
+// Tira a data de pin do id (ex.: 'gpt-5.4-mini-2026-03-17' → 'gpt-5.4-mini');
+// id sem sufixo de data passa intacto.
 function shortModel(m) {
   return String(m || '—').replace(/-\d{4}-\d{2}-\d{2}$/, '');
 }

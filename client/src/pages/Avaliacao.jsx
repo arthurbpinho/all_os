@@ -60,13 +60,10 @@ const MODELS = [
   { key: 'gpt-5.5', label: 'GPT 5.5', provider: 'openai' },
   { key: 'gpt-5.4', label: 'GPT 5.4', provider: 'openai' },
   { key: 'gpt-5.4-mini', label: 'GPT 5.4 mini', provider: 'openai' },
-  { key: 'glm-5.2', label: 'GLM 5.2 (z.ai)', provider: 'glm' },
 ];
-// Padrão por provedor: GPT usa low/medium/high; GLM (z.ai) usa disabled
-// (thinking off) / high / max.
+// Padrão por provedor: GPT usa low/medium/high.
 const EFFORTS_BY_PROVIDER = {
   openai: ['low', 'medium', 'high'],
-  glm: ['disabled', 'high', 'max'],
 };
 function modelOf(modelKey) {
   return MODELS.find((x) => x.key === modelKey) || null;
@@ -649,7 +646,7 @@ export default function Avaliacao({ user }) {
 
             {/* Runs ANTIGAS de avaliador de prompt único (v18-25, v16-2): o
                 raciocínio vinha na própria resposta quando o provedor o
-                devolvia (GLM sim; GPT via chat.completions não). Nenhuma run
+                devolvia (GPT via chat.completions não devolve). Nenhuma run
                 nova cai aqui — o alternador de prompt não existe mais. */}
             {!isPipe && (
               <div className="card aval-reasoning">
@@ -658,7 +655,7 @@ export default function Avaliacao({ user }) {
                   ? <div className="aval-reasoning-text"><RichText text={result.reasoning} /></div>
                   : (
                     <div className="aval-reasoning-empty">
-                      Sem texto de raciocínio nesta run{inst?.totais?.reasoning ? <> (foram <strong>{fmtTok(inst.totais.reasoning)}</strong> tokens de reasoning, já no custo de saída)</> : null}. O resumo do raciocínio aparece no modo <strong>síncrono</strong>: no <strong>GPT</strong> (exceto o "mini", que não emite resumo) e no <strong>GLM</strong> com effort <strong>high/max</strong>. No modo <strong>batch</strong> o texto não vem.
+                      Sem texto de raciocínio nesta run{inst?.totais?.reasoning ? <> (foram <strong>{fmtTok(inst.totais.reasoning)}</strong> tokens de reasoning, já no custo de saída)</> : null}. O resumo do raciocínio aparece no modo <strong>síncrono</strong>, no <strong>GPT</strong> (exceto o "mini", que não emite resumo). No modo <strong>batch</strong> o texto não vem.
                     </div>
                   )}
               </div>
@@ -711,7 +708,6 @@ export default function Avaliacao({ user }) {
                 setModel(mk);
                 const efs = effortsFor(mk);
                 if (!efs.includes(effort)) setEffort(efs.includes('medium') ? 'medium' : efs[0]);
-                if (providerOf(mk) === 'glm') setUseBatch(false); // GLM não tem Batch API
               }}
               style={{ width: '100%' }}
             >
@@ -726,17 +722,14 @@ export default function Avaliacao({ user }) {
           </div>
         </div>
 
-        <label className={`aval-batch-toggle ${providerOf(model) === 'glm' ? 'disabled' : ''}`}>
+        <label className="aval-batch-toggle">
           <input
             type="checkbox"
-            checked={useBatch && providerOf(model) !== 'glm'}
-            disabled={providerOf(model) === 'glm'}
+            checked={useBatch}
             onChange={(e) => setUseBatch(e.target.checked)}
           />
           <span>
-            {providerOf(model) === 'glm'
-              ? <>Batch indisponível para <strong>GLM</strong> (z.ai não expõe Batch API) — roda síncrono; o caching por prefixo continua ativo.</>
-              : <>Usar <strong>Batch</strong> (≈50% mais barato, assíncrono — o resultado cai na "Fila de avaliações")</>}
+            Usar <strong>Batch</strong> (≈50% mais barato, assíncrono — o resultado cai na "Fila de avaliações")
           </span>
         </label>
 

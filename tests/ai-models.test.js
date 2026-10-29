@@ -3,8 +3,8 @@
 // O que estes testes protegem, além do CRUD:
 //   1. ligar a tela não muda comportamento nenhum — categoria sem escolha
 //      continua no modelo/effort das envs de sempre (fonte 'padrao');
-//   2. GLM é escolhível em TODA categoria, e nas de batch ele simplesmente
-//      desliga o batch em vez de ser bloqueado (decisão do dono);
+//   2. só há presets OpenAI (Anthropic e GLM saíram em 2026-10), e uma escolha
+//      antiga de GLM/Claude guardada no banco cai no padrão em vez de quebrar;
 //   3. batch nunca aparece onde alguém está esperando a nota na tela;
 //   4. a Trilha não entra aqui (tem controle próprio, por exercício).
 
@@ -34,7 +34,7 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
   it('PUT também é admin-only', async () => {
     const aluno = await loginAs('aluno');
     const res = await request(app).put('/api/admin/ai-models').set(authHeader(aluno))
-      .send({ categoria: 'competitivo', evaluator: 'glm-5.2' });
+      .send({ categoria: 'competitivo', evaluator: 'gpt-5.5' });
     expect(res.status).toBe(403);
   });
 
@@ -53,7 +53,7 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
     // mesmo modelo e no mesmo effort — e isso não é economia de configuração:
     // nota de modos diferentes é comparada no ranking e no MMR, e duas réguas
     // iguais em modelos diferentes não produzem números comparáveis. O Duelo foi
-    // o último a entrar, quando saiu do avaliador comparativo próprio (GLM).
+    // o último a entrar, quando saiu do avaliador comparativo próprio.
     for (const categoria of ['treinamento', 'competitivo', 'seletivo', 'visitante', 'avaliacaoManual', 'duelo']) {
       expect(cat(res.body, categoria).avaliador.model).toBe('gpt-5.6-luna');
       expect(cat(res.body, categoria).avaliador.effort).toBe('high');
@@ -79,21 +79,20 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
     expect(put.status).toBe(400);
   });
 
-  it('as opções são as 4 do avaliador e as 6 do paciente', async () => {
+  it('as opções são as 3 do avaliador e as 4 do paciente, todas OpenAI', async () => {
     const admin = await loginAs('admin');
     const res = await request(app).get('/api/admin/ai-models').set(authHeader(admin));
-    // O 5.4 saiu da lista do AVALIADOR (pedido do dono): ficam os dois 5.6, o
-    // 5.5 e o GLM. No paciente o 5.4 continua, mas em effort none.
-    expect(res.body.avaliadorOpcoes.map((o) => o.key)).toEqual(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5', 'glm-5.2']);
+    // O 5.4 saiu da lista do AVALIADOR (pedido do dono): ficam os dois 5.6 e o
+    // 5.5. No paciente o 5.4 continua, mas em effort none. GLM e Claude saíram.
+    expect(res.body.avaliadorOpcoes.map((o) => o.key)).toEqual(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5']);
     expect(res.body.pacienteOpcoes.map((o) => o.key))
-      .toEqual(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.4-mini', 'glm-5.2', 'gpt-5.4', 'claude-sonnet-5']);
-    // Todo avaliador em 'high'; no paciente só GLM, Sol e Luna raciocinam.
+      .toEqual(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.4-mini', 'gpt-5.4']);
+    for (const o of [...res.body.avaliadorOpcoes, ...res.body.pacienteOpcoes]) expect(o.provider).toBe('openai');
+    // Todo avaliador em 'high'; no paciente só Sol e Luna raciocinam.
     for (const o of res.body.avaliadorOpcoes) expect(o.effort).toBe('high');
     const pacientePorKey = Object.fromEntries(res.body.pacienteOpcoes.map((o) => [o.key, o]));
     expect(pacientePorKey['gpt-5.4-mini'].effort).toBe('none');
     expect(pacientePorKey['gpt-5.4'].effort).toBe('none');
-    expect(pacientePorKey['claude-sonnet-5'].effort).toBe('disabled');
-    expect(pacientePorKey['glm-5.2'].effort).toBe('high');
     expect(pacientePorKey['gpt-5.6-sol'].effort).toBe('high');
     expect(pacientePorKey['gpt-5.6-luna'].effort).toBe('high');
   });
@@ -101,12 +100,12 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
   it('escolher um modelo persiste, marca fonte admin e reflete no GET', async () => {
     const admin = await loginAs('admin');
     const put = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-      .send({ categoria: 'treinamento', evaluator: 'gpt-5.6-luna', patient: 'claude-sonnet-5' });
+      .send({ categoria: 'treinamento', evaluator: 'gpt-5.6-luna', patient: 'gpt-5.4' });
     expect(put.status).toBe(200);
     expect(cat(put.body, 'treinamento').avaliador.preset).toBe('gpt-5.6-luna');
     expect(cat(put.body, 'treinamento').avaliador.fonte).toBe('admin');
-    expect(cat(put.body, 'treinamento').paciente.preset).toBe('claude-sonnet-5');
-    expect(cat(put.body, 'treinamento').paciente.provider).toBe('anthropic');
+    expect(cat(put.body, 'treinamento').paciente.preset).toBe('gpt-5.4');
+    expect(cat(put.body, 'treinamento').paciente.provider).toBe('openai');
 
     const get = await request(app).get('/api/admin/ai-models').set(authHeader(admin));
     expect(cat(get.body, 'treinamento').avaliador.model).toBe('gpt-5.6-luna');
@@ -118,7 +117,7 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
   it('null limpa a escolha e volta ao padrão do sistema', async () => {
     const admin = await loginAs('admin');
     await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-      .send({ categoria: 'neuro', evaluator: 'glm-5.2' });
+      .send({ categoria: 'neuro', evaluator: 'gpt-5.6-sol' });
     const antes = await request(app).get('/api/admin/ai-models').set(authHeader(admin));
     expect(cat(antes.body, 'neuro').avaliador.fonte).toBe('admin');
 
@@ -133,9 +132,9 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
     await request(app).put('/api/admin/ai-models').set(authHeader(admin))
       .send({ categoria: 'competitivo', evaluator: 'gpt-5.6-sol' });
     const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-      .send({ categoria: 'competitivo', patient: 'glm-5.2' });
+      .send({ categoria: 'competitivo', patient: 'gpt-5.6-luna' });
     expect(cat(res.body, 'competitivo').avaliador.preset).toBe('gpt-5.6-sol');
-    expect(cat(res.body, 'competitivo').paciente.preset).toBe('glm-5.2');
+    expect(cat(res.body, 'competitivo').paciente.preset).toBe('gpt-5.6-luna');
   });
 
   it('rejeita categoria e preset inválidos sem gravar nada', async () => {
@@ -192,9 +191,9 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       await request(app).put('/api/admin/ai-models').set(authHeader(admin))
         .send({ global: true, evaluator: 'gpt-5.6-luna' });
       const comEscolha = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-        .send({ categoria: 'competitivo', evaluator: 'glm-5.2' });
+        .send({ categoria: 'competitivo', evaluator: 'gpt-5.6-sol' });
       expect(cat(comEscolha.body, 'competitivo').avaliador.fonte).toBe('admin');
-      expect(cat(comEscolha.body, 'competitivo').avaliador.model).toBe('glm-5.2');
+      expect(cat(comEscolha.body, 'competitivo').avaliador.model).toBe('gpt-5.6-sol');
       expect(cat(comEscolha.body, 'duelo').avaliador.model).toBe('gpt-5.6-luna'); // segue o global
 
       const limpo = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
@@ -247,25 +246,15 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       expect(cat(res.body, 'seletivo').avaliador.batch).toBe(true);
     });
 
-    it('GLM é escolhível nas categorias de batch — só desliga o batch', async () => {
+    it('toda opção de avaliador mantém o batch nas categorias que comportam', async () => {
       const admin = await loginAs('admin');
       for (const categoria of ['competitivo', 'seletivo']) {
-        const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-          .send({ categoria, evaluator: 'glm-5.2' });
-        expect(res.status).toBe(200); // NÃO é bloqueado
-        expect(cat(res.body, categoria).avaliador.preset).toBe('glm-5.2');
-        expect(cat(res.body, categoria).avaliador.provider).toBe('glm');
-        expect(cat(res.body, categoria).avaliador.batch).toBe(false);
+        for (const evaluator of ['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.5']) {
+          const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
+            .send({ categoria, evaluator });
+          expect(cat(res.body, categoria).avaliador.batch).toBe(true);
+        }
       }
-    });
-
-    it('voltar pra um modelo OpenAI religa o batch', async () => {
-      const admin = await loginAs('admin');
-      await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-        .send({ categoria: 'competitivo', evaluator: 'glm-5.2' });
-      const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-        .send({ categoria: 'competitivo', evaluator: 'gpt-5.6-sol' });
-      expect(cat(res.body, 'competitivo').avaliador.batch).toBe(true);
     });
 
     it('categoria que mostra a nota na hora nunca vai de batch, nem em GPT', async () => {
@@ -303,8 +292,8 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
       await request(app).put('/api/admin/settings').set(authHeader(admin))
         .send({ visitorEvaluationModel: 'gpt-5.5' });
       const res = await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-        .send({ categoria: 'visitante', evaluator: 'glm-5.2' });
-      expect(cat(res.body, 'visitante').avaliador.model).toBe('glm-5.2');
+        .send({ categoria: 'visitante', evaluator: 'gpt-5.6-sol' });
+      expect(cat(res.body, 'visitante').avaliador.model).toBe('gpt-5.6-sol');
       expect(cat(res.body, 'visitante').avaliador.fonte).toBe('admin');
     });
 
@@ -322,7 +311,7 @@ describe('Modelos de IA por categoria (/api/admin/ai-models)', () => {
 
 // O módulo puro, sem HTTP — as invariantes que o resolve tem de garantir.
 describe('ai-models (resolve puro)', () => {
-  const padraoAvaliador = { model: 'glm-5.2', provider: 'glm', effort: 'high' };
+  const padraoAvaliador = { model: 'gpt-5.6-luna', provider: 'openai', effort: 'high' };
 
   it('escolha inválida em settings.json é ignorada (cai no padrão)', () => {
     const spec = aiModels.resolveEvaluator(
@@ -331,7 +320,25 @@ describe('ai-models (resolve puro)', () => {
       padraoAvaliador,
     );
     expect(spec.fonte).toBe('padrao');
-    expect(spec.model).toBe('glm-5.2');
+    expect(spec.model).toBe('gpt-5.6-luna');
+  });
+
+  // GLM e Claude saíram em 2026-10, mas o banco de produção pode ainda guardar a
+  // escolha antiga. Ela tem de cair no padrão (e não virar um provedor sem
+  // cliente), tanto por categoria quanto no padrão global.
+  it('escolha antiga de GLM/Claude guardada no banco cai no padrão OpenAI', () => {
+    const settings = {
+      aiModels: { competitivo: { evaluator: 'glm-5.2', patient: 'claude-sonnet-5' } },
+      aiModelsGlobal: { evaluator: 'glm-5.2', patient: 'glm-5.2' },
+    };
+    expect(aiModels.readCategoryChoices(settings)).toEqual({});
+    expect(aiModels.readGlobalChoice(settings)).toEqual({});
+    const av = aiModels.resolveEvaluator('competitivo', settings, padraoAvaliador);
+    expect(av.fonte).toBe('padrao');
+    expect(av.provider).toBe('openai');
+    const pac = aiModels.resolvePatient('competitivo', settings, { model: 'gpt-5.4-mini-2026-03-17', provider: 'openai', effort: 'none' });
+    expect(pac.fonte).toBe('padrao');
+    expect(pac.provider).toBe('openai');
   });
 
   it('readCategoryChoices descarta categoria desconhecida e lixo', () => {
@@ -401,10 +408,10 @@ describe('ai-models (resolve puro)', () => {
 describe('paciente por categoria em modo demonstração', () => {
   beforeEach(() => resetData());
 
-  it('/api/chat responde a fala padrão mesmo com o paciente em GLM sem chave', async () => {
+  it('/api/chat responde a fala padrão mesmo com outro paciente escolhido', async () => {
     const admin = await loginAs('admin');
     await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-      .send({ categoria: 'treinamento', patient: 'glm-5.2' });
+      .send({ categoria: 'treinamento', patient: 'gpt-5.6-sol' });
 
     const aluno = await loginAs('aluno');
     const res = await request(app).post('/api/chat').set(authHeader(aluno))
@@ -416,19 +423,15 @@ describe('paciente por categoria em modo demonstração', () => {
     expect(res.body.content).toMatch(/Modo demonstração/);
   });
 
-  it('idem com Claude Sonnet 5 (provedor Anthropic sem chave)', async () => {
+  it('GLM e Claude não são mais aceitos como escolha', async () => {
     const admin = await loginAs('admin');
-    await request(app).put('/api/admin/ai-models').set(authHeader(admin))
-      .send({ categoria: 'treinamento', patient: 'claude-sonnet-5' });
-
-    const aluno = await loginAs('aluno');
-    const res = await request(app).post('/api/chat').set(authHeader(aluno))
-      .send({
-        messages: [{ role: 'user', content: 'oi' }],
-        context: { type: 'freeplay', itemId: 'fp-test-1', category: 'treinamento' },
-      });
-    expect(res.status).toBe(200);
-    expect(res.body.content).toMatch(/Modo demonstração/);
+    for (const corpo of [
+      { categoria: 'treinamento', patient: 'claude-sonnet-5' },
+      { categoria: 'competitivo', evaluator: 'glm-5.2' },
+      { global: true, patient: 'glm-5.2' },
+    ]) {
+      expect((await request(app).put('/api/admin/ai-models').set(authHeader(admin)).send(corpo)).status).toBe(400);
+    }
   });
 
   it('category inválida vinda do cliente não quebra nada (cai em treinamento)', async () => {

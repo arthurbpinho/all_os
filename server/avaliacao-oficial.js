@@ -31,7 +31,7 @@
 //
 // Fora isso, quem escolhe o modelo continua sendo a tela Administração →
 // Modelos de IA (uma categoria por modo). O pipeline roda no modelo/effort que
-// a categoria resolver, seja OpenAI ou GLM.
+// a categoria resolver.
 
 const fs = require('fs');
 const path = require('path');
@@ -135,7 +135,7 @@ function versaoDisponivel(version) {
 // precisa das oito análises, então roda síncrono no coletor (a preço cheio,
 // uma chamada por sessão — ver buildInstrumentacao).
 //
-// Quando o modelo escolhido não tem Batch API (GLM), o modo cai no caminho
+// Quando o modelo escolhido não tem Batch API, o modo cai no caminho
 // síncrono em background, que é o `avaliar()` de sempre.
 
 // As requisições dos nós de uma sessão: [{ num, body }].
