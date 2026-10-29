@@ -93,6 +93,17 @@ server/data/neuro-characters.json
 SEGURANCA.md
 CLAUDE.md
 .manuais/
+# Documentos internos tirados do repo em 2026-10-29 (arquitetura, migração,
+# rotinas de deploy e segurança). Se voltarem a existir localmente, ficam fora.
+/VIRADA.md
+/demandas.md
+/perguntas.md
+/ESTADO.md
+/MIGRATION_REPORT.md
+/MMR.md
+/MMR-por-criterio.md
+/DEPLOY.md
+/mmr_simulador_clinico_v2.md
 # Comunidade: as discussões são conteúdo escrito pelos usuários, e a config leva
 # os banimentos. O servidor cria os dois vazios no boot (ver index.js), então
 # nada precisa estar versionado aqui.
