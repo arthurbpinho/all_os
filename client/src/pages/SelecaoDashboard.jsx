@@ -155,7 +155,11 @@ function SenhaAcesso() {
     <div className="card" style={{ marginTop: 16, marginBottom: 16 }}>
       <strong>Senha de acesso do candidato</strong>
       <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 4 }}>
-        Senha atual: <code>{info ? info.password : '…'}</code>
+        {/* Sem senha definida o link do candidato fica FECHADO (não há senha
+            padrão no servidor desde 2026-10). */}
+        Senha atual: {!info ? <code>…</code>
+          : info.password ? <code>{info.password}</code>
+            : <strong>nenhuma — o link do candidato está fechado até você definir uma</strong>}
         {info?.updatedBy && (
           <> · trocada por {info.updatedBy}{info.updatedAt ? ` em ${fmtWhen(info.updatedAt)}` : ''}</>
         )}

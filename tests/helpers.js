@@ -26,7 +26,6 @@ if (!URL_TESTE) {
 const DB_SCHEMA = `teste_${crypto.randomBytes(6).toString('hex')}`;
 process.env.DATABASE_URL = URL_TESTE;
 process.env.DATABASE_SCHEMA = DB_SCHEMA;
-process.env.SELECAO_EXPORT_SECRET = 'test-export-secret'; // backup externo (Apps Script)
 // Força modo demo (sem chamar a OpenAI). Setar pra '' em vez de delete — se
 // deletar, o dotenv.config() do server/index.js re-injeta do .env real (e a
 // suite passaria a bater na rede).
@@ -164,6 +163,18 @@ async function resetData() {
   await app.__test.recarregarConfig();
 }
 
+// Senha do Processo Seletivo: desde 2026-10 ela só existe nas configurações
+// (sem env var nem default no código; sem senha, o link fica fechado). Grava
+// direto, sem passar pela tela, para não marcar "trocada por".
+async function definirSenhaSelecao(senha) {
+  await db.query(
+    `INSERT INTO configuracoes (chave, valor) VALUES ('settings', $1::jsonb)
+     ON CONFLICT (chave) DO UPDATE SET valor = configuracoes.valor || EXCLUDED.valor, atualizado_em = now()`,
+    [JSON.stringify({ selecaoPassword: senha })],
+  );
+  await app.__test.recarregarConfig();
+}
+
 async function loginAs(username, password = TEST_PASSWORD) {
   const res = await request(app).post('/api/login').send({ username, password });
   if (res.status !== 200) {
@@ -207,6 +218,7 @@ module.exports = {
   app,
   request,
   resetData,
+  definirSenhaSelecao,
   loginAs,
   loginVisitor,
   authHeader,

@@ -5968,53 +5968,36 @@ app.post('/api/trilha/image-schema', requireAuth, aiLimiter, requireFeature('tri
 // Senha do processo seletivo. É deliberadamente fácil — vai por WhatsApp pro
 // candidato e só destrava um formulário público; não protege dado sensível.
 // O que a protege de força bruta é o selecaoLimiter (agora chaveado por IP real).
-// Default vem da env var (compat com quem nunca trocou); qualquer avaliador/admin
-// pode trocar em runtime pela tela (fica salva em settings.json, sobrevive a
-// redeploy — env var nunca é regravada em disco).
-const SELECAO_PASSWORD_DEFAULT = process.env.SELECAO_PASSWORD || '***REMOVIDO***';
+// Vive SÓ nas configurações: avaliador/admin define e troca pela tela do
+// Processo Seletivo (sobrevive a redeploy). Não há env var nem default no
+// código desde 2026-10 — o default antigo estava escrito num repositório
+// público. Sem senha definida, o link fica FECHADO (ver selecaoFechada).
 function selecaoPasswordAtual() {
   const s = readSettings();
-  return typeof s.selecaoPassword === 'string' && s.selecaoPassword ? s.selecaoPassword : SELECAO_PASSWORD_DEFAULT;
+  return typeof s.selecaoPassword === 'string' ? s.selecaoPassword : '';
+}
+// Responde "fechado" quando ninguém definiu a senha ainda. Separado do 401 de
+// senha errada para o candidato não ficar chutando senha num link fechado.
+function selecaoFechada(res) {
+  if (selecaoPasswordAtual()) return false;
+  res.status(403).json({ error: 'O processo seletivo não está aberto no momento.' });
+  return true;
 }
 
 // Comparação em tempo constante: com `!==`, o tempo de resposta vaza quantos
 // caracteres iniciais bateram. Não é o vetor mais provável aqui, mas custa 4 linhas.
 function senhaSelecaoConfere(entrada) {
+  const atual = selecaoPasswordAtual();
+  if (!atual) return false; // sem senha definida, nada entra — nem string vazia
   const a = Buffer.from(String(entrada == null ? '' : entrada), 'utf8');
-  const b = Buffer.from(selecaoPasswordAtual(), 'utf8');
+  const b = Buffer.from(atual, 'utf8');
   // timingSafeEqual exige buffers do mesmo tamanho; compara contra si mesmo
   // pra não responder mais rápido só porque o comprimento difere.
   if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
   return crypto.timingSafeEqual(a, b);
 }
-// Secret de M2M pro backup externo (Google Apps Script), que copia os logs do
-// seletivo para o Drive da Allos — uma cópia fora do banco, não mais uma corrida
-// contra poda (os logs são persistentes, §24.0). Deliberadamente separado do JWT:
-// quem chama é um script agendado, sem sessão de usuário — não faz sentido
-// reautenticar a cada corrida.
-// Vazio = endpoint desligado (nenhum backup configurado ainda).
-const SELECAO_EXPORT_SECRET = process.env.SELECAO_EXPORT_SECRET || '';
-function selecaoExportSecretConfere(informado) {
-  if (!SELECAO_EXPORT_SECRET) return false;
-  const a = Buffer.from(String(informado == null ? '' : informado), 'utf8');
-  const b = Buffer.from(SELECAO_EXPORT_SECRET, 'utf8');
-  if (a.length !== b.length) { crypto.timingSafeEqual(a, a); return false; }
-  return crypto.timingSafeEqual(a, b);
-}
-function requireSelecaoExportSecret(req, res, next) {
-  if (!SELECAO_EXPORT_SECRET) return res.status(503).json({ error: 'Backup do Processo Seletivo não configurado (SELECAO_EXPORT_SECRET ausente).' });
-  if (!selecaoExportSecretConfere(req.get('X-Export-Secret'))) return res.status(401).json({ error: 'Não autorizado.' });
-  next();
-}
-// Slug de nome de arquivo (mesmo padrão do buildDuelExport).
-function selecaoExportSlug(nome) {
-  return String(nome || '')
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-}
-
 // Logs do seletivo são PERSISTENTES (demandas.md §24.0). Quem pode entrar é
-// controlado de dois jeitos: a SELECAO_PASSWORD, que o admin troca entre
+// controlado de dois jeitos: a senha da tela, que o admin troca entre
 // aberturas, e o bloqueio de 15 dias por WhatsApp (demandas.md §25), que o
 // avaliador pode suspender com o botão "Dar mais uma chance".
 const SELECAO_BLOQUEIO_DIAS = 15;
@@ -6111,54 +6094,6 @@ function buildSelectionTranscript(messages, patientName) {
   return rows.join('\n\n---\n\n');
 }
 
-const SELECAO_STATUS_LABEL = { ativo: 'Ativo', rejeitado: 'Rejeitado', pending: 'Em avaliação (lote)', erro: 'Erro' };
-
-// Texto completo (log + avaliação) de um candidato, no MESMO formato que o
-// avaliador já baixa em "Tudo" na tela de Logs (client/SelecaoLogs.jsx). Usado
-// pelo backup externo (Google Apps Script), que salva isto num .txt no Drive.
-// Mesma frase da tela SelecaoLogs.jsx (o export espelha o "Tudo" de lá).
-function rotuloFeedbackPrevio(log) {
-  if (!log.feedbackIA) return 'não pediu';
-  const estado = log.feedbackEmail && log.feedbackEmail.estado;
-  if (estado === 'enviado') return 'pediu — e-mail enviado';
-  if (estado === 'falhou') return 'pediu — o envio falhou';
-  if (estado === 'nao-configurado') return 'pediu — e-mail não configurado no servidor';
-  return 'pediu — sai quando a avaliação terminar';
-}
-
-function buildSelectionExportText(log) {
-  const c = log.candidate || {};
-  const transcript = buildSelectionTranscript(log.messages, log.characterName);
-  const logStr = [
-    'PROCESSO SELETIVO — LOG DO ATENDIMENTO', '',
-    `Candidato: ${c.nome || '—'}`,
-    `E-mail: ${c.email || '—'}`,
-    `WhatsApp: ${c.whatsapp || '—'}`,
-    `Faculdade: ${c.faculdade || '—'}`,
-    `Período: ${c.periodo || '—'}`,
-    `Abordagem: ${c.abordagem || '—'}`,
-    `Feedback prévio (IA): ${rotuloFeedbackPrevio(log)}`,
-    `Caso: ${log.characterName || '—'}`,
-    `Data: ${log.timestamp ? new Date(log.timestamp).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : '—'}`, '',
-    transcript || '(sem mensagens)',
-  ].join('\n');
-
-  const hasEval = log.status === 'ativo' || log.status === 'rejeitado' || log.score != null;
-  if (!hasEval) return logStr;
-
-  const evalBody = [
-    `Nota final: ${log.score == null ? '—' : `${log.score}/100`}`,
-    `Status: ${SELECAO_STATUS_LABEL[log.status] || log.status}`,
-    log.evalVersion ? `Avaliador: ${log.evalVersion}` : null,
-    '',
-    (log.evaluation || '').trim() || '(sem texto de avaliação)',
-    // Análise por critério do avaliador oficial. Quem baixa este .txt é o
-    // recrutador (role 'evaluator') ou o admin — o candidato nunca recebe nada.
-    criteriosDoSeletivoTxt(log),
-  ].filter((l) => l !== null).join('\n');
-  return `${logStr}\n\n===========================\nAVALIAÇÃO DA IA\n===========================\n\n${evalBody}`;
-}
-
 // Materiais da avaliação do seletivo (Bloco 1 + transcrição, cada um no seu
 // slot). O candidato NUNCA vê nada disto — nem nota, nem feedback —, então aqui
 // o texto do sintetizador existe só para o recrutador ler.
@@ -6175,22 +6110,6 @@ function selectionMateriais(log) {
     bloco1: resolveBloco1({ context: { type: 'freeplay', itemId: char.id } }),
     log: `[LOG DO ATENDIMENTO — pode conter várias sessões com o mesmo paciente]\nPersonagem: ${char.name || 'Paciente'}\nLegenda: "═══ SESSÃO N ═══" separa as sessões (acompanhamento ao longo do tempo — avalie também a evolução entre elas); "★" marca uma intervenção que o próprio candidato destacou e a linha "{...}" logo abaixo é a justificativa dele.\n\n${transcript}`,
   });
-}
-
-// Bloco de análise por critério para o .txt do recrutador. Vazio quando o
-// candidato foi avaliado antes do avaliador oficial (ou quando o detalhe já
-// saiu do volume pela expiração).
-function criteriosDoSeletivoTxt(log) {
-  if (!log || !log.evalPartsId) return '';
-  const detalhe = oficial.lerDetalhe(log.evalPartsId);
-  if (!detalhe || !Array.isArray(detalhe.partes) || !detalhe.partes.length) return '';
-  const L = ['', '--- ANÁLISE POR CRITÉRIO ---', ''];
-  for (const p of detalhe.partes) {
-    L.push(`${p.num}. ${p.nome} — ${p.nota != null ? `${p.nota}/10` : 'sem nota'}${p.faixa ? ` (faixa ${p.faixa}${p.realizacao ? `, ${p.realizacao}` : ''})` : ''}`);
-    if (p.analise) L.push(p.analise);
-    L.push('');
-  }
-  return L.join('\n');
 }
 
 // Extrai nota + avaliação limpa do texto do avaliador (mesma régua do resto):
@@ -7077,6 +6996,7 @@ app.post('/api/competitive/finish', requireAuth, writeLimiter, requireFeature('s
 
 // 1) Senha — só destrava a UI do formulário. A senha é revalidada no /iniciar.
 app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
+  if (selecaoFechada(res)) return;
   const pw = String((req.body && req.body.password) || '');
   if (!senhaSelecaoConfere(pw)) return res.status(401).json({ error: 'Senha incorreta.' });
   res.json({ ok: true });
@@ -7086,6 +7006,7 @@ app.post('/api/selecao/senha', selecaoLimiter, (req, res) => {
 // personagem do Treinamento; emite o JWT do candidato com o characterId + dados.
 app.post('/api/selecao/iniciar', selecaoLimiter, rota(async (req, res) => {
   const b = req.body || {};
+  if (selecaoFechada(res)) return;
   if (!senhaSelecaoConfere(b.password)) {
     return res.status(401).json({ error: 'Senha incorreta.' });
   }
@@ -7325,30 +7246,6 @@ app.post('/api/selecao/logs/:id/nova-chance', requireAuth, requireRole('evaluato
     console.log(`[selecao] nova chance para o log ${alvo.id} por ${alvo.novaChance.por}`);
   }
   res.json({ ok: true, id: alvo.id, novaChance: alvo.novaChance });
-}));
-
-// 5b) Backup externo (Google Apps Script) — devolve TODOS os logs do banco (log +
-// avaliação, já formatados como .txt) pra uma cópia no Drive. Como os logs não
-// expiram mais, a resposta cresce com o histórico inteiro a cada corrida.
-// M2M por secret fixo no header (X-Export-Secret), não JWT: quem chama é
-// um script agendado, sem sessão de usuário. Idempotência de gravação fica a
-// cargo de quem chama (o script decide o que já salvou, pelo nome do arquivo).
-app.get('/api/selecao/export-all', requireSelecaoExportSecret, rota(async (req, res) => {
-  const sorted = await selecaoRepo.listar('asc');
-  const items = sorted.map((log) => {
-    const stamp = log.timestamp ? new Date(log.timestamp).toISOString().slice(0, 10) : 'sem-data';
-    const slug = selecaoExportSlug(log.candidate && log.candidate.nome) || 'candidato';
-    const shortId = String(log.id || '').slice(-8) || 'semid';
-    return {
-      id: log.id,
-      filename: `processo-seletivo-${slug}-${stamp}-${shortId}.txt`,
-      timestamp: log.timestamp,
-      status: log.status,
-      score: log.score,
-      content: buildSelectionExportText(log),
-    };
-  });
-  res.json({ generatedAt: new Date().toISOString(), count: items.length, logs: items });
 }));
 
 // 6) Dashboard — avaliador/admin. Agrega as estatísticas anônimas e permanentes

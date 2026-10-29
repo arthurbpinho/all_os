@@ -2,11 +2,11 @@
 // dedup por WhatsApp (15 dias) e a invariante de segurança: nota/avaliação NUNCA
 // voltam ao candidato. Roda em modo demo (sem OPENAI_API_KEY), então a avaliação
 // server-side não gera nota — o que basta pra checar a estrutura e o não-vazamento.
-const { app, request, resetData, loginAs, authHeader, db } = require('./helpers');
+const { app, request, resetData, definirSenhaSelecao, loginAs, authHeader, db } = require('./helpers');
 
-// Default de SELECAO_PASSWORD no server. Constante única: a senha é trocada de
-// tempos em tempos e antes ela estava repetida em três lugares deste arquivo.
-const SENHA = '***REMOVIDO***';
+// A senha só existe nas configurações (a tela do Processo Seletivo); cada teste
+// começa com esta definida, como se o avaliador já tivesse aberto o link.
+const SENHA = 'senha-de-teste';
 
 const CAMPOS = {
   password: SENHA,
@@ -21,7 +21,7 @@ const CAMPOS = {
 };
 
 describe('Processo Seletivo', () => {
-  beforeEach(() => resetData());
+  beforeEach(async () => { await resetData(); await definirSenhaSelecao(SENHA); });
 
   it('admin cria conta de avaliador; avaliador acessa dashboard e logs', async () => {
     const adminToken = await loginAs('admin');
@@ -49,6 +49,34 @@ describe('Processo Seletivo', () => {
     expect(logs.status).toBe(403);
     const dash = await request(app).get('/api/selecao/dashboard').set(authHeader(alunoToken));
     expect(dash.status).toBe(403);
+  });
+
+  it('sem senha definida na tela, o link fica fechado (não existe senha padrão)', async () => {
+    await resetData(); // apaga as configurações: nenhuma senha
+    const senha = await request(app).post('/api/selecao/senha').send({ password: SENHA });
+    expect(senha.status).toBe(403);
+    expect(senha.body.error).toMatch(/não está aberto/);
+    // Nem a antiga senha padrão do código, nem string vazia, abrem o formulário.
+    for (const password of ['***REMOVIDO***', '']) {
+      expect((await request(app).post('/api/selecao/iniciar').send({ ...CAMPOS, password })).status).toBe(403);
+    }
+    const cfg = await request(app).get('/api/selecao/senha-config').set(authHeader(await loginAs('admin')));
+    expect(cfg.body.password).toBe('');
+
+    // Definida pela tela, abre.
+    await request(app).put('/api/selecao/senha-config').set(authHeader(await loginAs('admin'))).send({ password: 'abre-agora' }).expect(200);
+    expect((await request(app).post('/api/selecao/senha').send({ password: 'abre-agora' })).status).toBe(200);
+  });
+
+  it('o backup externo para o Drive não existe mais (os logs ficam no banco)', async () => {
+    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
+    await request(app).post('/api/selecao/finish').set(authHeader(start.body.token))
+      .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
+    // Com o client/dist presente, um GET desconhecido cai no index.html do SPA
+    // (200, HTML) — então o que importa é que nenhum log sai daqui.
+    const res = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'qualquer');
+    expect(res.type).not.toMatch(/json/);
+    expect(res.text).not.toContain('Ana Silva');
   });
 
   it('senha: recusa incorreta, aceita a correta', async () => {
@@ -324,8 +352,6 @@ describe('Processo Seletivo', () => {
       .send({ messages: [{ role: 'user', content: 'oi' }], durationSeconds: 10 });
     const logs = await request(app).get('/api/selecao/logs').set(authHeader(await loginAs('admin')));
     expect(logs.body[0].candidate.abordagem).toBe('Não tenho ainda / prefiro não informar / outra');
-    const exp = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'test-export-secret');
-    expect(exp.body.logs[0].content).toContain('Abordagem: Não tenho ainda / prefiro não informar / outra');
   });
 
   it('a lista de abordagens do formulário é a mesma que o servidor aceita', () => {
@@ -339,29 +365,6 @@ describe('Processo Seletivo', () => {
     const servidor = lista('server/index.js', 'SELECAO_ABORDAGENS');
     expect(servidor).toHaveLength(11);
     expect(lista('client/src/pages/ProcessoSeletivo.jsx', 'ABORDAGENS')).toEqual(servidor);
-  });
-
-  it('export-all: exige o secret certo (M2M, sem JWT) e devolve log+avaliação em texto por candidato', async () => {
-    const start = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
-    await request(app).post('/api/selecao/finish').set(authHeader(start.body.token))
-      .send({ messages: [{ role: 'assistant', content: 'Oi.' }, { role: 'user', content: 'Tudo bem?' }], durationSeconds: 60 });
-
-    const semHeader = await request(app).get('/api/selecao/export-all');
-    expect(semHeader.status).toBe(401);
-
-    const secretErrado = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'chute-errado');
-    expect(secretErrado.status).toBe(401);
-
-    const ok = await request(app).get('/api/selecao/export-all').set('X-Export-Secret', 'test-export-secret');
-    expect(ok.status).toBe(200);
-    expect(ok.body.count).toBe(1);
-    const item = ok.body.logs[0];
-    expect(item.filename).toMatch(/^processo-seletivo-ana-silva-\d{4}-\d{2}-\d{2}-[0-9a-f-]+\.txt$/);
-    expect(item.content).toMatch(/Candidato: Ana Silva/);
-    expect(item.content).toMatch(/E-mail: ana@exemplo\.com/);
-    expect(item.content).toMatch(/Tudo bem\?/);
-    // Sem avaliação ainda (modo demo/pending) — não deve aparecer a seção de avaliação.
-    expect(item.content).not.toMatch(/AVALIAÇÃO DA IA/);
   });
 
   it('requireCandidate: token de usuário normal não acessa o chat do candidato', async () => {

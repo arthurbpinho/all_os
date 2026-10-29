@@ -6,11 +6,11 @@
 //   3. o e-mail leva o texto QUALITATIVO — nenhuma nota final ou por critério;
 //   4. avaliação com erro não vira e-mail, e o desfecho do envio fica no log.
 // IMPORTANTE: helpers seta as envs antes de importar o app — manter como 1º require.
-const { app, request, resetData, db } = require('./helpers');
+const { app, request, resetData, definirSenhaSelecao, db } = require('./helpers');
 const mailer = require('../server/email');
 
 const CAMPOS = {
-  password: '***REMOVIDO***',
+  password: 'senha-de-teste',
   nome: 'Ana Silva',
   email: 'ana@exemplo.invalid',
   whatsapp: '(11) 91234-5678',
@@ -57,7 +57,7 @@ function feedbacksEnviados() {
 }
 
 describe('Processo Seletivo — feedback prévio (IA)', () => {
-  beforeEach(async () => { await resetData(); mailer.limparCapturados(); });
+  beforeEach(async () => { await resetData(); await definirSenhaSelecao('senha-de-teste'); mailer.limparCapturados(); });
 
   it('a escolha Sim/Não é obrigatória e precisa ser booleana', async () => {
     const semEscolha = await request(app).post('/api/selecao/iniciar').send(CAMPOS);
