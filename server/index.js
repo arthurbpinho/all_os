@@ -8093,10 +8093,26 @@ function notificationPushPayload(n) {
   }
 }
 
+// Assinatura que nunca mais vai receber nada: expirada/revogada (404/410) ou
+// criada com OUTRO par VAPID. Este último caso é o da troca de chaves (ex.: a
+// rotação depois do incidente do Railway, 2026-10): o serviço de push responde
+// 403 com "VapidPkHashMismatch" (FCM: "...do not correspond to the credentials
+// used to create the subscriptions"), e sem esta regra a assinatura velha
+// ficava no banco para sempre, falhando a cada envio. Um 403 por outro motivo
+// (ex.: o nosso próprio VAPID mal configurado) NÃO apaga nada — derrubaria a
+// assinatura boa de todo mundo. O navegador reassina com a chave nova sozinho
+// (client/src/push.js), então apagar a velha não tira o push de ninguém.
+function assinaturaPushMorta(err) {
+  const status = err && err.statusCode;
+  if (status === 404 || status === 410) return true;
+  if (status !== 403) return false;
+  return /VapidPkHashMismatch|do not correspond to the credentials/i.test(String(err.body || ''));
+}
+
 // Envia a notificação via Web Push pra todos os dispositivos assinados do
 // usuário. Best-effort e fire-and-forget: quem chama não espera (nem trata erro
 // — use `.catch`), e o envio nunca atrasa nem derruba o fluxo. Assinatura
-// expirada/revogada (404/410) é removida; qualquer outro erro só loga.
+// morta (ver assinaturaPushMorta) é removida; qualquer outro erro só loga.
 async function sendWebPushToUser(userId, entry) {
   if (!userId || String(userId).startsWith('visitor-')) return;
   if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) return;
@@ -8106,7 +8122,7 @@ async function sendWebPushToUser(userId, entry) {
   const mortas = [];
   await Promise.all(subs.map((s) =>
     webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload).catch((err) => {
-      if (err && (err.statusCode === 404 || err.statusCode === 410)) {
+      if (assinaturaPushMorta(err)) {
         mortas.push(s.endpoint);
       } else {
         console.warn('[push] falha ao enviar:', err && err.message);
@@ -9428,10 +9444,20 @@ app.post('/api/push/test', requireAuth, writeLimiter, async (req, res) => {
   const resultados = await Promise.all(subs.map((s) =>
     webpush.sendNotification({ endpoint: s.endpoint, keys: s.keys }, payload)
       .then(() => ({ ok: true }))
-      .catch((err) => ({ ok: false, status: err && err.statusCode, message: err && err.message }))
+      .catch((err) => ({
+        ok: false, status: err && err.statusCode, message: err && err.message,
+        morta: assinaturaPushMorta(err), endpoint: s.endpoint,
+      }))
   ));
   const enviados = resultados.filter((r) => r.ok).length;
   const falhas = resultados.filter((r) => !r.ok);
+  // Mesma limpeza do envio normal: o teste costuma ser a primeira coisa que o
+  // dono roda depois de trocar o VAPID, e sobrar a assinatura velha confunde.
+  const mortas = falhas.filter((f) => f.morta).map((f) => f.endpoint);
+  if (mortas.length) {
+    await notificacoesRepo.desinscrever(req.user.id, mortas)
+      .catch((e) => console.warn('[push] teste: falha ao remover assinatura morta:', e.message));
+  }
   if (falhas.length) {
     console.warn('[push] teste falhou em', falhas.length, 'dispositivo(s):',
       falhas.map((f) => `${f.status || '?'} ${f.message || ''}`).join(' | '));
@@ -9443,6 +9469,7 @@ app.post('/api/push/test', requireAuth, writeLimiter, async (req, res) => {
     // Status HTTP do serviço de push (410 = assinatura morta, 403 = chave VAPID
     // trocada). A mensagem crua não vai pro cliente — vai pro log do servidor.
     failureStatuses: falhas.map((f) => f.status || 0),
+    removed: mortas.length,
   });
 });
 

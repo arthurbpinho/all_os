@@ -153,3 +153,51 @@ describe('Notificação de avaliação — fila → pronta', () => {
     expect(queued.refId).toBe('log:' + r.body.logId);
   });
 });
+
+// Troca do par VAPID (ex.: a rotação depois do incidente do Railway): toda
+// assinatura criada com a chave velha passa a voltar 403 "VapidPkHashMismatch".
+// Ela tem de sair do banco — o navegador reassina sozinho com a chave nova.
+describe('Web Push — assinatura de outro par VAPID', () => {
+  const webpush = require('web-push');
+  beforeEach(() => resetData());
+  afterEach(() => vi.restoreAllMocks());
+
+  function falhaPush(statusCode, body) {
+    return Object.assign(new Error('Received unexpected response code'), { statusCode, body });
+  }
+
+  it('403 VapidPkHashMismatch remove a assinatura', async () => {
+    const t = await loginAs('aluno');
+    await request(app).post('/api/push/subscribe').set(authHeader(t)).send({ subscription: FAKE_SUB(1) }).expect(200);
+    vi.spyOn(webpush, 'sendNotification').mockRejectedValue(
+      falhaPush(403, '{"code":403,"errno":109,"error":"Forbidden","message":"VapidPkHashMismatch"}'),
+    );
+
+    const r = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ devices: 1, sent: 0, failed: 1, failureStatuses: [403], removed: 1 });
+
+    const depois = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(depois.status).toBe(409); // nenhum dispositivo assinado
+  });
+
+  it('403 por outro motivo NÃO apaga a assinatura (pode ser o nosso VAPID errado)', async () => {
+    const t = await loginAs('aluno');
+    await request(app).post('/api/push/subscribe').set(authHeader(t)).send({ subscription: FAKE_SUB(1) }).expect(200);
+    vi.spyOn(webpush, 'sendNotification').mockRejectedValue(falhaPush(403, 'Forbidden'));
+
+    const r = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(r.body).toMatchObject({ failed: 1, removed: 0 });
+    const depois = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(depois.body.devices).toBe(1);
+  });
+
+  it('410 (assinatura expirada) também sai', async () => {
+    const t = await loginAs('aluno');
+    await request(app).post('/api/push/subscribe').set(authHeader(t)).send({ subscription: FAKE_SUB(1) }).expect(200);
+    vi.spyOn(webpush, 'sendNotification').mockRejectedValue(falhaPush(410, 'Gone'));
+
+    const r = await request(app).post('/api/push/test').set(authHeader(t)).send({});
+    expect(r.body).toMatchObject({ removed: 1 });
+  });
+});
