@@ -9,6 +9,7 @@ import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
 import RichText from '../components/RichText';
 import { PainelReavaliacao, EditorDeEstrelas, logReavaliavel } from '../components/ReavaliacaoLog';
+import { AbordagemTags } from '../components/AbordagemTags';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
@@ -355,10 +356,13 @@ function TherapistGroup({ therapistName, userId, logs, onAtualizado }) {
           marginBottom: 12,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
           <h3 style={{ margin: 0, fontSize: 18 }}>
             {therapistName || 'Terapeuta sem nome'}
           </h3>
+          {/* Abordagem teórica do terapeuta (tags do Perfil) — contexto para
+              quem lê; não entra na avaliação. */}
+          <AbordagemTags ids={logs[0] && logs[0].userAbordagens} compacto />
           <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.08em' }}>
             {total} {total === 1 ? 'caso' : 'casos'}
             {lastTs ? ` · última atividade ${formatDate(new Date(lastTs).toISOString())}` : ''}

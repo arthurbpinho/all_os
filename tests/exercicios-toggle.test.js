@@ -105,9 +105,11 @@ test('o interruptor de um aluno não vaza para outro', async () => {
   expect(r.body.mission).not.toBeNull();
 });
 
-test('abordagem é aceita, cortada em 120 caracteres e sem espaço nas pontas', async () => {
+test('abordagem em texto livre não é mais aceita (agora são tags — ver abordagens.test.js)', async () => {
   const aluno = await loginAs('aluno');
   const r = await request(app).put('/api/users/3').set(authHeader(aluno))
-    .send({ abordagem: '  ' + 'x'.repeat(300) + '  ' });
-  expect(r.body.abordagem).toBe('x'.repeat(120));
+    .send({ abordagem: 'texto livre qualquer' });
+  expect(r.status).toBe(200);
+  expect(r.body.abordagem).toBe('');
+  expect(r.body.abordagens).toEqual([]);
 });

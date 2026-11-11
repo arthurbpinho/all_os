@@ -11,6 +11,7 @@
 // condição (ver `atualizar`).
 
 const { transacao } = require('../db');
+const { lerAbordagens } = require('../abordagens');
 
 const ID_CONTA = /^[0-9]{1,18}$/;
 const ID_VISITANTE = /^visitor-[\w-]{1,64}$/;
@@ -33,10 +34,12 @@ function filtroDoDono(userId, indice = 1) {
     : { sql: `l.visitante_id = $${indice}`, valor: dono.visitante_id };
 }
 
-// O log com as mensagens agregadas, na ordem em que foram ditas.
+// O log com as mensagens agregadas, na ordem em que foram ditas, e a abordagem
+// ATUAL do dono (tags do Perfil) — só para quem lê o log; a avaliação não a usa.
 const SELECT_LOG = `
-  SELECT l.*, COALESCE(m.mensagens, '[]'::json) AS mensagens
+  SELECT l.*, COALESCE(m.mensagens, '[]'::json) AS mensagens, dono.abordagem AS dono_abordagem
   FROM logs l
+  LEFT JOIN users dono ON dono.id = l.user_id
   LEFT JOIN LATERAL (
     SELECT json_agg(json_build_object(
              'role', lm.role, 'content', lm.content,
@@ -95,6 +98,8 @@ function paraLog(r) {
     neuroTests: r.neuro_tests,
     userId: r.user_id ?? r.visitante_id,
     userName: r.user_name,
+    // Tags de abordagem do terapeuta (server/abordagens.js). Visitante não tem.
+    userAbordagens: lerAbordagens(r.dono_abordagem),
     evaluationPending: r.evaluation_pending,
   };
   for (const [coluna, chave] of OPCIONAIS) {

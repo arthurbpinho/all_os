@@ -7,13 +7,12 @@ import RichText from '../components/RichText';
 import DevTooltip from '../components/DevTooltip';
 import RadarCriterios from '../components/RadarCriterios';
 import { useNomesCriterios, nomeDoCriterio } from '../criteriosNomes';
+import { SeletorDeAbordagens } from '../components/AbordagemTags';
 
 // Balões das partes do Perfil que ainda estão em construção. Mesmo vocabulário
 // do menu lateral (ver NavEmDesenvolvimento em App.jsx): cinza + explicação.
 const DESC_DESCRICAO_VISUAL =
   'Funcionalidade para interação do paciente com sua descrição visual em tempo real na sessão.';
-const DESC_ABORDAGEM =
-  'Conduziremos pesquisas em psicologia comparada a partir dos dados gerados pelos usuários.';
 
 export default function Profile({ user, onUpdate, onLogout }) {
   const nomesCriterios = useNomesCriterios();
@@ -46,7 +45,8 @@ export default function Profile({ user, onUpdate, onLogout }) {
   // Exercícios (as antigas sidequests): a pessoa escolhe se quer receber um
   // objetivo junto do atendimento. Ausente = ligado (contas antigas).
   const [sidequestsEnabled, setSidequestsEnabled] = useState(user.sidequestsEnabled !== false);
-  const [abordagem, setAbordagem] = useState(user.abordagem || '');
+  // Tags de abordagem teórica (ids de client/src/abordagens.js).
+  const [abordagens, setAbordagens] = useState(Array.isArray(user.abordagens) ? user.abordagens : []);
   // MMR competitivo, mostrado aqui em vez de só no Ranking.
   const [mmr, setMmr] = useState(null);
   // Média por critério das sessões avaliadas. null = não carregou ou bloqueado
@@ -204,6 +204,7 @@ export default function Profile({ user, onUpdate, onLogout }) {
         updateAllOS,
         updateAllos,
         sidequestsEnabled,
+        abordagens,
       });
       onUpdate(updated);
       setSavedAt(new Date());
@@ -588,25 +589,16 @@ export default function Profile({ user, onUpdate, onLogout }) {
             </div>
           </div>
 
-          {/* Abordagem teórica. Em construção: o campo aparece para todos —
-              mostrar o que vem é o ponto — mas ainda não é editável nem salvo
-              (o servidor aceita o campo; a tela é que o mantém fechado). */}
-          <div className="profile-row bloco-dev" style={{ marginTop: 14 }}>
-            <div style={{ flex: 1 }}>
-              <label htmlFor="abordagem">
-                Abordagem
-                <DevTooltip text={DESC_ABORDAGEM} abrirNoToque>
-                  <span className="dev-etiqueta" tabIndex={0}>Em desenvolvimento</span>
-                </DevTooltip>
-              </label>
-              <input
-                id="abordagem"
-                type="text"
-                value={abordagem}
-                readOnly
-                placeholder="Psicanálise, TCC, Fenomenológica…"
-              />
-            </div>
+          {/* Abordagem teórica: tags. Aparece para quem LÊ os logs (supervisor,
+              admin) e serve à pesquisa em psicologia comparada — não entra em
+              nada da avaliação por IA. */}
+          <div style={{ marginTop: 14 }}>
+            <label>Abordagem</label>
+            <small style={{ display: 'block', margin: '2px 0 10px', color: 'var(--muted)', fontSize: 12.5, lineHeight: 1.6 }}>
+              Escolha as abordagens com que você trabalha. Elas aparecem para o seu supervisor nos seus logs
+              e não mudam em nada a avaliação das suas sessões.
+            </small>
+            <SeletorDeAbordagens valor={abordagens} onChange={setAbordagens} />
           </div>
         </section>
 

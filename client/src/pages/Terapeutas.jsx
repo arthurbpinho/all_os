@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import Typewriter from '../components/Typewriter';
 import { fotoDoUsuario } from '../utils/avatar';
+import { AbordagemTags } from '../components/AbordagemTags';
 
 function formatDate(ts) {
   if (!ts) return '—';
@@ -220,7 +221,16 @@ export default function Terapeutas({ user }) {
             ) : (
               <div className="card">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                  <h3 style={{ margin: 0 }}>{selected.name || selected.username}</h3>
+                  <div>
+                    <h3 style={{ margin: 0 }}>{selected.name || selected.username}</h3>
+                    <div style={{ marginTop: 6 }}>
+                      <AbordagemTags
+                        ids={selected.abordagens}
+                        compacto
+                        vazio={<span style={{ color: 'var(--muted)', fontSize: 12.5 }}>Abordagem não informada no perfil</span>}
+                      />
+                    </div>
+                  </div>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button className="btn btn-outline btn-sm" onClick={() => navigate('/supervisor')}>Ver logs</button>
                     <button className="btn btn-outline btn-sm" onClick={() => navigate('/avaliacao')}>Supervisão de IA</button>

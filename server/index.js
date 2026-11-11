@@ -51,6 +51,7 @@ const db = require('./db');
 const { criarRepoContas, ErroConta } = require('./repos/contas');
 const { criarRepoLogs } = require('./repos/logs');
 const { criarRepoReavaliacoes } = require('./repos/reavaliacoes');
+const abordagensCatalogo = require('./abordagens');
 const { criarRepoProgresso } = require('./repos/progresso');
 const { criarRepoMmr } = require('./repos/mmr');
 const { criarRepoDuelos } = require('./repos/duelos');
@@ -813,8 +814,8 @@ const DEFAULT_PROFILE = {
   // Exercícios (as antigas sidequests) ligados por padrão: quem nunca abriu o
   // Perfil continua recebendo o objetivo no atendimento, como sempre recebeu.
   sidequestsEnabled: true,
-  // Abordagem teórica declarada pela pessoa. Campo EM DESENVOLVIMENTO na tela:
-  // existe para a pesquisa em psicologia comparada, e por ora só o admin edita.
+  // Abordagem teórica declarada pela pessoa: ids das tags (server/abordagens.js).
+  // Só para quem lê os logs e para a pesquisa — não entra na avaliação por IA.
   abordagem: '',
 };
 
@@ -1993,7 +1994,17 @@ app.put('/api/users/:id', requireAuth, rota(async (req, res) => {
   // Os campos permitidos e a normalização de tipo de cada um moram em
   // CAMPOS_PERFIL (server/repos/contas.js): o endpoint é público a qualquer
   // cliente, e o banco recusaria um tipo errado em vez de gravá-lo cru.
-  const atualizado = await contasRepo.atualizarPerfil(req.params.id, req.body);
+  //
+  // Abordagem: chega como `abordagens` (lista de ids das tags, validada contra
+  // o catálogo em server/abordagens.js) e é gravada na coluna `abordagem`. O
+  // `abordagem` cru (texto livre, de quando o campo era assim) não é mais aceito.
+  const { abordagem: _abordagemCrua, abordagens, ...campos } = req.body || {};
+  if (abordagens !== undefined) {
+    const v = abordagensCatalogo.validarAbordagens(abordagens);
+    if (v.erro) return res.status(400).json({ error: v.erro });
+    campos.abordagem = abordagensCatalogo.gravarAbordagens(v.ids);
+  }
+  const atualizado = await contasRepo.atualizarPerfil(req.params.id, campos);
   if (!atualizado) return res.status(404).json({ error: 'Usuário não encontrado' });
   res.json(publicUser(atualizado));
 }));

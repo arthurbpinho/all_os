@@ -13,6 +13,7 @@
 
 const { transacao } = require('../db');
 const { normalizeUsername, normalizeEmail } = require('../cadastro');
+const { lerAbordagens } = require('../abordagens');
 
 const PAPEIS_ALUNO = ['therapist', 'external'];
 
@@ -67,6 +68,8 @@ function paraUsuario(r) {
     profilePhoto: r.profile_photo,
     sidequestsEnabled: r.sidequests_enabled,
     abordagem: r.abordagem,
+    // As tags de abordagem (ids), lidas da coluna `abordagem` (server/abordagens.js).
+    abordagens: lerAbordagens(r.abordagem),
     activeTitle: r.active_title,
     updateAllOS: r.update_all_os,
     updateAllos: r.update_allos,
@@ -106,7 +109,9 @@ const CAMPOS_PERFIL = {
   visualDescription: ['visual_description', opcional(texto)],
   shareAppearance: ['share_appearance', opcional(booleano)],
   sidequestsEnabled: ['sidequests_enabled', booleano],
-  abordagem: ['abordagem', (v) => texto(v).trim().slice(0, 120)],
+  // Ids das tags separados por vírgula — a rota valida (server/abordagens.js);
+  // aqui só o teto, que comporta todas as tags juntas.
+  abordagem: ['abordagem', (v) => texto(v).trim().slice(0, 400)],
 };
 
 const CAMPOS_ADMIN = {

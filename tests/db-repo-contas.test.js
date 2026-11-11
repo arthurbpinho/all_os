@@ -85,13 +85,13 @@ describe.skipIf(!URL_TESTE)('repositório de contas', () => {
       const editada = await repo.atualizarPerfil(u.id, {
         updateAllOS: 'sim',
         sidequestsEnabled: 0,
-        abordagem: `  ${'a'.repeat(200)}  `,
+        abordagem: `  ${'a'.repeat(500)}  `,
         role: 'admin',
         passwordHash: 'roubado',
       });
 
       expect(editada).toMatchObject({ updateAllOS: true, sidequestsEnabled: false, role: 'external', passwordHash: 'hash' });
-      expect(editada.abordagem).toHaveLength(120);
+      expect(editada.abordagem).toHaveLength(400);
     });
 
     it('duas trocas de senha simultâneas contam as duas no tokenVersion', async () => {
