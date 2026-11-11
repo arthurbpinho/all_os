@@ -50,6 +50,7 @@ const turnstile = require('./turnstile');
 const db = require('./db');
 const { criarRepoContas, ErroConta } = require('./repos/contas');
 const { criarRepoLogs } = require('./repos/logs');
+const { criarRepoReavaliacoes } = require('./repos/reavaliacoes');
 const { criarRepoProgresso } = require('./repos/progresso');
 const { criarRepoMmr } = require('./repos/mmr');
 const { criarRepoDuelos } = require('./repos/duelos');
@@ -108,6 +109,7 @@ app.use((req, res, next) => {
 });
 const contasRepo = criarRepoContas(db.getPool());
 const logsRepo = criarRepoLogs(db.getPool());
+const reavaliacoesRepo = criarRepoReavaliacoes(db.getPool());
 const progressoRepo = criarRepoProgresso(db.getPool());
 const mmrRepo = criarRepoMmr(db.getPool());
 const duelosRepo = criarRepoDuelos(db.getPool());
@@ -3601,27 +3603,47 @@ app.get('/api/criterios/nomes', requireAuth, rota(async (req, res) => {
   res.json({ nomes: Object.fromEntries(rows.map((r) => [r.id, r.nome])) });
 }));
 
+// Os logs como saem para `user`. Aluno (interno ou externo) e visitante recebem
+// o log SEM o evalPartsId, que é a chave do arquivo com as ANÁLISES por critério
+// (escritas com o gabarito à vista; a rota que o serve exige supervisor/admin).
+// As NOTAS por critério (criteriaScores) o aluno vê, desde que "Notas por
+// critério e gráfico" esteja liberado para o perfil dele em Acessos (decisão de
+// 2026-09, §18). Cada log leva também o estado da última reavaliação dele.
+async function servirLogs(user, arr) {
+  const isStudent = isAluno(user.role) || user.role === 'visitor';
+  const veNotas = !isStudent || !funcionalidadeBloqueada(user, 'graficoCriterios');
+  if (veNotas) await anexarCriteriosAtuais(arr);
+  await anexarReavaliacoes(arr, { equipe: !isStudent });
+  if (!isStudent) return arr;
+  // `temCriterios` só diz que há níveis por critério para buscar em
+  // /api/logs/:id/criterios; a chave do arquivo (evalPartsId) não sai.
+  return arr.map(({ criteriaScores, criteriaNames, criterios, evalPartsId, ...rest }) => (
+    veNotas ? { ...rest, criteriaScores, criteriaNames, criterios, temCriterios: !!evalPartsId } : rest
+  ));
+}
+
+// Última reavaliação de cada log (ver server/repos/reavaliacoes.js). A avaliação
+// anterior inteira (texto e notas por critério) só vai para a equipe; o aluno vê
+// o estado do pedido e a nota que tinha antes — que ele já tinha visto.
+async function anexarReavaliacoes(logs, { equipe }) {
+  if (!logs || !logs.length) return logs;
+  const porLog = await reavaliacoesRepo.ultimasDosLogs(logs.map((l) => l.id));
+  for (const l of logs) {
+    const r = porLog.get(l.id);
+    if (!r) continue;
+    if (equipe) { l.reavaliacao = r; continue; }
+    const { avaliacaoAnterior, solicitadoPor, decididoPor, ...visivel } = r;
+    l.reavaliacao = visivel;
+  }
+  return logs;
+}
+
 app.get('/api/logs', requireAuth, rota(async (req, res) => {
-  // Aluno (interno ou externo) e visitante recebem o log SEM o evalPartsId, que
-  // é a chave do arquivo com as ANÁLISES por critério (escritas com o gabarito
-  // à vista; a rota que o serve exige supervisor/admin). As NOTAS por critério
-  // (criteriaScores) o aluno vê, desde que "Notas por critério e gráfico"
-  // esteja liberado para o perfil dele em Acessos (decisão de 2026-09, §18).
   const isStudent = isAluno(req.user.role) || req.user.role === 'visitor';
-  const veNotas = !isStudent || !funcionalidadeBloqueada(req.user, 'graficoCriterios');
   // Filtro por tag (?tag=<id>) na visão de supervisor e admin: só os logs das
   // contas com aquela tag.
   const comTag = !isStudent && req.query.tag ? await tagsRepo.contasComTag(req.query.tag) : null;
-  const serve = async (lista) => {
-    const arr = comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista;
-    if (veNotas) await anexarCriteriosAtuais(arr);
-    if (!isStudent) return arr;
-    // `temCriterios` só diz que há níveis por critério para buscar em
-    // /api/logs/:id/criterios; a chave do arquivo (evalPartsId) não sai.
-    return arr.map(({ criteriaScores, criteriaNames, criterios, evalPartsId, ...rest }) => (
-      veNotas ? { ...rest, criteriaScores, criteriaNames, criterios, temCriterios: !!evalPartsId } : rest
-    ));
-  };
+  const serve = (lista) => servirLogs(req.user, comTag ? lista.filter((l) => comTag.has(String(l.userId))) : lista);
 
   // Aluno e visitante: só os próprios.
   if (isAluno(req.user.role) || req.user.role === 'visitor') {
@@ -4693,6 +4715,239 @@ app.delete('/api/logs/:id', requireAuth, requireRole('admin'), rota(async (req, 
   const removed = await logsRepo.excluir(req.params.id);
   if (!removed) return res.status(404).json({ error: 'Log não encontrado' });
   res.json({ ok: true, removed });
+}));
+
+// --- Reavaliação de log e estrelas depois da avaliação ---
+//
+// Duas funcionalidades que andam juntas:
+//
+//   REAVALIAR: supervisor e admin re-rodam a avaliação de uma sessão já
+//   avaliada — a avaliação deu erro, ou eles discordam da nota e acham que a IA
+//   alucinou. O pipeline roda de novo (síncrono, em background) sobre a
+//   transcrição salva, com as estrelas que o log tem AGORA, e a avaliação
+//   anterior fica guardada na reavaliação (server/repos/reavaliacoes.js).
+//
+//   ESTRELAS: o aluno (e o supervisor/admin) pode acrescentar estrelas — a
+//   justificativa das falas do terapeuta — a um log já avaliado. Só estrela e
+//   comentário: o texto das falas não muda. Mudar estrela NÃO reavalia: o aluno
+//   PEDE a reavaliação, e só supervisor/admin aprova (em Todos os Logs). Sem
+//   isso, bastaria marcar estrela e re-rodar até a nota subir.
+//
+// Só a Simulação (Treinamento e Competitivo), que roda o avaliador oficial. A
+// Trilha tem avaliador por exercício e nota em outra escala, e a Neuro tem o
+// avaliador de prompt único — nenhum dos dois sabe reavaliar um log salvo.
+//
+// MMR: a reavaliação não mexe no MMR de uma partida que já contou (o MMR é uma
+// sequência; refazer uma partida do meio exigiria refazer todas as seguintes).
+// A exceção é o Competitivo cuja avaliação FALHOU: a partida nunca contou, e
+// conta agora, como contaria se a avaliação tivesse dado certo.
+
+const REAVALIACAO_MOTIVO_MAX = 1000;
+const REAVALIACAO_TIPOS = ['freeplay'];
+
+// Execuções em andamento — os testes esperam por elas (aguardarReavaliacoes).
+const reavaliacoesRodando = new Set();
+// Quem roda o pipeline. Trocável nos testes, que rodam sem chave de API.
+let rodarPipelineDaReavaliacao = (args) => runPipelineSemBatch(args);
+
+const eDonoDoLog = (user, log) => !!(user && log && log.userId != null && String(log.userId) === String(user.id));
+const eEquipe = (user) => !!user && (user.role === 'supervisor' || user.role === 'admin');
+
+// Supervisor/admin com acesso ao aluno dono do log (o supervisor, só aos seus).
+async function equipeDoLog(user, log) {
+  if (!eEquipe(user) || !log) return false;
+  if (user.role === 'admin') return true;
+  return log.userId != null && canAccessUserResource(user, String(log.userId));
+}
+
+// Por que este log não pode ser reavaliado nem ter as estrelas mudadas (ou null).
+function motivoLogNaoReavaliavel(log) {
+  if (!REAVALIACAO_TIPOS.includes(log.type)) {
+    return 'Só sessões da Simulação (Treinamento e Competitivo) podem ser reavaliadas.';
+  }
+  if (log.evaluationPending) return 'A avaliação desta sessão ainda está na fila — espere ela sair.';
+  return null;
+}
+
+// A avaliação vigente do log, como fica guardada na reavaliação.
+function avaliacaoVigente(log) {
+  return {
+    score: Number.isFinite(log.score) ? log.score : null,
+    criteriaScores: log.criteriaScores || null,
+    criteriaNames: log.criteriaNames || null,
+    evaluation: log.evaluation || '',
+    evalVersion: log.evalVersion || null,
+    evalPartsId: log.evalPartsId || null,
+    evalError: log.evalError || null,
+  };
+}
+
+async function servirUmLog(user, id) {
+  const log = await logsRepo.porId(id);
+  return log ? (await servirLogs(user, [log]))[0] : null;
+}
+
+// Roda o pipeline de novo sobre o log e grava a avaliação nova. Nunca lança: a
+// falha vai para a reavaliação (status 'falhou') e o log fica como estava.
+async function executarReavaliacao(reavId, logId, quemDecidiu) {
+  let log = null;
+  try {
+    log = await logsRepo.porId(logId);
+    if (!log) throw new Error('o log não existe mais');
+    const categoria = log.mode === 'competitive' ? 'competitivo' : 'treinamento';
+    const spec = evaluatorSpecFor(categoria);
+    const materiais = competitiveMateriais(log, log.mode === 'competitive' ? 'Competitivo' : 'Treinamento');
+    const result = await rodarPipelineDaReavaliacao({ spec, materiais, rotulo: 'reavaliacao' });
+    if (!result || !(Number.isFinite(result.notaFinal) || result.corpoSintetizador)) {
+      throw new Error('o pipeline não devolveu avaliação');
+    }
+    // Dada como travada enquanto rodava: o resultado tardio não entra.
+    if (!(await reavaliacoesRepo.emAndamento(reavId))) return;
+    const campos = oficial.camposDoLog({
+      result, logId: log.id, dono: log.userId, version: oficial.VERSAO,
+      model: spec.model, effort: spec.effort, provider: spec.provider,
+      categoria, itemId: log.itemId, itemTitle: log.itemTitle, batch: false,
+    });
+    await logsRepo.atualizar(log.id, {
+      evaluation: clampStr(campos.evaluation, LOG_MAX_EVAL_LEN),
+      criteriaScores: campos.criteriaScores,
+      criteriaNames: campos.criteriaNames || null,
+      score: campos.score,
+      evalVersion: campos.evalVersion || null,
+      evalPartsId: campos.evalPartsId || null,
+      evalError: null,
+    });
+    // Competitivo cuja avaliação tinha falhado: a partida conta agora.
+    const nuncaContou = log.mode === 'competitive' && !Number.isFinite(log.score)
+      && log.mmrDelta == null && log.mmrBefore == null;
+    if (nuncaContou) await aplicarMmrDoLogCompetitivo(log, campos.score, campos.criteriaScores);
+    await reavaliacoesRepo.concluir(reavId, { notaNova: campos.score });
+    await upsertEvaluationNotification(log.userId, 'reaval:' + log.id, {
+      type: 'evaluation_ready',
+      message: `Sua sessão${log.itemTitle ? ` com "${log.itemTitle}"` : ''} foi reavaliada.`,
+    }).catch(() => {});
+    console.log(`[reavaliacao] log ${log.id} reavaliado em ${spec.model}: nota=${campos.score}`);
+  } catch (e) {
+    console.error(`[reavaliacao] log ${logId} falhou:`, e.message);
+    const r = await reavaliacoesRepo.falhar(reavId, e.message).catch(() => null);
+    if (r && quemDecidiu) {
+      await pushNotification(quemDecidiu, {
+        type: 'admin_notice',
+        title: 'Reavaliação falhou',
+        message: `A reavaliação${log && log.itemTitle ? ` de "${log.itemTitle}"` : ''}${log && log.userName ? ` (${log.userName})` : ''} falhou: ${e.message}`,
+      }).catch(() => {});
+    }
+  }
+}
+
+function dispararReavaliacao(reavId, logId, quemDecidiu) {
+  const p = executarReavaliacao(reavId, logId, quemDecidiu).finally(() => reavaliacoesRodando.delete(p));
+  reavaliacoesRodando.add(p);
+}
+
+// Um log, como a listagem o serve — a tela acompanha a reavaliação por aqui.
+app.get('/api/logs/:id', requireAuth, rota(async (req, res) => {
+  const log = await logsRepo.porId(req.params.id);
+  if (!log || !(eDonoDoLog(req.user, log) || await equipeDoLog(req.user, log))) {
+    return res.status(404).json({ error: 'Log não encontrado' });
+  }
+  res.json((await servirLogs(req.user, [log]))[0]);
+}));
+
+// Estrelas de um log já avaliado: { marcacoes: [{ posicao, highlighted, comment }] },
+// `posicao` 1-based na ordem de messages[]. Só falas do terapeuta.
+app.put('/api/logs/:id/estrelas', requireAuth, writeLimiter, rota(async (req, res) => {
+  const log = await logsRepo.porId(req.params.id);
+  const dono = eDonoDoLog(req.user, log) && isAluno(req.user.role);
+  if (!log || !(dono || await equipeDoLog(req.user, log))) {
+    return res.status(404).json({ error: 'Log não encontrado' });
+  }
+  const naoPode = motivoLogNaoReavaliavel(log);
+  if (naoPode) return res.status(409).json({ error: naoPode });
+  const aberta = await reavaliacoesRepo.abertaDoLog(log.id);
+  if (aberta && aberta.status === 'em_andamento') {
+    return res.status(409).json({ error: 'Esta sessão está sendo reavaliada agora — espere terminar para mexer nas estrelas.' });
+  }
+  const marcacoes = req.body && req.body.marcacoes;
+  if (!Array.isArray(marcacoes) || marcacoes.length > LOG_MAX_MESSAGES) {
+    return res.status(400).json({ error: 'marcacoes deve ser uma lista.' });
+  }
+  const limpas = [];
+  for (const m of marcacoes) {
+    const posicao = Number(m && m.posicao);
+    const msg = Number.isInteger(posicao) ? log.messages[posicao - 1] : null;
+    if (!msg) return res.status(400).json({ error: 'Mensagem inexistente no log.' });
+    if (msg.role !== 'user') return res.status(400).json({ error: 'Só as falas do terapeuta recebem estrela.' });
+    const comment = String((m && m.comment) ?? '').trim();
+    if (comment.length > 2000) return res.status(400).json({ error: 'O comentário da estrela pode ter até 2000 caracteres.' });
+    limpas.push({ posicao, highlighted: !!m.highlighted, comment });
+  }
+  await logsRepo.editarEstrelas(log.id, limpas);
+  res.json(await servirUmLog(req.user, log.id));
+}));
+
+// O aluno pede a reavaliação do próprio log (normalmente depois de acrescentar
+// estrelas). Avisa o supervisor dele e os admins.
+app.post('/api/logs/:id/reavaliacao/solicitar', requireAuth, writeLimiter, rota(async (req, res) => {
+  const log = await logsRepo.porId(req.params.id);
+  if (!log || !eDonoDoLog(req.user, log) || !isAluno(req.user.role)) {
+    return res.status(404).json({ error: 'Log não encontrado' });
+  }
+  const naoPode = motivoLogNaoReavaliavel(log);
+  if (naoPode) return res.status(409).json({ error: naoPode });
+  const motivo = clampStr(req.body && req.body.motivo, REAVALIACAO_MOTIVO_MAX).trim();
+  const r = await reavaliacoesRepo.solicitar({ logId: log.id, por: req.user.id, motivo });
+  if (!r) return res.status(409).json({ error: 'Já existe um pedido de reavaliação aberto para esta sessão.' });
+
+  try {
+    const conta = await contasRepo.porId(req.user.id);
+    const destinos = new Set((await usoIaRepo.idsDosAdmins()).map(String));
+    if (conta && conta.teacherId) destinos.add(String(conta.teacherId));
+    destinos.delete(String(req.user.id));
+    const trecho = motivo.length > 140 ? `${motivo.slice(0, 140)}…` : motivo;
+    await Promise.all([...destinos].map((id) => pushNotification(id, {
+      type: 'reevaluation_requested',
+      logId: log.id,
+      message: `${req.user.name || 'Um aluno'} pediu nova avaliação da sessão${log.itemTitle ? ` com "${log.itemTitle}"` : ''}${trecho ? `: ${trecho}` : '.'}`,
+    }).catch(() => {})));
+  } catch (err) {
+    console.error('aviso de pedido de reavaliação falhou:', err.message);
+  }
+  res.json(await servirUmLog(req.user, log.id));
+}));
+
+// Supervisor/admin recusa o pedido do aluno.
+app.post('/api/logs/:id/reavaliacao/recusar', requireAuth, requireRole('supervisor', 'admin'), writeLimiter, rota(async (req, res) => {
+  const log = await logsRepo.porId(req.params.id);
+  if (!log || !(await equipeDoLog(req.user, log))) return res.status(404).json({ error: 'Log não encontrado' });
+  const r = await reavaliacoesRepo.recusar({ logId: log.id, por: req.user.id });
+  if (!r) return res.status(409).json({ error: 'Não há pedido de reavaliação esperando decisão nesta sessão.' });
+  if (log.userId && String(log.userId) !== String(req.user.id)) {
+    await pushNotification(log.userId, {
+      type: 'reevaluation_declined',
+      logId: log.id,
+      message: `Seu pedido de nova avaliação${log.itemTitle ? ` da sessão com "${log.itemTitle}"` : ''} não foi aprovado.`,
+    }).catch(() => {});
+  }
+  res.json(await servirUmLog(req.user, log.id));
+}));
+
+// Supervisor/admin reavalia: aprova o pedido aberto do aluno ou, sem pedido,
+// manda reavaliar direto. Responde na hora (202) com o log em_andamento; a
+// avaliação nova chega quando o pipeline termina.
+app.post('/api/logs/:id/reavaliar', requireAuth, requireRole('supervisor', 'admin'), aiLimiter, rota(async (req, res) => {
+  const log = await logsRepo.porId(req.params.id);
+  if (!log || !(await equipeDoLog(req.user, log))) return res.status(404).json({ error: 'Log não encontrado' });
+  const naoPode = motivoLogNaoReavaliavel(log);
+  if (naoPode) return res.status(409).json({ error: naoPode });
+  if (!log.messages.some((m) => m.role === 'user' && String(m.content || '').trim())) {
+    return res.status(409).json({ error: 'Esta sessão não tem falas do terapeuta para avaliar.' });
+  }
+  const motivo = clampStr(req.body && req.body.motivo, REAVALIACAO_MOTIVO_MAX).trim();
+  const r = await reavaliacoesRepo.iniciar({ logId: log.id, por: req.user.id, motivo, anterior: avaliacaoVigente(log) });
+  if (!r) return res.status(409).json({ error: 'Esta sessão já está sendo reavaliada.' });
+  dispararReavaliacao(r.id, log.id, req.user.id);
+  res.status(202).json(await servirUmLog(req.user, log.id));
 }));
 
 // --- Active sessions (sessões em andamento, ainda não finalizadas) ---
@@ -6572,13 +6827,15 @@ async function sweepSelectionBatches() {
 // slot) — compartilhados pelo batch e pelo caminho síncrono. Remontados a partir
 // do log guardado, então uma resubmissão produz exatamente as mesmas
 // requisições.
-function competitiveMateriais(log) {
+// `sessao` é o rótulo do cabeçalho do log; a reavaliação de um Treinamento passa
+// 'Treinamento', que é o que o cliente escreve (buildDirectEvaluationPrompt).
+function competitiveMateriais(log, sessao = 'Competitivo') {
   const char = catalogos.ler('freeplay').find((c) => String(c.id) === String(log.itemId));
   const patientName = log.itemTitle || (char && char.name) || 'Paciente';
   const transcript = transcriptFromMessages(log.messages || [], log.userName || 'Aluno', patientName);
   return oficial.materiaisPadrao({
     bloco1: resolveBloco1({ context: { type: 'freeplay', itemId: log.itemId } }),
-    log: `[LOG DO ATENDIMENTO]\nSessão: Competitivo\nPersonagem: ${patientName}\n\n${transcript}`,
+    log: `[LOG DO ATENDIMENTO]\nSessão: ${sessao}\nPersonagem: ${patientName}\n\n${transcript}`,
   });
 }
 
@@ -6638,6 +6895,43 @@ function camposDaAvaliacaoAssincrona(entrada, { logId, dono, spec, categoria, it
   return null;
 }
 
+// MMR de um log competitivo que acabou de receber a nota (mesmo gate do
+// /api/logs: nota numérica + itemId + usuário real), e o recorde 👑 do paciente.
+// Quem chama garante que a partida ainda não contou: o fechamento da fila só
+// chega aqui pelo log que ele mesmo tirou de pendente, e a reavaliação só quando
+// o log nunca teve MMR aplicado (a avaliação original tinha falhado).
+async function aplicarMmrDoLogCompetitivo(l, score, criteriaScores) {
+  if (!(Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-'))) return;
+  const dono = await contasRepo.porId(l.userId).catch(() => null);
+  const role = (dono && dono.role) || 'therapist';
+  const criteriosById = await criteriosByIdParaMotor(criteriaScores);
+  const result = await aplicarPartidaCompetitiva(l.userId, l.itemId, criteriosById, score, role);
+  const antes = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
+  const depois = mmrEngine.agregarTotal(Object.fromEntries(
+    Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
+  const mmrDelta = {
+    total: { before: antes, after: depois },
+    criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
+      [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
+    ))),
+  };
+  await logsRepo.atualizar(l.id, {
+    mmrBefore: antes == null ? null : Math.round(antes),
+    mmrAfter: depois == null ? null : Math.round(depois),
+    mmrDelta,
+  });
+  // Recorde 👑 (spec §9): competitivo, nota numérica, usuário real.
+  try {
+    await updateCharacterRecord(l.itemId, score, {
+      userId: l.userId, userName: l.userName, userPhoto: dono && dono.profilePhoto,
+      origem: 'competitivo',
+    });
+  } catch (err) {
+    console.error('updateCharacterRecord (batch) falhou:', err.message);
+  }
+}
+
 // Fecha os logs competitivos com a avaliação: nota/feedback no log, zera o
 // pending e aplica o MMR. MESMO caminho para batch e para o síncrono, pra o gate
 // do MMR existir num só lugar. `results` é um Map id → { result } | { text }
@@ -6675,37 +6969,7 @@ async function finalizeCompetitiveEvals(ids, results, motivoSemResultado) {
       }, { soSePendente: true });
       if (!fechado) continue;
       if (l.userId) ready.push({ userId: l.userId, refId: 'log:' + l.id, itemTitle: l.itemTitle });
-      // MMR (mesmo gate do /api/logs): nota numérica + itemId + usuário real.
-      if (Number.isFinite(score) && l.itemId && l.userId && !String(l.userId).startsWith('visitor-')) {
-        const dono = await contasRepo.porId(l.userId).catch(() => null);
-        const role = (dono && dono.role) || 'therapist';
-        const criteriosById = await criteriosByIdParaMotor(criteriaScores);
-        const result = await aplicarPartidaCompetitiva(l.userId, l.itemId, criteriosById, score, role);
-        const antes = mmrEngine.agregarTotal(Object.fromEntries(
-          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_before])));
-        const depois = mmrEngine.agregarTotal(Object.fromEntries(
-          Object.entries(result.criterios || {}).map(([id, r]) => [id, r.P_after])));
-        const mmrDelta = {
-          total: { before: antes, after: depois },
-          criterios: Object.fromEntries(Object.entries(result.criterios || {}).map(([id, r]) => (
-            [id, { S: r.S, N: r.N, K: r.K, P_before: r.P_before, P_after: r.P_after, D_before: r.D_before, D_after: r.D_after, D_moved: r.D_moved }]
-          ))),
-        };
-        await logsRepo.atualizar(l.id, {
-          mmrBefore: antes == null ? null : Math.round(antes),
-          mmrAfter: depois == null ? null : Math.round(depois),
-          mmrDelta,
-        });
-        // Recorde 👑 (spec §9): competitivo, nota numérica, usuário real.
-        try {
-          await updateCharacterRecord(l.itemId, score, {
-            userId: l.userId, userName: l.userName, userPhoto: dono && dono.profilePhoto,
-            origem: 'competitivo',
-          });
-        } catch (err) {
-          console.error('updateCharacterRecord (batch) falhou:', err.message);
-        }
-      }
+      await aplicarMmrDoLogCompetitivo(l, score, criteriaScores);
     }
   }
   for (const r of ready) {
@@ -7948,7 +8212,10 @@ function notificationUrl(n) {
     case 'sidequest_completed': return '/missoes';
     case 'sidequest_assigned': return '/progressao';
     case 'evaluation_queued':
-    case 'evaluation_ready': return '/logs';
+    case 'evaluation_ready':
+    case 'reevaluation_declined': return '/logs';
+    // O pedido do aluno se decide em Todos os Logs (supervisor/admin).
+    case 'reevaluation_requested': return '/supervisor';
     case 'comunidade_reply': return `/comunidade/discussao/${n.discussionId}`;
     case 'feedback_received': return '/admin/users';
     default: return '/';
@@ -7985,6 +8252,10 @@ function notificationPushPayload(n) {
       return { ...base, title: 'Nova resposta na Comunidade', body: `${n.fromName} comentou em "${n.title || 'sua discussão'}".` };
     case 'feedback_received':
       return { ...base, title: n.title || 'Nova avaliação da plataforma', body: n.message || '' };
+    case 'reevaluation_requested':
+      return { ...base, title: 'Pedido de nova avaliação', body: n.message || '' };
+    case 'reevaluation_declined':
+      return { ...base, title: 'Pedido de nova avaliação', body: n.message || '' };
     default:
       return { ...base, title: n.title || 'Notificação', body: n.message || '' };
   }
@@ -10371,6 +10642,14 @@ if (require.main === module) {
   bancoPronto.then(() => sweepCompetitiveBatches()).catch(() => {});
   setInterval(() => { sweepCompetitiveBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
 
+  // Reavaliações que ficaram em andamento além do razoável (o processo que as
+  // rodava morreu num deploy): viram 'falhou', e o supervisor pode tentar de novo.
+  const encerrarReavaliacoesTravadas = () => reavaliacoesRepo.encerrarTravadas()
+    .then((n) => { if (n) console.log(`[reavaliacao] ${n} reavaliação(ões) interrompida(s) marcada(s) como falha.`); })
+    .catch((err) => console.error('[reavaliacao] limpeza das travadas falhou:', err.message));
+  bancoPronto.then(encerrarReavaliacoesTravadas).catch(() => {});
+  setInterval(encerrarReavaliacoesTravadas, 10 * 60 * 1000).unref();
+
   // Avaliação Independente (Batch API): coleta os jobs da fila que ficaram prontos.
   sweepAvaliacaoBatches().catch(() => {});
   setInterval(() => { sweepAvaliacaoBatches().catch(() => {}); }, SELECAO_BATCH_POLL_MS).unref();
@@ -10399,6 +10678,10 @@ if (process.env.VITEST) {
   app.__test = {
     finalizeSelectionEvals,
     bancoPronto,
+    // Reavaliação: troca quem roda o pipeline (a suíte não tem chave de API) e
+    // espera as execuções disparadas em background terminarem.
+    definirPipelineDaReavaliacao: (fn) => { rodarPipelineDaReavaliacao = fn; },
+    aguardarReavaliacoes: () => Promise.allSettled([...reavaliacoesRodando]),
     // Troca um catálogo inteiro (banco + cópia em memória).
     definirCatalogo: (tipo, lista) => catalogos.definir(tipo, lista),
     // Refaz as cópias em memória a partir do banco (depois do TRUNCATE do resetData).

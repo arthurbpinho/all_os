@@ -8,6 +8,7 @@ import RadarCriterios from '../components/RadarCriterios';
 import { makeLogItems, downloadText } from '../logFiles';
 import LogsSociais from './LogsSociais';
 import RichText from '../components/RichText';
+import { PainelReavaliacao, EditorDeEstrelas, logReavaliavel } from '../components/ReavaliacaoLog';
 
 const TYPE_LABELS = {
   exercise: 'Trilha',
@@ -155,9 +156,18 @@ function NeuroTestsLogSummary({ data }) {
   );
 }
 
-function LogCard({ log, showDownload }) {
+// Selo do pedido/execução de reavaliação, no cabeçalho do card e na lista.
+function SeloReavaliacao({ log }) {
+  const s = log.reavaliacao && log.reavaliacao.status;
+  if (s === 'solicitada') return <span className="log-pending-chip" title="O aluno pediu nova avaliação desta sessão">🔁 Reavaliação pedida</span>;
+  if (s === 'em_andamento') return <span className="log-pending-chip">⏳ Reavaliando…</span>;
+  return null;
+}
+
+function LogCard({ log, showDownload, onAtualizado }) {
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState('log');
+  const [editandoEstrelas, setEditandoEstrelas] = useState(false);
   const messages = Array.isArray(log.messages) ? log.messages : [];
   const evaluation = (log.evaluation || '').trim();
 
@@ -185,6 +195,7 @@ function LogCard({ log, showDownload }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <h4>{log.itemTitle || log.title || 'Sessão sem título'}</h4>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <SeloReavaliacao log={log} />
           <ScoreBadge score={log.score} />
           <span style={{ fontSize: 12, color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
             {expanded ? 'ocultar' : 'expandir'}
@@ -224,9 +235,27 @@ function LogCard({ log, showDownload }) {
             </div>
           )}
 
+          {/* Reavaliar (direto ou aprovando o pedido do aluno) e editar estrelas
+              — só supervisor e admin chegam a esta tela. */}
+          {onAtualizado && logReavaliavel(log) && (
+            <PainelReavaliacao
+              log={log}
+              equipe
+              onAtualizado={onAtualizado}
+              editando={editandoEstrelas}
+              onEditarEstrelas={() => { setEditandoEstrelas(true); setTab('log'); }}
+            />
+          )}
+
           {tab === 'log' && log.neuroTests && <NeuroTestsLogSummary data={log.neuroTests} />}
 
-          {tab === 'evaluation' ? (
+          {editandoEstrelas && tab === 'log' ? (
+            <EditorDeEstrelas
+              log={log}
+              onCancelar={() => setEditandoEstrelas(false)}
+              onSalvo={(novo) => { onAtualizado(novo); setEditandoEstrelas(false); }}
+            />
+          ) : tab === 'evaluation' ? (
             evaluation || log.criteriaScores ? (
               <div>
                 <CriteriaTable log={log} />
@@ -285,7 +314,7 @@ function LogCard({ log, showDownload }) {
   );
 }
 
-function TherapistGroup({ therapistName, userId, logs }) {
+function TherapistGroup({ therapistName, userId, logs, onAtualizado }) {
   const [open, setOpen] = useState(true);
   // Média por critério deste terapeuta (o mesmo gráfico que ele vê no Perfil).
   // Carregada sob demanda: seriam tantas requisições quantos grupos na tela, e o
@@ -395,7 +424,7 @@ function TherapistGroup({ therapistName, userId, logs }) {
       )}
 
       {open && logs.map((log, i) => (
-        <LogCard key={log.id || i} log={log} showDownload />
+        <LogCard key={log.id || i} log={log} showDownload onAtualizado={onAtualizado} />
       ))}
     </div>
   );
@@ -404,7 +433,7 @@ function TherapistGroup({ therapistName, userId, logs }) {
 // Visão do aluno: navegação em 3 níveis — Pacientes → Datas → Log/Avaliação.
 // Antes era lista flat de cards onde a avaliação ficava invisível (LogCard
 // dependia de evaluationStartIdx, que o novo fluxo de salvamento não popula).
-function StudentSessionsView({ logs }) {
+function StudentSessionsView({ logs, onAtualizado, equipe }) {
   const [selectedPatientKey, setSelectedPatientKey] = useState(null);
   const [selectedLogId, setSelectedLogId] = useState(null);
   const [tab, setTab] = useState('log');
@@ -442,6 +471,8 @@ function StudentSessionsView({ logs }) {
         tab={tab}
         onTab={setTab}
         onBack={() => { setSelectedLogId(null); setTab('log'); }}
+        onAtualizado={onAtualizado}
+        equipe={equipe}
       />
     );
   }
@@ -565,6 +596,7 @@ function PatientSessionList({ patient, onSelect, onBack }) {
                 </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <SeloReavaliacao log={log} />
                 {log.evaluationPending && log.score == null
                   ? <span className="log-pending-chip">⏳ Avaliação pendente · até 24h</span>
                   : <ScoreBadge score={log.score} />}
@@ -580,9 +612,10 @@ function PatientSessionList({ patient, onSelect, onBack }) {
   );
 }
 
-function SessionDetail({ patient, log, tab, onTab, onBack }) {
+function SessionDetail({ patient, log, tab, onTab, onBack, onAtualizado, equipe = false }) {
   const messages = Array.isArray(log.messages) ? log.messages.filter((m) => !m.isSystem) : [];
   const evaluation = (log.evaluation || '').trim();
+  const [editandoEstrelas, setEditandoEstrelas] = useState(false);
 
   return (
     <div>
@@ -634,7 +667,29 @@ function SessionDetail({ patient, log, tab, onTab, onBack }) {
         </div>
       )}
 
-      {tab === 'log' && (
+      {/* Estrelas depois da avaliação + pedido de nova avaliação (o supervisor
+          aprova). Só nas sessões da Simulação já avaliadas. */}
+      {onAtualizado && logReavaliavel(log) && (
+        <PainelReavaliacao
+          log={log}
+          equipe={equipe}
+          onAtualizado={onAtualizado}
+          editando={editandoEstrelas}
+          onEditarEstrelas={() => { setEditandoEstrelas(true); onTab('log'); }}
+        />
+      )}
+
+      {tab === 'log' && editandoEstrelas && (
+        <div className="card tight">
+          <EditorDeEstrelas
+            log={log}
+            onCancelar={() => setEditandoEstrelas(false)}
+            onSalvo={(novo) => { onAtualizado(novo); setEditandoEstrelas(false); }}
+          />
+        </div>
+      )}
+
+      {tab === 'log' && !editandoEstrelas && (
         <div className="card tight">
           {messages.length === 0 ? (
             <p style={{ color: 'var(--muted)', fontSize: 14, fontStyle: 'italic' }}>
@@ -695,6 +750,19 @@ export default function Logs({ user, userId }) {
 
   const isSupervisorView = !userId;
   const isVisitor = user?.role === 'visitor';
+  // Supervisão: filtra só as sessões com pedido de reavaliação esperando decisão.
+  const [soPedidos, setSoPedidos] = useState(false);
+
+  // Troca um log da lista pela versão nova que o servidor devolveu (estrelas
+  // salvas, pedido enviado, reavaliação em andamento ou concluída).
+  function atualizarLog(novo) {
+    if (!novo || !novo.id) return;
+    setLogs((prev) => prev.map((l) => (l.id === novo.id ? novo : l)));
+  }
+  const pedidosAbertos = useMemo(
+    () => logs.filter((l) => l.reavaliacao && l.reavaliacao.status === 'solicitada').length,
+    [logs],
+  );
   // Filtro por tag de terapeuta — só na visão de supervisão.
   const [tags, setTags] = useState([]);
   const [tag, setTag] = useState('');
@@ -727,7 +795,7 @@ export default function Logs({ user, userId }) {
   const grouped = useMemo(() => {
     if (!isSupervisorView) return null;
     const byUser = new Map();
-    for (const log of logs) {
+    for (const log of (soPedidos ? logs.filter((l) => l.reavaliacao && l.reavaliacao.status === 'solicitada') : logs)) {
       const key = log.userId || log.userName || '__sem-id';
       if (!byUser.has(key)) byUser.set(key, { name: log.userName || 'Terapeuta sem nome', userId: log.userId, logs: [] });
       byUser.get(key).logs.push(log);
@@ -744,7 +812,7 @@ export default function Logs({ user, userId }) {
       return tb - ta;
     });
     return groups;
-  }, [logs, isSupervisorView]);
+  }, [logs, isSupervisorView, soPedidos]);
 
   const title = isSupervisorView ? 'Logs de Supervisão' : 'Minhas Sessões';
   const subtitle = isSupervisorView
@@ -777,6 +845,17 @@ export default function Logs({ user, userId }) {
       )}
 
       {error && <div className="alert error">{error}</div>}
+
+      {isSupervisorView && (pedidosAbertos > 0 || soPedidos) && (
+        <div className="card tight" style={{ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', borderLeft: '3px solid var(--terra)' }}>
+          <span>
+            🔁 <strong>{pedidosAbertos}</strong> {pedidosAbertos === 1 ? 'pedido de nova avaliação esperando' : 'pedidos de nova avaliação esperando'} a sua decisão.
+          </span>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => setSoPedidos((v) => !v)} style={{ marginLeft: 'auto' }}>
+            {soPedidos ? 'Mostrar todas as sessões' : 'Ver só os pedidos'}
+          </button>
+        </div>
+      )}
 
       {isSupervisorView && tags.length > 0 && (
         <div className="card tight" style={{ marginBottom: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -825,12 +904,16 @@ export default function Logs({ user, userId }) {
               {grouped.length} {grouped.length === 1 ? 'terapeuta' : 'terapeutas'} · {logs.length} {logs.length === 1 ? 'caso' : 'casos'} no total
             </p>
             {grouped.map((g, i) => (
-              <TherapistGroup key={i} therapistName={g.name} userId={g.userId} logs={g.logs} />
+              <TherapistGroup key={g.userId || g.name || i} therapistName={g.name} userId={g.userId} logs={g.logs} onAtualizado={atualizarLog} />
             ))}
           </div>
         )
       ) : (
-        <StudentSessionsView logs={logs} />
+        <StudentSessionsView
+          logs={logs}
+          onAtualizado={isVisitor ? null : atualizarLog}
+          equipe={user?.role === 'supervisor' || user?.role === 'admin'}
+        />
       )}
     </div>
   );

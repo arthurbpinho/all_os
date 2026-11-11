@@ -39,6 +39,8 @@ function iconFor(n) {
     case 'evaluation_ready': return '📋';
     case 'comunidade_reply': return '💬';
     case 'feedback_received': return '⭐';
+    case 'reevaluation_requested': return '🔁';
+    case 'reevaluation_declined': return '↩';
     default: return '•';
   }
 }
@@ -95,6 +97,8 @@ function bodyFor(n) {
       );
     case 'evaluation_queued':
     case 'evaluation_ready':
+    case 'reevaluation_requested':
+    case 'reevaluation_declined':
       return n.message;
     case 'comunidade_reply':
       return (
@@ -221,8 +225,11 @@ export default function NotificationBell({ user }) {
       navigate('/missoes');
     } else if (n.type === 'sidequest_assigned') {
       navigate('/progressao');
-    } else if (n.type === 'evaluation_ready') {
+    } else if (n.type === 'evaluation_ready' || n.type === 'reevaluation_declined') {
       navigate('/logs');
+    } else if (n.type === 'reevaluation_requested') {
+      // O pedido do aluno se decide em Todos os Logs (supervisor/admin).
+      navigate('/supervisor');
     } else if (n.type === 'comunidade_reply') {
       navigate(`/comunidade/discussao/${n.discussionId}`);
     } else if (n.type === 'feedback_received') {

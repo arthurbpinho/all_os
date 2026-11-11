@@ -69,6 +69,7 @@ const OPCIONAIS = [
   ['mmr_after', 'mmrAfter'],
   ['mmr_delta', 'mmrDelta'],
   ['criteria_names', 'criteriaNames'],
+  ['estrelas_editadas_em', 'estrelasEditadasEm'],
 ];
 
 function paraLog(r) {
@@ -269,6 +270,36 @@ function criarRepoLogs(pool) {
     return rowCount ? porId(id) : null;
   }
 
+  // Estrelas (marcação + comentário) de um log já salvo. SÓ isso: o texto das
+  // falas nunca muda, e só as falas do terapeuta (role 'user') recebem estrela —
+  // é a justificativa dele para o que disse. `marcacoes` é uma lista de
+  // { posicao (1-based, a ordem de messages[]), highlighted, comment }.
+  // Devolve o log atualizado, ou null se ele não existe.
+  async function editarEstrelas(id, marcacoes) {
+    return transacao(pool, async (client) => {
+      const trava = await client.query('SELECT 1 FROM logs WHERE id = $1 FOR UPDATE', [String(id)]);
+      if (!trava.rows.length) return null;
+      const lista = (marcacoes || []).map((m) => ({
+        posicao: Math.trunc(Number(m.posicao)),
+        highlighted: !!m.highlighted,
+        comment: m.highlighted ? String(m.comment ?? '') : '',
+      })).filter((m) => Number.isFinite(m.posicao) && m.posicao >= 1);
+      let mudou = 0;
+      if (lista.length) {
+        ({ rowCount: mudou } = await client.query(
+          `UPDATE log_messages lm SET highlighted = x.highlighted, comment = x.comment
+           FROM jsonb_to_recordset($2::jsonb) AS x(posicao int, highlighted bool, comment text)
+           WHERE lm.log_id = $1 AND lm.posicao = x.posicao AND lm.role = 'user'
+             AND (lm.highlighted, lm.comment) IS DISTINCT FROM (x.highlighted, x.comment)`,
+          [String(id), JSON.stringify(lista)],
+        ));
+      }
+      // Só carimba quando alguma estrela de fato mudou.
+      if (mudou) await client.query('UPDATE logs SET estrelas_editadas_em = now() WHERE id = $1', [String(id)]);
+      return porId(id, client);
+    });
+  }
+
   // Exclusão pelo admin. Devolve o log removido (com as mensagens), como a rota
   // devolvia, ou null se ele não existe.
   async function excluir(id) {
@@ -309,6 +340,7 @@ function criarRepoLogs(pool) {
     pendentesCompetitivos,
     criar,
     atualizar,
+    editarEstrelas,
     excluir,
     zerarNotas,
   };

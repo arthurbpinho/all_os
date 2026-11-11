@@ -256,6 +256,15 @@ export const api = {
     return request(`/logs${s ? `?${s}` : ''}`);
   },
   saveLog: (data) => request('/logs', { method: 'POST', body: data }),
+  // Um log (a tela acompanha a reavaliação em andamento por aqui).
+  getLog: (logId) => request(`/logs/${encodeURIComponent(logId)}`),
+  // Estrelas de um log já avaliado: [{ posicao (1-based), highlighted, comment }].
+  // Só estrela e comentário — o texto das falas não muda.
+  editarEstrelas: (logId, marcacoes) => request(`/logs/${encodeURIComponent(logId)}/estrelas`, { method: 'PUT', body: { marcacoes } }),
+  // Reavaliação: o aluno pede; supervisor/admin aprova (reavaliar) ou recusa.
+  solicitarReavaliacao: (logId, motivo) => request(`/logs/${encodeURIComponent(logId)}/reavaliacao/solicitar`, { method: 'POST', body: { motivo } }),
+  recusarReavaliacao: (logId) => request(`/logs/${encodeURIComponent(logId)}/reavaliacao/recusar`, { method: 'POST', body: {} }),
+  reavaliar: (logId, motivo) => request(`/logs/${encodeURIComponent(logId)}/reavaliar`, { method: 'POST', body: { motivo } }),
   // Nota e feedback POR CRITÉRIO de um log — só supervisor/admin (o servidor
   // recusa aluno com 403). O aluno tem a nota total e o feedback qualitativo;
   // as análises por critério são escritas com o gabarito do caso à vista.
